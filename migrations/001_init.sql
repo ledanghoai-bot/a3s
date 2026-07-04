@@ -74,13 +74,13 @@ CREATE TABLE price_tiers (
   UNIQUE (product_id, min_qty)
 );
 
--- Seed san pham chinh (price_vnd = gia le 1-4 hu)
+-- Seed san pham chinh (price_vnd = gia le 1-4 hu; ton kho ban dau 1000 hu)
 INSERT INTO products (sku, name, description, price_vnd, stock) VALUES (
   '3S-100G',
   '3S Coffee – Hũ 100g',
   'Cà phê sấy lạnh nguyên chất, 100% Robusta (phôi Ro-Express R100). Hòa tan 3 giây với nước nguội/đá. ~50 ly/hũ (2g/ly).',
   170000,
-  0
+  1000
 );
 
 -- Bac gia 3S-100G: 1-4 hu 170k | 5-19 hu 160k | 20-100 hu 140k | >100 hu: chuyen staff
