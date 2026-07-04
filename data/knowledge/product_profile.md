@@ -13,6 +13,14 @@
 3. Hiệu suất tỉnh táo cao: caffeine tự nhiên tinh khiết cao (>1%); tỉnh táo sâu, hỗ trợ sức bền cho người vận động thể chất và làm việc trí óc cường độ cao; không cồn cào, không ép tim đột ngột.
 4. Bài toán kinh tế: hũ 100g; định lượng chuẩn 2g/ly → pha được ~50 ly/hũ; tối ưu chi phí cho lộ trình dùng dài hạn; loại bỏ calo rỗng.
 
+## Chính sách giá (hũ 100g, tính theo tổng số hũ trong đơn)
+- 1–4 hũ: 170.000đ/hũ
+- 5–19 hũ: 160.000đ/hũ
+- 20–100 hũ: 140.000đ/hũ
+- Trên 100 hũ: không báo giá tự động, chuyển đội ngũ kinh doanh làm việc trực tiếp (escalate to staff).
+
+Ví dụ quy đổi: 1 hũ 170.000đ ≈ 50 ly → ~3.400đ/ly cà phê nguyên chất.
+
 ## Khách hàng mục tiêu
 - Dân chạy bộ, người chơi thể thao sức bền (runners).
 - Người làm việc trí óc cường độ cao, cần tập trung, cày đêm (freelancers, devs, traders).

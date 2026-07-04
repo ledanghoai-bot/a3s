@@ -65,11 +65,26 @@ CREATE TABLE knowledge_chunks (
 CREATE INDEX knowledge_chunks_embedding_idx
   ON knowledge_chunks USING hnsw (embedding vector_cosine_ops);
 
--- Seed san pham chinh (gia cap nhat sau khi chot)
+-- Bang gia theo so luong (bac gia si). Don >100 hu: KHONG ap gia tu dong, escalate cho staff.
+CREATE TABLE price_tiers (
+  id BIGSERIAL PRIMARY KEY,
+  product_id BIGINT REFERENCES products(id),
+  min_qty INTEGER NOT NULL,
+  unit_price_vnd INTEGER NOT NULL,
+  UNIQUE (product_id, min_qty)
+);
+
+-- Seed san pham chinh (price_vnd = gia le 1-4 hu)
 INSERT INTO products (sku, name, description, price_vnd, stock) VALUES (
   '3S-100G',
   '3S Coffee – Hũ 100g',
   'Cà phê sấy lạnh nguyên chất, 100% Robusta (phôi Ro-Express R100). Hòa tan 3 giây với nước nguội/đá. ~50 ly/hũ (2g/ly).',
-  0,
+  170000,
   0
 );
+
+-- Bac gia 3S-100G: 1-4 hu 170k | 5-19 hu 160k | 20-100 hu 140k | >100 hu: chuyen staff
+INSERT INTO price_tiers (product_id, min_qty, unit_price_vnd)
+SELECT id, t.min_qty, t.unit_price_vnd
+FROM products, (VALUES (1, 170000), (5, 160000), (20, 140000)) AS t(min_qty, unit_price_vnd)
+WHERE sku = '3S-100G';
