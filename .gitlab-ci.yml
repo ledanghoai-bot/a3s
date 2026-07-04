@@ -1,0 +1,18 @@
+stages:
+  - lint
+  - test
+
+default:
+  image: python:3.12-slim
+  before_script:
+    - pip install --no-cache-dir -r requirements.txt ruff pytest
+
+lint:
+  stage: lint
+  script:
+    - ruff check app
+
+test:
+  stage: test
+  script:
+    - pytest -q || [ $? -eq 5 ]  # cho phep pass khi chua co test (exit 5 = no tests collected)
