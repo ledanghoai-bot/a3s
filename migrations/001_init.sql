@@ -53,12 +53,12 @@ CREATE TABLE order_items (
   unit_price_vnd INTEGER NOT NULL
 );
 
--- Knowledge base cho RAG (dimension 1536 = text-embedding-3-small)
+-- Knowledge base cho RAG (dimension 384 = paraphrase-multilingual-MiniLM-L12-v2)
 CREATE TABLE knowledge_chunks (
   id BIGSERIAL PRIMARY KEY,
   source TEXT NOT NULL,
   content TEXT NOT NULL,
-  embedding vector(1536),
+  embedding vector(384),
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
