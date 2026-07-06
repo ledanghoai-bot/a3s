@@ -1,16 +1,28 @@
-"""Truy van knowledge base (PostgreSQL + pgvector).
+"""Truy van knowledge base (PostgreSQL + pgvector)."""
 
-Nguon du lieu: data/knowledge/*.md -> chunk -> embedding -> bang knowledge_chunks.
-Script ingest se duoc bo sung o issue [Tuan 3-4] RAG pipeline.
-"""
+import asyncpg
+
+from app.config import settings
+from app.services.embedder import embed
 
 
 async def search_knowledge(query: str, top_k: int = 4) -> list[str]:
-    """Tra ve top-k doan kien thuc lien quan toi cau hoi cua khach.
+    """Tra ve top-k doan kien thuc lien quan nhat voi cau hoi cua khach."""
+    query_vec = embed(query)
+    vec_str = "[" + ",".join(str(x) for x in query_vec) + "]"
 
-    TODO(Tuan 3-4):
-    1. Tao embedding cho `query` (settings.embedding_model).
-    2. SELECT content FROM knowledge_chunks
-       ORDER BY embedding <=> :query_embedding LIMIT :top_k
-    """
-    return []
+    conn = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT content
+            FROM knowledge_chunks
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2
+            """,
+            vec_str,
+            top_k,
+        )
+        return [r["content"] for r in rows]
+    finally:
+        await conn.close()

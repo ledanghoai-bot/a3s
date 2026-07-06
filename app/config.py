@@ -15,10 +15,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://alpha3s:alpha3s@db:5432/alpha3s"
     redis_url: str = "redis://redis:6379/0"
 
-    # LLM
+    # LLM (DeepSeek)
     llm_api_key: str = ""
-    llm_model: str = "claude-sonnet-4-5"
-    embedding_model: str = "text-embedding-3-small"
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
+
+    # Embedding local
+    embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
+    embedding_dim: int = 384
 
 
 settings = Settings()
