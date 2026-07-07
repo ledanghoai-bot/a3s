@@ -8,8 +8,15 @@
 - Nguồn gốc phôi: dòng phôi sấy lạnh cao cấp Ro-Express R100 của nhà sản xuất Robanme; tinh chất 100% từ hạt Robusta tuyển chọn, rang xay theo quy chuẩn hiện đại.
 
 ## Tính năng cốt lõi
-1. Hòa tan siêu tốc (3 giây): tan hoàn toàn trong 3 giây, tương thích tốt với NƯỚC NGUỘI hoặc nước đá, không cần nước sôi. Tối giản mọi công đoạn pha chế.
+1. Hòa tan siêu tốc: "3 Giây Sẵn Sàng" là slogan về sự nhanh - tiện, không phải cam kết tan đúng 3 giây. Thời gian tan thực tế: nước nóng ~85°C tan tự nhiên trong 10-15 giây; nước nguội cần khuấy khoảng 30 giây; nước lạnh/đá lâu hơn một chút, cần khuấy kỹ. Dùng được với cả nước nguội và nước đá, không cần nước sôi. Tối giản mọi công đoạn pha chế, nhanh hơn nhiều so với pha phin.
 2. Chất lượng nguyên bản: giữ trọn hương vị Caramel – Chocolate tự nhiên sâu lắng của hạt Robusta; hậu vị sạch, dễ chịu, hoàn toàn không đắng gắt.
+
+## Hướng dẫn sử dụng & hương vị theo cách pha
+- Nước nóng/ấm (~85°C): cà phê thơm hơn. TRÁNH nước sôi 99°C vì vị sẽ hơi gắt.
+- Nước nguội/mát: vị mượt hơn, bớt đắng — hợp người mới uống cà phê nguyên chất.
+- Thời điểm dùng gợi ý:
+  - Sáng sớm: hợp cà phê nóng/ấm. Cà phê ấm buổi sáng còn hỗ trợ nhuận tràng, giúp cơ thể "làm sạch" trước khi tập thể dục, tránh sự cố không mong muốn giữa buổi tập (tùy cơ địa mỗi người).
+  - Trưa/chiều: hợp cà phê mát/lạnh, giải nhiệt và tỉnh táo cho buổi làm việc còn lại.
 3. Hiệu suất tỉnh táo cao: caffeine tự nhiên tinh khiết cao (>1%); tỉnh táo sâu, hỗ trợ sức bền cho người vận động thể chất và làm việc trí óc cường độ cao; không cồn cào, không ép tim đột ngột.
 4. Bài toán kinh tế: hũ 100g; định lượng chuẩn 2g/ly → pha được ~50 ly/hũ; tối ưu chi phí cho lộ trình dùng dài hạn; loại bỏ calo rỗng.
 
