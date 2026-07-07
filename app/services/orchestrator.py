@@ -15,6 +15,7 @@ import redis.asyncio as aioredis
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.services.messenger_profile import get_user_profile
 from app.services.rag import search_knowledge
 
 SYSTEM_PROMPT = (
@@ -46,8 +47,9 @@ async def handle_message(sender_id: str, text: str) -> str:
     redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
 
     try:
-        # 1. Lay lich su
+        # 1. Lay lich su + profile khach (ten tu Messenger)
         history = await _get_history(redis, sender_id)
+        profile = await get_user_profile(redis, sender_id)
 
         # 2. RAG: tim chunks lien quan
         chunks = await search_knowledge(text, top_k=4)
@@ -55,6 +57,13 @@ async def handle_message(sender_id: str, text: str) -> str:
 
         # 3. Xay dung messages cho LLM
         system = SYSTEM_PROMPT
+        full_name = f"{profile.get('last_name', '')} {profile.get('first_name', '')}".strip()
+        if full_name:
+            system += (
+                f"\n\n## Thong tin khach hang\nTen tren Messenger: {full_name}. "
+                "Dung ten nay de suy doan gioi tinh va danh xung phu hop "
+                "(theo quy tac 'Cach goi khach')."
+            )
         if rag_context:
             system += f"\n\n## Thong tin tham khao lien quan\n{rag_context}"
 
