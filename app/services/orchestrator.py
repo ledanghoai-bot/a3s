@@ -84,6 +84,14 @@ async def handle_message(sender_id: str, text: str) -> str:
         )
         reply = response.choices[0].message.content.strip()
 
+        # Safety net: loc ky hieu markdown lot luoi (Messenger khong render markdown)
+        reply = (
+            reply.replace("**", "")
+            .replace("###", "")
+            .replace("##", "")
+            .replace("`", "")
+        )
+
         # 5. Luu lich su
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": reply})
