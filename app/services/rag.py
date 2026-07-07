@@ -11,7 +11,8 @@ async def search_knowledge(query: str, top_k: int = 4) -> list[str]:
     query_vec = embed(query)
     vec_str = "[" + ",".join(str(x) for x in query_vec) + "]"
 
-    conn = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
+    db_url = settings.database_url.replace("+asyncpg", "")
+    conn = await asyncpg.connect(db_url)
     try:
         rows = await conn.fetch(
             """
