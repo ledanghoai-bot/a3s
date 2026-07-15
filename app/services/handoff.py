@@ -1,5 +1,6 @@
-"""Human handoff (issue #7): kiem tra/bat lai bot_paused, thong bao admin qua
-Telegram, va nhan dien deterministic khi khach chu dong doi gap nguoi that.
+"""Human handoff (issue #7/#8): kiem tra/bat lai bot_paused, thong bao admin qua
+Telegram, nhan dien deterministic khi khach chu dong doi gap nguoi that, va
+quy doi ma khach hang ngan (thay the PSID dai kho copy tren mobile).
 
 Dung asyncpg thuan, cung convention voi rag.py/tools.py.
 """
@@ -10,6 +11,7 @@ import asyncpg
 import httpx
 
 from app.config import settings
+from app.services import conversation_log
 
 # Cac cum tu pho bien khi khach CHU DONG doi gap nguoi that. Day la luoi an toan
 # thu 2, khong phu thuoc hoan toan vao viec LLM co goi escalate_to_human dung luc
@@ -31,6 +33,36 @@ def _db_url() -> str:
     return settings.database_url.replace("+asyncpg", "")
 
 
+async def resolve_psid(identifier: str) -> str:
+    """Cho phep staff dung MA KHACH HANG NGAN (customers.id, vd '42') thay vi
+    PSID Facebook dai/kho copy tren mobile Telegram (issue #8 - nang cap UX).
+
+    Neu identifier la chuoi so va khop voi 1 customers.id co that -> tra ve
+    PSID tuong ung. Neu khong (vd da la PSID day du, hoac ma khong ton tai) ->
+    tra ve nguyen identifier, coi nhu da la PSID (tuong thich nguoc).
+    """
+    if identifier.isdigit():
+        conn = await asyncpg.connect(_db_url())
+        try:
+            row = await conn.fetchrow("SELECT psid FROM customers WHERE id = $1", int(identifier))
+            if row:
+                return row["psid"]
+        finally:
+            await conn.close()
+    return identifier
+
+
+async def get_short_code(psid: str) -> str | None:
+    """Lay ma khach hang ngan (customers.id) tuong ung voi 1 psid, de hien thi
+    trong thong bao Telegram thay vi PSID day du."""
+    conn = await asyncpg.connect(_db_url())
+    try:
+        row = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
+        return str(row["id"]) if row else None
+    finally:
+        await conn.close()
+
+
 async def is_bot_paused(psid: str) -> bool:
     """True neu hoi thoai gan nhat cua khach dang bot_paused=TRUE (nhan vien da
     tiep quan). Khach moi/chua co conversation nao -> mac dinh False."""
@@ -50,6 +82,45 @@ async def is_bot_paused(psid: str) -> bool:
         return bool(row["bot_paused"]) if row else False
     finally:
         await conn.close()
+
+
+async def pause_bot(psid: str, reason: str = "Nhan vien chu dong pause tu dashboard") -> bool:
+    """Chieu nguoc cua resume_bot: nhan vien chu dong tiep quan hoi thoai tu
+    dashboard (issue #8), khong qua escalate_to_human/LLM. Tao conversation moi
+    neu khach chua tung co (vd nhan vien pause truoc ca khi khach nhan tin).
+    Cung log vao escalations de nhat quan voi luong escalate qua tool."""
+    conn = await asyncpg.connect(_db_url())
+    try:
+        customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
+        if customer is None:
+            customer_id = await conn.fetchval(
+                "INSERT INTO customers (psid) VALUES ($1) RETURNING id", psid
+            )
+        else:
+            customer_id = customer["id"]
+
+        conversation = await conn.fetchrow(
+            "SELECT id FROM conversations WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 1",
+            customer_id,
+        )
+        if conversation is None:
+            conversation_id = await conn.fetchval(
+                "INSERT INTO conversations (customer_id, bot_paused) VALUES ($1, TRUE) RETURNING id",
+                customer_id,
+            )
+        else:
+            conversation_id = conversation["id"]
+            await conn.execute(
+                "UPDATE conversations SET bot_paused = TRUE WHERE id = $1", conversation_id
+            )
+    finally:
+        await conn.close()
+
+    try:
+        await log_escalation(conversation_id, reason)
+    except Exception as e:
+        print(f"[handoff] Ghi log pause thu cong that bai: {e}")
+    return True
 
 
 async def resume_bot(psid: str) -> bool:
@@ -100,14 +171,15 @@ async def log_escalation(conversation_id: int, reason: str) -> None:
 
 
 async def list_paused_conversations() -> list[dict]:
-    """Liet ke tat ca hoi thoai dang bot_paused=TRUE, kem ten/sdt khach va ly do
-    escalate gan nhat - dung cho trang admin UI (khoi phai nho psid bang cach thu cong)."""
+    """Liet ke tat ca hoi thoai dang bot_paused=TRUE, kem ten/sdt khach, ma khach
+    hang ngan (customer_id) va ly do escalate gan nhat - dung cho trang admin UI
+    va lenh /list tren Telegram."""
     conn = await asyncpg.connect(_db_url())
     try:
         rows = await conn.fetch(
             """
             SELECT
-                cu.psid, cu.name, cu.phone,
+                cu.psid, cu.id AS customer_id, cu.name, cu.phone,
                 (SELECT reason FROM escalations e WHERE e.conversation_id = c.id
                  ORDER BY e.created_at DESC LIMIT 1) AS reason,
                 (SELECT created_at FROM escalations e WHERE e.conversation_id = c.id
@@ -123,6 +195,18 @@ async def list_paused_conversations() -> list[dict]:
         await conn.close()
 
 
+async def log_note(psid: str, note: str) -> None:
+    """Ghi 1 ghi chu tuong minh (vd sep chot chinh sach dac biet qua dien thoai,
+    ngoai Messenger nen khong the tu bat duoc) vao messages voi role='agent',
+    danh dau ro la note noi bo. Dung chung 1 "kenh" voi tin nhan that cua nhan
+    vien (xem tasks.py) de orchestrator chi can doc 1 nguon duy nhat.
+    """
+    conversation_id = await conversation_log.ensure_conversation(psid)
+    await conversation_log.log_message(
+        conversation_id, "agent", f"[Ghi chu noi bo] {note.strip()}"
+    )
+
+
 async def notify_admin(psid: str, reason: str, last_message: str) -> None:
     """Gui thong bao Telegram cho admin. Neu chua cau hinh TELEGRAM_BOT_TOKEN /
     TELEGRAM_ADMIN_CHAT_ID thi bo qua im lang - KHONG duoc raise loi lam gian
@@ -136,18 +220,36 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
     if contact.get("name") or contact.get("phone"):
         contact_line = f"\nKhach: {contact.get('name') or '(chua co ten)'} - {contact.get('phone') or '(chua co sdt)'}"
 
+    short_code = await get_short_code(psid)
+    code_line = (
+        f"\nMa KH: `{short_code}` (dung ma nay thay PSID cho /note, /resume - go gon hon nhieu)"
+        if short_code
+        else ""
+    )
+
     text = (
         "\U0001F514 3S Coffee - can nhan vien ho tro\n"
-        f"PSID: {psid}{contact_line}\n"
+        f"PSID: `{psid}`{code_line}{contact_line}\n"
         f"Ly do: {reason}\n"
         f"Tin nhan gan nhat: {last_message[:300]}\n\n"
-        "Mo Trang > Hop thu, tim theo ten/SDT hoac PSID o tren de tra loi truc tiep."
+        "Bam nut ben duoi de resume ngay, hoac vao Trang > Hop thu tim theo ten/SDT de tra loi truoc."
     )
 
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    reply_markup = {
+        "inline_keyboard": [[{"text": "\u25b6\ufe0f Resume bot ngay", "callback_data": f"resume:{psid}"}]]
+    }
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(url, json={"chat_id": settings.telegram_admin_chat_id, "text": text})
+            resp = await client.post(
+                url,
+                json={
+                    "chat_id": settings.telegram_admin_chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                    "reply_markup": reply_markup,
+                },
+            )
             resp.raise_for_status()
     except Exception as e:
         # Loi gui thong bao KHONG duoc lam sap luong tra loi khach - chi log.
