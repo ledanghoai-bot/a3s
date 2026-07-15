@@ -1,0 +1,53 @@
+<div class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden">Sơ đồ cây thư mục repository alpha3s, đánh dấu file mới và file đã sửa qua các issue #5, #6, #7</div>
+<style>
+.tl{display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:13px;padding:1.5px 0;white-space:pre}
+.pre{color:var(--text-muted)}
+.nm{color:var(--text-primary)}
+.bd{font-family:var(--font-sans);font-size:11px;font-weight:500;padding:1px 7px;border-radius:8px;white-space:nowrap}
+.bnew{background:var(--bg-success);color:var(--text-success)}
+.bmod{background:var(--bg-warning);color:var(--text-warning)}
+</style>
+<div style="display:flex;gap:16px;padding-bottom:10px;font-size:12px;color:var(--text-secondary)">
+  <span style="display:flex;align-items:center;gap:5px"><span class="bd bnew">mới</span>file lần đầu tạo</span>
+  <span style="display:flex;align-items:center;gap:5px"><span class="bd bmod">sửa</span>file đã chỉnh sửa</span>
+</div>
+<div class="tl"><span class="nm">alpha3s/</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">Dockerfile</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">docker-compose.yml</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">README.md</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">requirements.txt</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">.env.example</span><span class="bd bmod">sửa</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">.gitlab-ci.yml</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">ISSUES.md</span><span class="bd bnew">mới</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">app/</span></div>
+<div class="tl"><span class="pre">│   ├── </span><span class="nm">main.py</span><span class="bd bmod">sửa</span></div>
+<div class="tl"><span class="pre">│   ├── </span><span class="nm">config.py</span><span class="bd bmod">sửa</span></div>
+<div class="tl"><span class="pre">│   ├── </span><span class="nm">db.py</span></div>
+<div class="tl"><span class="pre">│   ├── </span><span class="nm">api/</span></div>
+<div class="tl"><span class="pre">│   │   ├── </span><span class="nm">webhook.py</span></div>
+<div class="tl"><span class="pre">│   │   └── </span><span class="nm">admin.py</span><span class="bd bnew">mới</span></div>
+<div class="tl"><span class="pre">│   ├── </span><span class="nm">services/</span></div>
+<div class="tl"><span class="pre">│   │   ├── </span><span class="nm">messenger.py</span></div>
+<div class="tl"><span class="pre">│   │   ├── </span><span class="nm">messenger_profile.py</span></div>
+<div class="tl"><span class="pre">│   │   ├── </span><span class="nm">rag.py</span></div>
+<div class="tl"><span class="pre">│   │   ├── </span><span class="nm">embedder.py</span></div>
+<div class="tl"><span class="pre">│   │   ├── </span><span class="nm">orchestrator.py</span><span class="bd bmod">sửa</span></div>
+<div class="tl"><span class="pre">│   │   ├── </span><span class="nm">tools.py</span><span class="bd bnew">mới</span></div>
+<div class="tl"><span class="pre">│   │   └── </span><span class="nm">handoff.py</span><span class="bd bnew">mới</span></div>
+<div class="tl"><span class="pre">│   ├── </span><span class="nm">workers/</span></div>
+<div class="tl"><span class="pre">│   │   └── </span><span class="nm">tasks.py</span><span class="bd bmod">sửa</span></div>
+<div class="tl"><span class="pre">│   └── </span><span class="nm">prompts/</span></div>
+<div class="tl"><span class="pre">│       └── </span><span class="nm">system_prompt.md</span><span class="bd bmod">sửa</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">migrations/</span></div>
+<div class="tl"><span class="pre">│   ├── </span><span class="nm">001_init.sql</span></div>
+<div class="tl"><span class="pre">│   └── </span><span class="nm">002_add_escalations.sql</span><span class="bd bnew">mới</span></div>
+<div class="tl"><span class="pre">├── </span><span class="nm">data/</span></div>
+<div class="tl"><span class="pre">│   └── </span><span class="nm">knowledge/</span></div>
+<div class="tl"><span class="pre">│       ├── </span><span class="nm">product_profile.md</span></div>
+<div class="tl"><span class="pre">│       ├── </span><span class="nm">faq.md</span></div>
+<div class="tl"><span class="pre">│       └── </span><span class="nm">scenarios_20.md</span><span class="bd bnew">mới</span></div>
+<div class="tl"><span class="pre">└── </span><span class="nm">scripts/</span></div>
+<div class="tl"><span class="pre">    ├── </span><span class="nm">ingest.py</span></div>
+<div class="tl"><span class="pre">    ├── </span><span class="nm">test_scenarios.py</span><span class="bd bnew">mới</span></div>
+<div class="tl"><span class="pre">    ├── </span><span class="nm">retest_scenarios.py</span><span class="bd bnew">mới</span></div>
+<div class="tl"><span class="pre">    └── </span><span class="nm">push_issues_to_gitlab.py</span><span class="bd bnew">mới</span></div>

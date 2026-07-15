@@ -24,5 +24,10 @@ class Settings(BaseSettings):
     embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dim: int = 384
 
+    # Human handoff (issue #7): thong bao Telegram khi escalate + token bat lai bot
+    telegram_bot_token: str = ""
+    telegram_admin_chat_id: str = ""
+    admin_api_token: str = "change-me"
+
 
 settings = Settings()

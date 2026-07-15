@@ -27,6 +27,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.services.handoff import is_bot_paused, resume_bot  # noqa: E402
 from app.services.orchestrator import handle_message  # noqa: E402
 
 # Duong dan mac dinh toi file kich ban, tinh tuyet doi tu project root de chay dung
@@ -71,14 +72,31 @@ def parse_scenarios(md_text: str) -> list[dict]:
 
 
 async def run_scenarios(scenarios: list[dict]) -> list[dict]:
-    """Chay tung kich ban qua handle_message(), tra ve ket qua kem cau tra loi cua bot."""
+    """Chay tung kich ban qua handle_message(), tra ve ket qua kem cau tra loi cua bot.
+
+    Truoc moi luot, KIEM TRA bot_paused giong het worker that (app/workers/tasks.py)
+    lam truoc khi goi handle_message - de mo phong dung hanh vi "bot im lang" khi
+    nhan vien da tiep quan hoi thoai (issue #7 - human handoff), thay vi goi
+    handle_message vo dieu kien nhu truoc.
+    """
     results = []
     for sc in scenarios:
         sender_id = f"test_scn_{sc['id']}"
+        # Dam bao trang thai sach truoc khi chay - kich ban lan truoc (neu co) co
+        # the da de lai bot_paused=TRUE, se lam sai lech ket qua lan nay.
+        try:
+            await resume_bot(sender_id)
+        except Exception as e:
+            print(f"[canh bao] Khong reset duoc bot_paused cho {sender_id}: {e}")
+
         print(f"\n=== Scenario {sc['id']} — {sc['title']} ===")
         transcript = []
         for turn in sc["turns"]:
-            reply = await handle_message(sender_id, turn)
+            if await is_bot_paused(sender_id):
+                # Dung nhu worker that: bo qua, KHONG goi handle_message
+                reply = "(bot im lặng — bot_paused=TRUE, nhân viên đang xử lý hội thoại này)"
+            else:
+                reply = await handle_message(sender_id, turn)
             print(f"Khach: {turn}")
             print(f"Bot:   {reply}\n")
             transcript.append({"user": turn, "bot": reply})
@@ -114,7 +132,8 @@ def write_report(results: list[dict], out_path: Path) -> None:
 
 
 async def cleanup_redis(results: list[dict]) -> None:
-    """Xoa lich su chat test khoi Redis de lan chay sau khong bi dinh kich ban cu."""
+    """Xoa lich su chat test khoi Redis va reset bot_paused=FALSE, de lan chay
+    sau khong bi dinh trang thai cua kich ban cu."""
     import redis.asyncio as aioredis
     from app.config import settings
 
@@ -122,6 +141,10 @@ async def cleanup_redis(results: list[dict]) -> None:
     try:
         for r in results:
             await redis.delete(f"chat:{r['sender_id']}")
+            try:
+                await resume_bot(r["sender_id"])
+            except Exception as e:
+                print(f"[canh bao] Khong reset duoc bot_paused cho {r['sender_id']}: {e}")
     finally:
         await redis.aclose()
 

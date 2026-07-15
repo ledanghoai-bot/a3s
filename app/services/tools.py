@@ -18,6 +18,7 @@ import re
 import asyncpg
 
 from app.config import settings
+from app.services import handoff
 
 PHONE_RE = re.compile(r"^(0|\+84)(3|5|7|8|9)\d{8}$")
 MAX_AUTO_QUANTITY = 100  # tren nguong nay: khong tu chot don, phai escalate
@@ -189,14 +190,13 @@ async def create_order(
         await conn.close()
 
 
-async def escalate_to_human(psid: str, reason: str) -> dict:
+async def escalate_to_human(psid: str, reason: str, last_message: str = "") -> dict:
     """Chuyen hoi thoai cho nhan vien: danh dau bot_paused=TRUE tren conversation
-    hien tai cua khach de bot ngung tu dong tra loi.
+    hien tai cua khach de bot ngung tu dong tra loi, log ly do vao bang
+    escalations, va gui thong bao Telegram cho admin.
 
-    Luu y: day moi chi la nua "ghi" cua co che human handoff (issue #6). Phan
-    "doc" (worker bo qua tin nhan khi bot_paused=TRUE, thong bao admin real-time)
-    thuoc pham vi issue #7, CHUA duoc trien khai - can lam #7 truoc khi coi
-    human handoff la hoan chinh end-to-end.
+    `last_message` KHONG nam trong tool schema expose cho LLM - orchestrator tu
+    bom vao (tin nhan hien tai cua khach) de admin co ngu canh ngay trong thong bao.
     """
     conn = await asyncpg.connect(_db_url())
     try:
@@ -224,15 +224,23 @@ async def escalate_to_human(psid: str, reason: str) -> dict:
             await conn.execute(
                 "UPDATE conversations SET bot_paused = TRUE WHERE id = $1", conversation_id
             )
-
-        return {
-            "escalated": True,
-            "conversation_id": conversation_id,
-            "reason": reason,
-            "note": "Da danh dau bot_paused=TRUE cho hoi thoai nay.",
-        }
     finally:
         await conn.close()
+
+    # Log + notify ngoai transaction chinh - loi o day (vd Telegram down) khong
+    # duoc lam rollback viec danh dau bot_paused, vi do moi la phan quan trong nhat.
+    try:
+        await handoff.log_escalation(conversation_id, reason)
+    except Exception as e:
+        print(f"[tools] Ghi log escalation that bai: {e}")
+    await handoff.notify_admin(psid, reason, last_message)
+
+    return {
+        "escalated": True,
+        "conversation_id": conversation_id,
+        "reason": reason,
+        "note": "Da danh dau bot_paused=TRUE cho hoi thoai nay va bao admin.",
+    }
 
 
 # Schema OpenAI/DeepSeek function-calling. psid KHONG xuat hien o day - orchestrator

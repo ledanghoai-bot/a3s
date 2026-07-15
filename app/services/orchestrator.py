@@ -19,7 +19,7 @@ import redis.asyncio as aioredis
 from openai import AsyncOpenAI
 
 from app.config import settings
-from app.services import tools
+from app.services import handoff, tools
 from app.services.messenger_profile import get_user_profile
 from app.services.rag import search_knowledge
 
@@ -48,11 +48,11 @@ async def _save_history(redis, sender_id: str, history: list[dict]) -> None:
     await redis.set(_redis_key(sender_id), json.dumps(trimmed, ensure_ascii=False), ex=86400)
 
 
-async def _execute_tool(name: str, args: dict, sender_id: str) -> dict:
+async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str) -> dict:
     """Dispatch 1 tool call toi ham that trong app/services/tools.py.
 
-    psid (sender_id) duoc bom o day, KHONG lay tu args model tra ve - tranh
-    model tu bia/nham lan sender_id cua khach dang chat.
+    psid (sender_id) va last_message duoc bom o day, KHONG lay tu args model
+    tra ve - tranh model tu bia/nham lan sender_id hoac tin nhan goc cua khach.
     """
     try:
         if name == "search_products":
@@ -62,7 +62,7 @@ async def _execute_tool(name: str, args: dict, sender_id: str) -> dict:
         if name == "create_order":
             return await tools.create_order(psid=sender_id, **args)
         if name == "escalate_to_human":
-            return await tools.escalate_to_human(psid=sender_id, **args)
+            return await tools.escalate_to_human(psid=sender_id, last_message=last_message, **args)
         return {"error": f"Tool khong ton tai: {name}"}
     except TypeError as e:
         # Model truyen sai/thieu tham so so voi schema
@@ -77,6 +77,25 @@ async def handle_message(sender_id: str, text: str) -> str:
     redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
 
     try:
+        # 0. Luoi an toan deterministic: khach CHU DONG doi gap nguoi that ->
+        # escalate ngay, KHONG di qua LLM (khong phu thuoc LLM co nho goi tool
+        # dung luc hay khong - xem ghi chu "rui ro cao nhat" o ISSUES.md #7).
+        if handoff.wants_human(text):
+            await tools.escalate_to_human(
+                psid=sender_id,
+                reason="Khach chu dong yeu cau gap nhan vien",
+                last_message=text,
+            )
+            reply = (
+                "Dạ, em đã chuyển yêu cầu này cho nhân viên hỗ trợ rồi ạ, "
+                "sẽ có người liên hệ anh/chị ngay nhé."
+            )
+            history = await _get_history(redis, sender_id)
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": reply})
+            await _save_history(redis, sender_id, history)
+            return reply
+
         # 1. Lay lich su + profile khach (ten tu Messenger)
         history = await _get_history(redis, sender_id)
         profile = await get_user_profile(redis, sender_id)
@@ -146,7 +165,7 @@ async def handle_message(sender_id: str, text: str) -> str:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                result = await _execute_tool(tc.function.name, args, sender_id)
+                result = await _execute_tool(tc.function.name, args, sender_id, text)
                 turn_messages.append(
                     {
                         "role": "tool",

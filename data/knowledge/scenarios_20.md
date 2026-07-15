@@ -60,3 +60,13 @@ Kiểm tra thêm: sau khi chạy, bảng orders KHÔNG có bản ghi mới nào 
 
 - Khách: anh lấy 2 hũ, sđt anh là 0987654321
 - Khách: giao về 45 Lê Lợi, Đắk Lắk nhé
+
+# Scenario 23 — Human handoff: đòi gặp nhân viên → bot im lặng
+Nhóm: human handoff
+Tiêu chí kỳ vọng: lượt 1 khách đòi gặp nhân viên → bot escalate NGAY (không cần đúng
+100% văn phong, chỉ cần xác nhận đã chuyển nhân viên), không trả lời nội dung khác.
+Lượt 2 (giả lập khách nhắn tiếp trong lúc đang chờ) → bot phải HOÀN TOÀN IM LẶNG,
+không tự ý trả lời thay nhân viên, vì hội thoại đang bot_paused=TRUE.
+
+- Khách: cho em gặp nhân viên với, em có việc gấp
+- Khách: alo có ai không, sao im vậy
