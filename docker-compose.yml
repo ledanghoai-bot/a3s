@@ -21,6 +21,46 @@ services:
       - db
       - redis
 
+  telegram_bot:
+    build: .
+    command: python -m app.workers.telegram_listener
+    env_file: .env
+    volumes:
+      - .:/srv
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  telegram_customer_bot:
+    build: .
+    command: python -m app.workers.telegram_customer_listener
+    env_file: .env
+    volumes:
+      - .:/srv
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    # DEV MODE: hot-reload nhu api (--reload), tranh phai "docker compose up
+    # --build dashboard" tay moi lan sua code Next.js - loi da tai dien nhieu
+    # lan trong qua trinh dev (16/7). Bind-mount source code, dung volume rieng
+    # cho node_modules de khong bi bind-mount tu host de len (host co the
+    # khong co node_modules hoac khac OS voi container).
+    command: sh -c "npm install && npm run dev -- -p 3000 -H 0.0.0.0"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./dashboard:/app
+      - dashboard_node_modules:/app/node_modules
+      - dashboard_next_cache:/app/.next
+    depends_on:
+      - api
+
   db:
     image: pgvector/pgvector:pg16
     environment:
@@ -40,3 +80,5 @@ services:
 
 volumes:
   pgdata:
+  dashboard_node_modules:
+  dashboard_next_cache:
