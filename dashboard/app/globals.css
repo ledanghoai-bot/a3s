@@ -1,0 +1,155 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f7f7f5;
+  color: #222;
+}
+
+a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+nav.topnav {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 24px;
+  background: #fff;
+  border-bottom: 1px solid #e5e5e0;
+}
+
+nav.topnav .brand {
+  font-weight: 600;
+  margin-right: auto;
+}
+
+nav.topnav a {
+  color: #555;
+  font-size: 14px;
+}
+
+nav.topnav a.active {
+  color: #2563eb;
+  font-weight: 600;
+}
+
+main.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+th, td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+  font-size: 14px;
+}
+
+th {
+  background: #fafaf8;
+  color: #666;
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.badge-paused { background: #fde68a; color: #7c5a05; }
+.badge-active { background: #bbf7d0; color: #14532d; }
+.badge-new { background: #dbeafe; color: #1e3a8a; }
+.badge-confirmed { background: #e0e7ff; color: #3730a3; }
+.badge-shipped { background: #fef3c7; color: #92400e; }
+.badge-done { background: #bbf7d0; color: #14532d; }
+.badge-cancelled { background: #fecaca; color: #7f1d1d; }
+
+button {
+  cursor: pointer;
+  font-size: 14px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid #ddd;
+  background: #fff;
+}
+
+button.primary {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+input[type="password"], input[type="text"], select {
+  padding: 8px 10px;
+  font-size: 14px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+}
+
+.error-box {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.empty-state {
+  color: #888;
+  padding: 40px 0;
+  text-align: center;
+}
+
+.bubble {
+  max-width: 70%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.bubble-customer {
+  background: #fff;
+  border: 1px solid #eee;
+  margin-right: auto;
+}
+
+.bubble-bot {
+  background: #dbeafe;
+  margin-left: auto;
+}
+
+.bubble-agent {
+  background: #fef3c7;
+  margin-left: auto;
+}
+
+.bubble-time {
+  font-size: 11px;
+  color: #999;
+  margin-top: 2px;
+}

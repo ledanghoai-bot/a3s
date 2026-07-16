@@ -33,7 +33,14 @@ import asyncio
 import httpx
 
 from app.config import settings
-from app.services.handoff import list_paused_conversations, log_note, resolve_psid, resume_bot
+from app.services import price_overrides
+from app.services.handoff import (
+    is_valid_identifier,
+    list_paused_conversations,
+    log_note,
+    resolve_psid,
+    resume_bot,
+)
 
 API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 30  # giay cho long-polling moi request getUpdates
@@ -91,7 +98,15 @@ async def _handle_command(client: httpx.AsyncClient, text: str) -> None:
         if len(parts) < 2 or not parts[1].strip():
             await _send(client, "Dùng đúng cú pháp: /resume <mã KH hoặc psid> [ghi chú tuỳ chọn]")
             return
-        psid = await resolve_psid(parts[1].strip())
+        raw_id = parts[1].strip()
+        if not is_valid_identifier(raw_id):
+            await _send(
+                client,
+                f"⚠️ '{raw_id}' không phải mã KH/PSID hợp lệ. Chỉ gõ đúng **số** (ví dụ: 4), "
+                "KHÔNG gõ cả chữ \"Mã KH:\" khi copy từ tin nhắn thông báo.",
+            )
+            return
+        psid = await resolve_psid(raw_id)
         note = parts[2].strip() if len(parts) > 2 else None
         await _send(client, await _do_resume(client, psid, note))
         return
@@ -101,13 +116,57 @@ async def _handle_command(client: httpx.AsyncClient, text: str) -> None:
         if len(parts) < 3 or not parts[2].strip():
             await _send(client, "Dùng đúng cú pháp: /note <mã KH hoặc psid> <nội dung ghi chú>")
             return
-        psid = await resolve_psid(parts[1].strip())
+        raw_id = parts[1].strip()
+        if not is_valid_identifier(raw_id):
+            await _send(
+                client,
+                f"⚠️ '{raw_id}' không phải mã KH/PSID hợp lệ. Chỉ gõ đúng **số** (ví dụ: 4), "
+                "KHÔNG gõ cả chữ \"Mã KH:\" khi copy từ tin nhắn thông báo.",
+            )
+            return
+        psid = await resolve_psid(raw_id)
         note = parts[2].strip()
         await log_note(psid, note)
         await _send(
             client,
             f"📝 Đã ghi chú cho `{psid}`:\n“{note}”\nBot sẽ dùng ghi chú này ở các lượt chat sau, "
             "kể cả khi bot đang trả lời bình thường (không cần resume lại).",
+        )
+        return
+
+    if text.startswith("/approve"):
+        parts = text.split(maxsplit=4)
+        if len(parts) < 4:
+            await _send(
+                client,
+                "Dung dung cu phap: /approve <ma KH> <so luong> <don gia VND> [ghi chu]\n"
+                "Vi du: /approve 42 500 130000 giao 33 Tran Hung Dao Q2 HCM trong 1 tuan",
+            )
+            return
+        raw_id = parts[1].strip()
+        if not is_valid_identifier(raw_id):
+            await _send(
+                client,
+                f"⚠️ '{raw_id}' không phải mã KH/PSID hợp lệ. Chỉ gõ đúng **số** (ví dụ: 4), "
+                "KHÔNG gõ cả chữ \"Mã KH:\" khi copy từ tin nhắn thông báo.",
+            )
+            return
+        psid = await resolve_psid(raw_id)
+        try:
+            qty = int(parts[2].strip())
+            unit_price = int(parts[3].strip())
+        except ValueError:
+            await _send(client, "So luong va don gia phai la so nguyen (khong dau cham/phay).")
+            return
+        note = parts[4].strip() if len(parts) > 4 else ""
+        await price_overrides.create_override(psid, qty, unit_price, note)
+        total = qty * unit_price
+        await _send(
+            client,
+            f"✅ Đã duyệt giá đặc biệt cho `{psid}`:\n"
+            f"Số lượng: {qty} hũ × {unit_price:,}đ = {total:,}đ\n"
+            "Bot giờ có thể tự tạo đơn nếu khách xác nhận đúng số lượng này (không "
+            "khớp số lượng thì không dùng được phê duyệt này).",
         )
         return
 
@@ -126,7 +185,7 @@ async def _handle_command(client: httpx.AsyncClient, text: str) -> None:
             code = c.get("customer_id")
             text_msg = (
                 f"{name} - {phone}\n"
-                f"Mã KH: `{code}` (dùng cho /note, /resume)\n"
+                f"Mã số khách — CHỈ gõ số này vào lệnh: `{code}`\n"
                 f"Lý do: {reason}"
             )
             keyboard = {
@@ -138,11 +197,14 @@ async def _handle_command(client: httpx.AsyncClient, text: str) -> None:
     if text.startswith("/help") or text.startswith("/start"):
         await _send(
             client,
-            "Lệnh hỗ trợ (dùng mã KH ngắn như `42` thay vì PSID dài cho gọn):\n"
+            "Lệnh hỗ trợ (dùng mã KH ngắn như `42` thay vì PSID dài cho gọn — CHỈ gõ đúng\n"
+            "số, không gõ cả chữ \"Mã KH:\" khi copy từ tin thông báo):\n"
             "/resume <mã KH> - bật lại bot cho 1 hội thoại\n"
             "/resume <mã KH> <ghi chú> - resume kèm ghi chú thoả thuận\n"
             "/note <mã KH> <ghi chú> - thêm ghi chú BẤT KỲ LÚC NÀO, không cần "
             "resume kèm theo (dùng được cả khi bot đang trả lời bình thường)\n"
+            "/approve <mã KH> <số lượng> <đơn giá> [ghi chú] - duyệt giá/số lượng đặc biệt, "
+            "cho phép BOT TỰ TẠO ĐƠN đúng số lượng đó (kể cả trên 100 hũ)\n"
             "/list - xem danh sách hội thoại đang chờ, kèm mã KH và nút resume nhanh\n\n"
             "Khi có khách mới cần hỗ trợ, bot sẽ tự nhắn kèm mã KH và nút "
             "\"Resume bot ngay\" — bấm thẳng vào đó là nhanh nhất.",

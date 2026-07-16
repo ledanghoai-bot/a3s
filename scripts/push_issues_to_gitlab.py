@@ -1,11 +1,12 @@
 """
-Doc file ISSUES.md (backlog da duoc dung lai + cap nhat trong qua trinh lam viec) va day
+Doc file ISSUES-VI.md (backlog da duoc dung lai + cap nhat trong qua trinh lam viec) va day
 toan bo issue len mot project GitLab moi qua REST API. Khong can cai them thu vien ngoai
 (chi dung urllib co san trong Python).
 
-ISSUES.md la "nguon that duy nhat" (single source of truth) - script parse truc tiep tu
-file nay, khong hardcode noi dung issue trong script. Sua ISSUES.md roi chay lai script la
-du, khong can sua script.
+ISSUES-VI.md la "nguon that duy nhat" (single source of truth) - script parse truc tiep tu
+file nay, khong hardcode noi dung issue trong script. File nay la ban tieng Viet (ban lam
+viec chinh); ISSUES-EN.md chi la ban dich tham khao, KHONG duoc script nay doc. Sua
+ISSUES-VI.md roi chay lai script la du, khong can sua script.
 
 Cach parse:
   - Moi issue la 1 khoi bat dau bang dong "## #<so> · <tieu de>"
@@ -21,8 +22,8 @@ Cach chay:
     # Xem truoc se tao/dong nhung gi ma KHONG goi API that:
     python push_issues_to_gitlab.py --project ledanghoai-group/alpha3s --dry-run
 
-    # Neu file ISSUES.md khong nam cung thu muc script:
-    python push_issues_to_gitlab.py --project ledanghoai-group/alpha3s --file /path/to/ISSUES.md
+    # Neu file ISSUES-VI.md khong nam cung thu muc script:
+    python push_issues_to_gitlab.py --project ledanghoai-group/alpha3s --file /path/to/ISSUES-VI.md
 
     # Neu dung GitLab tu-host (khong phai gitlab.com):
     python push_issues_to_gitlab.py --project mygroup/alpha3s --gitlab-url https://gitlab.company.com
@@ -36,7 +37,7 @@ Luu token vao .env:
     Them 1 dong vao file .env o project root (cung file dang chua PAGE_ACCESS_TOKEN, v.v.):
         GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
     Script se TU DONG doc file .env nay (khong can `export` tay), mien la .env nam o
-    project root (cung cap voi ISSUES.md) hoac cung thu muc voi script.
+    project root (cung cap voi ISSUES-VI.md) hoac cung thu muc voi script.
     QUAN TRONG: dam bao .env dang nam trong .gitignore, KHONG duoc commit len git
     (repo nay tung bi lo PAGE_ACCESS_TOKEN qua .env truoc do, xem ghi chu o issue #1).
 """
@@ -176,8 +177,8 @@ def main():
     parser.add_argument("--project", required=True, help="namespace/project hoac numeric project ID")
     parser.add_argument("--gitlab-url", default="https://gitlab.com", help="Base URL GitLab (mac dinh gitlab.com)")
     parser.add_argument(
-        "--file", default=str(Path(__file__).resolve().parent.parent / "ISSUES.md"),
-        help="Duong dan toi ISSUES.md",
+        "--file", default=str(Path(__file__).resolve().parent.parent / "ISSUES-VI.md"),
+        help="Duong dan toi ISSUES-VI.md (ban tieng Viet - nguon that duy nhat de day len GitLab)",
     )
     parser.add_argument(
         "--token", default=os.environ.get("GITLAB_TOKEN"),

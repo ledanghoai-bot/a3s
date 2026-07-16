@@ -23,6 +23,28 @@ _HUMAN_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Nhan dien 1 identifier staff go vao (/resume, /note, /approve) co hop le
+# hay khong - CHAN truong hop staff go nham ca cum bot tu hien thi (vd "Ma KH:
+# 4" - go ca chu "Ma" thay vi chi go so 4), tao nham customer/conversation
+# rac voi psid la 1 tu tieng Viet (bug thuc te gap 16/7). Chi chap nhan: ma KH
+# ngan (thuan so), hoac sender_id he thong that (tg:<so>, manual:<hex>, hoac
+# PSID Facebook thuan so dai).
+_TG_SENDER_RE = re.compile(r"^tg:\d+$")
+_MANUAL_SENDER_RE = re.compile(r"^manual:[0-9a-f]+$")
+
+
+def is_valid_identifier(raw: str) -> bool:
+    """True neu chuoi staff go la ma KH/PSID hop le, False neu la rac (vd
+    chua go nham chu tieng Viet thay vi chi go so)."""
+    raw = raw.strip()
+    if not raw:
+        return False
+    if raw.isdigit():
+        return True
+    if _TG_SENDER_RE.match(raw) or _MANUAL_SENDER_RE.match(raw):
+        return True
+    return False
+
 
 def wants_human(text: str) -> bool:
     """True neu tin nhan chua cum tu doi gap nguoi that ro rang."""
@@ -222,7 +244,7 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
 
     short_code = await get_short_code(psid)
     code_line = (
-        f"\nMa KH: `{short_code}` (dung ma nay thay PSID cho /note, /resume - go gon hon nhieu)"
+        f"\nMa so khach - CHI GO SO NAY vao lenh, KHONG go chu 'Ma KH': `{short_code}`"
         if short_code
         else ""
     )

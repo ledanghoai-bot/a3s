@@ -29,5 +29,12 @@ class Settings(BaseSettings):
     telegram_admin_chat_id: str = ""
     admin_api_token: str = "change-me"
 
+    # Dashboard Next.js (issue #8): danh sach origin duoc phep goi API, cach nhau boi dau phay
+    dashboard_cors_origins: str = "http://localhost:3000"
+
+    # Kenh khach hang du phong qua Telegram (khac han telegram_bot_token o tren,
+    # cai do la bot ADMIN nhan thong bao/lenh - bot nay tiep khach truc tiep)
+    telegram_customer_bot_token: str = ""
+
 
 settings = Settings()

@@ -8,7 +8,8 @@ Luong:
 4. Neu model tra ve tool_calls: thuc thi tool that (DB that qua app/services/tools.py),
    nap ket qua tool nguoc lai cho model, lap lai toi da MAX_TOOL_ITERATIONS vong
 5. Luu tin nhan (user + cau tra loi cuoi cung) vao Redis - KHONG luu buoc trung gian
-   tool_calls de lich su gon nhe
+   tool_calls de lich su gon nhe. Dong thoi ghi vao Postgres (bang messages) qua
+   app/services/conversation_log.py de dashboard (#8) doc lai duoc lich su lau dai.
 6. Tra ve cau tra loi cuoi cung
 """
 
@@ -19,7 +20,7 @@ import redis.asyncio as aioredis
 from openai import AsyncOpenAI
 
 from app.config import settings
-from app.services import handoff, tools
+from app.services import conversation_log, handoff, tools
 from app.services.messenger_profile import get_user_profile
 from app.services.rag import search_knowledge
 
@@ -77,6 +78,10 @@ async def handle_message(sender_id: str, text: str) -> str:
     redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
 
     try:
+        # -1. Dam bao co conversation trong Postgres cho dashboard (issue #8) -
+        # doc lai duoc lich su lau dai, khac voi Redis chi giu 24h.
+        conversation_id = await conversation_log.ensure_conversation(sender_id)
+
         # 0. Luoi an toan deterministic: khach CHU DONG doi gap nguoi that ->
         # escalate ngay, KHONG di qua LLM (khong phu thuoc LLM co nho goi tool
         # dung luc hay khong - xem ghi chu "rui ro cao nhat" o ISSUES.md #7).
@@ -94,11 +99,20 @@ async def handle_message(sender_id: str, text: str) -> str:
             history.append({"role": "user", "content": text})
             history.append({"role": "assistant", "content": reply})
             await _save_history(redis, sender_id, history)
+            await conversation_log.log_message(conversation_id, "customer", text)
+            await conversation_log.log_message(conversation_id, "bot", reply)
             return reply
 
-        # 1. Lay lich su + profile khach (ten tu Messenger)
+        # 1. Lay lich su + profile khach (ten tu Messenger Graph API - CHI goi
+        # cho khach Messenger that; cac kenh khac nhu Telegram (sender_id dang
+        # "tg:<chat_id>") khong co Graph API tuong duong nen bo qua, tranh goi
+        # API that vo ich moi luot chat - issue "nhieu kenh" phat sinh tu vu Meta
+        # khoa test user, xem ISSUES.md.
         history = await _get_history(redis, sender_id)
-        profile = await get_user_profile(redis, sender_id)
+        if sender_id.startswith("tg:") or sender_id.startswith("manual:"):
+            profile = {}
+        else:
+            profile = await get_user_profile(redis, sender_id)
 
         # 2. RAG: tim chunks lien quan (kien thuc san pham tinh, khong phai gia/ton kho)
         chunks = await search_knowledge(text, top_k=4)
@@ -115,6 +129,20 @@ async def handle_message(sender_id: str, text: str) -> str:
             )
         if rag_context:
             system += f"\n\n## Thong tin tham khao lien quan\n{rag_context}"
+
+        # Bom nguoc tin nhan/ghi chu that cua nhan vien trong luc handover (neu co) -
+        # doc tu Postgres (khong phai Redis) de KHONG bao gio mat, tranh bot noi
+        # trai thoa thuan sep/nhan vien da chot voi khach (issue #8 - xu ly tin
+        # nhan luc handover). Xem app/services/conversation_log.py:get_recent_agent_messages.
+        agent_notes = await conversation_log.get_recent_agent_messages(sender_id, limit=10)
+        if agent_notes:
+            notes_text = "\n".join(f"- {n['content']}" for n in agent_notes)
+            system += (
+                "\n\n## Ghi chu/thoa thuan tu nhan vien trong qua trinh handover\n"
+                "(KHONG doc nguyen van cho khach, chi dung de hieu boi canh va "
+                "KHONG duoc noi trai nhung gi nhan vien/sep da chot voi khach)\n"
+                f"{notes_text}"
+            )
 
         # messages cho vong lap tool-calling cua luot nay - khong dinh vao history
         # da luu tru khi con tool_calls trung gian
@@ -194,6 +222,8 @@ async def handle_message(sender_id: str, text: str) -> str:
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": reply})
         await _save_history(redis, sender_id, history)
+        await conversation_log.log_message(conversation_id, "customer", text)
+        await conversation_log.log_message(conversation_id, "bot", reply)
 
         return reply
 

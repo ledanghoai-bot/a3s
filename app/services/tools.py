@@ -18,7 +18,7 @@ import re
 import asyncpg
 
 from app.config import settings
-from app.services import handoff
+from app.services import handoff, price_overrides
 
 PHONE_RE = re.compile(r"^(0|\+84)(3|5|7|8|9)\d{8}$")
 MAX_AUTO_QUANTITY = 100  # tren nguong nay: khong tu chot don, phai escalate
@@ -103,15 +103,21 @@ async def create_order(
 
     CHI duoc goi khi da co du ten, SDT, dia chi, san pham va so luong tu khach
     (dung theo system_prompt.md muc "Quy tac an toan"). Tu choi neu SDT sai
-    dinh dang VN hoac so luong > MAX_AUTO_QUANTITY (phai escalate_to_human thay vao do).
+    dinh dang VN hoac so luong > MAX_AUTO_QUANTITY - TRU KHI co dung 1 phe duyet
+    staff (price_overrides) khop CHINH XAC psid + quantity nay, xem
+    app/services/price_overrides.py. LLM khong the tu tao phe duyet cho chinh no.
     """
     if quantity <= 0:
         return {"error": "So luong phai lon hon 0."}
-    if quantity > MAX_AUTO_QUANTITY:
+
+    override = await price_overrides.get_active_override(psid, quantity)
+
+    if quantity > MAX_AUTO_QUANTITY and not override:
         return {
             "error": (
                 f"Don tren {MAX_AUTO_QUANTITY} hu khong duoc tu chot don. "
-                "Goi escalate_to_human thay vi create_order."
+                "Goi escalate_to_human thay vi create_order, cho staff duyet gia "
+                "qua lenh /approve tren Telegram truoc."
             )
         }
     phone_clean = phone.replace(" ", "").replace("-", "")
@@ -134,11 +140,14 @@ async def create_order(
                     )
                 }
 
-            tiers = await conn.fetch(
-                "SELECT min_qty, unit_price_vnd FROM price_tiers WHERE product_id = $1",
-                product["id"],
-            )
-            unit_price = _unit_price_for_quantity(tiers, quantity) or product["price_vnd"]
+            if override:
+                unit_price = override["unit_price_vnd"]
+            else:
+                tiers = await conn.fetch(
+                    "SELECT min_qty, unit_price_vnd FROM price_tiers WHERE product_id = $1",
+                    product["id"],
+                )
+                unit_price = _unit_price_for_quantity(tiers, quantity) or product["price_vnd"]
             total = unit_price * quantity
 
             customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
@@ -170,6 +179,9 @@ async def create_order(
                 "UPDATE products SET stock = stock - $1 WHERE id = $2",
                 quantity, product["id"],
             )
+
+        if override:
+            await price_overrides.mark_override_used(override["id"])
 
         return {
             "order_id": order_id,
