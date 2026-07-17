@@ -4,7 +4,7 @@
 > processing flow (orchestrator + tool calling), the services, and the
 > internal APIs (`/admin/*`, `/dashboard/*`). Use this when deploying,
 > debugging, or continuing development.
-> Last updated: 7/17 (after Batch 2 + LLM reliability fixes for SKU/pricing).
+> Last updated: 7/17 (after Batch 3 — added Metrics/Analytics).
 
 ## Quick index
 - [Architecture overview](#architecture-overview)
@@ -208,6 +208,7 @@ to the exact button/screen it belongs to).
 | `orders.py` | `list_orders`, `update_order_status` (validates the status-transition order), `create_order_manual`, `list_products_brief` |
 | `products.py` (Batch 2, 7/17) | Product/price-tier CRUD (dashboard) + `get_sku_summary_text()` ("Layer 1") + auto-syncs RAG whenever `description` is edited ("Layer 2") |
 | `knowledge_entries.py` (Batch 2, 7/17) | FAQ CRUD (dashboard) — computes the embedding and writes/deletes `knowledge_chunks` immediately, no need to run `ingest.py` |
+| `metrics.py` (Batch 3, 7/17) | Metrics/Analytics for `/metrics` — messages/day, chat-to-order rate, top unanswered questions — no new DB table |
 | `rag.py` | `search_knowledge()` — queries `knowledge_chunks` via cosine similarity (pgvector) |
 | `embedder.py` | Generates embeddings (model `paraphrase-multilingual-MiniLM-L12-v2`, runs locally) |
 | `messenger.py` | `send_text()` — calls the Facebook Send API |

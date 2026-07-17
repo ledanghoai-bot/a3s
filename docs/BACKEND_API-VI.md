@@ -3,7 +3,7 @@
 > Mô tả toàn bộ backend FastAPI: webhook Messenger, luồng xử lý AI
 > (orchestrator + tool calling), các service, và API nội bộ (`/admin/*`,
 > `/dashboard/*`). Dùng khi deploy, debug, hoặc phát triển tiếp.
-> Cập nhật lần cuối: 17/7 (sau Bat 2 + fix độ tin cậy LLM về SKU/giá).
+> Cập nhật lần cuối: 17/7 (sau Bat 3 — thêm Metrics/Analytics).
 
 ## Mục lục nhanh
 - [Tổng quan kiến trúc](#tổng-quan-kiến-trúc)
@@ -192,6 +192,7 @@ trên UI).
 | `orders.py` | `list_orders`, `update_order_status` (validate thứ tự chuyển trạng thái), `create_order_manual`, `list_products_brief` |
 | `products.py` (Bat 2, 17/7) | CRUD sản phẩm/bậc giá (dashboard) + `get_sku_summary_text()` ("Lớp 1") + tự đồng bộ RAG khi sửa `description` ("Lớp 2") |
 | `knowledge_entries.py` (Bat 2, 17/7) | CRUD FAQ (dashboard) — tự tính embedding, ghi/xóa `knowledge_chunks` ngay lập tức, không cần chạy `ingest.py` |
+| `metrics.py` (Bat 3, 17/7) | Metrics/Analytics cho `/metrics` — tin nhắn/ngày, tỷ lệ chat→đơn, top câu hỏi bot không trả lời được — không thêm bảng mới |
 | `rag.py` | `search_knowledge()` — truy vấn `knowledge_chunks` bằng cosine similarity (pgvector) |
 | `embedder.py` | Tạo embedding (model `paraphrase-multilingual-MiniLM-L12-v2`, chạy local) |
 | `messenger.py` | `send_text()` — gọi Facebook Send API |

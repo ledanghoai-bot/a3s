@@ -12,6 +12,7 @@ from app.api.auth import require_admin_token
 from app.config import settings
 from app.services import conversation_log, price_overrides, products as products_service
 from app.services import knowledge_entries
+from app.services import metrics
 from app.services import orders as orders_service
 from app.services import tools
 from app.services.handoff import log_note, pause_bot, resume_bot
@@ -402,3 +403,24 @@ async def delete_faq_endpoint(entry_id: int) -> dict:
     if not found:
         raise HTTPException(status_code=404, detail=f"Khong tim thay FAQ id={entry_id}")
     return {"id": entry_id, "deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Metrics/Analytics (issue #8, Bat 3) - tan dung hoan toan du lieu san co,
+# KHONG them bang moi. Xem app/services/metrics.py cho ghi chu day du.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/metrics/messages-per-day")
+async def get_messages_per_day(days: int = 14) -> list[dict]:
+    return await metrics.list_messages_per_day(days=days)
+
+
+@router.get("/metrics/conversion-rate")
+async def get_conversion_rate_endpoint() -> dict:
+    return await metrics.get_conversion_rate()
+
+
+@router.get("/metrics/unanswered-questions")
+async def get_unanswered_questions(limit: int = 20) -> list[dict]:
+    return await metrics.list_unanswered_questions(limit=limit)

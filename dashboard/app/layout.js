@@ -15,6 +15,7 @@ export default function RootLayout({ children }) {
           <a href="/orders">Đơn hàng</a>
           <a href="/products">Sản phẩm</a>
           <a href="/faq">FAQ</a>
+          <a href="/metrics">Metrics</a>
         </nav>
         <main className="container">{children}</main>
       </body>

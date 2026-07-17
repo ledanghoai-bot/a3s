@@ -661,3 +661,35 @@ series of issues — each one diagnosed and fixed in turn:
   hit once while migration 009 was still being applied concurrently with a
   dashboard save — no data was lost (the write was inside a transaction that
   rolled back cleanly), just needed a retry after the migration finished.
+
+---
+
+## Batch 3 #8 — Metrics/Analytics (7/17)
+
+2 of the 3 remaining #8 items are now done (CRUD + Metrics); only real
+per-staff auth is left.
+
+**`app/services/metrics.py`** — 3 functions, 3 new endpoints
+(`/dashboard/metrics/*`), **no new DB table**, fully reusing existing data:
+1. **Messages/day** (`list_messages_per_day`) — counts `messages` per day,
+   split by `role` (customer/bot/agent). Days with no messages simply don't
+   appear in the result (not zero-filled).
+2. **Chat-to-order rate** (`get_conversion_rate`) — % of customers (by
+   `customer_id`) who have at least 1 order in `orders`, out of all customers
+   who have ever chatted. **Intentionally simplified**: not broken down by
+   time period (day/week) yet — just an overall rate, could be extended later.
+3. **Top unanswered questions** (`list_unanswered_questions`) — scans for bot
+   messages matching the fixed fallback phrase in `system_prompt.md` ("no
+   confirmed information yet..."), pairs each with the customer's question
+   from **immediately before** it in the same conversation, groups by
+   normalized question text (lowercased/trimmed) to count frequency. **No
+   NLP/fuzzy matching** — differently worded questions with the same meaning
+   are counted separately (a known limitation, acceptable for the current scope).
+
+**New `/metrics` dashboard page** — 3 overview cards (total customers /
+customers with orders / rate) + a CSS-only bar chart (no charting library
+added, to avoid an `npm install` inside the dev-mode container) for
+messages/day, plus a table of unanswered questions.
+
+**Not yet tested** — needs an `api` restart (the new endpoints live in
+`dashboard.py`, not `worker`) and a hard refresh of the dashboard.

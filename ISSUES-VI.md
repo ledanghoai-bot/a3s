@@ -802,3 +802,34 @@ trong cuộc này), rồi hỏi lại giá SKU 25kg từ đầu — lần này p
 giá SKU 25kg từ 1 cuộc chat sạch: bot trả đúng **cả giá lẻ (650.000đ/kg) lẫn bậc
 giá (630.000đ/kg từ 10 thùng)**, tự tính đúng tổng 25kg × 650k = 16.250.000đ/thùng.
 Không còn nói "chưa có giá", không còn tự mâu thuẫn. Đóng bug lần 5.
+
+## Bat 3 #8 — Metrics/Analytics (17/7)
+Đã làm xong 2/3 việc còn lại của #8 (CRUD + Metrics) — chỉ còn Auth thật chưa làm.
+**Không thêm bảng mới nào** — tận dụng hoàn toàn dữ liệu sẵn có.
+
+**`app/services/metrics.py`** — 3 hàm, 3 endpoint mới (`/dashboard/metrics/*`):
+1. **Tin nhắn/ngày** (`list_messages_per_day`) — đếm `messages` theo ngày, tách
+   theo `role` (khách/bot/nhân viên). Ngày không có tin nhắn không xuất hiện trong
+   kết quả (không tự điền 0).
+2. **Tỷ lệ hội thoại → đơn** (`get_conversion_rate`) — % khách (theo `customer_id`)
+   đã từng có ít nhất 1 đơn trong `orders`, trên tổng số khách đã từng chat.
+   **Đơn giản hóa có chủ đích**: không tách theo thời gian (vd theo ngày/tuần) —
+   chỉ là tỷ lệ tổng thể từ trước tới giờ, có thể mở rộng sau nếu cần.
+3. **Top câu hỏi bot không trả lời được** (`list_unanswered_questions`) — dò tìm
+   tin nhắn bot khớp đúng câu fallback cố định trong `system_prompt.md` ("chưa
+   có thông tin xác nhận..."), lấy đúng câu hỏi khách gửi **ngay trước** tin đó
+   trong cùng 1 conversation, gom nhóm theo nội dung câu hỏi (chuẩn hóa
+   thường/trim) để đếm tần suất. **Không dùng NLP/fuzzy matching** — 2 câu hỏi
+   khác chữ dù cùng ý nghĩa sẽ bị đếm riêng (giới hạn đã biết, chấp nhận cho
+   phạm vi hiện tại).
+
+**Trang dashboard mới `/metrics`** — 3 thẻ tổng quan (tổng khách/khách có đơn/tỷ
+ lệ) + bar chart tự vẽ bằng CSS (không thêm thư viện chart, tránh phải `npm
+install` thêm gói mới trong container dev mode) cho tin nhắn/ngày + bảng câu hỏi
+chưa trả lời được.
+
+**Chưa test** — cần restart `api` (endpoint mới nằm trong `dashboard.py`, không
+phải `worker`), hard refresh dashboard. Kiểm tra: (1) số liệu tổng quan có khớp
+đúng số đơn thật trong DB không; (2) thử 1 câu hỏi bot chắc chắn không trả lời
+được (vd hỏi phí ship cụ thể) — xác nhận câu đó xuất hiện đúng trong bảng "Top
+câu hỏi" sau khi chat.

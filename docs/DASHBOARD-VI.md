@@ -2,7 +2,7 @@
 
 > Tham chiếu đầy đủ dashboard quản trị (`dashboard/`) — dùng khi deploy, đào
 > tạo nhân viên mới, hoặc phát triển tiếp. Giống 1 file `/help` cho dashboard.
-> Cập nhật lần cuối: 17/7 (sau Bat 2 — thêm CRUD Sản phẩm/FAQ).
+> Cập nhật lần cuối: 17/7 (sau Bat 3 — thêm Metrics/Analytics).
 
 ## Mục lục nhanh
 - [Tổng quan](#tổng-quan)
@@ -12,6 +12,7 @@
 - [Trang /orders/new](#trang-ordersnew)
 - [Trang /products](#trang-products)
 - [Trang /faq](#trang-faq)
+- [Trang /metrics](#trang-metrics)
 - [Component dùng chung: OrderForm](#component-dùng-chung-orderform)
 - [Cấu trúc thư mục](#cấu-trúc-thư-mục)
 - [API backend mà dashboard gọi tới](#api-backend-mà-dashboard-gọi-tới)
@@ -168,6 +169,26 @@ ngay khi lưu** (không cần chạy `scripts/ingest.py`).
 
 ---
 
+## Trang /metrics
+
+Metrics/Analytics (17/7, Bat 3) — **không thêm bảng DB mới nào**, tận dụng hoàn
+toàn dữ liệu sẵn có. 3 khối nội dung:
+
+1. **3 thẻ tổng quan** — tổng số khách đã chat, số khách đã có đơn, tỷ lệ
+   chat → đơn (%). Tỷ lệ tính tổng thể từ trước tới giờ, **chưa tách theo
+   thời gian** (đơn giản hóa có chủ đích cho v1).
+2. **Tin nhắn/ngày** (14 ngày gần nhất) — bar chart tự vẽ bằng CSS (không
+   thêm thư viện chart ngoài, tránh phải cài gói npm mới trong container dev
+   mode), tách màu theo `role` (khách/bot/nhân viên).
+3. **Top câu hỏi bot không trả lời được** — dò tin nhắn bot khớp câu fallback
+   cố định ("chưa có thông tin xác nhận..."), ghép với câu hỏi khách ngay trước
+   đó, gom nhóm theo tần suất. **Không NLP/fuzzy** — câu hỏi khác chữ dù cùng
+   ý sẽ bị đếm riêng.
+
+Backend: `app/services/metrics.py` (3 hàm, không transaction, chỉ SELECT).
+
+---
+
 ## Component dùng chung: OrderForm
 
 File: `dashboard/app/components/OrderForm.js`
@@ -186,7 +207,7 @@ Dùng lại y hệt ở cả `/orders/new` (2 trường hợp trên) — không 
 ```
 dashboard/
 ├── app/
-│   ├── layout.js              # Layout gốc: nav (Hội thoại / Đơn hàng / Sản phẩm / FAQ)
+│   ├── layout.js              # Layout gốc: nav (Hội thoại / Đơn hàng / Sản phẩm / FAQ / Metrics)
 │   ├── page.js                 # Redirect -> /conversations
 │   ├── globals.css
 │   ├── login/page.js
@@ -201,6 +222,7 @@ dashboard/
 │   │   └── new/page.js
 │   ├── products/page.js         # CRUD sản phẩm (Bat 2, 17/7)
 │   ├── faq/page.js              # CRUD FAQ (Bat 2, 17/7)
+│   ├── metrics/page.js          # Metrics/Analytics (Bat 3, 17/7)
 │   └── components/
 │       └── OrderForm.js
 ├── lib/
@@ -239,6 +261,9 @@ Tất cả endpoint dưới `/dashboard/*`, yêu cầu header `X-Admin-Token` (t
 | POST | `/dashboard/faq` | Thêm FAQ |
 | PATCH | `/dashboard/faq/{id}` | Sửa FAQ |
 | DELETE | `/dashboard/faq/{id}` | Xoá FAQ |
+| GET | `/dashboard/metrics/messages-per-day?days=14` | Trang `/metrics` — bar chart tin nhắn/ngày |
+| GET | `/dashboard/metrics/conversion-rate` | Trang `/metrics` — 3 thẻ tổng quan |
+| GET | `/dashboard/metrics/unanswered-questions?limit=15` | Trang `/metrics` — bảng top câu hỏi |
 | POST | `/dashboard/conversations/{psid}/create_order` | Nút "🤖 Gọi bot tạo đơn" |
 | POST | `/dashboard/conversations/{psid}/create_order_manual` | Nút "👤 NV tạo đơn" (gắn hội thoại) |
 | POST | `/dashboard/orders/manual` | Nút "👤 NV tạo đơn" (độc lập, `/orders/new` không psid) |
@@ -294,12 +319,10 @@ phát triển.
 
 ## Việc chưa làm (ngoài phạm vi hiện tại)
 
-Theo đúng phạm vi issue #8 gốc, các mục sau **chưa xây**:
-- Metrics/analytics (tin nhắn/ngày, tỷ lệ hội thoại → đơn, top câu hỏi bot
-  không trả lời được)
+Theo đúng phạm vi issue #8 gốc, mục sau **chưa xây**:
 - Auth thật (đăng nhập theo từng nhân viên, JWT/session)
 
-(CRUD sản phẩm/FAQ đã xong ở Bat 2, 17/7 — xem `/products`, `/faq` ở trên.)
+(CRUD sản phẩm/FAQ xong ở Bat 2, Metrics/Analytics xong ở Bat 3 — 17/7.)
 
 Xem chi tiết đầy đủ lịch sử phát triển + quyết định kỹ thuật trong
 `ISSUES-VI.md` (hoặc `ISSUES-EN.md`) mục **#8**.

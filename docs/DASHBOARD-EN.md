@@ -3,7 +3,7 @@
 > Full reference for the admin dashboard (`dashboard/`) — use this when
 > deploying, onboarding new staff, or continuing development. Think of it as
 > a `/help` file for the dashboard.
-> Last updated: 7/17 (after Batch 2 — added Product/FAQ CRUD).
+> Last updated: 7/17 (after Batch 3 — added Metrics/Analytics).
 
 ## Quick index
 - [Overview](#overview)
@@ -13,6 +13,7 @@
 - [/orders/new page](#ordersnew-page)
 - [/products page](#products-page)
 - [/faq page](#faq-page)
+- [/metrics page](#metrics-page)
 - [Shared component: OrderForm](#shared-component-orderform)
 - [Folder structure](#folder-structure)
 - [Backend API endpoints used by the dashboard](#backend-api-endpoints-used-by-the-dashboard)
@@ -185,6 +186,28 @@ immediately on save** (no need to run `scripts/ingest.py`).
 
 ---
 
+## /metrics page
+
+Metrics/Analytics (7/17, Batch 3) — **no new DB table**, fully reuses existing
+data. 3 content blocks:
+
+1. **3 overview cards** — total customers who have chatted, customers who
+   have placed an order, chat-to-order rate (%). The rate is computed
+   overall (all-time), **not yet broken down by time period** (an
+   intentional simplification for v1).
+2. **Messages/day** (last 14 days) — a CSS-drawn bar chart (no external chart
+   library added, to avoid needing a new npm package inside the dev-mode
+   container), colored by `role` (customer/bot/staff).
+3. **Top questions the bot fails to answer** — scans bot messages matching
+   the fixed fallback phrase ("no confirmed information yet..."), pairs each
+   with the customer's preceding question, groups by frequency. **No NLP/
+   fuzzy matching** — differently worded questions with the same meaning are
+   counted separately.
+
+Backend: `app/services/metrics.py` (3 functions, no transactions, SELECT only).
+
+---
+
 ## Shared component: OrderForm
 
 File: `dashboard/app/components/OrderForm.js`
@@ -205,7 +228,7 @@ Reused as-is in both `/orders/new` scenarios above — no duplicate code.
 ```
 dashboard/
 ├── app/
-│   ├── layout.js              # Root layout: nav (Conversations / Orders / Products / FAQ)
+│   ├── layout.js              # Root layout: nav (Conversations / Orders / Products / FAQ / Metrics)
 │   ├── page.js                 # Redirects -> /conversations
 │   ├── globals.css
 │   ├── login/page.js
@@ -221,6 +244,7 @@ dashboard/
 │   │   └── new/page.js
 │   ├── products/page.js         # Product CRUD (Batch 2, 7/17)
 │   ├── faq/page.js              # FAQ CRUD (Batch 2, 7/17)
+│   ├── metrics/page.js          # Metrics/Analytics (Batch 3, 7/17)
 │   └── components/
 │       └── OrderForm.js
 ├── lib/
@@ -259,6 +283,9 @@ All endpoints are under `/dashboard/*`, requiring the `X-Admin-Token` header
 | POST | `/dashboard/faq` | Add an FAQ entry |
 | PATCH | `/dashboard/faq/{id}` | Edit an FAQ entry |
 | DELETE | `/dashboard/faq/{id}` | Delete an FAQ entry |
+| GET | `/dashboard/metrics/messages-per-day?days=14` | `/metrics` page — messages/day bar chart |
+| GET | `/dashboard/metrics/conversion-rate` | `/metrics` page — the 3 overview cards |
+| GET | `/dashboard/metrics/unanswered-questions?limit=15` | `/metrics` page — the top-questions table |
 | POST | `/dashboard/conversations/{psid}/create_order` | "🤖 Bot creates order" button |
 | POST | `/dashboard/conversations/{psid}/create_order_manual` | "👤 Staff creates order" button (tied to a conversation) |
 | POST | `/dashboard/orders/manual` | "👤 Staff creates order" button (standalone, `/orders/new` without psid) |
@@ -316,12 +343,10 @@ temporary convenience for faster iteration during the development phase.
 
 ## Not yet built (out of current scope)
 
-Per the original scope of issue #8, the following are **not yet built**:
-- Metrics/analytics (messages/day, conversation-to-order rate, top questions
-  the bot fails to answer)
+Per the original scope of issue #8, the following is **not yet built**:
 - Real auth (per-staff login, JWT/session)
 
-(Product/FAQ CRUD was completed in Batch 2, 7/17 — see `/products`, `/faq` above.)
+(Product/FAQ CRUD was completed in Batch 2; Metrics/Analytics in Batch 3 — 7/17.)
 
 See the full development history + technical decisions in `ISSUES-VI.md`
 (and its English translation `ISSUES-EN.md`), section **#8**.
