@@ -3,7 +3,7 @@
 > Mô tả toàn bộ backend FastAPI: webhook Messenger, luồng xử lý AI
 > (orchestrator + tool calling), các service, và API nội bộ (`/admin/*`,
 > `/dashboard/*`). Dùng khi deploy, debug, hoặc phát triển tiếp.
-> Cập nhật lần cuối: 16/7.
+> Cập nhật lần cuối: 17/7 (sau Bat 2 + fix độ tin cậy LLM về SKU/giá).
 
 ## Mục lục nhanh
 - [Tổng quan kiến trúc](#tổng-quan-kiến-trúc)
@@ -65,7 +65,7 @@ Không dùng SQLAlchemy ORM — toàn bộ service dùng **asyncpg thuần** (xe
    - Nếu là **echo** (tin Page gửi đi, Meta echo lại) VÀ hội thoại đang
      `bot_paused=TRUE` → ghi vào `messages` với `role='agent'` (bắt tin thật
      nhân viên gõ tay qua Messenger Inbox — cơ chế "timetrap", xem
-     `docs/DATABASE.md`).
+     `docs/DATABASE-VI.md`).
    - Nếu là tin khách thường VÀ đang `bot_paused=TRUE` → chỉ log
      (`role='customer'`), không gọi AI.
    - Ngược lại → gọi `orchestrator.handle_message()`, gửi trả lời qua
@@ -85,7 +85,7 @@ Hàm `handle_message(sender_id: str, text: str) -> str`, các bước:
    không.
 3. **Lấy lịch sử** từ Redis (`chat:{sender_id}`, TTL 24h, tối đa
    `MAX_HISTORY=10` lượt) + **profile khách** (Messenger Graph API — bỏ qua
-   cho kênh không phải Messenger, xem `docs/TELEGRAM_BOT.md`).
+   cho kênh không phải Messenger, xem `docs/TELEGRAM_BOT-VI.md`).
 4. **RAG**: `search_knowledge()` lấy top-4 đoạn liên quan từ
    `knowledge_chunks` (kiến thức sản phẩm tĩnh — cách pha, hương vị...
    **KHÔNG dùng cho giá/tồn kho/đơn hàng**, việc đó qua tool).
@@ -93,11 +93,19 @@ Hàm `handle_message(sender_id: str, text: str) -> str`, các bước:
    tối đa 10 note/tin nhắn nhân viên gần nhất, bơm vào system prompt. **Không
    lọc theo `handled`** — bot luôn biết toàn bộ thoả thuận dù dashboard đã
    đánh dấu "đã xử lý" hay chưa.
-6. **Gọi LLM** (DeepSeek, OpenAI-compatible) kèm `tools=TOOL_DEFINITIONS`,
-   `tool_choice="auto"`. Vòng lặp tối đa `MAX_TOOL_ITERATIONS=4` nếu model
-   gọi nhiều tool liên tiếp (tránh treo vô hạn).
-7. **Lọc markdown** an toàn (Messenger không render `**`, `#`, `` ` ``).
-8. **Lưu lịch sử** — Redis (context ngắn hạn) + Postgres `messages` (lâu dài,
+6. **Bơm danh sách SKU ("Lớp 1", thêm 17/7)**: `products.get_sku_summary_text()`
+   — 1 dòng liệt kê toàn bộ SKU hiện có, bơm vào system prompt **MỌI lượt**
+   (không qua tool_calls) — không phụ thuộc LLM có tự quyết định gọi
+   `search_products` hay không. Kèm dặn rõ "danh sách đây đầy đủ, không
+   được bịa thêm SKU" và "thứ tự ưu tiên khi có mâu thuẫn" (dữ liệu sống >
+   lịch sử hội thoại, kể cả câu trả lời trước đó của chính bot). Xem
+   phần "Lớp 2" ở mục `products.py` bên dưới để biết nguồn chi tiết hơn (RAG).
+7. **Gọi LLM** (DeepSeek, OpenAI-compatible) kèm `tools=TOOL_DEFINITIONS`,
+   `tool_choice="auto"`, **`temperature=0.1`** (hạ từ 0.3 xuống 17/7 — ưu
+   tiên bám sát dữ liệu hơn là "sáng tạo"). Vòng lặp tối đa
+   `MAX_TOOL_ITERATIONS=4` nếu model gọi nhiều tool liên tiếp (tránh treo vô hạn).
+8. **Lọc markdown** an toàn (Messenger không render `**`, `#`, `` ` ``).
+9. **Lưu lịch sử** — Redis (context ngắn hạn) + Postgres `messages` (lâu dài,
    cho dashboard).
 
 ---
@@ -110,7 +118,7 @@ vào lúc thực thi (tránh model tự bịa/nhầm sender).
 
 | Tool | Tham số LLM cung cấp | Ghi chú |
 |---|---|---|
-| `search_products` | `query` (tuỳ chọn) | Trả về sản phẩm + bảng giá **thật từ DB**, không hardcode trong prompt |
+| `search_products` | `query` (tuỳ chọn) | Trả về sản phẩm + bảng giá **thật từ DB**, không hardcode trong prompt. Từ 17/7, mỗi sản phẩm kèm cả `price_vnd_default` (giá lẻ, fallback khi chưa có bậc giá nào) và 1 `note` nhắc rõ đây là danh sách đầy đủ (fix bug bot từ chối/bịa SKU) |
 | `check_stock` | `sku`, `quantity` | |
 | `create_order` | `customer_name`, `phone`, `address`, `sku`, `quantity` | Validate SĐT VN (regex), chặn `quantity > 100` **trừ khi** có `price_overrides` khớp chính xác (staff duyệt qua `/approve`). Transaction `FOR UPDATE` tránh race condition khi trừ tồn kho. |
 | `escalate_to_human` | `reason` | Set `bot_paused=TRUE`, ghi `escalations`, gửi Telegram admin (kèm nút Resume) |
@@ -167,7 +175,7 @@ Bảo vệ bằng header `X-Admin-Token` (dependency `require_admin_token` trong
 ## Router `/dashboard`
 
 File: `app/api/dashboard.py` — API cho dashboard Next.js (issue #8). Xem đầy
-đủ trong **`docs/DASHBOARD.md`** (mỗi endpoint gắn với đúng nút/màn hình nào
+đủ trong **`docs/DASHBOARD-VI.md`** (mỗi endpoint gắn với đúng nút/màn hình nào
 trên UI).
 
 ---
@@ -182,6 +190,8 @@ trên UI).
 | `conversation_log.py` | Ghi/đọc `messages` + `conversations` trong Postgres — nguồn dữ liệu lâu dài (khác Redis chỉ giữ 24h) |
 | `price_overrides.py` | CRUD bảng `price_overrides` — duyệt/dùng/từ chối giá đặc biệt |
 | `orders.py` | `list_orders`, `update_order_status` (validate thứ tự chuyển trạng thái), `create_order_manual`, `list_products_brief` |
+| `products.py` (Bat 2, 17/7) | CRUD sản phẩm/bậc giá (dashboard) + `get_sku_summary_text()` ("Lớp 1") + tự đồng bộ RAG khi sửa `description` ("Lớp 2") |
+| `knowledge_entries.py` (Bat 2, 17/7) | CRUD FAQ (dashboard) — tự tính embedding, ghi/xóa `knowledge_chunks` ngay lập tức, không cần chạy `ingest.py` |
 | `rag.py` | `search_knowledge()` — truy vấn `knowledge_chunks` bằng cosine similarity (pgvector) |
 | `embedder.py` | Tạo embedding (model `paraphrase-multilingual-MiniLM-L12-v2`, chạy local) |
 | `messenger.py` | `send_text()` — gọi Facebook Send API |
@@ -197,13 +207,17 @@ trên UI).
 | `telegram_listener.py` | Bot admin Telegram | `python -m app.workers.telegram_listener` |
 | `telegram_customer_listener.py` | Bot khách hàng Telegram | `python -m app.workers.telegram_customer_listener` |
 
-Xem chi tiết 2 bot Telegram trong **`docs/TELEGRAM_BOT.md`**.
+Xem chi tiết 2 bot Telegram trong **`docs/TELEGRAM_BOT-VI.md`**.
 
 Script không phải worker thường trực (`scripts/`):
 - `ingest.py` — nạp `data/knowledge/*.md` vào `knowledge_chunks`
+- `clear_chat_history.py` (Bat 2, 17/7) — xóa lịch sử chat trong Redis (toàn
+  bộ hoặc 1 sender_id) — công cụ dev, dùng khi cần test sạch sau khi sửa
+  hành vi bot mà conversation cũ vẫn còn câu trả lời sai trước đó —
+  **không dùng trên production**
 - `test_scenarios.py` / `retest_scenarios.py` — chạy kịch bản test qua
   `handle_message()` trực tiếp, không cần webhook thật
-- `push_issues_to_gitlab.py` — đồng bộ `ISSUES.md` lên GitLab Issues
+- `push_issues_to_gitlab.py` — đồng bộ `ISSUES-VI.md` lên GitLab Issues
 
 ---
 
@@ -236,5 +250,12 @@ Xem `.env.example` ở root repo. Nhóm theo chức năng:
   huống mạng chập chờn.
 - **CI/CD + deploy production (#9)** chưa làm — hiện chỉ chạy Docker Compose
   trên máy dev, chưa có HTTPS, backup, alert.
+- **Độ tin cậy LLM từng lượt (turn-to-turn)** — DeepSeek đôi khi tự mâu
+  thuẫn với chính câu trả lời trước đó của nó trong cùng 1 hội thoại (vd
+  xác nhận 1 SKU tồn tại rồi sau đó tự phủ nhận) — đã giảm thiểu qua
+  `temperature=0.1` + bơm dữ liệu sống mỗi lượt, nhưng **không loại trừ
+  hoàn toàn được** — giới hạn vốn có của model, xem `ISSUES-VI.md` phần
+  "Fix bug 17/7" để hiểu đầy đủ bối cảnh.
 
-Xem lịch sử phát triển đầy đủ + quyết định kỹ thuật trong `ISSUES.md`.
+Xem lịch sử phát triển đầy đủ + quyết định kỹ thuật trong `ISSUES-VI.md`
+(hoặc `ISSUES-EN.md`).

@@ -52,17 +52,29 @@ async def search_products(query: str | None = None) -> dict:
                     "name": p["name"],
                     "description": p["description"],
                     "stock": p["stock"],
+                    "price_vnd_default": p["price_vnd"],
                     "price_tiers_vnd_per_unit": [
                         {"min_qty": t["min_qty"], "unit_price_vnd": t["unit_price_vnd"]}
                         for t in tiers
                     ],
                     "note": (
-                        f"Tren {MAX_AUTO_QUANTITY} hu: KHONG tu bao gia, "
-                        "phai goi escalate_to_human."
+                        f"Neu khong co bac gia nao khop so luong khach hoi, DUNG "
+                        f"'price_vnd_default' lam gia mac dinh (khong duoc noi la "
+                        f"'chua co gia' chi vi price_tiers_vnd_per_unit rong - san pham "
+                        f"van co gia le binh thuong). Tren {MAX_AUTO_QUANTITY} hu: KHONG "
+                        "tu bao gia, phai goi escalate_to_human."
                     ),
                 }
             )
-        return {"products": result}
+        return {
+            "products": result,
+            "note": (
+                f"Day la DANH SACH DAY DU va DUY NHAT ({len(result)} san pham) - "
+                "khong co san pham nao khac ngoai danh sach nay. Neu khach hoi ve "
+                "1 san pham/bien the KHONG co trong danh sach tren, phai noi that "
+                "la chua co, TUYET DOI KHONG duoc bia them."
+            ),
+        }
     finally:
         await conn.close()
 
@@ -273,8 +285,10 @@ TOOL_DEFINITIONS = [
                     "query": {
                         "type": "string",
                         "description": (
-                            "Tu khoa tim san pham, de trong neu chi can toan bo danh sach "
-                            "(hien tai chi co 1 san pham nen thuong de trong)."
+                            "Tu khoa tim san pham (vd ten, kich co, dong goi). De trong "
+                            "neu can toan bo danh sach san pham dang ban - LUON goi tool "
+                            "nay de lay danh sach MOI NHAT, KHONG gia dinh so luong san "
+                            "pham dua vao lan goi truoc hay kien thuc nen trong prompt."
                         ),
                     }
                 },
@@ -314,8 +328,8 @@ TOOL_DEFINITIONS = [
                         "description": "So dien thoai VN, vd 0912345678.",
                     },
                     "address": {"type": "string", "description": "Dia chi giao hang day du."},
-                    "sku": {"type": "string", "description": "Ma san pham, vd '3S-100G'."},
-                    "quantity": {"type": "integer", "description": "So luong hu muon mua."},
+                    "sku": {"type": "string", "description": "Ma san pham, vd '3S-100G'. Lay tu ket qua search_products, KHONG tu bia."},
+                    "quantity": {"type": "integer", "description": "So luong don vi muon mua (hu/tui/goi tuy san pham)."},
                 },
                 "required": ["customer_name", "phone", "address", "sku", "quantity"],
             },

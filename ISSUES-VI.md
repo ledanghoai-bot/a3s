@@ -571,3 +571,234 @@ diện được các file mới (không báo untracked) — hóa ra file thật 
 của Claude — đã khôi phục đúng vị trí bằng `git show HEAD:ISSUES.md > ISSUES-VI.md`
 rồi bổ sung lại đoạn này (thiếu trong bản commit gần nhất vì chưa từng commit
 sau khi viết đoạn này).
+
+## Bat 2 #8 — CRUD Sản phẩm/FAQ (17/7)
+Đã làm xong 1/3 việc còn lại của #8 (CRUD sản phẩm/FAQ) — metrics và auth thật vẫn chưa làm.
+
+**CRUD Sản phẩm** (`app/services/products.py`, trang `/products`):
+- Sửa `products` (tên/mô tả/giá lẻ/tồn kho) — **KHÔNG cho sửa `sku` sau khi tạo** (là khóa
+  tool dùng tra cứu, đổi giữa chừng rủi ro cao).
+- Xóa sản phẩm bị **từ chối bởi ràng buộc khóa ngoại** nếu đã có đơn hàng/bậc giá liên
+  quan (thiết kế có chủ đích, tránh xóa nhầm sản phẩm đã có lịch sử).
+- Bậc giá: `PUT /products/{id}/tiers` thay **TOÀN BỘ** danh sách mỗi lần lưu (xóa hết
+  bậc cũ, insert lại bậc mới trong 1 transaction) — đơn giản hơn PATCH từng dòng.
+- **Lưu ý phạm vi quan trọng:** chỉ sửa dữ liệu **có cấu trúc** (tool đọc trực tiếp) —
+  mô tả sản phẩm dùng cho trò chuyện tự do (RAG) vẫn nằm tĩnh trong
+  `data/knowledge/product_profile.md`, **KHÔNG tự đồng bộ 2 chiều**. Đã ghi rõ trên UI.
+
+**CRUD FAQ** (`app/services/knowledge_entries.py`, trang `/faq`):
+- Bảng mới `faq_entries` (migration 008) + cột `knowledge_chunks.faq_entry_id`
+  (FK, `ON DELETE CASCADE`) — khác với nội dung tĩnh trong `data/knowledge/*.md`
+  (nạp 1 lần qua `scripts/ingest.py`), FAQ tạo qua dashboard **lưu thẳng vào DB**.
+- Tạo/sửa FAQ: tự tính embedding (`embed()`) và ghi thẳng vào `knowledge_chunks`
+  **ngay lập tức**, không cần chạy lại `ingest.py` — bot dùng được từ câu hỏi kế tiếp.
+- Sửa: **XOÁ chunk cũ rồi TẠO LẠI** (không UPDATE embedding tại chỗ) — tránh trường
+  hợp content mới nhưng embedding cũ bị lệch nhau.
+- Xóa: `knowledge_chunks` liên quan tự xóa theo qua `ON DELETE CASCADE`.
+- Nội dung tĩnh gốc (`product_profile.md`, `faq.md`) **không bị ảnh hưởng gì** —
+  2 nguồn cùng tồn tại song song trong `knowledge_chunks`, phân biệt qua cột `source`
+  (`product_profile.md`/`faq.md` vs `dashboard:faq`).
+
+**Chưa test end-to-end** — cần: chạy migration 008, restart `worker` (backend Python thay
+đổi), hard refresh dashboard (đã hot-reload). Test: (1) thêm 1 sản phẩm mới → gọi
+`search_products` qua chat xem có thấy không; (2) thêm 1 FAQ (vd “Có giao quốc tế
+không?”) → hỏi bot ngay câu đó qua chat, xem có trả lời đúng nội dung vừa thêm không
+(xác nhận RAG thật sự đã cập nhật, không chỉ lưu DB); (3) xóa sản phẩm đã có đơn
+hàng → phải bị từ chối đúng thông báo, không crash.
+
+## Fix bug 17/7 — bot không nhận diện SKU mới thêm qua CRUD
+Anh Hoài thêm 2 SKU mới (hũ 60g, túi zip 200g) qua `/products`, hỏi bot không nhận
+ra, kể cả gõ đúng từ khóa "tiết kiệm" (liên quan túi zip 200g). **Xác định nguyên
+nhân:** `search_products` đọc thẳng từ `products`, KHÔNG lọc theo `query` — luôn
+trả về toàn bộ sản phẩm, không phải lỗi chạy sai code. Vấn đề thật: **LLM không
+gọi tool** vì 2 nơi trong prompt/schema viết như thể chỉ có 1 sản phẩm duy nhất:
+1. **`system_prompt.md`** mục "Kiến thức sản phẩm" và "Chính sách giá" mô tả duy nhất
+   hũ 100g như thể đó là toàn bộ sự thật, không có cảnh báo “có thể còn SKU khác”.
+2. **QUAN TRỌNG HƠN:** `tools.py:TOOL_DEFINITIONS` — mô tả tham số `query` của
+   `search_products` ghi cứng "hiện tại chỉ có 1 sản phẩm nên thường để trống" —
+   dòng này nằm trong schema gửi cho LLM ở **MỌI lượt chat**, độc lập với RAG, nên
+   ảnh hưởng trực tiếp và liên tục hơn cả nội dung prompt.
+
+**Fix:**
+- `system_prompt.md`: thêm cảnh báo rõ ở đầu mục "Kiến thức sản phẩm" và "Chính
+  sách giá" — danh mục có thể đã thay đổi qua dashboard, LUÔN gọi `search_products`
+  cho bất kỳ câu hỏi nào về sản phẩm/kích cỡ/đóng gói/giá, kể cả khi không nêu tên
+  SKU cụ thể (thêm ví dụ từ khóa: “tiết kiệm”, “gói lớn”, “loại khác”).
+- `tools.py`: sửa lại mô tả tham số `query` — bỏ câu “chỉ có 1 sản phẩm”, thay bằng
+  hướng dẫn LUÔN gọi để lấy danh sách mới nhất. Cũng sửa mô tả `sku`/`quantity`
+  trong `create_order` (bỏ cứng từ “hũ”, thêm nhắc “lấy từ search_products, không
+  tự bịa”) vì giờ có SKU dạng túi/gói, không chỉ hũ.
+- **Bài học rút ra:** khi thiết kế tool schema, không nên viết cứng giả định về
+  dữ liệu hiện tại (“chỉ có 1 sản phẩm”) vào mô tả tham số — giả định đó sẽ lỗi
+thời ngay khi dữ liệu thay đổi (và nay chính CRUD sản phẩm mới xây ở trên làm
+điều đó xảy ra ngay lập tức).
+
+**Chưa test lại** sau fix — cần restart `worker`, hỏi lại đúng câu “tiết kiệm” anh
+đã test, xác nhận bot gọi được `search_products` và nhắc đúng túi zip 200g.
+
+## Fix bug 17/7 (lần 2) — bot vẫn khẳng định sai "chỉ có 1 SKU" dù đã restart
+Anh Hoài xác nhận **đã restart** trước khi test, nhưng bot vẫn khẳng định sai "chỉ
+có 1 SKU" **3 lần liên tiếp**, ngày càng dứt khoát hơn ("em đã kiểm tra lại database"),
+kể cả khi khách (Hoài) trực tiếp phản bác. Đây là vấn đề **nghiêm trọng hơn**
+bug trước — không chỉ là "không gọi tool", mà còn có dấu hiệu LLM **khẳng định đã
+kiểm tra** trong khi có thể không thật sự gọi tool (hoặc bị "consistency bias" — giữ
+nguyên câu trả lời đầu tiên thay vì xác minh lại mỗi lần khách hỏi lại).
+
+**Fix (không phụ thuộc việc LLM có chịu gọi tool hay không nữa):**
+- Thêm `products.py:get_sku_summary_text()` — trả về 1 dòng text liệt kê toàn bộ
+  SKU hiện có.
+- `orchestrator.py` **bơm THẲNG** kết quả này vào system prompt **ở MỌI lượt chat**
+  (không phải qua tool_calls) — giống cách đang bơm agent notes. Đây là nguồn sự
+  thật về **sự tồn tại** của SKU, không phụ thuộc LLM tự quyết định gọi tool hay
+  không — giá/bậc giá/tồn kho chi tiết vẫn phải qua `search_products`/`check_stock`
+  như cũ (không bơm toàn bộ chi tiết để tránh làm prompt quá dài/lỗi thời nếu giá đổi).
+- `system_prompt.md`: thêm quy tắc chặn hành vi "khẳng định đã kiểm tra" — cấm nói
+  đã "kiểm tra"/"tra cứu database" nếu không thật sự gọi tool trong lượt đó, và bắt
+  buộc gọi lại tool khi khách phản bác 1 thông tin đã trả lời trước đó.
+
+**Chờ anh Hoài xác nhận 2 việc:**
+1. Kết quả SQL `SELECT id, sku, name FROM products ORDER BY id;` — loại trừ khả
+   năng dữ liệu thật sự bị thiếu/lỗi trong DB (đã gửi yêu cầu chạy, chưa nhận
+   được kết quả khi viết đoạn này).
+2. Test lại sau khi restart `worker` với fix lần này — cần hỏi lại đúng kịch bản
+   “có bao nhiêu SKU” rồi phản bác 1-2 lần giống đoạn chat thật đã gửi, xem bot có
+   liệt kê đúng cả 3 SKU ngay từ lần đầu không (không cần phản bác mới đúng).
+
+## Nâng cấp 17/7 — “Lớp 2”: RAG tự đồng bộ theo từng sản phẩm
+Sau khi fix xong bug “chỉ có 1 SKU”, anh Hoài đặt câu hỏi đúng hướng: cách “bơm
+thẳng vào prompt” sẽ không scale khi nhiều SKU/ngành hàng đa dạng hơn. Đã thảo
+luận và thống nhất thiết kế **2 lớp**:
+- **Lớp 1** (giữ nguyên, đã làm ở fix trước): `get_sku_summary_text()` — chỉ tên +
+  SKU, cực ngắn, không phình dù có nhiều sản phẩm. Lưới an toàn cho “sự tồn tại”.
+- **Lớp 2** (mới): mỗi sản phẩm tự động có 1 `knowledge_chunk` riêng trong RAG,
+  CRUD qua `/products` tự tạo/sửa/xóa chunk này — tái dùng **y nguyên** pattern đã
+  làm cho FAQ (`knowledge_entries.py`), không phải xây mới từ đầu.
+
+**Triển khai:**
+- Migration 009: thêm `knowledge_chunks.product_id` (FK, `ON DELETE CASCADE`).
+- `products.py`: `create_product`/`update_product` giờ tính embedding từ
+  `{sku} - {name}: {description}` và ghi/thay chunk tương ứng trong cùng 1
+  transaction với việc ghi `products`. `delete_product` không cần xóa chunk tay
+  — `ON DELETE CASCADE` tự lo.
+- **Không cần sửa `orchestrator.py`** — `search_knowledge()` (RAG) đã chạy **không
+  điều kiện** mỗi lượt chat từ trước giờ (không phụ thuộc LLM có tự quyết định
+  gọi hay không) — đây chính là lý do Lớp 2 đáng tin cậy hơn việc dựa vào
+  `search_products` (tool, phụ thuộc LLM quyết định gọi hay không).
+- UI `/products`: cập nhật ghi chú + placeholder ô mô tả, nhấn mạnh mô tả giờ
+  dùng trực tiếp cho RAG (khác `product_profile.md` tĩnh, vẫn tách biệt).
+
+**Lưu ý quan trọng khi anh test:** 2 SKU (hũ 60g, túi zip 200g) đã tạo **TRƯỚC** khi
+code này tồn tại sẽ **CHƯA có** knowledge_chunk tương ứng (chỉ sản phẩm tạo/sửa
+**sau** khi chạy migration 009 + restart mới tự sinh). Cần **vào `/products`, bấm
+“Sửa” rồi “Lưu” lại** cho 2 sản phẩm đó (không cần đổi gì, chỉ cần trigger lại
+đúng lượt update) để tạo chunk RAG cho chúng.
+
+**Chưa test** — cần: chạy migration 009, restart `worker`, hard refresh dashboard,
+re-save 2 sản phẩm cũ như trên, rồi hỏi bot câu chi tiết (vd “túi zip 200g pha thế
+nào”, “có gì khác hũ 100g”) — xác nhận RAG trả đúng đoạn mô tả vừa nhập, không chỉ
+danh sách tên SKU (Lớp 1).
+
+## Công cụ dev 17/7 — `scripts/clear_chat_history.py`
+Sau khi xác nhận Bat 2 hoạt động đúng (2 tầng SKU summary + RAG sản phẩm), gặp
+đúng vấn đề đã dự đoán: anh Hoài test lại **đúng cuộc chat cũ** (đã từng hỏi “có
+bao nhiêu SKU” trước khi fix) — bot vẫn trả lời sai vì Redis (TTL 24h) còn giữ
+đúng câu trả lời sai cũ trong lịch sử, LLM có xu hướng giữ nhất quán với chính
+nó thay vì tự sửa theo system prompt mới. **Không phải bug** — chỉ xảy ra khi test
+lại đúng thread cũ sau khi sửa hành vi bot.
+
+Vì dự án đang giai đoạn dev, tình huống này sẽ còn lặp lại nhiều — thêm script
+theo yêu cầu anh Hoài:
+- `docker compose exec api python scripts/clear_chat_history.py` — xóa **toàn bộ**
+  cache Redis (mọi `chat:*`).
+- `... clear_chat_history.py <sender_id>` — chỉ xóa **đúng 1** cuộc chat (vd
+  `tg:5913051767` cho Telegram, hoặc PSID Facebook đầy đủ cho Messenger).
+- `... clear_chat_history.py --list` — liệt kê các cuộc chat đang có trong Redis
+  (kèm TTL còn lại) để tìm đúng sender_id trước khi xóa.
+- **CHỈ xóa Redis (bộ nhớ ngữ cảnh LLM)**, không đụng tới Postgres — lịch sử
+  tin nhắn trên dashboard vẫn giữ nguyên.
+- Có cảnh báo rõ trong docstring: **không dùng trên production** khi đã có khách
+thật đang chat (sẽ làm mất ngữ cảnh 24h gần nhất của họ).
+
+## Fix bug 17/7 (lần 3) — bot tự bịa ra 1 SKU không tồn tại
+Sau khi xác nhận Bat 2 hoạt động đúng (dùng `clear_chat_history.py` để test sạch),
+anh Hoài phát hiện lỗ hổng mới: hỏi "có loại nào phù hợp cho xưởng đóng gói không"
+— bot **tự bịa** ra 1 SKU không tồn tại ("3S-25KG – Thùng 25kg"), miêu tả chi tiết
+như thật. May mắn: khi hỏi giá cụ thể, cơ chế "không được khẳng định đã kiểm
+tra nếu chưa gọi tool" (fix lần 2) đã khiến bot tự gọi lại tool, phát hiện SKU
+đó không có thật, và **tự xin lỗi đúng** — nhưng lẽ ra không nên bịa ngay từ đầu.
+
+**Nguyên nhân:** câu lệnh Lớp 1 (`get_sku_summary_text` bơm vào prompt) chỉ dặn
+"không được nói TRÁI dữ liệu này" — chưa nói rõ đây là danh sách ĐẦY ĐỦ, không
+được bịa THÊM. Khi câu hỏi khách không khớp đúng với SKU nào trong danh sách,
+LLM có xu hướng "sáng tạo" ra 1 sản phẩm nghe hợp lý thay vì nói thật là chưa có.
+
+**Fix:**
+- `orchestrator.py`: siết lại câu lệnh Lớp 1 — nhấn mạnh đây là danh sách "DUY
+  NHẤT và ĐẦY ĐỦ", TUYỆT ĐỐI KHÔNG được bịa thêm SKU ngoài danh sách dù nghe
+  hợp lý với nhu cầu khách — phải nói thật là chưa có.
+- `system_prompt.md`: thêm quy tắc tương tự vào mục "Không được suy diễn", kèm
+  ví dụ SAI/ĐÚNG lấy đúng từ tình huống thật vừa xảy ra (lặp lại pattern đã
+  dùng cho các quy tắc khác trong prompt — ví dụ cụ thể giúp model tuân thủ tốt
+  hơn là chỉ nói chung chung).
+
+**Chưa test lại** — cần restart cả 4 service (`api worker telegram_bot
+telegram_customer_bot`), xóa Redis history của đúng cuộc chat đã test (dùng
+`clear_chat_history.py`), rồi hỏi lại đúng câu “có loại nào phù hợp cho xưởng đóng
+gói không” — lần này bot phải trả lời thật là chưa có dòng đó, không bịa SKU mới.
+
+## Fix bug 17/7 (lần 4) — bot tự mâu thuẫn với chính nó (không phải bug dữ liệu)
+Sau khi anh Hoài xác nhận `3S-25KG` **là SKU thật** (anh tự tạo trước khi hỏi, không
+phải bot bịa) — xác minh lại toàn bộ: DB đúng (SKU tồn tại, `created_at` khớp đúng
+thời điểm trước tin nhắn đầu), code đúng (không có thao tác nào làm mất dữ liệu).
+**Vấn đề thật:** bot trả lời đúng ở tin 10:53, rồi **tự mâu thuẫn với chính nó**
+6 phút sau (11:00), phủ nhận đúng điều nó vừa nói đúng trước đó — không phải lỗi
+code/DB có thể sửa dứt điểm, mà là vấn đề độ tin cậy vốn có của model (DeepSeek).
+
+**3 lớp giảm thiểu đã thêm (không loại trừ hẳn được, chỉ giảm rủi ro):**
+1. `orchestrator.py`: giảm `temperature` 0.3 → 0.1 — ưu tiên bám sát dữ liệu được
+   cung cấp hơn là "sáng tạo", hợp với bot bán hàng cần chính xác.
+2. `orchestrator.py`: thêm rõ **thứ tự ưu tiên khi có mâu thuẫn** vào lời bơm Lớp 1
+   — danh sách SKU bơm mỗi lượt là dữ liệu **sống**, luôn đáng tin hơn lịch sử hội
+   thoại (kể cả câu trả lời trước đó của chính bot) — không được tự "sửa lại" thành
+   phủ nhận trừ khi vừa gọi lại tool và nhận kết quả khác thật.
+3. `tools.py`: kết quả `search_products` giờ tự kèm dòng "đây là danh sách đầy
+   đủ và duy nhất" ngay trong response — củng cố thêm ở tầng kết quả tool, không
+   chỉ dựa vào system prompt.
+
+**Chưa test lại** — cần restart cả 4 service, xóa Redis đúng cuộc chat đã test
+(`clear_chat_history.py`). Anh Hoài đã chọn để sau mới test lại theo kịch bản cụ
+thể — khi nào tiện cần thử lại đúng câu “có loại nào phù hợp cho xưởng đóng gói
+không” rồi hỏi giá ngay sau đó, xem có còn tái diễn không.
+
+## Fix bug 17/7 (lần 5) — bug THẬT (khác hẳn lần 4): `search_products` thiếu `price_vnd`
+Anh Hoài tiếp tục đào sâu trong **cùng cuộc chat chưa xóa Redis** ở trên, hỏi đi hỏi
+lại giá SKU 25kg. Bot cuối cùng ổn định lại đúng: SKU có thật, nhưng "không có
+bảng giá công khai theo bậc" — và giữ nguyên kết luận này **dù anh đã thêm giá lẻ
+trước đó và thêm bậc giá sau đó**. Lần này **không phải** lỗi độ tin cậy LLM — là
+bug code thật, xác minh được qua đọc code trực tiếp:
+
+**Nguyên nhân:** `tools.py:search_products()` **chưa bao giờ trả về `price_vnd`**
+(giá lẻ mặc định của sản phẩm) — chỉ trả `price_tiers_vnd_per_unit` (bảng bậc
+giá). SKU hũ 100g gốc luôn có sẵn bậc giá từ "1+" nên chưa từng lộ ra lỗ hổng này;
+chỉ khi tạo sản phẩm mới qua CRUD (chỉ set `price_vnd` lúc tạo, chưa thêm bậc
+giá riêng) mới lộ ra: bot gọi đúng tool, nhưng tool trả về `price_tiers_vnd_per_unit`
+rỗng — không hề có số nào để nói, dù `price_vnd` vẫn có giá trị đúng trong DB.
+
+**Fix:** `search_products()` giờ trả thêm `price_vnd_default` cho mỗi sản phẩm,
+kèm ghi chú rõ trong `note`: nếu không có bậc giá nào khớp số lượng khách hỏi, PHẢI
+dùng giá này làm giá mặc định, không được nói "chưa có giá".
+
+**Lưu ý thêm:** `create_order` (khi thật sự tạo đơn) đã luôn fallback đúng về
+`product["price_vnd"]` khi không có bậc giá khớp — chỉ riêng `search_products` (hàm
+bot dùng để **trả lời** khách) là thiếu, nên nếu khách thật sự đặt đơn được thì
+giá vẫn sẽ đúng — chỉ là bot không thể **nói** giá đó ra trước khi chốt đơn.
+
+**Chưa test lại** — cần restart cả 4 service, xóa Redis đúng cuộc chat đã test (đã
+tích lũy nhiều vòng tự mâu thuẫn, nên **bắt buộc xóa sạch** thay vì tiếp tục test
+trong cuộc này), rồi hỏi lại giá SKU 25kg từ đầu — lần này phải thấy đúng giá lẻ
+đã set, không còn nói "chưa có giá".
+
+**✅ XÁC NHẬN ĐÃ FIX (17/7)** — anh Hoài test lại sau khi restart + xóa Redis, hỏi
+giá SKU 25kg từ 1 cuộc chat sạch: bot trả đúng **cả giá lẻ (650.000đ/kg) lẫn bậc
+giá (630.000đ/kg từ 10 thùng)**, tự tính đúng tổng 25kg × 650k = 16.250.000đ/thùng.
+Không còn nói "chưa có giá", không còn tự mâu thuẫn. Đóng bug lần 5.

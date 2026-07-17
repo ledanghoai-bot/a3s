@@ -2,7 +2,7 @@
 
 > Tham chiếu đầy đủ dashboard quản trị (`dashboard/`) — dùng khi deploy, đào
 > tạo nhân viên mới, hoặc phát triển tiếp. Giống 1 file `/help` cho dashboard.
-> Cập nhật lần cuối: 16/7 (sau nâng cấp UX lần 5 — note/approve theo từng item).
+> Cập nhật lần cuối: 17/7 (sau Bat 2 — thêm CRUD Sản phẩm/FAQ).
 
 ## Mục lục nhanh
 - [Tổng quan](#tổng-quan)
@@ -10,6 +10,8 @@
 - [Trang /conversations (trang chính)](#trang-conversations-trang-chính)
 - [Trang /orders](#trang-orders)
 - [Trang /orders/new](#trang-ordersnew)
+- [Trang /products](#trang-products)
+- [Trang /faq](#trang-faq)
 - [Component dùng chung: OrderForm](#component-dùng-chung-orderform)
 - [Cấu trúc thư mục](#cấu-trúc-thư-mục)
 - [API backend mà dashboard gọi tới](#api-backend-mà-dashboard-gọi-tới)
@@ -131,6 +133,41 @@ chỉ **không bao giờ** đưa vào query string, luôn fetch lại qua API.
 
 ---
 
+## Trang /products
+
+CRUD sản phẩm đầy đủ (17/7, Bat 2) — danh sách SKU + bậc giá, mỗi dòng có 3 nút:
+**Sửa**, **Bậc giá**, **Xoá**.
+
+- **Thêm/Sửa** — form mở ngay trong bảng (không chuyển trang). `sku`
+  **không sửa được** sau khi tạo (immutable, xem `docs/DATABASE-VI.md`).
+  Trường **Mô tả** tự động dùng cho RAG (xem bên dưới) — UI có gợi ý nên
+  viết cụ thể (kích thước, đóng gói, điểm khác biệt) để bot trả lời đúng hơn.
+- **Bậc giá** — editor riêng, thay **TOÀN BỘ** danh sách bậc mỗi lần lưu (không
+  PATCH từng dòng) — gọi `PUT /dashboard/products/{id}/tiers`.
+- **Xoá** — bị **từ chối** nếu sản phẩm đã có đơn hàng/bậc giá liên quan (khóa
+  ngoại chặn đúng thiết kế, không phải bug).
+
+⚠️ **Quan trọng — sản phẩm tạo TRƯỚC khi có tính năng RAG tự đồng bộ (trước
+migration 009) sẽ KHÔNG có sẵn knowledge_chunk** — cần vào sửa rồi lưu lại
+(không cần đổi nội dung gì) để trigger tạo chunk cho lần đầu.
+
+---
+
+## Trang /faq
+
+CRUD FAQ (17/7, Bat 2) — từng cặp câu hỏi/trả lời, **tự động đồng bộ vào RAG
+ngay khi lưu** (không cần chạy `scripts/ingest.py`).
+
+- **Thêm/Sửa** — form 2 ô (Câu hỏi, Câu trả lời). Lưu sẽ mất vài giây vì phải
+  tính embedding (model chạy local, CPU-bound) — UI hiển "Đang lưu (tính
+  embedding)..." trong lúc chờ.
+- **Xoá** — xóa luôn cả `knowledge_chunk` tương ứng qua `ON DELETE CASCADE`,
+  không cần bước dọn thêm.
+- Nội dung tĩnh gốc (`data/knowledge/*.md`) **không bị ảnh hưởng gì** — 2
+  nguồn cùng tồn tại song song trong `knowledge_chunks` (phân biệt qua cột `source`).
+
+---
+
 ## Component dùng chung: OrderForm
 
 File: `dashboard/app/components/OrderForm.js`
@@ -149,7 +186,7 @@ Dùng lại y hệt ở cả `/orders/new` (2 trường hợp trên) — không 
 ```
 dashboard/
 ├── app/
-│   ├── layout.js              # Layout gốc: nav (Hội thoại / Đơn hàng)
+│   ├── layout.js              # Layout gốc: nav (Hội thoại / Đơn hàng / Sản phẩm / FAQ)
 │   ├── page.js                 # Redirect -> /conversations
 │   ├── globals.css
 │   ├── login/page.js
@@ -162,6 +199,8 @@ dashboard/
 │   ├── orders/
 │   │   ├── page.js
 │   │   └── new/page.js
+│   ├── products/page.js         # CRUD sản phẩm (Bat 2, 17/7)
+│   ├── faq/page.js              # CRUD FAQ (Bat 2, 17/7)
 │   └── components/
 │       └── OrderForm.js
 ├── lib/
@@ -191,6 +230,15 @@ Tất cả endpoint dưới `/dashboard/*`, yêu cầu header `X-Admin-Token` (t
 | POST | `/dashboard/overrides/{override_id}/mark-used` | Nút "✓ Đã tạo đơn" (approve) |
 | POST | `/dashboard/overrides/{override_id}/reject` | Nút "✗ Từ chối" (approve) |
 | GET | `/dashboard/products` | Dropdown chọn SKU trong `OrderForm` |
+| GET | `/dashboard/products/full` | Trang `/products` — danh sách đầy đủ kèm bậc giá |
+| POST | `/dashboard/products` | Thêm sản phẩm mới |
+| PATCH | `/dashboard/products/{id}` | Sửa sản phẩm (không gồm `sku`) |
+| DELETE | `/dashboard/products/{id}` | Xoá sản phẩm |
+| PUT | `/dashboard/products/{id}/tiers` | Thay toàn bộ bậc giá |
+| GET | `/dashboard/faq` | Trang `/faq` — danh sách |
+| POST | `/dashboard/faq` | Thêm FAQ |
+| PATCH | `/dashboard/faq/{id}` | Sửa FAQ |
+| DELETE | `/dashboard/faq/{id}` | Xoá FAQ |
 | POST | `/dashboard/conversations/{psid}/create_order` | Nút "🤖 Gọi bot tạo đơn" |
 | POST | `/dashboard/conversations/{psid}/create_order_manual` | Nút "👤 NV tạo đơn" (gắn hội thoại) |
 | POST | `/dashboard/orders/manual` | Nút "👤 NV tạo đơn" (độc lập, `/orders/new` không psid) |
@@ -233,7 +281,7 @@ phát triển.
 
 1. **Vẫn cần `docker compose up -d --build dashboard`** sau mỗi lần sửa code
    dashboard, dù đã chuyển sang dev mode hot-reload — không tự nhận code mới
-   hoàn toàn như kỳ vọng ban đầu. Đã ghi nhận trong `ISSUES.md`, quyết định
+   hoàn toàn như kỳ vọng ban đầu. Đã ghi nhận trong `ISSUES-VI.md`, quyết định
    **không đào sâu fix** (16/7).
 2. **Chưa có đăng xuất** trên UI — đổi token phải xoá tay qua DevTools
    (`localStorage.removeItem('admin_token')`) hoặc xoá cache trình duyệt.
@@ -247,10 +295,11 @@ phát triển.
 ## Việc chưa làm (ngoài phạm vi hiện tại)
 
 Theo đúng phạm vi issue #8 gốc, các mục sau **chưa xây**:
-- CRUD sản phẩm/FAQ (tự động re-ingest RAG khi sửa nội dung)
 - Metrics/analytics (tin nhắn/ngày, tỷ lệ hội thoại → đơn, top câu hỏi bot
   không trả lời được)
 - Auth thật (đăng nhập theo từng nhân viên, JWT/session)
 
-Xem chi tiết đầy đủ lịch sử phát triển + quyết định kỹ thuật trong `ISSUES.md`
-mục **#8**.
+(CRUD sản phẩm/FAQ đã xong ở Bat 2, 17/7 — xem `/products`, `/faq` ở trên.)
+
+Xem chi tiết đầy đủ lịch sử phát triển + quyết định kỹ thuật trong
+`ISSUES-VI.md` (hoặc `ISSUES-EN.md`) mục **#8**.

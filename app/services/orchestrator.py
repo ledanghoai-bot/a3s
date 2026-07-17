@@ -20,7 +20,7 @@ import redis.asyncio as aioredis
 from openai import AsyncOpenAI
 
 from app.config import settings
-from app.services import conversation_log, handoff, tools
+from app.services import conversation_log, handoff, products, tools
 from app.services.messenger_profile import get_user_profile
 from app.services.rag import search_knowledge
 
@@ -130,6 +130,33 @@ async def handle_message(sender_id: str, text: str) -> str:
         if rag_context:
             system += f"\n\n## Thong tin tham khao lien quan\n{rag_context}"
 
+        # Bom THANG danh sach SKU vao system prompt moi luot chat - KHONG phu
+        # thuoc viec LLM co tu quyet dinh goi search_products hay khong (bug
+        # 17/7: du prompt/tool schema da nhac goi tool, DeepSeek van tung
+        # khang dinh sai "chi co 1 SKU" nhieu lan lien tiep trong 1 hoi thoai,
+        # ke ca khi khach phan bac). Day la nguon that ve SU TON TAI cua SKU -
+        # gia/ton kho/bac gia chi tiet van phai qua search_products/check_stock.
+        sku_summary = await products.get_sku_summary_text()
+        system += (
+            "\n\n## Danh sach SKU hien co (nguon that DUY NHAT va DAY DU, LUON\n"
+            "dung, khong duoc noi trai hay phu nhan du lieu nay du lich su hoi\n"
+            "thoai truoc do co the da noi sai)\n"
+            f"{sku_summary}\n\n"
+            "TUYET DOI KHONG duoc bia them BAT KY SKU nao ngoai danh sach tren,\n"
+            "ke ca khi nghe co ve hop ly voi nhu cau khach (vd khach hoi 'co loai\n"
+            "nao dong goi lon/thung/bao khong' ma danh sach tren khong co loai do\n"
+            "-> phai noi that la CHUA CO, KHONG duoc tu dat ten 1 SKU moi nghe hop ly).\n\n"
+            "QUAN TRONG - THU TU UU TIEN khi co mau thuan: danh sach tren la du\n"
+            "lieu SONG, luon duoc lay lai moi luot chat - LUON dung hon lich su\n"
+            "hoi thoai o duoi (ke ca cau tra loi TRUOC DAY cua chinh ban). Neu ban\n"
+            "thay minh (hoac lich su) tung noi 1 SKU KHONG co trong danh sach nay,\n"
+            "hay TIN THEO danh sach nay (SKU do CO THAT), KHONG duoc tu 'sua lai'\n"
+            "thanh phu nhan no chi vi muon nghe nhat quan voi cau truoc - chi duoc\n"
+            "phep thay doi ket luan khi VUA goi lai tool va nhan ket qua khac.\n"
+            "Van phai goi search_products de lay gia/bac gia/ton kho chi tiet cho\n"
+            "tung SKU truoc khi bao gia cu the."
+        )
+
         # Bom nguoc tin nhan/ghi chu that cua nhan vien trong luc handover (neu co) -
         # doc tu Postgres (khong phai Redis) de KHONG bao gio mat, tranh bot noi
         # trai thoa thuan sep/nhan vien da chot voi khach (issue #8 - xu ly tin
@@ -160,7 +187,7 @@ async def handle_message(sender_id: str, text: str) -> str:
                 tools=tools.TOOL_DEFINITIONS,
                 tool_choice="auto",
                 max_tokens=512,
-                temperature=0.3,
+                temperature=0.1,
             )
             message = response.choices[0].message
 

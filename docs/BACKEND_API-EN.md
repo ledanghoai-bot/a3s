@@ -4,7 +4,7 @@
 > processing flow (orchestrator + tool calling), the services, and the
 > internal APIs (`/admin/*`, `/dashboard/*`). Use this when deploying,
 > debugging, or continuing development.
-> Last updated: 7/16.
+> Last updated: 7/17 (after Batch 2 + LLM reliability fixes for SKU/pricing).
 
 ## Quick index
 - [Architecture overview](#architecture-overview)
@@ -101,13 +101,22 @@ The function `handle_message(sender_id: str, text: str) -> str`, steps:
    into the system prompt. **Not filtered by `handled`** — the bot must
    always know the full agreement whether or not the dashboard has marked it
    as "handled" yet.
-6. **Calls the LLM** (DeepSeek, OpenAI-compatible) with
-   `tools=TOOL_DEFINITIONS`, `tool_choice="auto"`. Loops up to
-   `MAX_TOOL_ITERATIONS=4` if the model calls multiple tools in a row (to
-   avoid an infinite hang).
-7. **Strips markdown** as a safety net (Messenger doesn't render `**`, `#`,
+6. **Injects the SKU list ("Layer 1", added 7/17)**: `products.get_sku_summary_text()`
+   — a single line listing every current SKU, injected into the system
+   prompt on **EVERY turn** (not via tool_calls) — independent of whether the
+   LLM decides to call `search_products` on its own. Includes explicit
+   instructions that "this list is complete, do not invent extra SKUs" and
+   the "priority order when there's a conflict" (live data always beats
+   conversation history, including the bot's own earlier replies). See the
+   "Layer 2" note under `products.py` below for the richer (RAG) source.
+7. **Calls the LLM** (DeepSeek, OpenAI-compatible) with
+   `tools=TOOL_DEFINITIONS`, `tool_choice="auto"`, **`temperature=0.1`**
+   (lowered from 0.3 on 7/17 — prioritizing sticking to the supplied data
+   over "creativity"). Loops up to `MAX_TOOL_ITERATIONS=4` if the model calls
+   multiple tools in a row (to avoid an infinite hang).
+8. **Strips markdown** as a safety net (Messenger doesn't render `**`, `#`,
    `` ` ``).
-8. **Saves history** — Redis (short-term context) + Postgres `messages`
+9. **Saves history** — Redis (short-term context) + Postgres `messages`
    (long-term, for the dashboard).
 
 ---
@@ -121,7 +130,7 @@ up the sender).
 
 | Tool | Parameters the LLM provides | Notes |
 |---|---|---|
-| `search_products` | `query` (optional) | Returns products + price tiers **straight from the DB**, not hardcoded in the prompt |
+| `search_products` | `query` (optional) | Returns products + price tiers **straight from the DB**, not hardcoded in the prompt. Since 7/17, each product also includes `price_vnd_default` (the base retail price, used as a fallback when no tier matches) and a `note` explicitly stating this is the complete list (fixes a bug where the bot denied/invented SKUs) |
 | `check_stock` | `sku`, `quantity` | |
 | `create_order` | `customer_name`, `phone`, `address`, `sku`, `quantity` | Validates the phone number (VN regex), blocks `quantity > 100` **unless** a `price_overrides` record exactly matches (staff-approved via `/approve`). Uses a `FOR UPDATE` transaction to avoid race conditions when decrementing stock. |
 | `escalate_to_human` | `reason` | Sets `bot_paused=TRUE`, logs to `escalations`, sends a Telegram notification to admin (with a Resume button) |
@@ -197,6 +206,8 @@ to the exact button/screen it belongs to).
 | `conversation_log.py` | Writes/reads `messages` + `conversations` in Postgres — the long-term data source (as opposed to Redis, which only keeps 24h) |
 | `price_overrides.py` | CRUD for the `price_overrides` table — approving/using/rejecting special prices |
 | `orders.py` | `list_orders`, `update_order_status` (validates the status-transition order), `create_order_manual`, `list_products_brief` |
+| `products.py` (Batch 2, 7/17) | Product/price-tier CRUD (dashboard) + `get_sku_summary_text()` ("Layer 1") + auto-syncs RAG whenever `description` is edited ("Layer 2") |
+| `knowledge_entries.py` (Batch 2, 7/17) | FAQ CRUD (dashboard) — computes the embedding and writes/deletes `knowledge_chunks` immediately, no need to run `ingest.py` |
 | `rag.py` | `search_knowledge()` — queries `knowledge_chunks` via cosine similarity (pgvector) |
 | `embedder.py` | Generates embeddings (model `paraphrase-multilingual-MiniLM-L12-v2`, runs locally) |
 | `messenger.py` | `send_text()` — calls the Facebook Send API |
@@ -216,6 +227,10 @@ See the full details of both Telegram bots in **`docs/TELEGRAM_BOT-EN.md`**.
 
 Scripts that are not persistent workers (`scripts/`):
 - `ingest.py` — loads `data/knowledge/*.md` into `knowledge_chunks`
+- `clear_chat_history.py` (Batch 2, 7/17) — clears Redis chat history (all
+  conversations, or a single sender_id) — a dev-only tool, used to get a
+  clean test after fixing bot behavior when an existing conversation still
+  contains an earlier wrong reply — **do not use in production**
 - `test_scenarios.py` / `retest_scenarios.py` — run test scenarios directly
   through `handle_message()`, no real webhook needed
 - `push_issues_to_gitlab.py` — syncs `ISSUES-VI.md` to GitLab Issues
@@ -252,6 +267,12 @@ See `.env.example` at the repo root. Grouped by purpose:
   1 message under flaky network conditions.
 - **CI/CD + production deployment (#9)** not yet done — currently only runs
   via Docker Compose on a dev machine, no HTTPS, backups, or alerting yet.
+- **Turn-to-turn LLM reliability** — DeepSeek sometimes contradicts its own
+  earlier reply within the same conversation (e.g. confirming a SKU exists,
+  then later denying it) — mitigated via `temperature=0.1` + injecting live
+  data every turn, but **not eliminated entirely** — an inherent model
+  limitation, see the "Fix bug 7/17" section of `ISSUES-VI.md` for the full
+  story.
 
 See the full development history + technical decisions in `ISSUES-VI.md`
 (Vietnamese) / `ISSUES-EN.md` (English).

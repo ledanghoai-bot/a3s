@@ -3,7 +3,7 @@
 > Full reference for the PostgreSQL (+ pgvector) schema of the 3S Coffee system.
 > Use this when deploying, operating, or debugging — think of it as a `/help`
 > file for the database.
-> Last updated: 7/16 (after migration 007). If you add a new migration,
+> Last updated: 7/17 (after migration 009). If you add a new migration,
 > remember to update this file too.
 
 ## Quick index
@@ -31,8 +31,9 @@ customers (1 customer = 1 psid, regardless of channel)
     │
     └── escalations (log of the reason for every handoff to staff)
 
-knowledge_chunks — independent, used for RAG (static product knowledge), not
-linked to any customer.
+knowledge_chunks — used for RAG, linkage depends on source: static (no FK),
+via faq_entries, or via products — see "Table details" below. Never linked
+to any customer.
 ```
 
 **The central key of the whole system is `customers.psid`** — a customer
@@ -58,13 +59,14 @@ receive/send-message layer (Messenger webhook vs
 | `customers` | Customer info (name/phone/address), keyed by `psid` |
 | `conversations` | 1 chat session per customer; holds the `bot_paused` flag (human handoff) |
 | `messages` | Full message history (customer/bot/staff) — data source for the dashboard + bot context |
-| `products` | Product catalog (currently only 1 SKU: `3S-100G`) |
+| `products` | Product catalog (multi-SKU, CRUD via dashboard `/products`) |
 | `price_tiers` | Quantity-based price tiers, tied to 1 product |
 | `orders` | Real orders |
 | `order_items` | Line items of each order |
-| `knowledge_chunks` | Product knowledge for RAG (vector embedding, pgvector) |
+| `knowledge_chunks` | Knowledge for RAG (vector embedding) — covers static content, FAQ, and product descriptions |
 | `escalations` | Log of the reason for every escalation to staff |
 | `price_overrides` | Staff-approved special price/quantity via the Telegram `/approve` command |
+| `faq_entries` | FAQ created via the dashboard (`/faq`) — auto-synced into `knowledge_chunks` |
 
 ---
 
@@ -105,10 +107,14 @@ time-based sessions is not yet supported.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | BIGSERIAL PK | |
-| `sku` | TEXT UNIQUE | Currently only `3S-100G` |
-| `name`, `description` | TEXT | |
+| `sku` | TEXT UNIQUE | **Immutable after creation** (not editable via CRUD) — this is the key tools use for lookup |
+| `name`, `description` | TEXT | `description` has, since 7/17, been **automatically used for RAG** (see the `knowledge_chunks` section below) |
 | `price_vnd` | INTEGER | Default retail price (fallback if no tier in `price_tiers` matches) |
 | `stock` | INTEGER | Inventory — decremented directly every time `create_order`/`create_order_manual` succeeds |
+
+Full CRUD via `/products` (dashboard) except `sku` (immutable). Deleting a
+product is **rejected by a foreign-key constraint** if it already has related
+orders/price tiers (this is intentional).
 
 ### `price_tiers`
 | Column | Type | Notes |
@@ -146,13 +152,40 @@ automatic pricing**, the bot must `escalate_to_human` — unless a matching
 | Column | Type | Notes |
 |---|---|---|
 | `id` | BIGSERIAL PK | |
-| `source` | TEXT | Source file name (`product_profile.md`, `faq.md`...) |
+| `source` | TEXT | `product_profile.md`/`faq.md` (static content) • `dashboard:faq` (from `/faq`) • `dashboard:product` (product description, from `/products`) |
 | `content` | TEXT | The chunked text segment |
 | `embedding` | `vector(384)` | Model: `paraphrase-multilingual-MiniLM-L12-v2`. HNSW cosine index. |
+| `faq_entry_id` | BIGINT FK → faq_entries, `ON DELETE CASCADE` (migration 008) | Only set for chunks from `source='dashboard:faq'` |
+| `product_id` | BIGINT FK → products, `ON DELETE CASCADE` (migration 009) | Only set for chunks from `source='dashboard:product'` |
 | `created_at` | TIMESTAMPTZ | |
 
-Populated via `scripts/ingest.py`. **Not linked to any customer** — this is
-static product knowledge shared across every chat (RAG).
+**3 content sources coexist side by side, never overwriting each other:**
+1. **Static content** (`product_profile.md`, `faq.md`) — written via
+   `scripts/ingest.py`, run manually once, not auto-updated when the `.md`
+   files change.
+2. **FAQ via dashboard** (`dashboard:faq`) — CRUD via `/faq`
+   (`app/services/knowledge_entries.py`), computes the embedding and writes/
+   deletes the chunk **immediately** on create/edit/delete, no need to run
+   `ingest.py`.
+3. **Product description via dashboard** (`dashboard:product`) — CRUD via
+   `/products` (`app/services/products.py`), auto-creates/edits/deletes the
+   matching chunk whenever a product's `description` is edited — the exact
+   same pattern as FAQ.
+
+Populated via `scripts/ingest.py` (source 1 only). **Not linked to any
+customer** — this is knowledge shared across every chat (RAG).
+
+### `faq_entries` (migration 008)
+| Column | Type | Notes |
+|---|---|---|
+| `id` | BIGSERIAL PK | |
+| `question`, `answer` | TEXT NOT NULL | |
+| `created_at`, `updated_at` | TIMESTAMPTZ | |
+
+The source of truth for dashboard-created FAQ — see the `knowledge_chunks`
+section above for details. Editing an FAQ entry **DELETES the old chunk and
+CREATES a new one** (does not update the embedding in place), avoiding any
+content/embedding mismatch.
 
 ### `escalations`
 | Column | Type | Notes |
@@ -199,6 +232,8 @@ can never write to it** — this is how the system prevents the AI from
 | 005 | `005_staff_action.sql` | `conversations.staff_action` — **legacy, no longer used in the UI** |
 | 006 | `006_messages_handled.sql` | `messages.handled` |
 | 007 | `007_override_status.sql` | `price_overrides.status` + `reject_reason` |
+| 008 | `008_faq_entries.sql` | `faq_entries` table + `knowledge_chunks.faq_entry_id` |
+| 009 | `009_product_knowledge.sql` | `knowledge_chunks.product_id` — per-product RAG sync |
 
 **Important deployment note:** `docker-entrypoint-initdb.d` (the `./migrations`
 folder mounted into the `db` container) **only runs automatically ONCE, when
@@ -209,7 +244,7 @@ throughout this dev process), every migration from 002 onward must be run
 docker compose exec db psql -U alpha3s -d alpha3s -f /docker-entrypoint-initdb.d/00X_file_name.sql
 ```
 When deploying to a **completely fresh** environment (empty Postgres volume),
-all 7 files run automatically in filename order — no manual step needed.
+all 9 files run automatically in filename order — no manual step needed.
 
 ---
 
@@ -269,6 +304,16 @@ ORDER BY m.created_at DESC;
 **Check current stock:**
 ```sql
 SELECT sku, name, stock FROM products;
+```
+
+**View all FAQ entries created via the dashboard:**
+```sql
+SELECT id, question, answer, updated_at FROM faq_entries ORDER BY id;
+```
+
+**Count knowledge_chunks by source (check whether RAG is synced correctly):**
+```sql
+SELECT source, COUNT(*) FROM knowledge_chunks GROUP BY source;
 ```
 
 ---

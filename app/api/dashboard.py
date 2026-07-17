@@ -10,7 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import require_admin_token
 from app.config import settings
-from app.services import conversation_log, price_overrides
+from app.services import conversation_log, price_overrides, products as products_service
+from app.services import knowledge_entries
 from app.services import orders as orders_service
 from app.services import tools
 from app.services.handoff import log_note, pause_bot, resume_bot
@@ -282,3 +283,122 @@ async def patch_order_status(order_id: int, body: dict) -> dict:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# CRUD San pham (issue #8, Bat 2) - du lieu CO CAU TRUC ma tool doc truc tiep,
+# KHONG di qua RAG. Xem app/services/products.py cho ghi chu day du ve pham vi.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/products/full")
+async def get_products_full() -> list[dict]:
+    """Danh sach san pham DAY DU kem bac gia long vao - dung cho trang CRUD
+    san pham tren dashboard. Khac `GET /products` (brief) dang dung cho
+    dropdown trong OrderForm - KHONG doi endpoint do de tranh pha vo OrderForm.
+    """
+    return await products_service.list_products_full()
+
+
+@router.post("/products")
+async def create_product_endpoint(body: dict) -> dict:
+    required = ["sku", "name", "price_vnd", "stock"]
+    missing = [f for f in required if body.get(f) in (None, "")]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
+    try:
+        return await products_service.create_product(
+            sku=body["sku"],
+            name=body["name"],
+            description=body.get("description", ""),
+            price_vnd=int(body["price_vnd"]),
+            stock=int(body["stock"]),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/products/{product_id}")
+async def update_product_endpoint(product_id: int, body: dict) -> dict:
+    """KHONG nhan `sku` - xem ghi chu trong products.py:update_product ve ly
+    do sku la immutable sau khi tao."""
+    required = ["name", "price_vnd", "stock"]
+    missing = [f for f in required if body.get(f) in (None, "")]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
+    try:
+        return await products_service.update_product(
+            product_id=product_id,
+            name=body["name"],
+            description=body.get("description", ""),
+            price_vnd=int(body["price_vnd"]),
+            stock=int(body["stock"]),
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/products/{product_id}")
+async def delete_product_endpoint(product_id: int) -> dict:
+    try:
+        await products_service.delete_product(product_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"product_id": product_id, "deleted": True}
+
+
+@router.put("/products/{product_id}/tiers")
+async def replace_price_tiers_endpoint(product_id: int, body: dict) -> dict:
+    """Body: {"tiers": [{"min_qty": 5, "unit_price_vnd": 160000}, ...]}.
+    Thay TOAN BO bac gia cua san pham nay bang danh sach moi (xem
+    products.py:replace_price_tiers)."""
+    tiers = body.get("tiers")
+    if tiers is None or not isinstance(tiers, list):
+        raise HTTPException(status_code=422, detail="Thieu truong 'tiers' (danh sach) trong body")
+    try:
+        updated = await products_service.replace_price_tiers(product_id, tiers)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"product_id": product_id, "price_tiers": updated}
+
+
+# ---------------------------------------------------------------------------
+# CRUD FAQ (issue #8, Bat 2) - tu dong dong bo RAG khi sua/xoa. Xem
+# app/services/knowledge_entries.py cho ghi chu day du.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/faq")
+async def list_faq_endpoint() -> list[dict]:
+    return await knowledge_entries.list_faq()
+
+
+@router.post("/faq")
+async def create_faq_endpoint(body: dict) -> dict:
+    question = body.get("question")
+    answer = body.get("answer")
+    if not question or not answer:
+        raise HTTPException(status_code=422, detail="Thieu 'question' hoac 'answer' trong body")
+    return await knowledge_entries.create_faq(question.strip(), answer.strip())
+
+
+@router.patch("/faq/{entry_id}")
+async def update_faq_endpoint(entry_id: int, body: dict) -> dict:
+    question = body.get("question")
+    answer = body.get("answer")
+    if not question or not answer:
+        raise HTTPException(status_code=422, detail="Thieu 'question' hoac 'answer' trong body")
+    try:
+        return await knowledge_entries.update_faq(entry_id, question.strip(), answer.strip())
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/faq/{entry_id}")
+async def delete_faq_endpoint(entry_id: int) -> dict:
+    found = await knowledge_entries.delete_faq(entry_id)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Khong tim thay FAQ id={entry_id}")
+    return {"id": entry_id, "deleted": True}

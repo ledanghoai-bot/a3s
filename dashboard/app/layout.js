@@ -13,6 +13,8 @@ export default function RootLayout({ children }) {
           <span className="brand">3S Coffee</span>
           <a href="/conversations">Hội thoại</a>
           <a href="/orders">Đơn hàng</a>
+          <a href="/products">Sản phẩm</a>
+          <a href="/faq">FAQ</a>
         </nav>
         <main className="container">{children}</main>
       </body>

@@ -3,8 +3,7 @@
 > Full reference for the admin dashboard (`dashboard/`) — use this when
 > deploying, onboarding new staff, or continuing development. Think of it as
 > a `/help` file for the dashboard.
-> Last updated: 7/16 (after UX upgrade round 5 — per-item note/approval
-> tracking).
+> Last updated: 7/17 (after Batch 2 — added Product/FAQ CRUD).
 
 ## Quick index
 - [Overview](#overview)
@@ -12,6 +11,8 @@
 - [/conversations page (main screen)](#conversations-page-main-screen)
 - [/orders page](#orders-page)
 - [/orders/new page](#ordersnew-page)
+- [/products page](#products-page)
+- [/faq page](#faq-page)
 - [Shared component: OrderForm](#shared-component-orderform)
 - [Folder structure](#folder-structure)
 - [Backend API endpoints used by the dashboard](#backend-api-endpoints-used-by-the-dashboard)
@@ -146,6 +147,44 @@ via the API.
 
 ---
 
+## /products page
+
+Full product CRUD (7/17, Batch 2) — SKU list + price tiers, each row has 3
+buttons: **Edit**, **Price tiers**, **Delete**.
+
+- **Add/Edit** — an inline form opens right in the table (no page navigation).
+  `sku` **cannot be edited** after creation (immutable, see `docs/DATABASE-EN.md`).
+  The **Description** field is now automatically used for RAG (see below) —
+  the UI suggests writing something specific (size, packaging, differentiators)
+  so the bot answers more accurately.
+- **Price tiers** — a separate editor that replaces the **ENTIRE** tier list on
+  every save (not a per-row PATCH) — calls `PUT /dashboard/products/{id}/tiers`.
+- **Delete** — **rejected** if the product already has related orders/price
+  tiers (a foreign-key constraint blocking it by design, not a bug).
+
+⚠️ **Important — products created BEFORE the RAG auto-sync feature existed
+(before migration 009) will NOT have a knowledge_chunk yet** — open them for
+editing and save again (no content change needed) to trigger the first-time
+chunk creation.
+
+---
+
+## /faq page
+
+Full FAQ CRUD (7/17, Batch 2) — question/answer pairs, **auto-synced into RAG
+immediately on save** (no need to run `scripts/ingest.py`).
+
+- **Add/Edit** — a 2-field form (Question, Answer). Saving takes a few seconds
+  because it has to compute the embedding (the model runs locally, CPU-bound)
+  — the UI shows "Saving (computing embedding)..." while it waits.
+- **Delete** — also deletes the matching `knowledge_chunk` via
+  `ON DELETE CASCADE`, no extra cleanup step needed.
+- The original static content (`data/knowledge/*.md`) is **not affected at
+  all** — the 2 sources coexist side by side in `knowledge_chunks`
+  (distinguished via the `source` column).
+
+---
+
 ## Shared component: OrderForm
 
 File: `dashboard/app/components/OrderForm.js`
@@ -166,7 +205,7 @@ Reused as-is in both `/orders/new` scenarios above — no duplicate code.
 ```
 dashboard/
 ├── app/
-│   ├── layout.js              # Root layout: nav (Conversations / Orders)
+│   ├── layout.js              # Root layout: nav (Conversations / Orders / Products / FAQ)
 │   ├── page.js                 # Redirects -> /conversations
 │   ├── globals.css
 │   ├── login/page.js
@@ -180,6 +219,8 @@ dashboard/
 │   ├── orders/
 │   │   ├── page.js
 │   │   └── new/page.js
+│   ├── products/page.js         # Product CRUD (Batch 2, 7/17)
+│   ├── faq/page.js              # FAQ CRUD (Batch 2, 7/17)
 │   └── components/
 │       └── OrderForm.js
 ├── lib/
@@ -209,6 +250,15 @@ All endpoints are under `/dashboard/*`, requiring the `X-Admin-Token` header
 | POST | `/dashboard/overrides/{override_id}/mark-used` | "✓ Order created" button (approval) |
 | POST | `/dashboard/overrides/{override_id}/reject` | "✗ Reject" button (approval) |
 | GET | `/dashboard/products` | The SKU dropdown in `OrderForm` |
+| GET | `/dashboard/products/full` | `/products` page — full list with price tiers |
+| POST | `/dashboard/products` | Add a new product |
+| PATCH | `/dashboard/products/{id}` | Edit a product (excludes `sku`) |
+| DELETE | `/dashboard/products/{id}` | Delete a product |
+| PUT | `/dashboard/products/{id}/tiers` | Replace the entire price tier list |
+| GET | `/dashboard/faq` | `/faq` page — the list |
+| POST | `/dashboard/faq` | Add an FAQ entry |
+| PATCH | `/dashboard/faq/{id}` | Edit an FAQ entry |
+| DELETE | `/dashboard/faq/{id}` | Delete an FAQ entry |
 | POST | `/dashboard/conversations/{psid}/create_order` | "🤖 Bot creates order" button |
 | POST | `/dashboard/conversations/{psid}/create_order_manual` | "👤 Staff creates order" button (tied to a conversation) |
 | POST | `/dashboard/orders/manual` | "👤 Staff creates order" button (standalone, `/orders/new` without psid) |
@@ -252,7 +302,7 @@ temporary convenience for faster iteration during the development phase.
 1. **Still requires `docker compose up -d --build dashboard`** after every
    code change, despite switching to dev-mode hot-reload — it does not fully
    pick up new code automatically as originally hoped. Logged in
-   `ISSUES.md`, decided **not to dig deeper into fixing it** (7/16).
+   `ISSUES-VI.md`, decided **not to dig deeper into fixing it** (7/16).
 2. **No logout in the UI** — changing tokens requires manually clearing it
    via DevTools (`localStorage.removeItem('admin_token')`) or clearing the
    browser cache.
@@ -267,10 +317,11 @@ temporary convenience for faster iteration during the development phase.
 ## Not yet built (out of current scope)
 
 Per the original scope of issue #8, the following are **not yet built**:
-- Product/FAQ CRUD (automatically re-ingesting RAG when content is edited)
 - Metrics/analytics (messages/day, conversation-to-order rate, top questions
   the bot fails to answer)
 - Real auth (per-staff login, JWT/session)
+
+(Product/FAQ CRUD was completed in Batch 2, 7/17 — see `/products`, `/faq` above.)
 
 See the full development history + technical decisions in `ISSUES-VI.md`
 (and its English translation `ISSUES-EN.md`), section **#8**.

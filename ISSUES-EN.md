@@ -572,3 +572,92 @@ deploying/handing off/debugging, no need to dig back through the code:
 
 **Not yet done:** `docs/DEPLOYMENT.md` — saved for when #9 (CI/CD + VPS deploy) is finished, at which
 point a real deployment process will exist to document accurately.
+
+---
+
+## Batch 2 #8 — Product/FAQ CRUD + LLM reliability fixes (7/17)
+
+> Note: from this point on, updates are summarized in English rather than
+> translated line-by-line from `ISSUES-VI.md` (which grew very large during
+> this session). See `ISSUES-VI.md` for the full blow-by-blow narrative,
+> including exact chat transcripts, SQL diagnostics, and every intermediate
+> fix attempt.
+
+**Scope completed:** 1 of the 3 remaining #8 items — Product/FAQ CRUD.
+Metrics/analytics and real per-staff auth are still not built.
+
+### Product/FAQ CRUD (the planned work)
+- **Migration 008** (`faq_entries` table + `knowledge_chunks.faq_entry_id`)
+  and **migration 009** (`knowledge_chunks.product_id`).
+- **`app/services/products.py`** — full product CRUD (name/description/
+  price/stock; `sku` is immutable after creation) + price-tier CRUD (replaces
+  the entire tier list on every save). Deleting a product is rejected by a
+  foreign-key constraint if it has related orders/tiers (by design).
+  Every create/update also auto-creates/replaces a matching `knowledge_chunks`
+  row from the product's `description` field ("RAG Layer 2", see below).
+- **`app/services/knowledge_entries.py`** — FAQ CRUD, computing the
+  embedding and writing/deleting the matching `knowledge_chunks` row
+  immediately on save/delete — no need to run `scripts/ingest.py`.
+- **New dashboard pages** `/products` and `/faq`, new nav links, new
+  `/dashboard/products*` and `/dashboard/faq*` endpoints.
+
+### A chain of LLM-reliability bugs found during real testing (not code bugs, mostly)
+After adding 2 new SKUs via the dashboard, real-world testing surfaced a
+series of issues — each one diagnosed and fixed in turn:
+
+1. **Bot insisted "only 1 SKU exists"** even after the new SKUs were added
+   and confirmed in the DB. Root cause: `tools.py`'s tool schema literally
+   said *"currently there is only 1 product"* in the `query` parameter
+   description — this text is sent to the LLM on **every single turn**,
+   independent of RAG, and actively discouraged it from trusting/checking
+   for more products. Fixed by rewriting that description, and by adding a
+   new **"Layer 1"** mechanism: `products.get_sku_summary_text()` is now
+   injected fresh into the system prompt on every turn (bypassing the LLM's
+   own discretion about whether to call `search_products`).
+2. **Bot claimed "I just checked the database"** when it likely hadn't
+   actually called the tool that turn, and kept flip-flopping between
+   confirming and denying the same fact across a few messages. Fixed by
+   adding an explicit system-prompt rule: never claim to have "checked"
+   unless a tool was genuinely called this turn, and always re-verify via
+   tool when the customer pushes back on a previous answer.
+3. **Bot invented a nonexistent SKU** ("3S-25KG") when asked about a
+   packaging-workshop use case that didn't match any real product — even
+   though a real SKU with that exact code existed a few messages later in
+   testing (a coincidence that initially caused a misdiagnosis on our part).
+   Fixed by explicitly stating the SKU list is *closed* (complete, nothing
+   else exists) in both the Layer-1 prompt injection and a SAI/ĐÚNG example
+   added to `system_prompt.md`.
+4. **Bot kept contradicting itself within the same conversation thread**
+   even after the above fixes were deployed — traced to **stale Redis chat
+   history**: the bot's own earlier wrong replies were still present in the
+   24h-TTL Redis context, and the LLM tended to stay "consistent" with its
+   own past mistakes rather than trust the freshly injected ground truth.
+   Mitigated (not eliminated — inherent LLM behavior) via: `temperature`
+   lowered from 0.3 to 0.1, an explicit "live data always outranks
+   conversation history" priority rule added to the Layer-1 prompt text, and
+   a new **dev-only utility script** `scripts/clear_chat_history.py` to wipe
+   Redis history for a conversation (or everything) so retests start clean.
+5. **A real, non-LLM code bug**: `search_products()` never returned
+   `price_vnd` (the base retail price) — only the price-tier list. Products
+   created via the new CRUD that had a base price set but no tiers added
+   caused the bot to correctly report "I have no price to give you", which
+   looked like more LLM flakiness but was actually a straightforward gap in
+   the tool's return value. Fixed by adding `price_vnd_default` to every
+   product in the tool's response, confirmed working end-to-end afterward
+   (base price + tier price both reported correctly, with correct bulk-order
+   math).
+
+### Also fixed during this session
+- **Restart-target confusion**: for a while, code changes affecting the
+  dashboard's `/dashboard/*` endpoints were mistakenly diagnosed as needing
+  a `worker` restart, when in fact the `api` service (which the dashboard
+  actually talks to) needed it — `worker` only processes the Messenger
+  Redis queue and never serves any HTTP endpoint. The going-forward rule is
+  now to restart all 4 Python backend services together
+  (`api worker telegram_bot telegram_customer_bot`) after any backend code
+  change, rather than trying to reason about exactly which service imports
+  which module each time.
+- A migration-timing race condition (`UndefinedColumnError: product_id`) was
+  hit once while migration 009 was still being applied concurrently with a
+  dashboard save — no data was lost (the write was inside a transaction that
+  rolled back cleanly), just needed a retry after the migration finished.
