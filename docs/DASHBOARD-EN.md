@@ -3,7 +3,7 @@
 > Full reference for the admin dashboard (`dashboard/`) — use this when
 > deploying, onboarding new staff, or continuing development. Think of it as
 > a `/help` file for the dashboard.
-> Last updated: 7/17 (after Batch 3 — added Metrics/Analytics).
+> Last updated: 7/17 (after Batch 4 — real auth, closing out issue #8).
 
 ## Quick index
 - [Overview](#overview)
@@ -14,6 +14,7 @@
 - [/products page](#products-page)
 - [/faq page](#faq-page)
 - [/metrics page](#metrics-page)
+- [/staff page](#staff-page)
 - [Shared component: OrderForm](#shared-component-orderform)
 - [Folder structure](#folder-structure)
 - [Backend API endpoints used by the dashboard](#backend-api-endpoints-used-by-the-dashboard)
@@ -34,10 +35,9 @@ JSON (`NEXT_PUBLIC_API_URL`, default `http://localhost:8000`).
 into the database — view conversations, take over/hand back the bot, manage
 notes and special-price approvals, create and track orders.
 
-**Authentication:** a simple static token (`ADMIN_API_TOKEN`, taken from the
-backend's `.env`) — **there is no** real login/JWT system yet, which is
-sufficient for the current scale but should be upgraded once multiple staff
-members use it concurrently.
+**Authentication:** real per-staff login (username/password + session token)
+since Batch 4 (7/17) — fully replacing the old shared static token
+`ADMIN_API_TOKEN`. No role-based permissions yet — see "Known limitations".
 
 ---
 
@@ -45,16 +45,26 @@ members use it concurrently.
 
 **Page:** `/login`
 
-- Enter the `ADMIN_API_TOKEN` (from the backend's `.env` file, the
-  `ADMIN_API_TOKEN` variable).
-- The token is stored in the browser's `localStorage` (key `admin_token`) —
-  **it does not expire automatically**, it's only lost when the browser
-  cache is cleared or (currently **there is no logout button** in the UI —
-  clear it manually via DevTools if you need to change tokens).
-- Authenticated by calling `GET /dashboard/ping` — a wrong token is rejected
-  immediately, no bad token is ever saved to localStorage.
-- Any other request that gets a `401` automatically clears the token and
-  redirects to `/login`.
+Since Batch 4 (7/17) — real **username/password** login (no more pasting a
+static token):
+- Calls `POST /dashboard/auth/login` with `{username, password}` → receives
+  a **session token** (a random string, 7-day TTL, stored in the
+  `staff_sessions` table).
+- Token stored in `localStorage` (key `staff_token`, renamed from the old
+  `admin_token`).
+- Every request carries the standard `Authorization: Bearer <token>` header
+  (replacing the old `X-Admin-Token`).
+- A `401` response auto-clears the token and redirects to `/login`.
+- **Real logout** now exists (nav button, `NavUser.js`) — calls
+  `POST /dashboard/auth/logout`, deleting exactly that session from the DB
+  (doesn't affect other sessions if logged in on multiple devices).
+
+**Creating the first account (required, one-time):** nobody can log in yet
+to create an account via `/staff` (chicken-and-egg), so use the script:
+```bash
+docker compose exec api python scripts/create_staff_user.py <username> <password> "<name>"
+```
+From the 2nd account onward, create them directly via the `/staff` page.
 
 ---
 
@@ -208,6 +218,22 @@ Backend: `app/services/metrics.py` (3 functions, no transactions, SELECT only).
 
 ---
 
+## /staff page
+
+Staff account management (7/17, Batch 4) — list, add, deactivate/reactivate.
+
+- **Add staff** — username + password (min 6 chars) + display name (optional).
+  Password hashed with PBKDF2 (see `docs/BACKEND_API-EN.md`).
+- **Deactivate** — doesn't delete the account (keeps history), just sets
+  `is_active=FALSE` — all of that staff's existing sessions are rejected on
+  their very next API call.
+
+⚠️ **No role-based permissions yet** — any logged-in staff can access this
+page and manage other accounts (including deactivating themselves). Fine for
+the current small-team scale.
+
+---
+
 ## Shared component: OrderForm
 
 File: `dashboard/app/components/OrderForm.js`
@@ -245,8 +271,10 @@ dashboard/
 │   ├── products/page.js         # Product CRUD (Batch 2, 7/17)
 │   ├── faq/page.js              # FAQ CRUD (Batch 2, 7/17)
 │   ├── metrics/page.js          # Metrics/Analytics (Batch 3, 7/17)
+│   ├── staff/page.js            # Staff account management (Batch 4, 7/17)
 │   └── components/
-│       └── OrderForm.js
+│       ├── OrderForm.js
+│       └── NavUser.js             # Name + logout button in the nav (Batch 4, 7/17)
 ├── lib/
 │   ├── api.js                  # apiFetch() - auto-attaches the token, handles 401
 │   └── useAuthGuard.js         # Hook that checks the token, redirects to /login if missing
@@ -259,12 +287,19 @@ dashboard/
 
 ## Backend API endpoints used by the dashboard
 
-All endpoints are under `/dashboard/*`, requiring the `X-Admin-Token` header
-(including `ping`, which is used to validate the token at login).
+All endpoints are under `/dashboard/*`, requiring the `Authorization: Bearer
+<token>` header (except `POST /dashboard/auth/login`, which needs none since
+there's no token yet).
 
 | Method | Path | Used in |
 |---|---|---|
-| GET | `/dashboard/ping` | Login — token validation |
+| POST | `/dashboard/auth/login` | Login — NO token required |
+| POST | `/dashboard/auth/logout` | "Logout" button |
+| GET | `/dashboard/auth/me` | Displays staff name in the nav |
+| GET | `/dashboard/auth/staff` | `/staff` page — the list |
+| POST | `/dashboard/auth/staff` | `/staff` page — add staff |
+| PATCH | `/dashboard/auth/staff/{id}` | `/staff` page — deactivate/reactivate |
+| GET | `/dashboard/ping` | Legacy, kept for backward compatibility |
 | GET | `/dashboard/conversations` | `/conversations` — the list + `/n(N)` `/a(N)` |
 | GET | `/dashboard/conversations/{psid}/messages` | The expanded chat panel |
 | GET | `/dashboard/conversations/{psid}/order_draft` | The expanded note/approval panel + auto-filling `OrderForm` |
@@ -299,7 +334,7 @@ All endpoints are under `/dashboard/*`, requiring the `X-Admin-Token` header
 | Variable | Used in | Default |
 |---|---|---|
 | `NEXT_PUBLIC_API_URL` | `dashboard/lib/api.js` | `http://localhost:8000` |
-| `ADMIN_API_TOKEN` | Backend (root `.env`, **not** the dashboard's own) — used for login | `change-me` (change this for a real deployment) |
+| `ADMIN_API_TOKEN` | ⚠️ **No longer used since Batch 4** — still present in `config.py`/`.env` for backward compatibility, doesn't cause errors if still set but has no authentication effect anymore | — |
 | `DASHBOARD_CORS_ORIGINS` | Backend — origins allowed to call the API | `http://localhost:3000` |
 
 ---
@@ -330,12 +365,15 @@ temporary convenience for faster iteration during the development phase.
    code change, despite switching to dev-mode hot-reload — it does not fully
    pick up new code automatically as originally hoped. Logged in
    `ISSUES-VI.md`, decided **not to dig deeper into fixing it** (7/16).
-2. **No logout in the UI** — changing tokens requires manually clearing it
-   via DevTools (`localStorage.removeItem('admin_token')`) or clearing the
-   browser cache.
-3. **1 shared token for all staff** — no distinction of who performed which
-   action, no "who clicked what" audit trail. Sufficient for the current scale.
-4. The `/conversations/[psid]` page (separate popup window) is **still in
+2. **No role-based permissions yet** — any logged-in staff can manage other
+   staff accounts (Batch 4, 7/17) — fine for the current small-team scale.
+3. **No audit trail** — no record of which staff member performed which
+   action (e.g. who created an order, who marked a note as handled) — the
+   system knows who's logged in via the session, but doesn't log it against
+   business data yet.
+4. **No password change/reset flow** — requires a sysadmin to intervene
+   directly in the DB (`UPDATE staff_users ...`) if forgotten.
+5. The `/conversations/[psid]` page (separate popup window) is **still in
    the code but no button links to it anymore** — safe to remove if you want
    to clean up the code later.
 
@@ -343,10 +381,12 @@ temporary convenience for faster iteration during the development phase.
 
 ## Not yet built (out of current scope)
 
-Per the original scope of issue #8, the following is **not yet built**:
-- Real auth (per-staff login, JWT/session)
-
-(Product/FAQ CRUD was completed in Batch 2; Metrics/Analytics in Batch 3 — 7/17.)
+Issue #8 has **completed its entire original checklist** (CRUD in Batch 2,
+Metrics in Batch 3, Auth in Batch 4 — 7/17). Potential future directions
+(outside the original #8 scope, not yet planned):
+- Role-based permissions (e.g. only "admin" can manage accounts)
+- Detailed audit trail (who did what, when)
+- Password change/reset via the UI
 
 See the full development history + technical decisions in `ISSUES-VI.md`
 (and its English translation `ISSUES-EN.md`), section **#8**.

@@ -4,7 +4,7 @@
 > processing flow (orchestrator + tool calling), the services, and the
 > internal APIs (`/admin/*`, `/dashboard/*`). Use this when deploying,
 > debugging, or continuing development.
-> Last updated: 7/17 (after Batch 3 — added Metrics/Analytics).
+> Last updated: 7/17 (after Batch 4 — real auth, closing out issue #8).
 
 ## Quick index
 - [Architecture overview](#architecture-overview)
@@ -15,6 +15,7 @@
 - [`/webhook` router](#webhook-router)
 - [`/admin` router](#admin-router)
 - [`/dashboard` router](#dashboard-router)
+- [`/dashboard/auth` router — authentication](#dashboardauth-router--authentication)
 - [Service list (app/services/)](#service-list-appservices)
 - [Worker list (app/workers/)](#worker-list-appworkers)
 - [Full environment variable list](#full-environment-variable-list)
@@ -183,8 +184,10 @@ fully replaced.
 | GET | `/admin/conversations/paused` | List conversations currently waiting on staff |
 | GET | `/admin/ui` | A simple HTML page (not Next.js) — view the list + resume with 1 click, used when it's not convenient to open the full dashboard |
 
-Protected by the `X-Admin-Token` header (dependency `require_admin_token` in
-`app/api/auth.py`, shared with the `/dashboard` router).
+Protected by `require_staff_session` (`app/api/auth.py`) — the standard
+`Authorization: Bearer <token>` header, shared with the `/dashboard` router.
+Before Batch 4 this used a static `X-Admin-Token` — fully replaced (see
+`docs/DASHBOARD-EN.md`).
 
 ---
 
@@ -193,6 +196,32 @@ Protected by the `X-Admin-Token` header (dependency `require_admin_token` in
 File: `app/api/dashboard.py` — the API for the Next.js dashboard (issue #8).
 See the full breakdown in **`docs/DASHBOARD-EN.md`** (every endpoint mapped
 to the exact button/screen it belongs to).
+
+---
+
+## `/dashboard/auth` router — Authentication
+
+File: `app/api/auth_router.py` (Batch 4, 7/17) — **UNLIKE** the `/dashboard`
+router, it does **not** apply a dependency at the router level, since
+`/login` must be callable BEFORE a token exists. Each route declares its own
+`Depends(require_staff_session)` (except `/login`).
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/dashboard/auth/login` | `{username, password}` → session token, NO token required |
+| POST | `/dashboard/auth/logout` | Deletes exactly the current session |
+| GET | `/dashboard/auth/me` | Info about the currently logged-in staff member |
+| GET/POST | `/dashboard/auth/staff` | List / create staff accounts |
+| PATCH | `/dashboard/auth/staff/{id}` | Deactivate/reactivate |
+
+Full logic in `app/services/auth_service.py`:
+- Password hashing: `hashlib.pbkdf2_hmac("sha256", ..., 200_000)` + a
+  per-user salt — **no bcrypt/passlib** (to avoid adding a new dependency to
+  `requirements.txt`, which would require rebuilding the `api` Docker image).
+- Session token: `secrets.token_urlsafe(32)`, stored in the `staff_sessions`
+  table, 7-day TTL — **no JWT** (avoids adding `PyJWT`, simpler to revoke).
+- `authenticate()` doesn't distinguish "wrong username" from "wrong password"
+  in the error message (avoids leaking which accounts exist).
 
 ---
 
@@ -209,6 +238,7 @@ to the exact button/screen it belongs to).
 | `products.py` (Batch 2, 7/17) | Product/price-tier CRUD (dashboard) + `get_sku_summary_text()` ("Layer 1") + auto-syncs RAG whenever `description` is edited ("Layer 2") |
 | `knowledge_entries.py` (Batch 2, 7/17) | FAQ CRUD (dashboard) — computes the embedding and writes/deletes `knowledge_chunks` immediately, no need to run `ingest.py` |
 | `metrics.py` (Batch 3, 7/17) | Metrics/Analytics for `/metrics` — messages/day, chat-to-order rate, top unanswered questions — no new DB table |
+| `auth_service.py` (Batch 4, 7/17) | Password hashing (PBKDF2), `authenticate()`, session tokens (`create_session`/`validate_session`/`delete_session`), `staff_users` CRUD |
 | `rag.py` | `search_knowledge()` — queries `knowledge_chunks` via cosine similarity (pgvector) |
 | `embedder.py` | Generates embeddings (model `paraphrase-multilingual-MiniLM-L12-v2`, runs locally) |
 | `messenger.py` | `send_text()` — calls the Facebook Send API |
@@ -232,6 +262,10 @@ Scripts that are not persistent workers (`scripts/`):
   conversations, or a single sender_id) — a dev-only tool, used to get a
   clean test after fixing bot behavior when an existing conversation still
   contains an earlier wrong reply — **do not use in production**
+- `create_staff_user.py` (Batch 4, 7/17) — creates the **first** staff
+  account (bootstrap, run once — nobody can log in yet to create one
+  themselves via `/staff`, chicken-and-egg). From the 2nd account onward,
+  create them directly via the dashboard.
 - `test_scenarios.py` / `retest_scenarios.py` — run test scenarios directly
   through `handle_message()`, no real webhook needed
 - `push_issues_to_gitlab.py` — syncs `ISSUES-VI.md` to GitLab Issues
@@ -248,8 +282,9 @@ See `.env.example` at the repo root. Grouped by purpose:
 | Infrastructure | `DATABASE_URL`, `REDIS_URL` |
 | LLM | `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` |
 | Embedding | `EMBEDDING_MODEL`, `EMBEDDING_DIM` |
-| Human handoff | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `ADMIN_API_TOKEN` |
+| Human handoff | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID` |
 | Dashboard | `DASHBOARD_CORS_ORIGINS` |
+| ⚠️ Legacy (no longer used) | `ADMIN_API_TOKEN` — replaced by `staff_users`/`staff_sessions` since Batch 4 |
 | Fallback channel | `TELEGRAM_CUSTOMER_BOT_TOKEN` |
 
 ---
@@ -274,6 +309,9 @@ See `.env.example` at the repo root. Grouped by purpose:
   data every turn, but **not eliminated entirely** — an inherent model
   limitation, see the "Fix bug 7/17" section of `ISSUES-VI.md` for the full
   story.
+- **No role-based permissions yet** — any logged-in staff can call every
+  `/dashboard/auth/staff/*` endpoint (create/deactivate other accounts) —
+  fine for the current small-team scale (Batch 4, 7/17).
 
 See the full development history + technical decisions in `ISSUES-VI.md`
 (Vietnamese) / `ISSUES-EN.md` (English).

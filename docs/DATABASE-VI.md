@@ -2,7 +2,7 @@
 
 > Tham chiếu đầy đủ schema PostgreSQL (+ pgvector) của hệ thống 3S Coffee.
 > Dùng khi deploy, vận hành, hoặc debug — giống 1 file `/help` cho database.
-> Cập nhật lần cuối: 17/7 (sau migration 009). Nếu thêm migration mới, nhớ cập
+> Cập nhật lần cuối: 17/7 (sau migration 010). Nếu thêm migration mới, nhớ cập
 > nhật file này theo.
 
 ## Mục lục nhanh
@@ -64,6 +64,8 @@ xử lý logic, chỉ khác ở phần nhận/gửi tin nhắn (webhook Messenge
 | `escalations` | Log lý do mỗi lần escalate cho nhân viên |
 | `price_overrides` | Staff duyệt giá/số lượng đặc biệt qua lệnh `/approve` Telegram |
 | `faq_entries` | FAQ tạo qua dashboard (`/faq`) — tự động đồng bộ vào `knowledge_chunks` |
+| `staff_users` | Tài khoản nhân viên dashboard (username/password_hash) |
+| `staff_sessions` | Session token đăng nhập của từng nhân viên, TTL 7 ngày |
 
 ---
 
@@ -179,6 +181,23 @@ Nguồn thật cho FAQ tạo qua dashboard — xem chi tiết ở mục `knowled
 ở trên. Sửa FAQ sẽ **XOÁ chunk cũ rồi TẠO LẠI** (không UPDATE embedding tại
 chỗ), tránh lệch content/embedding.
 
+### `staff_users` / `staff_sessions` (migration 010)
+| Bảng | Cột | Kiểu | Ghi chú |
+|---|---|---|---|
+| `staff_users` | `id` | BIGSERIAL PK | |
+| | `username` | TEXT UNIQUE NOT NULL | |
+| | `password_hash`, `password_salt` | TEXT NOT NULL | PBKDF2-HMAC-SHA256, 200.000 vòng lặp (Python `hashlib`, không dùng bcrypt/passlib) |
+| | `name` | TEXT | Tên hiển thị trên nav |
+| | `is_active` | BOOLEAN DEFAULT TRUE | Vô hiệu hóa = `FALSE`, không xóa hẳn (giữ lịch sử) |
+| `staff_sessions` | `id` | BIGSERIAL PK | |
+| | `staff_id` | FK → staff_users, `ON DELETE CASCADE` | |
+| | `token` | TEXT UNIQUE NOT NULL | Chuỗi ngẫu nhiên (`secrets.token_urlsafe(32)`) — **KHÔNG phải JWT** |
+| | `expires_at` | TIMESTAMPTZ NOT NULL | TTL 7 ngày kể từ lúc tạo |
+
+Thay thế hoàn toàn biến môi trường `ADMIN_API_TOKEN` tĩnh dùng chung trước
+đây (Bat 4, 17/7) — xem `docs/BACKEND_API-VI.md` mục auth cho chi tiết logic.
+Đăng xuất = xóa đúng 1 dòng `staff_sessions`, không ảnh hưởng session khác.
+
 ### `escalations`
 | Cột | Kiểu | Ghi chú |
 |---|---|---|
@@ -224,6 +243,7 @@ thống chặn AI tự "cấp phép" vượt giới hạn giá/số lượng cho
 | 007 | `007_override_status.sql` | `price_overrides.status` + `reject_reason` |
 | 008 | `008_faq_entries.sql` | Bảng `faq_entries` + `knowledge_chunks.faq_entry_id` |
 | 009 | `009_product_knowledge.sql` | `knowledge_chunks.product_id` — đồng bộ RAG theo từng sản phẩm |
+| 010 | `010_staff_auth.sql` | Bảng `staff_users` + `staff_sessions` — auth thật theo từng nhân viên |
 
 **Lưu ý deploy quan trọng:** `docker-entrypoint-initdb.d` (thư mục
 `./migrations` mount vào container `db`) **chỉ tự chạy 1 LẦN DUY NHẤT lúc tạo
@@ -232,8 +252,10 @@ trình dev ở đây), mọi migration 002 trở đi đều phải **chạy tay*
 ```bash
 docker compose exec db psql -U alpha3s -d alpha3s -f /docker-entrypoint-initdb.d/00X_ten_file.sql
 ```
-Khi deploy môi trường **hoàn toàn mới** (volume Postgres trống), cả 9 file sẽ
-tự chạy theo đúng thứ tự tên file — không cần chạy tay.
+Khi deploy môi trường **hoàn toàn mới** (volume Postgres trống), cả 10 file sẽ
+tự chạy theo đúng thứ tự tên file — không cần chạy tay. **Lưu ý:** môi trường
+mới hoàn toàn sẽ vẫn **không có sẵn tài khoản nhân viên nào** — vẫn phải chạy
+`scripts/create_staff_user.py` 1 lần để tạo tài khoản đầu tiên.
 
 ---
 
@@ -302,6 +324,17 @@ SELECT id, question, answer, updated_at FROM faq_entries ORDER BY id;
 **Đếm số knowledge_chunk theo từng nguồn (kiểm tra RAG đồng bộ đúng chưa):**
 ```sql
 SELECT source, COUNT(*) FROM knowledge_chunks GROUP BY source;
+```
+
+**Xem danh sách tài khoản nhân viên:**
+```sql
+SELECT id, username, name, is_active, created_at FROM staff_users ORDER BY id;
+```
+
+**Xóa sạch session hết hạn (không bắt buộc, chỉ dọn cho gọn, session hết hạn
+vẫn bị từ chối khi validate dù vẫn còn trong DB):**
+```sql
+DELETE FROM staff_sessions WHERE expires_at < now();
 ```
 
 ---

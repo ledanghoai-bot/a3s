@@ -2,7 +2,7 @@
 
 > Tham chiếu đầy đủ dashboard quản trị (`dashboard/`) — dùng khi deploy, đào
 > tạo nhân viên mới, hoặc phát triển tiếp. Giống 1 file `/help` cho dashboard.
-> Cập nhật lần cuối: 17/7 (sau Bat 3 — thêm Metrics/Analytics).
+> Cập nhật lần cuối: 17/7 (sau Bat 4 — Auth thật, đóng hẳn issue #8).
 
 ## Mục lục nhanh
 - [Tổng quan](#tổng-quan)
@@ -13,6 +13,7 @@
 - [Trang /products](#trang-products)
 - [Trang /faq](#trang-faq)
 - [Trang /metrics](#trang-metrics)
+- [Trang /staff](#trang-staff)
 - [Component dùng chung: OrderForm](#component-dùng-chung-orderform)
 - [Cấu trúc thư mục](#cấu-trúc-thư-mục)
 - [API backend mà dashboard gọi tới](#api-backend-mà-dashboard-gọi-tới)
@@ -33,9 +34,9 @@ JSON (`NEXT_PUBLIC_API_URL`, mặc định `http://localhost:8000`).
 database — xem hội thoại, tiếp quản/bàn giao bot, quản lý ghi chú/phê duyệt
 giá đặc biệt, tạo và theo dõi đơn hàng.
 
-**Xác thực:** token tĩnh đơn giản (`ADMIN_API_TOKEN`, lấy từ `.env` của backend) —
-**chưa có** hệ thống đăng nhập/JWT thật, đủ dùng cho quy mô hiện tại, cần nâng cấp
-khi có nhiều nhân viên dùng song song.
+**Xác thực:** đăng nhập thật theo từng nhân viên (username/password + session
+token) từ Bat 4 (17/7) — thay thế hoàn toàn token tĩnh `ADMIN_API_TOKEN` dùng
+chung trước đây. Chưa có phân quyền theo role — xem mục "Giới hạn đã biết".
 
 ---
 
@@ -43,13 +44,24 @@ khi có nhiều nhân viên dùng song song.
 
 **Trang:** `/login`
 
-- Nhập `ADMIN_API_TOKEN` (lấy từ file `.env` của backend, biến `ADMIN_API_TOKEN`).
-- Token lưu trong `localStorage` trình duyệt (key `admin_token`) — **không hết
-  hạn tự động**, chỉ mất khi xoá cache trình duyệt hoặc bấm đăng xuất (hiện
-  **chưa có nút đăng xuất** trên UI — xoá tay qua DevTools nếu cần đổi token).
-- Xác thực bằng cách gọi `GET /dashboard/ping` — sai token thì báo lỗi ngay,
-  không lưu token sai vào localStorage.
-- Mọi request khác nếu nhận `401` sẽ tự xoá token + điều hướng về `/login`.
+Từ Bat 4 (17/7) — đăng nhập bằng **username/password thật** (không còn dán
+token tĩnh):
+- Gọi `POST /dashboard/auth/login` với `{username, password}` → nhận về
+  **session token** (chuỗi ngẫu nhiên, TTL 7 ngày, lưu trong bảng `staff_sessions`).
+- Token lưu trong `localStorage` (key `staff_token`, đổi từ `admin_token` cũ).
+- Mọi request kèm header chuẩn `Authorization: Bearer <token>` (thay
+  `X-Admin-Token` trước đây).
+- Nhận `401` → tự xóa token + điều hướng về `/login`.
+- **Đăng xuất thật** đã có (nút trên nav, `NavUser.js`) — gọi
+  `POST /dashboard/auth/logout`, xóa đúng session đó khỏi DB (không ảnh
+  hưởng session khác nếu đăng nhập trên nhiều thiết bị).
+
+**Tạo tài khoản đầu tiên (bắt buộc, chỉ 1 lần):** chưa ai đăng nhập được để
+tự tạo tài khoản qua `/staff` (gà và trứng), nên dùng script:
+```bash
+docker compose exec api python scripts/create_staff_user.py <username> <password> "<ten>"
+```
+Từ tài khoản thứ 2 trở đi, tạo thẳng qua trang `/staff`.
 
 ---
 
@@ -189,6 +201,22 @@ Backend: `app/services/metrics.py` (3 hàm, không transaction, chỉ SELECT).
 
 ---
 
+## Trang /staff
+
+Quản lý tài khoản nhân viên (17/7, Bat 4) — liệt kê, thêm mới, vô hiệu
+hóa/kích hoạt lại.
+
+- **Thêm nhân viên** — username + password (tối thiểu 6 ký tự) + tên hiển
+  thị (tuỳ chọn). Mật khẩu hash bằng PBKDF2 (xem `docs/BACKEND_API-VI.md`).
+- **Vô hiệu hóa** — không xóa tài khoản (giữ lịch sử), chỉ đặt `is_active=FALSE`
+  — mọi session hiện có của staff đó bị từ chối ngay từ lần gọi API kế tiếp.
+
+⚠️ **Chưa có phân quyền theo role** — bất kỳ staff nào đang đăng nhập đều vào
+được trang này và quản lý được tài khoản khác (kể cả tự vô hiệu hóa chính mình).
+Phù hợp quy mô đội nhỏ hiện tại.
+
+---
+
 ## Component dùng chung: OrderForm
 
 File: `dashboard/app/components/OrderForm.js`
@@ -223,8 +251,10 @@ dashboard/
 │   ├── products/page.js         # CRUD sản phẩm (Bat 2, 17/7)
 │   ├── faq/page.js              # CRUD FAQ (Bat 2, 17/7)
 │   ├── metrics/page.js          # Metrics/Analytics (Bat 3, 17/7)
+│   ├── staff/page.js            # Quan ly tai khoan nhan vien (Bat 4, 17/7)
 │   └── components/
-│       └── OrderForm.js
+│       ├── OrderForm.js
+│       └── NavUser.js             # Ten + nut Dang xuat tren nav (Bat 4, 17/7)
 ├── lib/
 │   ├── api.js                  # apiFetch() - tự đính kèm token, xử lý 401
 │   └── useAuthGuard.js         # Hook check token, điều hướng /login nếu thiếu
@@ -237,12 +267,18 @@ dashboard/
 
 ## API backend mà dashboard gọi tới
 
-Tất cả endpoint dưới `/dashboard/*`, yêu cầu header `X-Admin-Token` (trừ
-`ping` cũng yêu cầu nhưng dùng để validate token lúc login).
+Tất cả endpoint dưới `/dashboard/*`, yêu cầu header `Authorization: Bearer
+<token>` (trừ `POST /dashboard/auth/login` không cần, vì chưa có token lúc đó).
 
 | Method | Path | Dùng ở |
 |---|---|---|
-| GET | `/dashboard/ping` | Login — validate token |
+| POST | `/dashboard/auth/login` | Đăng nhập — KHÔNG cần token |
+| POST | `/dashboard/auth/logout` | Nút "Đăng xuất" |
+| GET | `/dashboard/auth/me` | Hiển thị tên staff trên nav |
+| GET | `/dashboard/auth/staff` | Trang `/staff` — danh sách |
+| POST | `/dashboard/auth/staff` | Trang `/staff` — thêm nhân viên |
+| PATCH | `/dashboard/auth/staff/{id}` | Trang `/staff` — vô hiệu hóa/kích hoạt lại |
+| GET | `/dashboard/ping` | Legacy, giữ tương thích ngược |
 | GET | `/dashboard/conversations` | `/conversations` — danh sách + `/n(N)` `/a(N)` |
 | GET | `/dashboard/conversations/{psid}/messages` | Khung chat mở rộng |
 | GET | `/dashboard/conversations/{psid}/order_draft` | Khung note/approve mở rộng + tự điền `OrderForm` |
@@ -277,7 +313,7 @@ Tất cả endpoint dưới `/dashboard/*`, yêu cầu header `X-Admin-Token` (t
 | Biến | Nơi dùng | Mặc định |
 |---|---|---|
 | `NEXT_PUBLIC_API_URL` | `dashboard/lib/api.js` | `http://localhost:8000` |
-| `ADMIN_API_TOKEN` | Backend (`.env` gốc, **không phải** của dashboard) — dùng để đăng nhập | `change-me` (đổi khi deploy thật) |
+| `ADMIN_API_TOKEN` | ⚠️ **Không còn được dùng từ Bat 4** — vẫn còn trong `config.py`/`.env` để tương thích ngược, không gây lỗi nếu còn set nhưng không còn tác dụng xác thực | — |
 | `DASHBOARD_CORS_ORIGINS` | Backend — origin được phép gọi API | `http://localhost:3000` |
 
 ---
@@ -308,21 +344,25 @@ phát triển.
    dashboard, dù đã chuyển sang dev mode hot-reload — không tự nhận code mới
    hoàn toàn như kỳ vọng ban đầu. Đã ghi nhận trong `ISSUES-VI.md`, quyết định
    **không đào sâu fix** (16/7).
-2. **Chưa có đăng xuất** trên UI — đổi token phải xoá tay qua DevTools
-   (`localStorage.removeItem('admin_token')`) hoặc xoá cache trình duyệt.
-3. **1 token dùng chung cho mọi nhân viên** — không phân biệt ai đang thao
-   tác, không có audit "ai bấm nút gì". Đủ dùng cho quy mô hiện tại.
-4. Trang `/conversations/[psid]` (popup cửa sổ riêng) **còn trong code
+2. **Chưa phân quyền theo role** — bất kỳ staff nào đăng nhập đều quản lý được
+   tài khoản nhân viên khác (Bat 4, 17/7) — đủ dùng cho quy mô đội nhỏ.
+3. **Chưa có audit trail** — không ghi lại AI nhân viên nào thực hiện hành động
+   gì (vd ai tạo đơn, ai đánh dấu note đã xử lý) — có biết AI đang đăng nhập
+   qua session, nhưng chưa lưu vào dữ liệu nghiệp vụ.
+4. **Chưa có đổi mật khẩu/quên mật khẩu** — cần sysadmin can thiệp trực tiếp
+   DB (`UPDATE staff_users ...`) nếu quên.
+5. Trang `/conversations/[psid]` (popup cửa sổ riêng) **còn trong code
    nhưng không còn nút nào dẫn tới** — an toàn để xoá nếu muốn dọn code sau này.
 
 ---
 
 ## Việc chưa làm (ngoài phạm vi hiện tại)
 
-Theo đúng phạm vi issue #8 gốc, mục sau **chưa xây**:
-- Auth thật (đăng nhập theo từng nhân viên, JWT/session)
-
-(CRUD sản phẩm/FAQ xong ở Bat 2, Metrics/Analytics xong ở Bat 3 — 17/7.)
+Issue #8 **đã xong toàn bộ checklist gốc** (CRUD Bat 2, Metrics Bat 3, Auth Bat 4
+— 17/7). Các hướng mở rộng tiềm năng (ngoài phạm vi #8 gốc, chưa có kế hoạch):
+- Phân quyền theo role (vd chỉ "admin" mới quản lý được tài khoản)
+- Audit trail chi tiết (ai làm gì, lúc nào)
+- Đổi mật khẩu/quên mật khẩu qua UI
 
 Xem chi tiết đầy đủ lịch sử phát triển + quyết định kỹ thuật trong
 `ISSUES-VI.md` (hoặc `ISSUES-EN.md`) mục **#8**.

@@ -1,22 +1,25 @@
 """API noi bo cho nhan vien: bat lai bot sau khi da xu ly xong hoi thoai
 (issue #7 - human handoff).
 
-Bao ve bang header X-Admin-Token don gian - chua co he thong auth/dashboard
-that (xem issue #8), day la giai phap tam thoi de co the resume bot ma khong
-can vao thang DB. Nen goi tu Postman/curl hoac gan sau nay vao nut "Resume"
-tren dashboard khi #8 lam xong.
+⚠️ LEGACY: trang `/admin/ui` la giai phap tam thoi tu truoc khi dashboard
+Next.js (issue #8) hoan thien - gio dashboard chinh (`/conversations`) da co
+y het chuc nang nay (liet ke + resume 1-click), nên dùng dashboard chính làm
+chinh. Trang nay van giu lai nhu 1 fallback nhe, khong can build/deploy
+Next.js - từ Bat 4 (17/7) cần dán **session token** (lấy sau khi đăng nhập
+ở dashboard chính, xem `localStorage.staff_token` qua DevTools) thay vì
+ADMIN_API_TOKEN tĩnh như trước.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 
-from app.api.auth import require_admin_token
+from app.api.auth import require_staff_session
 from app.services.handoff import list_paused_conversations, resume_bot
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-@router.post("/conversations/{psid}/resume", dependencies=[Depends(require_admin_token)])
+@router.post("/conversations/{psid}/resume", dependencies=[Depends(require_staff_session)])
 async def resume_conversation(psid: str) -> dict:
     """Bat lai bot cho 1 khach (bot_paused=FALSE). Goi sau khi nhan vien da
     tra loi/xu ly xong hoi thoai ngoai Messenger."""
@@ -26,7 +29,7 @@ async def resume_conversation(psid: str) -> dict:
     return {"psid": psid, "bot_paused": False}
 
 
-@router.get("/conversations/paused", dependencies=[Depends(require_admin_token)])
+@router.get("/conversations/paused", dependencies=[Depends(require_staff_session)])
 async def list_paused() -> list[dict]:
     """Liet ke hoi thoai dang cho nhan vien, dung cho trang /admin/ui."""
     return await list_paused_conversations()
@@ -53,7 +56,7 @@ _UI_HTML = """<!doctype html>
 <body>
   <h1>3S Coffee — Hoi thoai dang cho nhan vien</h1>
   <div class="row">
-    <input id="token" type="password" placeholder="Dan X-Admin-Token vao day">
+    <input id="token" type="password" placeholder="Dan SESSION TOKEN (lay sau khi dang nhap dashboard chinh)">
     <button onclick="saveToken()">Luu token</button>
     <button onclick="load()">Tai lai danh sach</button>
   </div>
@@ -74,7 +77,7 @@ async function load() {
   const listEl = document.getElementById('list');
   listEl.textContent = 'Dang tai...';
   try {
-    const res = await fetch('/admin/conversations/paused', { headers: { 'X-Admin-Token': token } });
+    const res = await fetch('/admin/conversations/paused', { headers: { 'Authorization': 'Bearer ' + token } });
     if (res.status === 401) { listEl.textContent = 'Token sai hoac thieu.'; return; }
     const data = await res.json();
     if (!data.length) { listEl.className = 'empty'; listEl.textContent = 'Khong co hoi thoai nao dang cho.'; return; }
@@ -100,7 +103,7 @@ async function resume(psid, btn) {
   try {
     const res = await fetch(`/admin/conversations/${encodeURIComponent(psid)}/resume`, {
       method: 'POST',
-      headers: { 'X-Admin-Token': token },
+      headers: { 'Authorization': 'Bearer ' + token },
     });
     if (res.ok) { load(); } else { alert('Loi: ' + res.status); btn.disabled = false; btn.textContent = 'Resume bot'; }
   } catch (e) {

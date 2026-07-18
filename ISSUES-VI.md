@@ -833,3 +833,131 @@ phải `worker`), hard refresh dashboard. Kiểm tra: (1) số liệu tổng qua
 đúng số đơn thật trong DB không; (2) thử 1 câu hỏi bot chắc chắn không trả lời
 được (vd hỏi phí ship cụ thể) — xác nhận câu đó xuất hiện đúng trong bảng "Top
 câu hỏi" sau khi chat.
+
+## Bat 4 #8 — Auth thật (17/7) — ĐÓNG HẲN #8
+Đây là việc cuối cùng của issue #8 — sau Bat 4, #8 coi như xong toàn bộ checklist
+gốc (CRUD, Metrics, Auth). **Thay thế hoàn toàn** `ADMIN_API_TOKEN` tĩnh dùng chung
+bằng đăng nhập thật theo từng nhân viên.
+
+**Quyết định kỹ thuật quan trọng — không thêm dependency mới:**
+- **Không dùng JWT** (tránh thêm `PyJWT` vào `requirements.txt`) — dùng **session
+  token** dạng chuỗi ngẫu nhiên (`secrets.token_urlsafe`), lưu trong bảng
+  `staff_sessions`. Đơn giản hơn JWT, dễ revoke (chỉ cần xóa 1 dòng DB).
+- **Không dùng bcrypt/passlib** — hash mật khẩu bằng `hashlib.pbkdf2_hmac`
+  (thư viện chuẩn Python, 200.000 vòng lặp SHA256 + salt riêng mỗi user).
+- **Lý do:** thêm dependency mới = phải **rebuild lại Docker image** `api`
+  (khác restart thường) — đã gặp khó khăn với việc này nhiều lần trong các
+  Bat trước (ví dụ vụ `docker-compose.yml` đổi sang dev mode 16/7).
+
+**Triển khai:**
+- Migration 010: bảng `staff_users` (username/password_hash/password_salt/name/
+  is_active) + `staff_sessions` (staff_id/token/expires_at, TTL 7 ngày).
+- `app/services/auth_service.py`: hash/verify mật khẩu, `authenticate()`,
+  `create_session()`/`validate_session()`/`delete_session()`, CRUD `staff_users`.
+- `app/api/auth.py`: `require_staff_session` — đọc header chuẩn
+  `Authorization: Bearer <token>` (thay `X-Admin-Token` trước đây).
+- `app/api/auth_router.py` (mới): `/dashboard/auth/login|logout|me|staff`
+  — **không** áp dependency ở cấp router (khác `dashboard.py`) vì `/login`
+  phải gọi được TRƯỚC khi có token — từng route tự khai báo dependency riêng.
+- `app/api/dashboard.py`, `app/api/admin.py`: đổi sang `require_staff_session`.
+  Trang `/admin/ui` (HTML thuần, tiền thân của dashboard) vẫn giữ lại như 1
+  backup nhẹ, nay phải dán session token (lấy qua DevTools sau khi đăng
+  nhập dashboard chính) thay vì token tĩnh như trước.
+- **Frontend:** `login/page.js` đổi form username/password; `lib/api.js` đổi
+  header `Authorization: Bearer` + đổi key localStorage `admin_token` →
+  `staff_token` (**không migrate tự động** — ai đang đăng nhập sẽ bị đẩy về
+  `/login`, cần đăng nhập lại bằng tài khoản thật — chấp nhận được vì đây
+  là thay đổi bảo mật có chủ đích).
+- **Khắc phục 1 giới hạn đã biết từ `DASHBOARD-VI.md`**: thêm nút đăng xuất
+  thật (`NavUser.js`, hiện tên + nút logout trên nav, trước đó phải xóa tay
+  qua DevTools).
+- Trang `/staff` mới — liệt kê/thêm/vô hiệu hóa tài khoản nhân viên. **Chưa
+  có phân quyền theo role** — bất kỳ staff nào đăng nhập đều quản lý được
+  tài khoản khác, phù hợp quy mô đội nhỏ hiện tại, giới hạn đã biết.
+- `scripts/create_staff_user.py` — script bootstrap tạo tài khoản **đầu tiên**
+  (bắt buộc, vì chưa ai đăng nhập được để tự tạo qua `/staff` — gà và trứng).
+  Từ tài khoản thứ 2 trở đi, tạo thẳng qua trang `/staff`.
+
+**Chưa xây** (ngoài phạm vi Bat 4, ghi nhận cho tương lai nếu cần): phân quyền
+theo role (vd chỉ admin mới tạo được tài khoản), audit trail (ghi lại AI nhân
+viên nào thực hiện hành động gì trong `messages`/`orders`...), đổi mật khẩu,
+quên mật khẩu qua email.
+
+**Chưa test** — cần:
+1. Chạy migration 010.
+2. Restart cả 4 service (`api worker telegram_bot telegram_customer_bot`).
+3. **Bắt buộc** chạy script tạo tài khoản đầu tiên trước khi đăng nhập được:
+   ```
+   docker compose exec api python scripts/create_staff_user.py <username> <password> "<ten>"
+   ```
+4. Hard refresh dashboard — sẽ tự bị đẩy về `/login` (token cũ không còn
+   hợp lệ). Đăng nhập bằng tài khoản vừa tạo.
+5. Xác nhận nút đăng xuất hoạt động, vào `/staff` thử thêm 1 tài khoản thứ 2.
+
+## Fix bug 18/7 — đăng nhập đúng username/password vẫn báo sai (browser autofill)
+Anh Hoài tạo tài khoản thành công (xác nhận qua SQL), nhưng đăng nhập qua form
+vẫn báo "Sai username hoặc mật khẩu" liên tục, kể cả ở cửa sổ Incognito.
+
+**Chẩn đoán từng bước:**
+1. Viết script `debug_auth.py` gọi thẳng `auth_service.authenticate()` — test
+   với đúng password thật (`Ho123456@`, khác với password ví dụ
+   `MatKhauManh123` dùng minh họa trước đó — hiểu lầm ban đầu là ngẫu
+   nhiên, không phải bug) → **thành công**, xác nhận backend hoàn toàn đúng.
+2. Hỏi anh Hoài: "2 ô có sẵn giá trị ngay khi mở trang, chưa gõ gì không?" →
+   **CÓ**. Xác nhận 100% là **browser autofill**.
+
+**Nguyên nhân thật:** trang `/login` cũ từng chỉ có 1 ô `type="password"` chứa
+`ADMIN_API_TOKEN` — Chrome đã lưu giá trị đó như 1 "mật khẩu" cho đúng origin
+này. Khi đổi sang form 2 ô (username/password) vẫn cùng URL, Chrome tự đối
+chiếu và điền lại **giá trị token cũ** vào ô password. **Nghiêm trọng hơn:**
+input React dạng **controlled** (`value={state}`) — khi Chrome autofill thẳng
+vào DOM mà không bắn `onChange`, state React phía sau **vẫn rỗng/cũ**, dù
+mắt người dùng thấy có chữ hiển thị — nên lúc submit, dữ liệu gửi đi **không
+phải** cái mắt thấy.
+
+**Fix:** viết lại `login/page.js` — đọc giá trị trực tiếp qua `FormData` lúc
+submit (luôn phản ánh đúng DOM thật, bất kể có qua `onChange` hay không) thay
+vì chỉ tin state React. Thêm `autoComplete="off"` (form + ô username) và
+`autoComplete="new-password"` (ô password) để giảm tối đa Chrome gợi ý lại
+giá trị đã lưu trước đó.
+
+**Anh Hoài cần làm thêm (không đủ nếu chỉ sửa code):** xóa thủ công mật khẩu
+đã lưu sai trong trình duyệt — `chrome://settings/passwords` → tìm đúng
+domain dashboard → xóa entry cũ. Nếu không xóa, Chrome vẫn có thể hiển gợi
+ý (dropdown) để người dùng tự tay chọn nhầm lại, dù code đã không còn tự
+động điền sẵn nữa.
+
+**Chưa test lại** — dashboard hot-reload, chỉ cần hard refresh sau khi xóa
+mật khẩu cũ trong trình duyệt.
+
+**❌ Đính chính (18/7):** giả thuyết "browser autofill" trên **không phải
+nguyên nhân chính** — anh Hoài test thêm ở tab **Guest** và **trình duyệt hoàn
+toàn mới** (chưa từng mở localhost này) vẫn lỗi y hệt, loại trừ hẳn
+autofill. Soi log `api` thấy pattern rõ ràng: `POST /login` → `200 OK` rồi
+**ngay lập tức** `GET /conversations` → `401` dùng đúng token vừa nhận.
+
+**Chẩn đoán lần 2:** viết `debug_session.py` test trực tiếp qua Python
+(`authenticate` → `create_session` → đọc DB → `validate_session`) —
+**thành công hoàn toàn**, session có thật trong DB, hạn dùng đúng 7 ngày,
+giờ server khớp nhau. Xác nhận `auth_service.py` **100% đúng** — bug
+phải nằm ở tầng HTTP (header) giữa browser và server.
+
+**Nguyên nhân thật:** soi trực tiếp Request Headers qua DevTools — request
+gửi đi vẫn mang header **`x-admin-token`** (tên header của hệ thống CŨ, trước
+Bat 4) thay vì `Authorization: Bearer`. **Dashboard (Next.js dev server)
+đang serve code CŨ của `lib/api.js`** — chưa nhận thay đổi từ Bat 4, dù
+trang `/login` đã hiện đúng giao diện mới (gây hiểu lầm là code mới đã
+load). Đúng **giới hạn đã biết** từ trước: `docker compose up -d --build
+dashboard` vẫn cần thiết, hard refresh thường không đủ. Anh Hoài xác
+nhận: `docker compose up -d --build dashboard` xong → đăng nhập thành công.
+
+**✅ Đã fix xong.** Fix code `login/page.js` (FormData + autoComplete) vẫn
+giữ nguyên vì là cải thiện đúng hướng (phòng ngừa autofill thật sự sau này),
+nhưng **không phải** nguyên nhân gốc của lần lỗi này. Đã xóa 2 file debug
+tạm (`debug_auth.py`, `debug_session.py`) sau khi dùng xong.
+
+**✅ XÁC NHẬN ĐÃ TEST ĐẦY ĐỦ (18/7)** — anh Hoài xác nhận cả 3 mục:
+đăng xuất đúng (về `/login`, vào lại trang cũ bị đá về), thêm tài khoản
+thứ 2 qua `/staff` rồi đăng nhập được bằng tài khoản đó, vô hiệu hóa 1 tài
+khoản thành công (không đăng nhập được nữa sau đó). **Bat 4 hoàn tất —
+đóng chính thức issue #8** (toàn bộ checklist gốc: CRUD, Metrics, Auth).

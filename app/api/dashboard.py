@@ -1,14 +1,12 @@
-"""API JSON cho dashboard Next.js (issue #8). Tat ca endpoint deu yeu cau header
-X-Admin-Token (xem app/api/auth.py).
-
-CRUD san pham/FAQ va metrics (con lai cua checklist #8) CHUA lam trong phan nay
-theo dung uu tien anh chon - xem ISSUES.md #8.
+"""API JSON cho dashboard Next.js (issue #8). Tat ca endpoint deu yeu cau dang
+nhap that (header `Authorization: Bearer <token>` - xem app/api/auth.py va
+app/api/auth_router.py cho login/logout).
 """
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.auth import require_admin_token
+from app.api.auth import require_staff_session
 from app.config import settings
 from app.services import conversation_log, price_overrides, products as products_service
 from app.services import knowledge_entries
@@ -18,7 +16,7 @@ from app.services import tools
 from app.services.handoff import log_note, pause_bot, resume_bot
 
 router = APIRouter(
-    prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(require_admin_token)]
+    prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(require_staff_session)]
 )
 
 
@@ -28,7 +26,9 @@ def _db_url() -> str:
 
 @router.get("/ping")
 async def ping() -> dict:
-    """Dung de frontend kiem tra token con hop le hay khong sau khi nhap."""
+    """Con giu lai de tuong thich nguoc voi code cu goi /ping - dashboard moi
+    dung /dashboard/auth/me thay the (tra ve thong tin staff luon, khong chi
+    True/False)."""
     return {"ok": True}
 
 

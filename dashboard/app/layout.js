@@ -1,4 +1,5 @@
 import "./globals.css";
+import NavUser from "./components/NavUser";
 
 export const metadata = {
   title: "3S Coffee - Dashboard",
@@ -16,6 +17,8 @@ export default function RootLayout({ children }) {
           <a href="/products">Sản phẩm</a>
           <a href="/faq">FAQ</a>
           <a href="/metrics">Metrics</a>
+          <a href="/staff">Nhân viên</a>
+          <NavUser />
         </nav>
         <main className="container">{children}</main>
       </body>

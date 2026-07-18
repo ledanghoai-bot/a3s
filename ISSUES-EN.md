@@ -693,3 +693,66 @@ messages/day, plus a table of unanswered questions.
 
 **Not yet tested** — needs an `api` restart (the new endpoints live in
 `dashboard.py`, not `worker`) and a hard refresh of the dashboard.
+
+---
+
+## Batch 4 #8 — Real auth (7/17) — CLOSES OUT ISSUE #8
+
+The last remaining item of issue #8 — after Batch 4, #8's entire original
+checklist is complete (CRUD, Metrics, Auth). **Fully replaces** the old
+shared static `ADMIN_API_TOKEN` with real per-staff login.
+
+**Key technical decision — no new dependencies added:**
+- **No JWT** (avoids adding `PyJWT` to `requirements.txt`) — uses a random
+  **session token** (`secrets.token_urlsafe`), stored in the `staff_sessions`
+  table. Simpler than JWT, easy to revoke (just delete 1 DB row).
+- **No bcrypt/passlib** — passwords hashed with `hashlib.pbkdf2_hmac`
+  (Python's standard library, 200,000 SHA256 iterations + a per-user salt).
+- **Why:** adding a new dependency means **rebuilding the `api` Docker
+  image** (different from a simple restart) — this caused real friction
+  multiple times in earlier batches (e.g. the `docker-compose.yml` dev-mode
+  switch on 7/16).
+
+**Implementation:**
+- Migration 010: `staff_users` table (username/password_hash/password_salt/
+  name/is_active) + `staff_sessions` (staff_id/token/expires_at, 7-day TTL).
+- `app/services/auth_service.py`: password hash/verify, `authenticate()`,
+  `create_session()`/`validate_session()`/`delete_session()`, `staff_users` CRUD.
+- `app/api/auth.py`: `require_staff_session` — reads the standard
+  `Authorization: Bearer <token>` header (replacing the old `X-Admin-Token`).
+- `app/api/auth_router.py` (new): `/dashboard/auth/login|logout|me|staff` —
+  does **not** apply the dependency at the router level (unlike
+  `dashboard.py`) since `/login` must work BEFORE a token exists — each
+  route declares its own dependency.
+- `app/api/dashboard.py`, `app/api/admin.py`: switched to `require_staff_session`.
+  The `/admin/ui` page (plain HTML, dashboard's predecessor) is kept as a
+  lightweight fallback, now requiring a session token (grabbed via DevTools
+  after logging into the main dashboard) instead of the old static token.
+- **Frontend:** `login/page.js` changed to a username/password form;
+  `lib/api.js` switched to the `Authorization: Bearer` header + renamed the
+  localStorage key `admin_token` → `staff_token` (**no auto-migration** —
+  anyone currently logged in gets bounced to `/login` and must log in again
+  with a real account — acceptable since this is an intentional security
+  change).
+- **Fixed a known limitation from `DASHBOARD-VI.md`**: added a real logout
+  button (`NavUser.js`, shows the name + a logout button in the nav; before
+  this you had to clear it manually via DevTools).
+- New `/staff` page — list/add/deactivate staff accounts. **No role-based
+  permissions yet** — any logged-in staff can manage other accounts, fine
+  for the current small-team scale.
+- `scripts/create_staff_user.py` — a bootstrap script to create the
+  **first** account (required, since nobody can log in yet to create one
+  via `/staff` — chicken-and-egg). From the 2nd account onward, create
+  directly via `/staff`.
+
+**Not yet built** (out of Batch 4 scope, noted for the future if needed):
+role-based permissions (e.g. only "admin" can create accounts), an audit
+trail (recording which staff member did what in `messages`/`orders`...),
+password change, password reset via email.
+
+**Not yet tested** — needs: (1) run migration 010; (2) restart all 4
+services; (3) run the bootstrap script to create the first account (required
+before anyone can log in); (4) hard refresh the dashboard (will auto-bounce
+to `/login` since the old token is no longer valid) and log in with the new
+account; (5) confirm the logout button works, try adding a 2nd account via
+`/staff`.

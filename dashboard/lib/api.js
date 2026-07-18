@@ -1,6 +1,11 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-const TOKEN_KEY = "admin_token";
+// Doi ten key tu "admin_token" -> "staff_token" (Bat 4, issue #8) - phan anh
+// dung ban chat: gio la session token cua TUNG nhan vien dang nhap, khong
+// phai token tinh dung chung nhu truoc. Ai da dang nhap voi ten cu se bi
+// day ve /login (khong tu dong migrate) - chap nhan duoc vi day la thay doi
+// bao mat co chu dich (moi nguoi phai dang nhap lai bang tai khoan that).
+const TOKEN_KEY = "staff_token";
 
 export function getToken() {
   if (typeof window === "undefined") return null;
@@ -17,7 +22,9 @@ export function clearToken() {
   window.localStorage.removeItem(TOKEN_KEY);
 }
 
-// Goi API backend FastAPI, tu dong dinh kem header X-Admin-Token.
+// Goi API backend FastAPI, tu dong dinh kem header Authorization: Bearer
+// (session token rieng cho tung nhan vien - Bat 4, thay the X-Admin-Token
+// tinh dung chung truoc day).
 // Neu server tra ve 401 (token sai/het han), xoa token va day nguoi dung ve /login.
 export async function apiFetch(path, options = {}) {
   const token = getToken();
@@ -25,7 +32,7 @@ export async function apiFetch(path, options = {}) {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "X-Admin-Token": token || "",
+      Authorization: token ? `Bearer ${token}` : "",
       ...(options.headers || {}),
     },
   });
@@ -35,11 +42,11 @@ export async function apiFetch(path, options = {}) {
     if (typeof window !== "undefined") {
       window.location.href = "/login";
     }
-    throw new Error("Token khong hop le hoac da het han");
+    throw new Error("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại");
   }
 
   if (!res.ok) {
-    let detail = `Loi ${res.status}`;
+    let detail = `Lỗi ${res.status}`;
     try {
       const body = await res.json();
       if (body && body.detail) detail = body.detail;

@@ -3,7 +3,7 @@
 > Full reference for the PostgreSQL (+ pgvector) schema of the 3S Coffee system.
 > Use this when deploying, operating, or debugging — think of it as a `/help`
 > file for the database.
-> Last updated: 7/17 (after migration 009). If you add a new migration,
+> Last updated: 7/17 (after migration 010). If you add a new migration,
 > remember to update this file too.
 
 ## Quick index
@@ -67,6 +67,8 @@ receive/send-message layer (Messenger webhook vs
 | `escalations` | Log of the reason for every escalation to staff |
 | `price_overrides` | Staff-approved special price/quantity via the Telegram `/approve` command |
 | `faq_entries` | FAQ created via the dashboard (`/faq`) — auto-synced into `knowledge_chunks` |
+| `staff_users` | Dashboard staff accounts (username/password_hash) |
+| `staff_sessions` | Per-staff login session tokens, 7-day TTL |
 
 ---
 
@@ -187,6 +189,24 @@ section above for details. Editing an FAQ entry **DELETES the old chunk and
 CREATES a new one** (does not update the embedding in place), avoiding any
 content/embedding mismatch.
 
+### `staff_users` / `staff_sessions` (migration 010)
+| Table | Column | Type | Notes |
+|---|---|---|---|
+| `staff_users` | `id` | BIGSERIAL PK | |
+| | `username` | TEXT UNIQUE NOT NULL | |
+| | `password_hash`, `password_salt` | TEXT NOT NULL | PBKDF2-HMAC-SHA256, 200,000 iterations (Python `hashlib`, no bcrypt/passlib) |
+| | `name` | TEXT | Display name shown in the nav |
+| | `is_active` | BOOLEAN DEFAULT TRUE | Deactivated = `FALSE`, never hard-deleted (keeps history) |
+| `staff_sessions` | `id` | BIGSERIAL PK | |
+| | `staff_id` | FK → staff_users, `ON DELETE CASCADE` | |
+| | `token` | TEXT UNIQUE NOT NULL | Random string (`secrets.token_urlsafe(32)`) — **NOT a JWT** |
+| | `expires_at` | TIMESTAMPTZ NOT NULL | 7-day TTL from creation |
+
+Fully replaces the old shared static `ADMIN_API_TOKEN` env var (Batch 4,
+7/17) — see `docs/BACKEND_API-EN.md`'s auth section for the full logic.
+Logging out = deleting exactly 1 row from `staff_sessions`, doesn't affect
+other sessions.
+
 ### `escalations`
 | Column | Type | Notes |
 |---|---|---|
@@ -234,6 +254,7 @@ can never write to it** — this is how the system prevents the AI from
 | 007 | `007_override_status.sql` | `price_overrides.status` + `reject_reason` |
 | 008 | `008_faq_entries.sql` | `faq_entries` table + `knowledge_chunks.faq_entry_id` |
 | 009 | `009_product_knowledge.sql` | `knowledge_chunks.product_id` — per-product RAG sync |
+| 010 | `010_staff_auth.sql` | `staff_users` + `staff_sessions` tables — real per-staff auth |
 
 **Important deployment note:** `docker-entrypoint-initdb.d` (the `./migrations`
 folder mounted into the `db` container) **only runs automatically ONCE, when
@@ -244,7 +265,9 @@ throughout this dev process), every migration from 002 onward must be run
 docker compose exec db psql -U alpha3s -d alpha3s -f /docker-entrypoint-initdb.d/00X_file_name.sql
 ```
 When deploying to a **completely fresh** environment (empty Postgres volume),
-all 9 files run automatically in filename order — no manual step needed.
+all 10 files run automatically in filename order — no manual step needed.
+**Note:** a brand-new environment will still have **no staff account** — you
+still need to run `scripts/create_staff_user.py` once to create the first one.
 
 ---
 
@@ -314,6 +337,17 @@ SELECT id, question, answer, updated_at FROM faq_entries ORDER BY id;
 **Count knowledge_chunks by source (check whether RAG is synced correctly):**
 ```sql
 SELECT source, COUNT(*) FROM knowledge_chunks GROUP BY source;
+```
+
+**View the list of staff accounts:**
+```sql
+SELECT id, username, name, is_active, created_at FROM staff_users ORDER BY id;
+```
+
+**Clean up expired sessions (optional, tidiness only — expired sessions are
+still rejected at validation time even if left in the DB):**
+```sql
+DELETE FROM staff_sessions WHERE expires_at < now();
 ```
 
 ---

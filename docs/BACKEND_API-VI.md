@@ -3,7 +3,7 @@
 > Mô tả toàn bộ backend FastAPI: webhook Messenger, luồng xử lý AI
 > (orchestrator + tool calling), các service, và API nội bộ (`/admin/*`,
 > `/dashboard/*`). Dùng khi deploy, debug, hoặc phát triển tiếp.
-> Cập nhật lần cuối: 17/7 (sau Bat 3 — thêm Metrics/Analytics).
+> Cập nhật lần cuối: 17/7 (sau Bat 4 — Auth thật, đóng hẳn issue #8).
 
 ## Mục lục nhanh
 - [Tổng quan kiến trúc](#tổng-quan-kiến-trúc)
@@ -14,6 +14,7 @@
 - [Router `/webhook`](#router-webhook)
 - [Router `/admin`](#router-admin)
 - [Router `/dashboard`](#router-dashboard)
+- [Router `/dashboard/auth` — xác thực](#router-dashboardauth--xác-thực)
 - [Danh sách service (app/services/)](#danh-sách-service-appservices)
 - [Danh sách worker (app/workers/)](#danh-sách-worker-appworkers)
 - [Biến môi trường đầy đủ](#biến-môi-trường-đầy-đủ)
@@ -167,8 +168,9 @@ toàn.
 | GET | `/admin/conversations/paused` | Liệt kê hội thoại đang chờ |
 | GET | `/admin/ui` | Trang HTML đơn giản (không phải Next.js) — xem danh sách + resume bằng 1 click, dùng khi không tiện mở dashboard đầy đủ |
 
-Bảo vệ bằng header `X-Admin-Token` (dependency `require_admin_token` trong
-`app/api/auth.py`, dùng chung với router `/dashboard`).
+Bảo vệ bằng `require_staff_session` (`app/api/auth.py`) — header chuẩn
+`Authorization: Bearer <token>`, dùng chung với router `/dashboard`. Trước
+Bat 4 dùng `X-Admin-Token` tĩnh — đã thay hoàn toàn (xem `docs/DASHBOARD-VI.md`).
 
 ---
 
@@ -177,6 +179,32 @@ Bảo vệ bằng header `X-Admin-Token` (dependency `require_admin_token` trong
 File: `app/api/dashboard.py` — API cho dashboard Next.js (issue #8). Xem đầy
 đủ trong **`docs/DASHBOARD-VI.md`** (mỗi endpoint gắn với đúng nút/màn hình nào
 trên UI).
+
+---
+
+## Router `/dashboard/auth` — Xác thực
+
+File: `app/api/auth_router.py` (Bat 4, 17/7) — **KHÁC** router `/dashboard` ở
+chỗ **không** áp dependency ở cấp router, vì `/login` phải gọi được TRƯỚC
+khi có token. Từng route tự khai báo `Depends(require_staff_session)` riêng
+(trừ `/login`).
+
+| Method | Path | Mô tả |
+|---|---|---|
+| POST | `/dashboard/auth/login` | `{username, password}` → session token, KHÔNG cần token |
+| POST | `/dashboard/auth/logout` | Xóa đúng session hiện tại |
+| GET | `/dashboard/auth/me` | Thông tin staff đang đăng nhập |
+| GET/POST | `/dashboard/auth/staff` | Liệt kê / tạo tài khoản nhân viên |
+| PATCH | `/dashboard/auth/staff/{id}` | Vô hiệu hóa/kích hoạt lại |
+
+Logic đầy đủ trong `app/services/auth_service.py`:
+- Hash mật khẩu: `hashlib.pbkdf2_hmac("sha256", ..., 200_000)` + salt riêng
+  mỗi user — **không dùng bcrypt/passlib** (tránh thêm dependency mới vào
+  `requirements.txt`, tức phải rebuild lại Docker image `api`).
+- Session token: `secrets.token_urlsafe(32)`, lưu trong bảng `staff_sessions`,
+  TTL 7 ngày — **không dùng JWT** (tránh thêm `PyJWT`, đơn giản hơn để revoke).
+- `authenticate()` không phân biệt "sai username" vs "sai password" trong
+  thông báo lỗi (tránh lộ thông tin tài khoản nào tồn tại).
 
 ---
 
@@ -193,6 +221,7 @@ trên UI).
 | `products.py` (Bat 2, 17/7) | CRUD sản phẩm/bậc giá (dashboard) + `get_sku_summary_text()` ("Lớp 1") + tự đồng bộ RAG khi sửa `description` ("Lớp 2") |
 | `knowledge_entries.py` (Bat 2, 17/7) | CRUD FAQ (dashboard) — tự tính embedding, ghi/xóa `knowledge_chunks` ngay lập tức, không cần chạy `ingest.py` |
 | `metrics.py` (Bat 3, 17/7) | Metrics/Analytics cho `/metrics` — tin nhắn/ngày, tỷ lệ chat→đơn, top câu hỏi bot không trả lời được — không thêm bảng mới |
+| `auth_service.py` (Bat 4, 17/7) | Hash mật khẩu (PBKDF2), `authenticate()`, session token (`create_session`/`validate_session`/`delete_session`), CRUD `staff_users` |
 | `rag.py` | `search_knowledge()` — truy vấn `knowledge_chunks` bằng cosine similarity (pgvector) |
 | `embedder.py` | Tạo embedding (model `paraphrase-multilingual-MiniLM-L12-v2`, chạy local) |
 | `messenger.py` | `send_text()` — gọi Facebook Send API |
@@ -216,6 +245,9 @@ Script không phải worker thường trực (`scripts/`):
   bộ hoặc 1 sender_id) — công cụ dev, dùng khi cần test sạch sau khi sửa
   hành vi bot mà conversation cũ vẫn còn câu trả lời sai trước đó —
   **không dùng trên production**
+- `create_staff_user.py` (Bat 4, 17/7) — tạo tài khoản nhân viên **đầu tiên**
+  (bootstrap, chạy 1 lần duy nhất — không ai đăng nhập được để tự tạo qua
+  `/staff`, gà và trứng). Từ tài khoản thứ 2, tạo thẳng qua dashboard.
 - `test_scenarios.py` / `retest_scenarios.py` — chạy kịch bản test qua
   `handle_message()` trực tiếp, không cần webhook thật
 - `push_issues_to_gitlab.py` — đồng bộ `ISSUES-VI.md` lên GitLab Issues
@@ -232,8 +264,9 @@ Xem `.env.example` ở root repo. Nhóm theo chức năng:
 | Hạ tầng | `DATABASE_URL`, `REDIS_URL` |
 | LLM | `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` |
 | Embedding | `EMBEDDING_MODEL`, `EMBEDDING_DIM` |
-| Human handoff | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `ADMIN_API_TOKEN` |
+| Human handoff | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID` |
 | Dashboard | `DASHBOARD_CORS_ORIGINS` |
+| ⚠️ Legacy (không còn dùng) | `ADMIN_API_TOKEN` — thay thế bởi `staff_users`/`staff_sessions` từ Bat 4 |
 | Kênh dự phòng | `TELEGRAM_CUSTOMER_BOT_TOKEN` |
 
 ---
@@ -257,6 +290,9 @@ Xem `.env.example` ở root repo. Nhóm theo chức năng:
   `temperature=0.1` + bơm dữ liệu sống mỗi lượt, nhưng **không loại trừ
   hoàn toàn được** — giới hạn vốn có của model, xem `ISSUES-VI.md` phần
   "Fix bug 17/7" để hiểu đầy đủ bối cảnh.
+- **Chưa phân quyền theo role** — bất kỳ staff nào đăng nhập đều gọi được
+  mọi endpoint `/dashboard/auth/staff/*` (tạo/vô hiệu hóa tài khoản khác) —
+  đủ dùng cho quy mô đội nhỏ hiện tại (Bat 4, 17/7).
 
 Xem lịch sử phát triển đầy đủ + quyết định kỹ thuật trong `ISSUES-VI.md`
 (hoặc `ISSUES-EN.md`).
