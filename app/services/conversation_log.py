@@ -5,16 +5,13 @@ du de dashboard hien thi lich su lau dai. Module nay ghi CAU HOI/CAU TRA LOI
 cuoi cung cua moi luot vao bang messages (Postgres, khong TTL) de dashboard
 doc lai duoc.
 
-Dung asyncpg thuan, cung convention voi rag.py/tools.py/handoff.py.
+Tu issue #9 (Bat 1): dung POOL dung chung (`app/db_pool.py`) thay vi tu mo
+connection moi moi lan goi - module nay la 1 trong 2 duong goi nhieu nhat moi
+luot chat (ensure_conversation + log_message x2 + get_recent_agent_messages
+deu chay o MOI tin nhan), nen duoc uu tien chuyen sang pool truoc.
 """
 
-import asyncpg
-
-from app.config import settings
-
-
-def _db_url() -> str:
-    return settings.database_url.replace("+asyncpg", "")
+from app.db_pool import get_pool
 
 
 async def ensure_conversation(psid: str) -> int:
@@ -24,8 +21,8 @@ async def ensure_conversation(psid: str) -> int:
     moi nhat) - chua ho tro tach nhieu phien rieng biet theo thoi gian, du cho
     quy mo hien tai cua du an.
     """
-    conn = await asyncpg.connect(_db_url())
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
         if customer is None:
             customer_id = await conn.fetchval(
@@ -45,42 +42,37 @@ async def ensure_conversation(psid: str) -> int:
         else:
             conversation_id = conversation["id"]
         return conversation_id
-    finally:
-        await conn.close()
 
 
 async def log_message(conversation_id: int, role: str, content: str) -> None:
     """Ghi 1 tin nhan vao bang messages. role phai la 'customer', 'bot', hoac 'agent'."""
     if role not in ("customer", "bot", "agent"):
         role = "bot"
-    conn = await asyncpg.connect(_db_url())
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES ($1, $2, $3)",
             conversation_id,
             role,
             content,
         )
-    finally:
-        await conn.close()
 
 
 async def get_recent_agent_messages(psid: str, limit: int = 10) -> list[dict]:
     """Lay cac tin nhan role='agent' gan nhat cua 1 khach (ca reply that cua
     nhan vien qua Messenger trong luc paused, lan ghi chu tuong minh luc resume)
     - dung de bom nguoc vao system prompt cho LLM, tranh bot noi trai thoa thuan
-    nhan vien/sep da chot voi khach (xem ISSUES.md #8 - phan xu ly tin nhan luc handover).
+    nhan vien/sep da chot voi khach (xem ISSUES-VI.md #8 - phan xu ly tin nhan luc handover).
 
     Doc tu Postgres (khong phai Redis) vi Redis history chi giu 24h va co the bi
     trim boi MAX_HISTORY - thong tin thoa thuan quan trong khong duoc phep mat.
 
     QUAN TRONG: KHONG loc theo cot `handled` - bot van phai biet toan bo thoa
     thuan du staff da bam "Da xu ly" tren dashboard hay chua, vi "handled" chi
-    la co gon giao dien cho staff, khong lam mat hieu luc thoa thuan (xem
-    ISSUES.md #8 - dong y 16/7 voi anh Hoai).
+    la co gon giao dien cho staff, khong lam mat hieu luc thoa thuan.
     """
-    conn = await asyncpg.connect(_db_url())
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT m.content, m.created_at
@@ -95,8 +87,6 @@ async def get_recent_agent_messages(psid: str, limit: int = 10) -> list[dict]:
             limit,
         )
         return [dict(r) for r in reversed(rows)]  # tra ve theo thu tu thoi gian tang dan
-    finally:
-        await conn.close()
 
 
 async def list_unhandled_notes(psid: str) -> list[dict]:
@@ -104,8 +94,8 @@ async def list_unhandled_notes(psid: str) -> list[dict]:
     cua 1 khach, kem id de dashboard gan nut "Da xu ly" cho tung dong rieng
     (issue #8 - nang cap UX 16/7, thay the viec chi hien note gan nhat).
     """
-    conn = await asyncpg.connect(_db_url())
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT m.id, m.content, m.created_at
@@ -118,14 +108,12 @@ async def list_unhandled_notes(psid: str) -> list[dict]:
             psid,
         )
         return [dict(r) for r in rows]
-    finally:
-        await conn.close()
 
 
 async def count_unhandled_notes(psid: str) -> int:
     """So note chua xu ly - dung cho nhan "/n(N)" tren dashboard."""
-    conn = await asyncpg.connect(_db_url())
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         return await conn.fetchval(
             """
             SELECT COUNT(*)
@@ -136,20 +124,16 @@ async def count_unhandled_notes(psid: str) -> int:
             """,
             psid,
         )
-    finally:
-        await conn.close()
 
 
 async def mark_message_handled(message_id: int) -> bool:
     """Danh dau 1 note (message) la da xu ly. Tra ve True neu tim thay va cap nhat."""
-    conn = await asyncpg.connect(_db_url())
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         result = await conn.execute(
             "UPDATE messages SET handled = TRUE WHERE id = $1 AND role = 'agent'", message_id
         )
         return result != "UPDATE 0"
-    finally:
-        await conn.close()
 
 
 async def list_all_agent_messages(psid: str) -> list[dict]:
@@ -157,8 +141,8 @@ async def list_all_agent_messages(psid: str) -> list[dict]:
     khong loc/an - de dashboard hien lai lich su du da xu ly xong (issue #8 -
     nang cap UX 16/7 lan 5, thay vi lam bien mat khoi giao dien nhu ban truoc).
     """
-    conn = await asyncpg.connect(_db_url())
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT m.id, m.content, m.handled, m.created_at
@@ -171,5 +155,3 @@ async def list_all_agent_messages(psid: str) -> list[dict]:
             psid,
         )
         return [dict(r) for r in rows]
-    finally:
-        await conn.close()

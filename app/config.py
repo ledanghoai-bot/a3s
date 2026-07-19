@@ -24,10 +24,13 @@ class Settings(BaseSettings):
     embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dim: int = 384
 
-    # Human handoff (issue #7): thong bao Telegram khi escalate + token bat lai bot
+    # Human handoff (issue #7): thong bao Telegram khi escalate
     telegram_bot_token: str = ""
     telegram_admin_chat_id: str = ""
-    admin_api_token: str = "change-me"
+    # admin_api_token: DA XOA (issue #9, Bat 1) - la token tinh dung chung cu,
+    # thay the hoan toan boi dang nhap that (staff_users/staff_sessions) tu
+    # issue #8 Bat 4. Neu bien ADMIN_API_TOKEN con trong file .env cua ai do,
+    # khong sao ca - pydantic-settings voi extra="ignore" se tu bo qua, khong loi.
 
     # Dashboard Next.js (issue #8): danh sach origin duoc phep goi API, cach nhau boi dau phay
     dashboard_cors_origins: str = "http://localhost:3000"

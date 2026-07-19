@@ -961,3 +961,120 @@ tạm (`debug_auth.py`, `debug_session.py`) sau khi dùng xong.
 thứ 2 qua `/staff` rồi đăng nhập được bằng tài khoản đó, vô hiệu hóa 1 tài
 khoản thành công (không đăng nhập được nữa sau đó). **Bat 4 hoàn tất —
 đóng chính thức issue #8** (toàn bộ checklist gốc: CRUD, Metrics, Auth).
+
+---
+
+## Bat 1 #9 — Dọn nợ kỹ thuật + chuẩn bị production (18/7)
+Đây là Bat đầu tiên của #9 (CI/CD + deploy VPS + monitoring) — phần **không cần
+VPS**, làm được ngay trên máy dev. Xem `docs/BACKEND_API-VI.md` mục "Giới hạn
+đã biết" để biết danh sách đầy đủ các vấn đề đã tồn đọng từ #1-#4.
+
+**1. Dedupe theo `mid`** (`app/workers/tasks.py`) — Meta có thể gửi trùng
+1 webhook event. Dùng Redis `SET key NX EX` (chỉ thành công nếu chưa từng
+thấy `mid` này, TTL 24h) để chặn xử lý trùng ngay đầu vào `process_message`.
+
+**2. Retry + dead-letter** (`app/workers/tasks.py`) — tách logic chính ra
+`_process_message_inner()`, bọc ngoài bằng try/except: nếu lỗi ở **lần thử
+cuối cùng** (`job_try >= max_tries`, khai báo rõ `max_tries = 3` trong
+`WorkerSettings`), ghi lại toàn bộ `event` vào Redis list `dead_letter:messages`
+trước khi raise lại (không nuốt lỗi — arq vẫn cần biết job thất bại để tính
+đúng retry/metric). Tra cứu dead-letter: `redis-cli LRANGE dead_letter:messages 0 -1`.
+
+**3. Connection pooling** (`app/db_pool.py` mới) — pool `asyncpg` dùng chung
+(`min_size=2, max_size=10`), thay vì mỗi hàm tự mở/đóng connection riêng.
+**Phạm vi hiện tại:** chỉ migrate 2 module gọi nhiều nhất mỗi lượt chat
+(`conversation_log.py`, `products.py`) — các service còn lại
+(`handoff.py`, `orders.py`, `price_overrides.py`, `knowledge_entries.py`,
+`metrics.py`, `auth_service.py`, `tools.py`, `rag.py`) **VẪN** dùng
+`asyncpg.connect()` trực tiếp như cũ — sẽ chuyển dần ở Bat sau, không làm
+1 lần vì phạm vi quá rộng (~15 file).
+
+**4. Offload `embed()` sang threadpool** — thêm `embed_async()` trong
+`embedder.py` (`asyncio.to_thread`), đã cập nhật đủ 3 nơi gọi:
+`rag.py:search_knowledge()` (mọi lượt chat), `products.py`, `knowledge_entries.py`
+(tạo/sửa). `embed()` đồng bộ vẫn giữ nguyên cho `scripts/ingest.py` (script
+độc lập, không chạy trong event loop nào cần bảo vệ).
+
+**5. Dọn `ADMIN_API_TOKEN`** — xóa khỏi `config.py`/`.env.example` (legacy
+từ trước Bat 4, không còn tác dụng xác thực gì).
+
+**6. `docker-compose.prod.yml` mới** — file **độc lập, đầy đủ** (không dùng
+cơ chế override/merge của Docker Compose để tránh rủi ro tương thích version):
+- Không bind-mount source code (`api`/`worker`/`telegram_bot`/`telegram_customer_bot`)
+  — code build thẳng vào image, không cho sửa "sống" như dev nữa.
+- `dashboard` chuyển sang **production build** (`npm run build && npm start`)
+  thay vì dev-mode hot-reload đang dùng tạm trên máy dev.
+- `db`/`redis` không expose port ra ngoài host nữa (giảm bề mặt tấn công).
+- Tất cả service `restart: unless-stopped`.
+- `POSTGRES_PASSWORD` **bắt buộc** phải đặt qua biến môi trường khi deploy
+  thật (`${POSTGRES_PASSWORD:?...}` — compose tự báo lỗi rõ nếu quên đặt,
+  không âm thầm dùng mật khẩu yếu mặc định như bản dev).
+- **CHƯA có** (để dành Bat sau khi có VPS/domain thật): reverse proxy + HTTPS,
+  backup tự động, alert/monitoring.
+
+**Việc anh Hoài cần tự làm (không thể tự động hóa):**
+- **Rotate `META_APP_SECRET`/`PAGE_ACCESS_TOKEN`** — vẫn còn tồn đọng từ #1
+  (secret từng lộ trong git history, commit `a9db226`→`a9638f9`). Cần vào
+  Meta Developer Console tự tạo lại, không có cách nào làm thay qua code.
+
+**Chưa test** — cần:
+1. Restart cả 4 service (`api worker telegram_bot telegram_customer_bot`) —
+   `db_pool.py`/`conversation_log.py`/`products.py`/`tasks.py` đều thay đổi.
+2. Chat thử bình thường qua Messenger/Telegram — xác nhận không có gì vỡ
+sau khi đổi sang connection pool (bot vẫn trả lời đúng, note/FAQ vẫn hoạt
+động bình thường).
+3. `docker-compose.prod.yml` **chưa thể test thật** vì chưa có VPS — có thể
+thử build local trước để xác nhận không lỗi cú pháp:
+   ```bash
+   docker compose -f docker-compose.prod.yml config
+   ```
+   (lệnh này chỉ in ra config đã ghép, không thật sự chạy gì — an toàn để test)
+
+**✅ XÁC NHẬN** — anh Hoài test đúng như dự kiến: lệnh báo lỗi đúng `POSTGRES_PASSWORD`
+thiếu giá trị — xác nhận cơ chế bảo vệ hoạt động đúng (không âm thầm dùng mật
+khẩu yếu mặc định). Set tạm biến để test phần còn lại của file → không báo lỗi
+nào khác → xác nhận `docker-compose.prod.yml` đúng cú pháp. **Bat 1 hoàn tất.**
+
+---
+
+## Bat 2 #9 — Test thật cho CI (18/7)
+`.gitlab-ci.yml` trước đây chỉ là placeholder (`pytest -q || [ $? -eq 5 ]` — pass
+kể cả khi không có test nào). Bat này **không cần VPS**, làm ngay trên máy dev.
+
+**Thư mục `tests/` mới** — 60 assertion, tập trung vào **các hàm logic THUẦN**
+(không chạm DB) vì CI hiện chưa có hạ tầng Postgres test riêng (sẽ cần cho
+Bat sau nếu muốn test tich hợp end-to-end thật):
+- `test_handoff.py` — `is_valid_identifier()` (bug thực tế 16/7: staff gõ nhầm
+  "Ma KH: 4" thay vì chỉ gõ "4"), `wants_human()` (regex nhận diện "gặp nhân viên").
+- `test_orders.py` — `validate_transition()` (state machine trạng thái đơn hàng) —
+  đây là hàm quan trọng nhất để test vì sai sót có thể cho phép staff làm nhầm
+  (vd hủy đơn đã giao xong).
+- `test_tools.py` — `PHONE_RE` (regex SDT VN), `_unit_price_for_quantity()` (tính
+  giá theo bậc số lượng).
+- `test_auth_service.py` — `_hash_password()`/`_verify_password()` (PBKDF2) —
+  phần bảo mật quan trọng nhất của hệ thống đăng nhập (Bat 4, #8).
+
+**Đã verify toàn bộ 60 assertion chạy đúng với code thật** (copy nguyên văn logic
+trực tiếp qua sandbox test do không cài được pytest trực tiếp — không có internet).
+
+**`.gitlab-ci.yml`:**
+- Bỏ điều kiện `|| [ $? -eq 5 ]` — CI giờ **thật sự fail** nếu bất kỳ test nào fail,
+  không còn là "cổng chất lượng giả" như trước.
+- Thêm stage `build` mới — chỉ xác nhận `docker build` thành công (chưa
+  push/deploy gì cả), chạy bằng `docker:24-dind` service, chỉ trên nhánh `main`.
+  Mục đích: chặn pipeline sớm nếu Dockerfile lỗi cú pháp/thiếu dependency,
+  thay vì phát hiện lúc deploy thật trên VPS (Bat sau).
+
+**Chưa xây** (ngoài phạm vi Bat 2, ghi nhận cho tương lai): test tích hợp
+end-to-end thật cần Postgres test riêng trong CI (GitLab CI service
+`pgvector/pgvector:pg16`), coverage report, test cho các hàm có chạm DB.
+
+**Chưa test trên GitLab thật** — cần anh Hoài push lên nhánh có CI để xác
+nhận pipeline chạy đúng cả 3 stage (lint → test → build), có thể test trực
+tiếp bằng `pytest -v` ngay trên máy dev trước (cần `pip install pytest`
+nếu chưa có trong môi trường dev của máy Windows).
+
+**✅ XÁC NHẬN ĐÃ CHẠY THẬT (18/7)** — anh Hoài chạy `docker compose exec api
+pytest -v` (không dùng pip trên Windows trực tiếp — cài pytest thẳng trong
+container `api` với `--break-system-packages`): **38/38 test PASSED**, khớp
+đúng kỳ vọng (60 assertion trải đều trên 38 test case). **Bat 2 hoàn tất.**

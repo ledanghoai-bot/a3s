@@ -6,15 +6,15 @@ dung 1 dong knowledge_chunks qua faq_entry_id. Sua/xoa entry se tu dong xoa chun
 cu + tao lai (tinh embedding moi) - khong bao gio bi "lech" giua noi dung hien
 thi tren dashboard va noi dung bot thuc su dung de tra loi.
 
-Dung asyncpg thuan, cung convention voi cac service khac. embed() la ham dong
-bo/CPU-bound (xem app/services/embedder.py) - da biet la gioi han hieu nang khi
-nhieu request cung luc, xem docs/BACKEND_API-VI.md muc "Gioi han da biet".
+Dung asyncpg thuan, cung convention voi cac service khac. Tu issue #9 Bat 1,
+dung `embed_async()` (khong phai `embed()` truc tiep) - da offload sang
+threadpool rieng, xem app/services/embedder.py.
 """
 
 import asyncpg
 
 from app.config import settings
-from app.services.embedder import embed
+from app.services.embedder import embed_async
 
 SOURCE_LABEL = "dashboard:faq"
 
@@ -42,7 +42,7 @@ async def create_faq(question: str, answer: str) -> dict:
     """Tao FAQ moi + tinh embedding + insert knowledge_chunks ngay lap tuc -
     bot co the dung ngay tu cau hoi ke tiep, khong can cho batch ingest nao."""
     content = f"{question}\n{answer}"
-    vec_str = _vec_str(embed(content))
+    vec_str = _vec_str(await embed_async(content))
 
     conn = await asyncpg.connect(_db_url())
     try:
@@ -71,7 +71,7 @@ async def update_faq(entry_id: int, question: str, answer: str) -> dict:
     """Sua FAQ - XOA chunk cu roi TAO LAI (khong UPDATE embedding tai cho) de
     dam bao khong bao gio co chunk "mo côi" content cu/embedding moi lech nhau."""
     content = f"{question}\n{answer}"
-    vec_str = _vec_str(embed(content))
+    vec_str = _vec_str(await embed_async(content))
 
     conn = await asyncpg.connect(_db_url())
     try:

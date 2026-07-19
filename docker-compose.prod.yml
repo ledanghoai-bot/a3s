@@ -1,0 +1,98 @@
+# docker-compose.prod.yml — cau hinh PRODUCTION day du, doc lap (issue #9, Bat 1)
+#
+# Chay bang: docker compose -f docker-compose.prod.yml up -d --build
+# (KHONG ket hop voi docker-compose.yml — day la file DOC LAP, day du, tranh
+# rui ro tuong thich voi co che merge/override cua cac ban Docker Compose cu
+# hon chua ho tro tot viec "xoa" gia tri list tu file base, vd volumes/ports).
+#
+# Khac gi so voi docker-compose.yml (dev):
+# - api/worker/telegram_bot/telegram_customer_bot: KHONG bind-mount source
+#   code (`.:/srv`) — code duoc build THANG vao image luc build, khong the
+#   sua file "song" nhu dev nua (dung y, production khong nen cho phep sua
+#   code ma khong qua deploy chinh thuc).
+# - dashboard: PRODUCTION BUILD (`npm run build && npm start`) thay vi
+#   dev-mode hot-reload — nhanh hon, on dinh hon, dung dung muc dich.
+# - db/redis: KHONG expose port ra ngoai host (5432/6379) — chi cac service
+#   trong CUNG docker network moi truy cap duoc, giam be mat tan cong.
+# - Tat ca service co `restart: unless-stopped` — tu khoi dong lai neu crash
+#   hoac VPS reboot.
+#
+# CHUA co trong file nay (se lam o Bat sau cua issue #9 khi co VPS/domain that):
+# - Reverse proxy + HTTPS (Caddy/Nginx + Let's Encrypt) — Meta bat buoc HTTPS
+#   cho webhook, nhung can domain that truoc, chua lam duoc tren may dev.
+# - Backup PostgreSQL tu dong.
+# - Alert/monitoring.
+#
+# LUU Y QUAN TRONG: sau khi sua code (bat ky file .py/.js nao), PHAI chay lai
+# `docker compose -f docker-compose.prod.yml up -d --build <service>` —
+# KHONG co hot-reload trong file nay (dung y, production ben vung hon dev).
+
+services:
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: arq app.workers.tasks.WorkerSettings
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+
+  telegram_bot:
+    build: .
+    command: python -m app.workers.telegram_listener
+    env_file: .env
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  telegram_customer_bot:
+    build: .
+    command: python -m app.workers.telegram_customer_listener
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    command: sh -c "npm ci && npm run build && npm start -- -p 3000 -H 0.0.0.0"
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: alpha3s
+      # QUAN TRONG: KHONG dung mat khau mac dinh yeu "alpha3s" nhu ban dev khi
+      # deploy that - dat POSTGRES_PASSWORD that trong .env cua VPS (khac hoan
+      # toan voi may dev), va cap nhat DATABASE_URL trong .env cho khop.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Phai dat POSTGRES_PASSWORD trong .env khi deploy production, khong dung mac dinh}
+      POSTGRES_DB: alpha3s
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+volumes:
+  pgdata:

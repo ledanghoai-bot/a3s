@@ -1,6 +1,7 @@
 stages:
   - lint
   - test
+  - build
 
 default:
   image: python:3.12-slim
@@ -15,4 +16,22 @@ lint:
 test:
   stage: test
   script:
-    - pytest -q || [ $? -eq 5 ]  # cho phep pass khi chua co test (exit 5 = no tests collected)
+    # Issue #9 Bat 2: KHONG con cho phep pass gia khi chua co test (bo dieu
+    # kien "|| [ $? -eq 5 ]" cu) - CI gio se THAT SU FAIL neu bat ky test nao
+    # fail. Bo test hien tai (tests/) chi cover cac ham logic THUAN (khong
+    # cham DB that): handoff.py, orders.py, tools.py, auth_service.py.
+    - pytest -v
+
+build:
+  stage: build
+  image: docker:24-cli
+  services:
+    - docker:24-dind
+  # Issue #9 Bat 2: chi XAC NHAN build duoc image, CHUA push/deploy di dau ca
+  # (deploy that se lam o Bat sau khi co VPS - #9 Bat 3/4). Chan pipeline
+  # som neu Dockerfile bi loi cu phap/dependency thieu, thay vi de phat hien
+  # luc deploy that tren VPS.
+  script:
+    - docker build -t alpha3s-api:ci-test .
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

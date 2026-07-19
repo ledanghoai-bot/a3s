@@ -1,4 +1,10 @@
-"""Worker arq: xu ly tin nhan bat dong bo sau khi webhook da tra 200."""
+"""Worker arq: xu ly tin nhan bat dong bo sau khi webhook da tra 200.
+
+Issue #9 (Bat 1): them dedupe theo `mid` (Meta co the gui trung webhook event)
+va retry + dead-letter (khi Send API/LLM loi lien tuc).
+"""
+
+import json
 
 from arq.connections import RedisSettings
 
@@ -8,8 +14,45 @@ from app.services.handoff import is_bot_paused
 from app.services.messenger import send_text
 from app.services.orchestrator import handle_message
 
+DEDUP_TTL_SECONDS = 24 * 60 * 60  # 24h - du lon hon cua so retry cua Meta
+DEAD_LETTER_KEY = "dead_letter:messages"
+
 
 async def process_message(ctx: dict, event: dict) -> None:
+    """Wrapper ben ngoai: dedupe + bat exception de ghi dead-letter o lan thu
+    cuoi cung truoc khi de arq bao that bai that su (van raise lai, KHONG nuot
+    loi - arq can biet job that bai de tinh dung so lan retry/metric)."""
+    message = event.get("message") or {}
+    mid = message.get("mid")
+    if mid:
+        redis = ctx["redis"]
+        # SET ... NX EX: chi thanh cong (tra ve True) neu KEY CHUA TUNG TON TAI -
+        # tuc la lan dau gap mid nay. Meta gui trung se bi chan ngay o day,
+        # tranh tao 2 cau tra loi cho cung 1 tin nhan khach.
+        is_first_time = await redis.set(f"dedup:mid:{mid}", "1", nx=True, ex=DEDUP_TTL_SECONDS)
+        if not is_first_time:
+            print(f"[worker] Bo qua tin nhan trung (mid={mid} da xu ly truoc do).")
+            return
+
+    try:
+        await _process_message_inner(event)
+    except Exception:
+        job_try = ctx.get("job_try", 1)
+        max_tries = ctx.get("max_tries", 3)
+        if job_try >= max_tries:
+            # Lan thu CUOI CUNG that bai - arq se KHONG retry them nua, ghi lai
+            # "dead letter" de sau nay xem lai/xu ly tay, tranh mat tin nhan
+            # am tham khong ai biet.
+            redis = ctx["redis"]
+            await redis.lpush(
+                DEAD_LETTER_KEY,
+                json.dumps({"event": event, "job_try": job_try}, ensure_ascii=False),
+            )
+            print(f"[worker] DEAD-LETTER sau {job_try} lan thu that bai, event: {event}")
+        raise
+
+
+async def _process_message_inner(event: dict) -> None:
     message = event.get("message") or {}
     text = message.get("text")
     if not text:
@@ -63,3 +106,4 @@ class WorkerSettings:
     functions = [process_message]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20
+    max_tries = 3  # issue #9 Bat 1: khai bao ro rang thay vi dua vao default cua arq
