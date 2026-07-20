@@ -1382,3 +1382,51 @@ Lần này phải thấy `intent=learn_brewing`, `route=knowledge`, và block
 `route=knowledge`, `KU-FAQ-003-003` (FAQ-BREW-001) đứng #1 (score 0.0307),
 prompt lắp đầy đủ 7 block đúng thứ tự kèm provenance rõ ràng từng KU.
 **Bat 4 hoàn tất — pipeline M1→M4 hoạt động trọn vẹn đầu-cuối.**
+
+## Bat 5 — Runtime Guardrails (M5, 18/7)
+Đọc kỹ `RT-001` (Runtime Input/Output Contract) + `RT-002` (Guardrails and
+Fallbacks) trước khi code (`docs/runtime/` trong depository). Code thành
+`app/services/kb_runtime.py`.
+
+**Phân biệt rõ 2 phần theo đúng mức độ "thật" — quan trọng để không hiểu nhầm:**
+1. **Pre-Generation Guardrails** — **hoàn toàn thật**, chỉ dựa trên dữ liệu
+   đã có (route/knowledge_units từ M2-M3), không cần LLM: chặn KU
+   draft/superseded, chặn route=tool mà vẫn lẫn Knowledge tĩnh, gắn cờ
+   risk cho health_safety/complaint.
+2. **Post-Generation Validation** — **chỉ heuristic** (quét regex/từ khóa),
+   **KHÔNG thể** đánh giá đúng “câu trả lời có đúng fact trong provenance
+   không” hay “có quá 1 next best action không” — cần LLM-as-judge, ngoài
+   phạm vi Bat 5. Chỉ bắt được 3 loại lỗi rõ ràng: giá/tiền không kèm
+tool_results, claim y khoa tuyệt đối, lộ metadata nội bộ (vd nhắc
+"KU-...").
+
+**Fallback F1-F5** — code F2 (Clarification), F3 (Honest uncertainty), F5
+(Human handoff); **chưa làm F1 và F4** (cần LLM/Tool thật để rewrite
+ngắn gọn/retry, ngoài phạm vi Bat 5).
+
+**Bug thật phát hiện khi tự test:** `_PRICE_PATTERN_RE` có `đ` không
+ranh giới từ → câu “Pha nóng **85 độ**” bị nhận nhầm thành đang nói giá
+trong khi “độ” chỉ là đơn vị nhiệt độ. Fix: thêm `\b` sau `đ`.
+
+**Đã verify 19/19 test PASS** qua sandbox trước khi đưa code chính thức.
+
+**`scripts/kb_runtime_test.py`** — CLI nối trọn vẹn M2+M3+M5 thật, kèm
+candidate response **mẫu** (`--candidate=clean|bad_price|bad_medical|bad_leak`)
+để test post-generation validation.
+
+**Chưa test trên máy anh Hoài** — cần:
+```bash
+docker compose exec api python scripts/kb_runtime_test.py "Pha cà phê 3S thế nào?"
+docker compose exec api python scripts/kb_runtime_test.py "Pha cà phê 3S thế nào?" --candidate=bad_price
+docker compose exec api python scripts/kb_runtime_test.py "shop giao sai hàng"
+```
+Xác nhận: câu 1 (candidate=clean) validation PASS, không cần fallback; câu 2
+(candidate=bad_price) validation FAIL với flag `price_mentioned_without_tool_result`,
+chuyển fallback F3; câu 3 (complaint) phải thấy `risk_flag_detected` ở
+Pre-Generation và fallback F5 (human handoff).
+
+**✅ XÁC NHẬN (18/7)** — cả 3 kịch bản đúng kỳ vọng: candidate=clean
+pass sạch không cần fallback; candidate=bad_price bắt đúng flag
+`price_mentioned_without_tool_result` → F3; câu complaint gắn đúng
+`risk_flag_detected` + fallback F5 + `risk_flags=['complaint']` trong RT-001
+output. **Bat 5 hoàn tất — pipeline M1→M5 hoạt động trọn vẹn.**
