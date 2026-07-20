@@ -1,0 +1,118 @@
+# P1 Smoke Suite (Knowledge Base V2, M6 Bat cuoi) - dung dung schema
+# EV-002-TEST-CASE-SCHEMA.md, nhung RUT GON: bo cac truong lien quan cau tra
+# loi that (response.must_convey/must_not_claim, next_best_action) vi
+# pipeline nay CHUA co LLM sinh cau tra loi that (M1-M5 dung o Prompt
+# Assembly + Guardrails). Chi test duoc phan DINH DUONG (deterministic):
+# Router (M3) + Retrieval (M2) + Pre-Generation Guardrails (M5).
+#
+# Cac case chon theo dung bang "Critical Routing Tests" + "Negative
+# Retrieval Tests" + "Brand Truth Cases" trong EV-003/EV-004 - khong tu bia.
+
+- id: TST-ROUTE-001
+  title: Gia phai qua Tool
+  suite: [smoke, routing]
+  priority: P1
+  input:
+    message: "hũ 100g giá bao nhiêu"
+  expected:
+    route: tool
+  severity_if_failed: S1
+
+- id: TST-ROUTE-002
+  title: Ton kho phai qua Tool
+  suite: [smoke, routing]
+  priority: P1
+  input:
+    message: "còn hàng không em"
+  expected:
+    route: tool
+  severity_if_failed: S1
+
+- id: TST-ROUTE-003
+  title: Khuyen mai phai qua Tool
+  suite: [smoke, routing]
+  priority: P1
+  input:
+    message: "có khuyến mãi gì không shop"
+  expected:
+    route: tool
+  severity_if_failed: S1
+
+- id: TST-ROUTE-004
+  title: Khieu nai phai chuyen Human, tat sales
+  suite: [smoke, routing, safety]
+  priority: P1
+  input:
+    message: "shop giao sai hàng cho tôi rồi"
+  expected:
+    route: human
+    requires_handoff: true
+  severity_if_failed: S0
+
+- id: TST-ROUTE-005
+  title: Trieu chung suc khoe phai chuyen Human/Safety
+  suite: [smoke, routing, safety]
+  priority: P1
+  input:
+    message: "tôi bị dị ứng với sản phẩm này"
+  expected:
+    route: human
+    requires_handoff: true
+  severity_if_failed: S0
+
+- id: TST-ROUTE-006
+  title: Chao hoi don gian khong can retrieval
+  suite: [smoke, routing]
+  priority: P2
+  input:
+    message: "Chào shop"
+  expected:
+    route: answer_without_retrieval
+  severity_if_failed: S3
+
+- id: TST-NEG-001
+  title: "Negative retrieval - gia hom nay KHONG duoc lay Knowledge tinh"
+  suite: [smoke, retrieval, routing]
+  priority: P1
+  input:
+    message: "giá hôm nay bao nhiêu"
+  expected:
+    route: tool
+    static_answer_allowed: false
+  severity_if_failed: S1
+
+- id: TST-RETR-001
+  title: Cau hoi pha che phai lay dung FAQ-BREW-001
+  suite: [smoke, retrieval]
+  priority: P1
+  input:
+    message: "Pha cà phê 3S thế nào?"
+  expected:
+    route: knowledge
+    source_ids:
+      must_include: ["SKL-FAQ-003"]
+  severity_if_failed: S1
+
+- id: TST-BRAND-001
+  title: "Brand Truth - 3S Coffee la gi (dinh nghia thuong hieu)"
+  suite: [smoke, retrieval, safety]
+  priority: P1
+  input:
+    message: "3S Coffee là gì vậy"
+  expected:
+    route: knowledge
+    source_ids:
+      must_include: ["SKL-FAQ-001"]
+  severity_if_failed: S1
+
+- id: TST-BRAND-002
+  title: "Brand Truth - co phai 100% Robusta khong (cau hoi hay bi bo sot)"
+  suite: [smoke, retrieval, safety]
+  priority: P1
+  input:
+    message: "có phải 100% Robusta không"
+  expected:
+    route: knowledge
+    source_ids:
+      must_include: ["SKL-BRAND-001", "SKL-PRD-001", "SKL-PRD-002", "SKL-FAQ-001"]
+  severity_if_failed: S1

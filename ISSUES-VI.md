@@ -1430,3 +1430,90 @@ pass sạch không cần fallback; candidate=bad_price bắt đúng flag
 `price_mentioned_without_tool_result` → F3; câu complaint gắn đúng
 `risk_flag_detected` + fallback F5 + `risk_flags=['complaint']` trong RT-001
 output. **Bat 5 hoàn tất — pipeline M1→M5 hoạt động trọn vẹn.**
+
+## Bat 6 — P1 Smoke Test Suite (M6, Bat cuối cùng, 18/7)
+Đọc kỹ `EV-001..004` (`EV-005` Continuous Learning Loop là quy trình vận hành
+cho con người/team, không phải thứ code được, chỉ tham khảo) trước khi làm.
+
+**Phạm vi test được thật (vì chưa có LLM sinh câu trả lời thật):** chỉ phần
+định lượng (deterministic) — Router (M3) + Retrieval (M2) + Pre-Generation
+Guardrails (M5). **Không test được** `response.must_convey/must_not_claim`,
+`next_best_action` (EV-002 schema) vì cần LLM thật — giới hạn ghi rõ ngay
+đầu file `tests/kb_eval/smoke.yaml`.
+
+**`tests/kb_eval/smoke.yaml`** — 10 test case theo đúng schema `EV-002`, chọn
+theo đúng bảng "Critical Routing Tests" + "Negative Retrieval Tests" +
+"Brand Truth Cases" trong `EV-003`/`EV-004` (không tự bịa case).
+
+**Phát hiện quan trọng khi soạn test Brand Truth:** câu “có phải 100%
+Robusta không” (nêu rõ trong `EV-004` là case bắt buộc) bị Router (M3) **bỏ**
+**sót hoàn toàn** — không có từ khóa nào chứa “robusta”/“arabica” trong
+`_PRODUCT_RE`. Đã sửa thêm ngay (không để test fail rồi mới sửa sau).
+
+**`scripts/kb_eval_runner.py`** — CLI đọc `tests/kb_eval/*.yaml`, chạy thật
+qua M2+M3+M5, in báo cáo pass/fail + **Release Gate** (theo `EV-001`: block
+nếu còn test fail severity S0/S1, cho phép release có ngoại lệ nếu chỉ
+S2/S3). Hỗ trợ `--suite <tên>` để lọc riêng 1 nhóm (routing/retrieval/safety...).
+
+**Đã verify kỹ qua sandbox trước khi đưa code chính thức:**
+- 10/10 test PASS với dữ liệu mock khớp đúng kết quả thật đã xác nhận từ
+trước (Bat 3/4).
+- Thêm 1 test **cố ý sai** để xác nhận runner **phát hiện đúng lỗi** và
+**Release Gate block đúng** khi có S1 fail — đã xóa case này trước khi giao
+(chỉ dùng để tự test, không để lẫn vào bộ test thật).
+- Xác nhận `--suite safety` lọc đúng chỉ 4/10 case thuộc nhóm đó.
+
+**Chưa test trên máy anh Hoài** — cần:
+```bash
+docker compose exec api python scripts/kb_eval_runner.py
+```
+Kỳ vọng: **10/10 PASS**, `RELEASE GATE: PASS`. Có thể thử thêm
+`--suite retrieval` hoặc `--suite routing` để xem riêng từng nhóm.
+
+## Fix bug 18/7 — Router loại nhầm domain `faq` khỏi `product_understanding`
+`kb_eval_runner.py` chạy thật: **9/10 PASS**, `TST-BRAND-001` ("3S Coffee là
+gì vậy") fail — không tìm thấy `SKL-FAQ-001` trong kết quả (chỉ có
+`SKL-BRAND-001`, `SKL-PRD-001`). **Đây là bug thật**, không phải flaky test —
+lần test trước câu tương tự ("3S Coffee là thương hiệu gì?") pass vì gọi
+`kb_search_test.py` **trực tiếp** (không qua Router, không giới hạn domain) —
+lần này `kb_eval_runner.py` chạy đúng quy trình thật (qua Router trước).
+
+**Nguyên nhân:** `_INTENT_DOMAINS["product_understanding"] = ["product", "brand"]`
+**thiếu domain `"faq"`** — trong khi `FAQ-BRAND-001` (đáp án đúng nhất cho
+“3S Coffee là gì”) lại nằm ở domain `faq`. Router loại domain đó trước cả
+khi gọi retrieval, nên dù KU đúng có tồn tại trong DB, retrieval **không bao
+giờ thấy được**. Các intent khác (`evaluate_taste`, `compare`, `learn_brewing`)
+đều đã có sẵn `"faq"` trong domain — chỉ riêng `product_understanding` bị sót.
+
+**Fix:** thêm `"faq"` vào `_INTENT_DOMAINS["product_understanding"]`.
+
+**Đây chính là giá trị thực tế của M6** — bug này hoàn toàn **ẩn đi** nếu chỉ
+test retrieval độc lập (như các lần trước) — chỉ lộ ra khi test **nguyên
+pipeline** (Router → Retrieval) như `kb_eval_runner.py` đã thiết kế.
+
+**Chưa test lại** — chạy lại:
+```bash
+docker compose exec api python scripts/kb_eval_runner.py
+```
+Kỳ vọng lần này: **10/10 PASS**, `RELEASE GATE: PASS`.
+
+**✅ XÁC NHẬN (18/7)** — anh Hoài xác nhận **10/10 PASS**. **Bat 6 hoàn tất.**
+
+---
+
+## 🎉 TOÀN BỘ PIPELINE M1→M6 HOÀN TẤT (18/7)
+Đủ 6 milestone theo đúng `IMPLEMENTATION_PLAN.md` gốc từ team Knowledge:
+**M1** Ingestion → **M2** Retrieval → **M3** Intent/Risk Router → **M4** Prompt
+Assembly → **M5** Runtime Guardrails → **M6** P1 Smoke Test Suite. Toàn bộ
+**tách biệt hoàn toàn** khỏi bot production hiện tại, test end-to-end thành
+công qua nhiều vòng debug thực chiến (chi tiết đầy đủ trong các mục đã
+ghi ở trên).
+
+**Chưa làm** (theo đúng quyết định phạm vi từ đầu, ngoài phiên này):
+- Tích hợp vào `orchestrator.py`/bot thật.
+- Lớp NLU nâng cao (`NLU-INTEGRATION-GUIDE.md`) — đang chờ team Knowledge
+  biên soạn nội dung utterance/normalization.
+- STYLE_CONTEXT thật (Playbook qua retrieval), ngân sách context theo token
+thật, Tool thật thay mô phỏng, Fallback F1/F4, phân quyền role, audit trail.
+- `EV-005` Continuous Learning Loop (quy trình vận hành cho con người/team,
+không phải cần code).

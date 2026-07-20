@@ -119,14 +119,14 @@ _COMPARE_RE = _gap_re(("khác", "gì"), ("so", "với"))
 _B2B_RE = _kw_re("sỉ", "đại lý", "hợp tác", "số lượng lớn", "nhập sỉ")
 _PRODUCT_RE = _gap_re(
     ("là", "gì"),
-    extra_exact=("sản xuất", "nguyên liệu", "thành phần"),
+    extra_exact=("sản xuất", "nguyên liệu", "thành phần", "robusta", "arabica"),
 )
 
 # Domain duoc phep truy hoi Knowledge Base cho tung intent (dung filter
 # allowed_domains cua search_kb() trong app/services/kb_retrieval.py).
 _INTENT_DOMAINS: dict[str, list[str]] = {
     "greeting": [],
-    "product_understanding": ["product", "brand"],
+    "product_understanding": ["product", "brand", "faq"],
     "evaluate_taste": ["product", "faq"],
     "compare": ["product", "faq"],
     "learn_brewing": ["faq", "product"],
