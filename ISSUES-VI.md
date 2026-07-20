@@ -1244,3 +1244,141 @@ ban đầu).
 
 **🎉 M1 + M2 CHÍNH THỨC HOÀN TẤT** — không còn vấn đề nào cần xử lý thêm trong
 phạm vi đã thống nhất (Ingestion + Retrieval, song song với production).
+
+## Bat 3 — Intent/Risk Router (M3, 18/7)
+Đọc đúng "Decision Logic" + "Routing Rules" đã có sẵn trong
+`skills/conversation/SKL-CON-001.md` (không tự bịa logic mới), code thành
+`app/services/kb_router.py` — vẫn **tách biệt hoàn toàn** khỏi bot production
+(theo mặc định đã chọn khi anh Hoài không phản hồi rõ câu hỏi thiết kế).
+
+**MVP (chưa dùng LLM):** phân loại bằng từ khóa/regex thuần, đủ cho các
+trường hợp rõ ràng. Nâng cấp lên LLM-based classification cho trường hợp
+mơ hồ là bước tiếp theo, ngoài phạm vi Bat 3.
+
+**2 bug phát hiện khi tự test trước khi giao (không đợi anh Hoài phát hiện):**
+1. **Khách VN hay gõ không dấu** ("gia bao nhieu" thay vì "giá bao nhiêu") —
+   regex có dấu thuần bỏ sót gần hết. **Fix:** chuẩn hóa bỏ dấu
+   (`unicodedata.normalize("NFD", ...)`) cho cả text đầu vào lẫn từ khóa
+   trước khi so khớp, thay vì viết character-class tay như `handoff.py` cũ
+   (khó bảo trì).
+2. **Khớp nhầm substring**: "hỏng" (bỏ dấu → "hong") khớp nhầm **bên
+   trong** "không" (bỏ dấu → "khong") vì thiếu ranh giới từ — khiến câu
+   “còn hàng không em” bị xếp nhầm thành `complaint`. **Fix:** thêm `\b` hai
+   đầu mỗi từ khóa.
+
+**Đã verify 33/33 test PASS** (bao gồm cặp có dấu/không dấu cho mỗi câu) qua
+sandbox trước khi đưa code chính thức — không đoán mò.
+
+**`scripts/kb_router_test.py`** — CLI test, có `--suite` chạy sẵn bộ câu mẫu.
+
+**Chưa test trên máy anh Hoài** — cần:
+```bash
+docker compose exec api python scripts/kb_router_test.py --suite
+```
+Xác nhận tất cả 13 câu mẫu phân loại đúng như mong đợi, hoặc thử câu bất kỳ:
+```bash
+docker compose exec api python scripts/kb_router_test.py "câu hỏi của anh"
+```
+
+**✅ XÁC NHẬN (18/7)** — anh Hoài chạy `--suite`: **13/13 câu mẫu phân loại
+đúng**, khớp hoàn toàn với kết quả sandbox đã verify trước đó. **Bat 3
+hoàn tất.**
+
+**Điều chỉnh thêm (18/7)** — anh Hoài test câu “e ơi” (cách gọi thu hút chú ý
+phổ biến, giống "shop ơi"/"em ơi" đã nhắc trong `system_prompt.md` cũ)
+→ bị xếp `unclear` — anh xác nhận nên xếp gần `greeting` thay vì hỏi lại làm
+rõ. Đã thêm nhóm từ khóa "thu hút chú ý" ("e ơi", "shop ơi", "a ơi", "c ơi"...)
+vào `_GREETING_RE`, verify lại **39/39 test PASS** (33 test cũ + 6 test mới),
+xác nhận không đổi thứ tự ưu tiên (vd “em ơi anh có bầu...” vẫn đúng
+`health_safety`, không bị nhóm greeting mới lấn át vì health_safety check
+đứng trước trong thứ tự IF/ELIF).
+
+**Chưa test lại trên máy anh Hoài** — chạy lại:
+```bash
+docker compose exec api python scripts/kb_router_test.py "e ơi"
+```
+
+## Bat 4 — Prompt Assembly (M4, 18/7)
+Đọc kỹ cả 3 tài liệu `PA-001/002/003` (địa chỉ trong depository:
+`docs/prompt_assembly/`) trước khi code, không đoán. Code thành
+`app/services/kb_prompt_assembly.py`.
+
+**Hoàn toàn theo đúng PA-001** — 9 block đúng thứ tự: `RUNTIME_POLICY →
+MISSION → SOURCE_PRIORITY → CONVERSATION_STATE → TOOL_RESULTS →
+KNOWLEDGE_CONTEXT → BEHAVIOR_CONTEXT → STYLE_CONTEXT → OUTPUT_REQUIREMENTS →
+USER_MESSAGE`. **Block rỗng bị bỏ hoàn toàn**, không để placeholder nhiễu
+(đúng yêu cầu "Things to Avoid" của PA-001).
+
+**Assembly Logic theo route (từ M3 Router) — y nguyên logic PA-001:**
+- `route=human` (complaint/health_safety) → **ẩn hẳn** Knowledge Context, nạp
+Behavior an toàn, không bán hàng.
+- `route=tool` (giá/tồn kho/đặt hàng) → **KHÔNG bao giờ** chèn Knowledge
+tĩnh dù có truyền `knowledge_units` vào (đúng yêu cầu "Do not retrieve
+static price/stock/promotion content").
+- `route=answer_without_retrieval` (greeting) → context tối thiểu, ẩn cả
+Knowledge/Tool/Behavior.
+- `intent=ask_for_consultation` → thêm Behavior riêng về Need
+Discovery/Recommendation/Next Best Action.
+
+**Đã verify 5 kịch bản qua sandbox** (greeting/learn_brewing/ask_dynamic_information/
+complaint/ask_for_consultation) trước khi đưa code chính thức — đặc biệt
+assert chặt: route=tool KHÔNG được lẫn Knowledge tĩnh, route=human KHÔNG
+được hiện Knowledge (tiềm ẩn bán hàng) — cả 5 PASS.
+
+**Giới hạn đã biết:**
+- Chưa tích hợp `STYLE_CONTEXT` thật (cần ingest Playbook qua kb_retrieval
+rồi chọn đúng playbook theo tình huống — để sau).
+- Ngân sách context (PA-002) **chưa tính token thật** — mới dừng ở thiết
+kế tỷ lệ, chưa có cơ chế cắt giảm khi vượt ngân sách thật.
+- Chưa tích hợp Tool that (phần `tool_results` trong CLI test là **dữ liệu
+mô phỏng**, chưa gọi đúng `search_products`/`check_stock` thật từ
+`tools.py` đã có sẵn cho bot production).
+
+**`scripts/kb_prompt_test.py`** — CLI ghep dung ca M2+M3+M4 that (khong
+phai mo phong): classify() → search_kb() (neu can) → assemble_prompt(),
+in ra prompt hoan chinh de xem bang mat.
+
+**Chưa test trên máy anh Hoài** — cần:
+```bash
+docker compose exec api python scripts/kb_prompt_test.py "Pha cà phê 3S thế nào?"
+```
+Xác nhận: block `KNOWLEDGE_CONTEXT` có đúng KU `FAQ-BREW-001`, block
+`TOOL_RESULTS` KHÔNG xuất hiện (vì đây là route=knowledge, không phải tool).
+Thử thêm:
+```bash
+docker compose exec api python scripts/kb_prompt_test.py "giá bao nhiêu"
+docker compose exec api python scripts/kb_prompt_test.py "shop giao sai hàng"
+```
+Để xác nhận block `KNOWLEDGE_CONTEXT` **không bao giờ** xuất hiện ở 2 câu này.
+
+## Fix bug 18/7 — Router phan loai sai cau hoi that dung nhat ("Pha cà phê 3S thế nào?")
+Anh Hoài test `kb_prompt_test.py` với đúng câu đã dùng để xác nhận M1-M2
+trước đó — nhưng lần này **Router (M3) lại phân loại sai** thành `unclear`,
+khiến cả pipeline bỏ qua Retrieval, không có `KNOWLEDGE_CONTEXT` nào được
+chèn — dù M2 đã xác nhận tìm đúng `FAQ-BREW-001` từ trước.
+
+**Nguyên nhân:** `_BREWING_RE` chỉ khớp cụm **liền kề** "pha thế nào" —
+nhưng câu thật "Pha **cà phê 3S** thế nào?" có danh từ chen giữa động từ và
+từ hỏi — không khớp được chuỗi liền kề. Đây là **lỗi hệ thống**, ảnh
+hưởng cả `_TASTE_RE`, `_COMPARE_RE`, `_PRODUCT_RE` (vd "cà phê này có vị
+đắng không" cũng sẽ bị bỏ sót vì không khớp được cum "có đắng" liền kề).
+
+**Fix:** thêm hàm `_gap(word1, word2, max_gap=25)` — cho phép 2 từ khóa
+cách nhau bởi nội dung bất kỳ (tối đa 25 ký tự) thay vì bắt buộc liền kề,
+và `_gap_re()` kết hợp nhiều cặp + từ khóa đơn lẻ thành 1 regex. Áp dụng
+cho `_BREWING_RE`, `_TASTE_RE`, `_COMPARE_RE`, `_PRODUCT_RE`.
+
+**Đã verify 46/46 test PASS** qua sandbox (39 test cũ + đúng câu bug thật +
+6 biến thể tương tự khác) trước khi đưa code chính thức.
+
+**Chưa test lại trên máy anh Hoài** — chạy lại đúng lệnh đã fail:
+```bash
+docker compose exec api python scripts/kb_prompt_test.py "Pha cà phê 3S thế nào?"
+```
+Lần này phải thấy `intent=learn_brewing`, `route=knowledge`, và block
+`KNOWLEDGE_CONTEXT` có đúng `KU-FAQ-003-XXX` (FAQ-BREW-001).
+
+**✅ XÁC NHẬN (18/7)** — anh Hoài chạy lại: `intent=learn_brewing`,
+`route=knowledge`, `KU-FAQ-003-003` (FAQ-BREW-001) đứng #1 (score 0.0307),
+prompt lắp đầy đủ 7 block đúng thứ tự kèm provenance rõ ràng từng KU.
+**Bat 4 hoàn tất — pipeline M1→M4 hoạt động trọn vẹn đầu-cuối.**
