@@ -1,0 +1,166 @@
+version: 2.0.0
+status: approved
+approved_by: PO
+last_review: 2026-07-20
+review_after: 2027-01-20
+owner: Alpha3S
+last_updated: 2026-07-20
+
+principles:
+  structure_language: en
+  knowledge_language: vi
+  production_status: approved
+  dynamic_information_source: tool
+
+asset_types:
+  brand_skill:
+    prefix: SKL-BRAND
+    domain: brand
+  product_skill:
+    prefix: SKL-PRD
+    domain: product
+  customer_service_skill:
+    prefix: SKL-CS
+    domain: customer_service
+  sales_skill:
+    prefix: SKL-SAL
+    domain: sales
+  conversation_skill:
+    prefix: SKL-CON
+    domain: conversation
+  faq_skill:
+    prefix: SKL-FAQ
+    domain: faq
+  playbook:
+    prefix: PBK
+    domain: playbook
+  architecture_decision:
+    prefix: ADR
+    domain: governance
+  knowledge_graph:
+    prefix: KG
+    domain: knowledge_graph
+  prompt_assembly:
+    prefix: PA
+    domain: prompt_assembly
+  runtime:
+    prefix: RT
+    domain: runtime
+  evaluation:
+    prefix: EV
+    domain: evaluation
+  knowledge_unit:
+    prefix: KU
+    domain: runtime_knowledge
+  test_case:
+    prefix: TST
+    domain: test
+  tool:
+    prefix: TOOL
+    domain: tool
+
+conversation_stages:
+  - awareness
+  - interest
+  - consideration
+  - purchase
+  - after_sales
+  - loyalty
+
+primary_intents:
+  - greeting
+  - ask_for_consultation
+  - product_understanding
+  - evaluate_taste
+  - compare
+  - learn_brewing
+  - seek_recommendation
+  - ask_dynamic_information
+  - order
+  - request_support
+  - complaint
+  - health_safety
+  - b2b_inquiry
+
+routes:
+  - answer_without_retrieval
+  - knowledge
+  - tool
+  - human
+  - clarification
+
+next_best_actions:
+  - answer_only
+  - ask_clarifying_question
+  - recommend
+  - call_tool
+  - start_order_flow
+  - handoff
+  - close_gracefully
+
+tool_capabilities:
+  - pricing
+  - inventory
+  - promotion
+  - shipping
+  - payment_policy
+  - order_create
+  - order_status
+  - return_support
+  - b2b_handoff
+
+relationships:
+  - depends_on
+  - references
+  - governed_by
+  - supports
+  - routes_to
+  - shaped_by
+  - validated_by
+  - supersedes
+  - related_to
+
+statuses:
+  - draft
+  - review
+  - approved
+  - locked
+  - superseded
+  - archived
+
+priorities:
+  - P1
+  - P2
+  - P3
+  - P4
+
+severities:
+  - S0
+  - S1
+  - S2
+  - S3
+
+domains:
+  active:
+    - brand
+    - customer_service
+    - product
+    - sales
+    - conversation
+    - faq
+    - playbook
+    - knowledge_graph
+    - prompt_assembly
+    - runtime
+    - evaluation
+    - integration
+  planned:
+    - ordering
+    - after_sales
+    - health
+    - caffeine
+    - storage
+    - sports
+    - comparisons
+    - objections
+    - b2b

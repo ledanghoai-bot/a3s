@@ -1078,3 +1078,169 @@ nếu chưa có trong môi trường dev của máy Windows).
 pytest -v` (không dùng pip trên Windows trực tiếp — cài pytest thẳng trong
 container `api` với `--break-system-packages`): **38/38 test PASSED**, khớp
 đúng kỳ vọng (60 assertion trải đều trên 38 test case). **Bat 2 hoàn tất.**
+
+---
+
+## Knowledge Base V2 — M1 Ingestion + M2 Retrieval (18/7)
+
+Yêu cầu mới ngoài phạm vi #8/#9: team Knowledge gửi 1 kiến trúc Knowledge Base
+đầy đủ (governance, hybrid retrieval, Prompt Assembly, Runtime — xem
+`docs/KNOWLEDGE_BASE_V2_DESIGN-VI.md` cho thiết kế chi tiết). Phạm vi đã thống
+nhất với anh Hoài: **chỉ M1 (Ingestion) + M2 (Retrieval)**, thử nghiệm
+**song song, tách biệt hoàn toàn** khỏi hệ thống production hiện tại (không
+đụng `knowledge_chunks`/`rag.py`/bot đang chạy).
+
+### Rà soát depository thật (`Knowledge_Base.zip`, 64 file) — 3 phát hiện quan trọng
+1. **Trạng thái draft/approved lệch tracker**: `depository-structure.md` ghi
+   toàn bộ Sales+FAQ là "approved", nhưng `status:` thật trong file là
+   `draft` cho cả 10/23 file Skill. **Anh Hoài quyết định**: gửi lại cho team
+   Knowledge/PO xác nhận, trong lúc chờ **cứ code theo thiết kế** (đã có sẵn
+   cờ `--include-draft` xử lý cả 2 khả năng, không cần code lại sau).
+2. **4 định dạng front matter khác nhau** cùng tồn tại: YAML chuẩn, text 1
+   dòng, bold 1 dòng có "& Locked", bold nhiều dòng có `\` cuối dòng. Parser
+   đã test đủ cả 4 với **22/22 file thật**, không lỗi nào.
+3. **Cấu trúc thư mục lệch spec**: `skill/` (số ít) vs `skills/` (số nhiều),
+   FAQ ở `docs/faq/` thay vì `skills/faq/`. Giải quyết bằng
+   `scripts/kb_normalize_source.py` (tự động chuẩn hóa, không copy tay).
+
+**Phát hiện thêm lúc code (18/7):** file YAML dùng `#` (H1) cho section
+chính (khác hẳn file không-YAML dùng `##`), nhưng riêng FAQ Object lại có
+`##`/`###` lồng bên trong **không được tách rời** (đúng yêu cầu "FAQ Object
+nên là 1 Knowledge Unit độc lập" trong `INGESTION_GUIDE.md`). Đã thiết kế
+thuật toán chunk tổng quát (xem `unit_builder.py`), test với `SKL-FAQ-003`
+cho kết quả **khớp chính xác** ví dụ `FAQ-BREW-005 — Nên pha mấy muỗng?`
+nêu trong `INGESTION_GUIDE.md`.
+
+### Đã code (Bat 1 — M1 + M2, chưa test trên máy anh Hoài)
+
+**Migration:** `migrations/011_knowledge_base_v2.sql` — 4 bảng mới (`kb_assets`,
+`kb_units`, `kb_ingestion_reports`, `kb_config`), hoàn toàn cộng thêm.
+
+**`app/services/kb_ingest/`** (package mới):
+- `loader.py` — parser 4 định dạng front matter, đã test 22/22 file thật.
+- `validator.py` — chặn thiếu id/version/status, ID trùng, status không phải
+  approved (trừ khi `--include-draft`), dependency thiếu.
+- `unit_builder.py` — chunk theo heading, thuật toán tổng quát tự nhận diện
+  `primary_level` (đã test khớp ví dụ FAQ-BREW-005 trong spec).
+
+**`scripts/kb_normalize_source.py`** — chuẩn hóa cấu trúc thư mục từ zip team
+Knowledge gửi (`skill/`→`skills/`, `docs/faq/`→`skills/faq/`) — đã test với
+đúng 22 file + `taxonomy.yaml` thật, ra đúng cấu trúc.
+
+**`scripts/kb_ingest.py`** — CLI chạy toàn bộ pipeline: parse → validate →
+chunk → embed → ghi `kb_units` với `index_version` mới → in báo cáo. **KHÔNG
+tự động atomic switch** — in lệnh SQL để anh tự kích hoạt sau khi xem báo cáo.
+
+**`app/services/kb_retrieval.py`** — `search_kb()`, hybrid retrieval: vector
+(pgvector) + lexical (Postgres full-text `tsvector`, config `'simple'` vì
+Postgres không có dictionary tiếng Việt tốt) + merge bằng **Reciprocal Rank
+Fusion** (thay cho model rerank ML riêng — giới hạn đã biết, có thể nâng cấp
+sau) + boost theo domain priority (Brand>Product>Sales>Conversation>FAQ) và
+`priority` (P1-P4). Dùng `app/db_pool.py` (connection pool, tái dùng hạ tầng
+từ #9 Bat 1).
+
+**`scripts/kb_search_test.py`** — CLI test nhanh 1 câu hỏi, in kết quả kèm
+đầy đủ provenance (ku_id, asset_id, source_path, domain, status, score).
+
+**`requirements.txt`**: thêm `pyyaml>=6.0` — **CẦN REBUILD** image `api`
+(`docker compose up -d --build api`), KHÔNG chỉ restart, vì đây là dependency
+mới thêm vào.
+
+### Chưa test — cần anh Hoài làm theo đúng thứ tự
+1. **Rebuild `api`** (bắt buộc, vì thêm `pyyaml`):
+   ```bash
+   docker compose up -d --build api
+   ```
+2. Chạy migration 011:
+   ```bash
+   docker compose exec db psql -U alpha3s -d alpha3s -f /docker-entrypoint-initdb.d/011_knowledge_base_v2.sql
+   ```
+3. Giải nén `Knowledge_Base.zip` ra 1 thư mục bất kỳ (vd `C:\alpha3s\_kb_source\`),
+   rồi chuẩn hóa:
+   ```bash
+   docker compose exec api python scripts/kb_normalize_source.py /srv/_kb_source/Knowledge_Base
+   ```
+   (lưu ý: đường dẫn trong container khác Windows — `_kb_source` phải nằm
+   trong `C:\alpha3s\` để container nhìn thấy qua bind-mount `/srv`)
+4. Chạy ingest (bật `--include-draft` vì đang chờ team Knowledge xác nhận status thật):
+   ```bash
+   docker compose exec api python scripts/kb_ingest.py --include-draft
+   ```
+   Đọc kỹ báo cáo cuối — có bao nhiêu asset chấp nhận/từ chối, đúng như
+bảng trạng thái đã rà soát không (9 approved + 13 draft nếu bật `--include-draft`
+đúng như mong đợi).
+5. Chạy lệnh SQL kích hoạt `active_index_version` mà `kb_ingest.py` in ra ở
+cuối (atomic switch thủ công, có chủ đích).
+6. Test retrieval:
+   ```bash
+   docker compose exec api python scripts/kb_search_test.py "Pha cà phê 3S thế nào?"
+   docker compose exec api python scripts/kb_search_test.py "3S Coffee là thương hiệu gì?"
+   docker compose exec api python scripts/kb_search_test.py "giá bao nhiêu"
+   ```
+   Xác nhận kết quả trả về đúng KU liên quan (vd câu hỏi pha chế phải trả về
+đúng `KU-FAQ-003-XXX` tương ứng).
+
+**Chưa làm** (ngoài phạm vi M1-M2, để sau nếu quyết định "go"): tích hợp vào
+`orchestrator.py`/bot thật (M3+), Intent/Risk Router, Prompt Assembly theo
+PA-001..003, Runtime Guardrails RT-001..002, P1 test suite chính thức.
+
+### Team Knowledge gửi lại depository đã sửa (18/7) — fix hoàn toàn cả 3 vấn đề
+Đã rà soát lại toàn bộ: **23/23 file giờ đều `status: approved`**, chuẩn hóa 100%
+về YAML front matter (hết 4 định dạng lộn xộn), `SKL-CS-002.md` đã có đủ nội
+dung, cấu trúc thư mục đã đúng spec (`skills/`, `skills/faq/`). Cấu trúc heading
+giữ nguyên, thuật toán chunk không cần sửa gì.
+
+**Đã sửa `kb_normalize_source.py`** để tự nhận diện cả 2 phiên bản cấu trúc
+(cũ `skill/` và mới `skills/`), tránh báo "không thấy" sai khi team Knowledge đã
+tự sửa đúng tên thư mục rồi.
+
+**Đã sửa `kb_ingest.py`**: `json.dumps(..., default=str)` — YAML parse
+`last_review`/`review_after` thành kiểu `date` của Python, `json.dumps` không
+tự serialize được kiểu này nếu không có `default=str`.
+
+### Bug retrieval nghiêm trọng phát hiện lúc test thật — đã fix xong
+Sau khi ingest thành công 24/24 asset, test câu “Pha cà phê 3S thế nào?” —
+kết quả #1 là “Brand North Star” (không liên quan), trong khi `FAQ-BREW-001 —
+Pha cà phê 3S thế nào?` (khớp gần nguyên văn câu hỏi) chỉ đứng #2, hoà gần
+tuyệt đối.
+
+**Nguyên nhân 1 (bug thật):** hệ số boost domain/priority ban đầu quá lớn
+(`P1: +0.03`, domain × 0.001) — **lớn hơn cả điểm RRF tối đa** (~0.033), khiến
+mọi nội dung gắn nhãn P1 (hầu như toàn bộ depository) thắng áp đảo bất kể
+liên quan hay không. **Fix:** giảm hệ số xuống `1e-7`, chỉ còn là tiebreaker
+thật sự (chỉ tác động khi 2 KU có điểm RRF **hoàn toàn bằng nhau**).
+
+**Nguyên nhân 2 (vấn đề chất lượng embedding, sau khi fix #1):** embedding
+tinh trên nguyên `content` (dài, gồm cả Answer Guidance/Unit Rule) bị **pha
+loãng** tín hiệu ngữ nghĩa mạnh của riêng dòng heading. **Fix lần 1** (lặp
+heading cố định 2 lần) **không đủ mạnh** (heading chỉ chiếm ~18% trọng số).
+**Fix lần 2 (đúng):** thêm trường `embedding_text` riêng (khác `content` dùng
+để lưu/hiển thị) — số lần lặp heading **tự động tính theo tỷ lệ độ dài**
+(`content_words // heading_words + 1`, giới hạn 3-15 lần) để heading luôn
+chiếm ≥~50% trọng số từ bất kể content dài bao nhiêu.
+
+**✅ XÁC NHẬN KẾT QUẢ CUỐI (18/7)** — sau khi re-ingest với `embedding_text`
+mới (index_version=3), câu “Pha cà phê 3S thế nào?” trả đúng `FAQ-BREW-001`
+ở **#1** với điểm `0.0299` (gần chạm mức tối đa lý thuyết khi thắng cả 2 danh
+sách vector+lexical), các kết quả #2-5 đều hợp lý về ngữ nghĩa (Product,
+FAQ Brand liên quan, Brand North Star bị đẩy xuống cuối đúng vì ít liên quan
+nhất). **M1 + M2 hoàn tất và xác nhận hoạt động đúng.**
+
+**Giới hạn đã biết phát sinh thêm:** schema `kb_units` dùng `id` (KU-XXX) làm
+khóa chính duy nhất — mỗi lần `kb_ingest.py` chạy lại sẽ **GHI ĐÈ** dữ liệu
+KU cùng ID sang `index_version` mới, không giữ song song để rollback thật
+như thiết kế ban đầu mô tả ("build index mới bên cạnh index cũ"). Cần sửa
+khi nào thực sự cần atomic switch/rollback thật (ngoài phạm vi M1-M2 test
+ban đầu).
+
+**✅ TEST THÊM 2 CÂU NỮA (18/7)** — anh Hoài test thêm:
+- “3S Coffee là thương hiệu gì?” → `FAQ-BRAND-001 — 3S Coffee là gì?` đúng #1,
+  điểm `0.032` (gần tối đa lý thuyết).
+- “SKL-BRAND-001” (test khả năng lexical bắt đúng mã ID) → trả đúng các đoạn
+  **trích dẫn** đến ID này (mục Traceability/Source ở file khác), **không** trả
+  về chính nội dung asset `SKL-BRAND-001` — do ID là metadata, không tự xuất
+  hiện như text trong content của chính nó. **Anh Hoài xác nhận không cần sửa**
+  — khách chat thật không gõ nguyên mã ID, không phải tình huống thực tế.
+
+**🎉 M1 + M2 CHÍNH THỨC HOÀN TẤT** — không còn vấn đề nào cần xử lý thêm trong
+phạm vi đã thống nhất (Ingestion + Retrieval, song song với production).
