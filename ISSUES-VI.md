@@ -17,7 +17,7 @@
 | 9 | CI/CD + deploy VPS + monitoring | 🟡 Đang làm (2/nhiều Bat) |
 | 10 | Kênh khách hàng dự phòng (Telegram) | ✅ Closed |
 | 11 | Knowledge Base V2 (Ingestion → Retrieval → Router → Prompt Assembly → Guardrails → Test Suite) | ✅ Closed (song song production) |
-| 12 | Lớp NLU (Normalization → Pattern Router → Semantic Router → Combined Pipeline) | 🟡 Đang làm |
+| 12 | Lớp NLU (Normalization → Pattern Router → Semantic Router → Combined Pipeline) | ✅ Paused ở 80% (chấp nhận mốc) |
 
 ---
 
@@ -332,7 +332,7 @@ milestone (M1-M6) theo `IMPLEMENTATION_PLAN.md` gốc, **tách biệt hoàn toà
 ---
 
 ## #12 · Lớp NLU (Normalization → Pattern Router → Semantic Router → Combined Pipeline)
-**Trạng thái:** 🟡 Đang làm — Bat A-D đã code, chờ kết quả `nlu_combined_test.py --eval` cuối cùng
+**Trạng thái:** ✅ Paused ở 80% — anh Hoài chấp nhận mốc hiện tại, chuyển sang tích hợp bot thật
 
 **Bối cảnh:** Nâng cấp Router M3 của #11 (vốn hardcode regex) lên hệ thống NLU học từ dữ liệu
 thật — team Knowledge gửi `datasets/nlu/` (intent-catalog, normalization rules, 300+ utterance,
@@ -379,22 +379,31 @@ thật — team Knowledge gửi `datasets/nlu/` (intent-catalog, normalization r
 ### Bat D — Combined Pipeline
 - [x] `app/services/nlu/router.py` — Pattern Router trước (nhanh, đã chứng minh 2% sai), Semantic
       Router là fallback khi Pattern không khớp
-- [ ] **Chưa có kết quả accuracy cuối cùng** — `scripts/nlu_combined_test.py --eval` trên 150 test
-      held-out, cần đối chiếu với mục tiêu "P1 routing accuracy ≥ 95%"
+- [x] **Kết quả accuracy cuối cùng (18/7):** `nlu_combined_test.py --eval` trên 150 test held-out
+      — **Đúng 120/150 (80.0%) | Sai 23/150 (15.3%) | Clarify 7/150 (4.7%)**. Tách theo tầng: Pattern
+      Router xử lý 56 câu (37.3%) đạt **94.6% chính xác** trong phạm vi nó xử lý; Semantic Router
+      xử lý 94 câu còn lại (62.7%, fallback) đạt **71.3%** — khớp đúng con số đo riêng lẻ trước đó.
+      **Thấp hơn mục tiêu ≥95%** trong README ~15 điểm phần trăm — nguyên nhân rõ ràng: Pattern
+      Router gần như hoàn hảo nhưng chỉ phủ được 37% câu, phần lớn rơi xuống Semantic Router
+      (độ chính xác thấp hơn nhiều).
+- **Quyết định (18/7):** anh Hoài chọn **chấp nhận 80% làm mốc hiện tại**, dừng #12 ở đây để
+  chuyển sang tích hợp vào bot thật thay vì tiếp tục tối ưu thêm (các hướng đã cân nhắc nhưng
+  không chọn: gửi kết quả cho team Knowledge đề nghị bổ sung utterance/rule để tăng độ phủ
+  Pattern Router; xây Entity Extraction để mở khóa 3 rule đang bị bỏ qua).
 
-**Chưa làm (ngoài phạm vi hiện tại):**
+**Chưa làm (tạm dừng, ngoài phạm vi đã quyết định):**
 - [ ] Entity Extraction (Bước 6) — 3 rule trong `routing-rules.yaml` có điều kiện entity đang bị
       bỏ qua rõ ràng vì chưa có tầng này
 - [ ] Route Resolution đầy đủ (Bước 8), Context-aware Resolution (Bước 5, multi-turn)
-- [ ] Tích hợp vào `orchestrator.py`/bot production thật
+- [ ] Tích hợp vào `orchestrator.py`/bot production thật — **ưu tiên tiếp theo**
 
 ---
 
 ## Đề xuất thứ tự ưu tiên tiếp theo
-1. **#12** — chạy `nlu_combined_test.py --eval`, đối chiếu accuracy thật với mục tiêu 95%, quyết
-   định hướng tiếp (Entity Extraction, hay tích hợp thẳng vào bot).
+1. **Tích hợp #11 + #12 vào `orchestrator.py`/bot production thật** — quyết định mới nhất (18/7),
+   thay cho việc tiếp tục tối ưu accuracy #12.
 2. **#1** — rotate `META_APP_SECRET`/`PAGE_ACCESS_TOKEN` (độc lập, nên làm sớm nếu chưa làm).
-3. **#9** — deploy VPS thật khi có hạ tầng, để #11/#12 có môi trường tích hợp vào bot production.
+3. **#9** — deploy VPS thật khi có hạ tầng, để #11/#12 có môi trường hoạt động thật sự.
 
 ## Tài liệu tham chiếu (`docs/`)
 - `docs/DATABASE-VI.md` — schema, lịch sử migration, câu SQL tra cứu thường dùng

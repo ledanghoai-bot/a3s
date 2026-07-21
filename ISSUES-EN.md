@@ -17,7 +17,7 @@
 | 9 | CI/CD + VPS deploy + monitoring | 🟡 In progress (2/several batches) |
 | 10 | Fallback customer channel (Telegram) | ✅ Closed |
 | 11 | Knowledge Base V2 (Ingestion → Retrieval → Router → Prompt Assembly → Guardrails → Test Suite) | ✅ Closed (parallel to production) |
-| 12 | NLU layer (Normalization → Pattern Router → Semantic Router → Combined Pipeline) | 🟡 In progress |
+| 12 | NLU layer (Normalization → Pattern Router → Semantic Router → Combined Pipeline) | ✅ Paused at 80% (accepted milestone) |
 
 ---
 
@@ -344,7 +344,7 @@ all 6 milestones (M1-M6) per the original `IMPLEMENTATION_PLAN.md`, **fully sepa
 ---
 
 ## #12 · NLU layer (Normalization → Pattern Router → Semantic Router → Combined Pipeline)
-**Status:** 🟡 In progress — Batches A-D coded, waiting on the final `nlu_combined_test.py --eval` result
+**Status:** ✅ Paused at 80% — anh Hoài accepted the current milestone, moving to real bot integration
 
 **Context:** Upgrading #11's M3 Router (originally hardcoded regex) into an NLU system that
 learns from real data — the Knowledge team sent `datasets/nlu/` (an intent catalog, normalization
@@ -394,24 +394,34 @@ rules, 300+ utterances, 150 held-out tests) per `NLU-INTEGRATION-GUIDE.md`.
 ### Batch D — Combined pipeline
 - [x] `app/services/nlu/router.py` — the Pattern Router runs first (fast, already proven at 2%
       wrong), the Semantic Router is the fallback when Pattern doesn't match
-- [ ] **No final accuracy number yet** — `scripts/nlu_combined_test.py --eval` on the 150 held-out
-      tests, needs to be checked against the "P1 routing accuracy ≥ 95%" target
+- [x] **Final accuracy result (7/18):** `nlu_combined_test.py --eval` on the 150 held-out tests —
+      **Correct 120/150 (80.0%) | Wrong 23/150 (15.3%) | Clarify 7/150 (4.7%)**. By layer: the
+      Pattern Router handles 56 utterances (37.3%), reaching **94.6% accuracy** within its own
+      scope; the Semantic Router handles the remaining 94 (62.7%, fallback), reaching **71.3%** —
+      matching the standalone number measured earlier. **~15 points below** the README's ≥95%
+      target — the reason is clear: the Pattern Router is near-perfect but only covers 37% of
+      utterances, with most falling through to the less-accurate Semantic Router.
+- **Decision (7/18):** anh Hoài chose to **accept 80% as the current milestone**, pausing #12
+  here to move to real bot integration instead of continuing to optimize further (options
+  considered but not chosen: sending results to the Knowledge team requesting more
+  utterances/rules to grow Pattern Router coverage; building Entity Extraction to unlock the 3
+  skipped rules).
 
-**Not yet done (out of current scope):**
+**Not yet done (paused, out of the decided scope):**
 - [ ] Entity Extraction (Step 6) — 3 rules in `routing-rules.yaml` with entity conditions are
       explicitly skipped since this layer doesn't exist yet
 - [ ] Full Route Resolution (Step 8), Context-aware Resolution (Step 5, multi-turn)
-- [ ] Integration into `orchestrator.py`/the real production bot
+- [ ] Integration into `orchestrator.py`/the real production bot — **next priority**
 
 ---
 
 ## Suggested next priority order
-1. **#12** — run `nlu_combined_test.py --eval`, check the real accuracy against the 95% target,
-   decide the next direction (Entity Extraction, or integrating straight into the bot).
+1. **Integrate #11 + #12 into `orchestrator.py`/the real production bot** — the latest decision
+   (7/18), replacing further #12 accuracy optimization.
 2. **#1** — rotate `META_APP_SECRET`/`PAGE_ACCESS_TOKEN` (independent, should be done soon if not
    already).
-3. **#9** — real VPS deployment once infrastructure exists, so #11/#12 have an environment to
-   integrate into the production bot.
+3. **#9** — real VPS deployment once infrastructure exists, so #11/#12 have a real operating
+   environment.
 
 ## Reference documentation (`docs/`)
 - `docs/DATABASE-EN.md` — schema, migration history, common lookup SQL
