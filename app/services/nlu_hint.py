@@ -71,9 +71,8 @@ async def _ensure_loaded() -> bool:
 
 
 def _build_hint_text(decision, resolved) -> str:
-    """Ghep hint text theo type route - CHI la GOI Y, khong ra lenh tuyet doi
-    cho LLM (LLM van tu quyet dinh cuoi cung, giu dung tinh than "Minimal
-    Context Builder" cua guide)."""
+    """Ghep phan hint KHONG can Knowledge Base (tool/handoff) - phan
+    knowledge duoc xu ly rieng trong _build_knowledge_hint() vi can await."""
     lines = [
         f"He thong NLU phat hien y dinh khach hang: '{decision.intent}' "
         f"(do tin cay {decision.confidence}, qua {decision.matched_by})."
@@ -93,13 +92,51 @@ def _build_hint_text(decision, resolved) -> str:
             "tra/hoan tien) - can nhac goi escalate_to_human neu phu hop voi noi "
             "dung cau hoi that su cua khach."
         )
-    elif resolved.type == "knowledge":
-        lines.append(
-            "Cau hoi lien quan toi kien thuc san pham/thuong hieu - uu tien dung "
-            "thong tin tham khao da co san trong prompt, khong bia them."
-        )
 
     return "\n".join(lines)
+
+
+async def _build_knowledge_hint(message: str) -> str:
+    """MOI (18/7) - goi THAT Knowledge Base V2 (#11, M1-M6) qua
+    kb_retrieval.search_kb() de lay noi dung Knowledge Unit that, thay vi
+    chi 1 cau goi y chung chung nhu truoc.
+
+    PHAT HIEN QUAN TRONG luc sua: truoc ban sua nay, nlu_hint.py CHUA BAO
+    GIO goi Knowledge Base V2 that - moi type=knowledge chi tra ve 1 cau
+    hint chung chung, khien bot van dung RAG cu (#4, knowledge_chunks) chu
+    khong phai KB V2. Da xac nhan qua chat that: cau "3s coffee cua ai?"
+    bot tra loi "chua co thong tin cu the" trong khi SKL-BRAND-001 (da
+    ingest o M1) co ghi ro "Cong ty Co phan Robanme".
+
+    KHONG loc theo domain cu the (targets trong intent-catalog.yaml la
+    asset-level nhu "SKL-PRD-001", khong khop truc tiep voi domain-level
+    filter cua search_kb() nhu "product"/"brand" - de don gian va an toan,
+    dung xep hang ngu nghia+lexical cua search_kb() tu tim noi dung phu hop
+    nhat, khong can anh xa thu cong).
+
+    An toan: moi loi (DB chua san sang, kb_config chua kich hoat...) deu bi
+    bat, tra ve cau hint du phong chung chung thay vi raise.
+    """
+    try:
+        from app.services.kb_retrieval import search_kb
+        units = await search_kb(message, top_k=2)
+        if not units:
+            return (
+                "Cau hoi lien quan toi kien thuc san pham/thuong hieu nhung khong tim "
+                "thay noi dung tham khao cu the trong Knowledge Base - tra loi than "
+                "trong, khong bia."
+            )
+        lines = ["Kien thuc lien quan tu Knowledge Base (dung dung noi dung nay, khong bia them):"]
+        for u in units:
+            content_snippet = u["content"][:500]
+            lines.append(f"[{u['asset_id']}] {u['heading']}: {content_snippet}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[nlu_hint] Loi khi goi Knowledge Base V2 (bo qua, dung hint chung): {e}")
+        return (
+            "Cau hoi lien quan toi kien thuc san pham/thuong hieu - uu tien dung thong "
+            "tin tham khao da co san trong prompt, khong bia them."
+        )
 
 
 async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
@@ -140,6 +177,11 @@ async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
                 from app.services.nlu.context_state import save_conversation_state
                 domains = resolved.targets if (resolved and resolved.type == "knowledge") else []
                 await save_conversation_state(sender_id, decision.intent, domains)
+
+            if resolved and resolved.type == "knowledge":
+                base = _build_hint_text(decision, resolved)
+                kb_part = await _build_knowledge_hint(message)
+                return f"{base}\n{kb_part}"
             return _build_hint_text(decision, resolved)
 
         # Router khong du tin cay - thu Context-aware Resolution (Buoc 5)
