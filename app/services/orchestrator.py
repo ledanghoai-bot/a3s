@@ -136,7 +136,7 @@ async def handle_message(sender_id: str, text: str) -> str:
         # tai. An toan tuyet doi: get_nlu_hint() tu bat moi loi ben trong,
         # khong bao gio raise ra day - xem app/services/nlu_hint.py.
         if settings.enable_nlu_router:
-            nlu_hint = await get_nlu_hint(text)
+            nlu_hint = await get_nlu_hint(text, sender_id=sender_id)
             if nlu_hint:
                 system += f"\n\n## Goi y tu he thong phan loai NLU (tham khao, khong bat buoc)\n{nlu_hint}"
 

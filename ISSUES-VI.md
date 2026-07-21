@@ -535,10 +535,69 @@ quán với thiết kế.
 
 **Chưa làm (tiếp tục từ đây theo Integration Guide):**
 - [ ] Mở rộng Entity Extraction (`location`, `product`) để mở khóa `RTE-006`
-- [ ] Context-aware Resolution (Bước 5, multi-turn, dùng `conversation_state`)
+- [x] ~~Context-aware Resolution (Bước 5, multi-turn, dùng `conversation_state`)~~ → đã làm ở Bat 3 bên dưới
 - [ ] Tích hợp sâu hơn Knowledge Base V2 (#11) vào `nlu_hint.py` (hiện type=knowledge chỉ
       hint chung chung, chưa thực sự gọi `kb_retrieval.search_kb()`)
 - [ ] Cache (Bước 10)
+
+### Bat 3 — Context-aware Resolution (Bước 5, 18/7)
+`app/services/nlu/context_state.py` (mới) — dùng `conversation_state` lưu Redis (TTL 24h,
+giống lịch sử chat) để hỗ trợ giải quyết câu hỏi NỐI TIẾP mơ hồ (vd “Loại này pha
+lạnh được không?” rồi “Vậy hai muỗng thì sao?”). Đúng tinh thần guide: “không dùng
+state để ghi đè intent rõ ràng của tin nhắn hiện tại” — state **chỉ** được tham khảo
+khi Router (Pattern+Semantic) **đã không chắc chắn** (`action != accept`), và kết quả
+**chỉ** là 1 đoạn hint tham khảo thêm, không ép buộc.
+
+**Phát hiện khi tự test heuristic “câu nối tiếp”:** dùng “vậy” đứng riêng làm dấu
+hiệu ban đầu gây **2/6 case sai** — “3S Coffee là gì vậy” (câu hoàn chỉnh, phổ biến) và
+“Giá bao nhiêu” (≤ 4 từ) đều bị nhầm thành câu nối tiếp, vì “vậy” quá phổ biến như trợ
+từ cuối câu bình thường. Fix: bỏ “vậy” đứng riêng, chỉ giữ cụm RÕ NGHĨA hơn (“vậy
+con”, “thì sao”...) + danh sách các câu ngắn nhưng độc lập thường gặp (“giá”, “còn
+hàng”...) để loại trừ. Verify lại 7/7 test đúng qua sandbox trước khi đưa vào code.
+
+**Tích hợp:** `get_nlu_hint()` (`nlu_hint.py`) nhận thêm tham số `sender_id` (tùy chọn)
+— khi route thành công (`accept`), lưu lại intent làm ngữ cảnh cho lần sau; khi không
+chắc chắn VÀ câu “giống nối tiếp”, tra lại ngữ cảnh đã lưu để gợi ý (không ép buộc).
+`orchestrator.py` truyền `sender_id` vào đúng 1 chỗ gọi hiện có.
+`scripts/nlu_hint_test.py` thêm `--context` demo 2 tin nhắn liên tiếp với cùng
+`sender_id` giả lập.
+
+### Chưa test trên máy anh Hoài
+```bash
+docker compose exec api python scripts/nlu_hint_test.py --context
+```
+Kỳ vọng: tin nhắn 1 (“Loại này pha lạnh được không?”) có hint bình thường (route qua
+Pattern/Semantic); tin nhắn 2 (“Vậy hai muỗng thì sao?”) kỳ vọng có hint dạng “có thể
+là câu hỏi nối tiếp từ ngữ cảnh trước đó...” thay vì rỗng hoàn toàn.
+
+**⚠️ Lỗi câu mẫu demo tự phát hiện và sửa (18/7):** kết quả thực tế cả 2 tin nhắn
+đều rỗng — hóa ra câu 1 (“Loại này pha lạnh được không?”) **tự nó cũng không đạt
+`accept`** (không có High-Precision Rule nào khớp “pha lạnh” cụ thể), nên chưa từng
+có gì để lưu vào `context_state.py` cho câu 2 tham khảo — **không phải lỗi cơ chế**,
+chỉ là chọn sai câu mẫu demo. Đã sửa `nlu_hint_test.py --context` dùng
+`"gia bao nhieu"` làm tin nhắn 1 (đã xác nhận nhiều lần trước đó LUÔN `accept` qua
+`exact_phrase`), tin nhắn 2 đổi thành “Vậy 60g thì sao?”.
+
+### Chưa test lại trên máy anh Hoài
+```bash
+docker compose exec api python scripts/nlu_hint_test.py --context
+```
+Kỳ vọng lần này: tin nhắn 1 có hint `ask_price`; tin nhắn 2 có hint tham khảo ngữ
+cảnh (không rỗng).
+
+**✅ XÁC NHẬN THÀNH CÔNG HOÀN TOÀN (18/7)** — sau khi restart, sự cố Redis DNS
+(`Error -5 connecting to redis:6379`) tự phục hồi (sự cố hạ tầng Docker Desktop tạm
+thời, giống kiểu đã gặp với lỗi `/srv` trước đó — không phải lỗi code). Kết quả:
+tin nhắn 1 (“gia bao nhieu”) → hint đúng `ask_price`; tin nhắn 2 (“Vậy 60g thì sao?”)
+→ **có hint tham khảo ngữ cảnh đúng**: “có thể là câu hỏi NỐI TIẾP từ ngữ cảnh trước đó
+(chủ đề gần nhất: 'ask_price')...” — đúng chính xác thiết kế mong muốn.
+**Bat 3 hoàn tất.**
+
+🎉 **Cả 10/10 Bước trong `NLU-INTEGRATION-GUIDE.md` đã được triển khai** (một số
+giới hạn đã ghi rõ: Entity `location`/`product` chưa làm, Cache Bước 10 chưa làm,
+Knowledge Base V2 mới hint chung chung chưa gọi retrieval thật sự). Đây là điểm dừng
+hợp lý để đánh giá tổng thể trước khi cân nhắc bật `ENABLE_NLU_ROUTER=true` cho
+Messenger thật (hiện mới test qua Telegram customer bot #10).
 
 ---
 

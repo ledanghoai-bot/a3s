@@ -102,13 +102,20 @@ def _build_hint_text(decision, resolved) -> str:
     return "\n".join(lines)
 
 
-async def get_nlu_hint(message: str) -> str:
+async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
     """Ham DUY NHAT orchestrator.py can goi. Tra ve chuoi rong "" neu:
     - NLU chua load duoc (loi file/model), HOAC
-    - Router khong du tin cay (action != "accept") - CHU DINH khong bom hint
-      mo ho vao prompt, tranh gay nhieu neu do tin cay thap.
+    - Router khong du tin cay (action != "accept") VA khong co goi y ngu
+      canh nao tu Context-aware Resolution (Buoc 5) de bo sung.
     Neu co hint, tra ve 1 doan text ngan de orchestrator.py tu ghep vao
-    system prompt (giong cach dang lam voi rag_context/agent_notes)."""
+    system prompt (giong cach dang lam voi rag_context/agent_notes).
+
+    sender_id: TUY CHON - neu co, ho tro Context-aware Resolution (Buoc 5):
+    luu lai intent xac nhan chac chan de lam ngu canh cho tin nhan sau, va
+    tham khao ngu canh do khi tin nhan hien tai khong ro rang (chi la GOI Y
+    tham khao, khong ghi de intent ro rang cua tin nhan hien tai - dung theo
+    guide).
+    """
     ok = await _ensure_loaded()
     if not ok:
         return ""
@@ -127,11 +134,30 @@ async def get_nlu_hint(message: str) -> str:
             routing_rules_config=_state["routing_rules_config"],
         )
 
-        if decision.action != "accept":
-            return ""  # khong du tin cay - khong bom hint mo ho
+        if decision.action == "accept":
+            resolved = resolve_route(decision.intent, _state["catalog"])
+            if sender_id:
+                from app.services.nlu.context_state import save_conversation_state
+                domains = resolved.targets if (resolved and resolved.type == "knowledge") else []
+                await save_conversation_state(sender_id, decision.intent, domains)
+            return _build_hint_text(decision, resolved)
 
-        resolved = resolve_route(decision.intent, _state["catalog"])
-        return _build_hint_text(decision, resolved)
+        # Router khong du tin cay - thu Context-aware Resolution (Buoc 5)
+        # truoc khi tra ve rong hoan toan. CHI la goi y tham khao, KHONG ep
+        # buoc theo intent cu - dung theo guide "khong ghi de intent ro rang
+        # cua tin nhan hien tai".
+        if sender_id:
+            from app.services.nlu.context_state import get_conversation_state, looks_like_continuation
+            if looks_like_continuation(message):
+                state = await get_conversation_state(sender_id)
+                if state and state.get("previous_intent"):
+                    return (
+                        f"Tin nhan nay ngan/chua ro y dinh - co the la cau hoi NOI TIEP "
+                        f"tu ngu canh truoc do (chu de gan nhat: '{state['previous_intent']}'). "
+                        f"Can nhac ngu canh nay khi tra loi, nhung KHONG bat buoc phai theo neu "
+                        f"noi dung cau hien tai ro rang la chu de khac."
+                    )
+        return ""
     except Exception as e:
         print(f"[nlu_hint] Loi khi chay NLU Router (bo qua, dung flow cu): {e}")
         return ""
