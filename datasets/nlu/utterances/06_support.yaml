@@ -1,0 +1,56 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_support
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+locale: vi-VN
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+utterances:
+  - {id: UTT-SUP-001, text: "mình muốn khiếu nại", intent: complaint, style: direct, split: train}
+  - {id: UTT-SUP-002, text: "sản phẩm có vấn đề", intent: complaint, style: standard, split: train}
+  - {id: UTT-SUP-003, text: "hũ cà phê mình nhận bị lỗi", intent: complaint, style: standard, split: train}
+  - {id: UTT-SUP-004, text: "hàng giao không đúng", intent: complaint, style: standard, split: train}
+  - {id: UTT-SUP-005, text: "đóng gói bị hư", intent: complaint, style: colloquial, split: train}
+  - {id: UTT-SUP-006, text: "mình không hài lòng", intent: complaint, style: indirect, split: train}
+  - {id: UTT-SUP-007, text: "dịch vụ bên bạn quá chậm", intent: complaint, style: negative, split: train}
+  - {id: UTT-SUP-008, text: "tại sao giao sai đơn", intent: complaint, style: direct, split: train}
+  - {id: UTT-SUP-009, text: "cf nhận dc co van de", normalized_text: "cà phê nhận được có vấn đề", intent: complaint, style: accentless, split: train}
+  - {id: UTT-SUP-010, text: "loi sp roi shop", normalized_text: "sản phẩm lỗi rồi shop", intent: complaint, style: abbreviation, split: train}
+  - {id: UTT-SUP-011, text: "mình cần phản ánh nhân viên", intent: complaint, style: formal, split: train}
+  - {id: UTT-SUP-012, text: "shop xử lý giúp vụ này", intent: complaint, style: contextual, split: validation}
+
+  - {id: UTT-SUP-013, text: "mình muốn đổi hàng", intent: request_return, style: standard, split: train}
+  - {id: UTT-SUP-014, text: "có đổi sản phẩm được không", intent: request_return, style: standard, split: train}
+  - {id: UTT-SUP-015, text: "cho mình trả lại hũ này", intent: request_return, style: direct, split: train}
+  - {id: UTT-SUP-016, text: "quy trình đổi trả thế nào", intent: request_return, style: formal, split: train}
+  - {id: UTT-SUP-017, text: "hàng lỗi đổi giúp mình", intent: request_return, style: colloquial, split: train}
+  - {id: UTT-SUP-018, text: "doi tra dc k", normalized_text: "đổi trả được không", intent: request_return, style: abbreviation, split: train}
+  - {id: UTT-SUP-019, text: "tôi cần gửi trả sản phẩm", intent: request_return, style: formal, split: validation}
+  - {id: UTT-SUP-020, text: "mua nhầm thì đổi được chứ", intent: request_return, style: conditional, split: validation}
+
+  - {id: UTT-SUP-021, text: "mình muốn hoàn tiền", intent: request_refund, style: direct, split: train}
+  - {id: UTT-SUP-022, text: "bao giờ được hoàn tiền", intent: request_refund, style: standard, split: train}
+  - {id: UTT-SUP-023, text: "hủy đơn và trả tiền lại giúp mình", intent: request_refund, style: direct, split: train}
+  - {id: UTT-SUP-024, text: "yêu cầu hoàn lại khoản đã thanh toán", intent: request_refund, style: formal, split: train}
+  - {id: UTT-SUP-025, text: "hoan tien giup mk", normalized_text: "hoàn tiền giúp mình", intent: request_refund, style: abbreviation, split: train}
+  - {id: UTT-SUP-026, text: "refund đơn này", normalized_text: "hoàn tiền đơn này", intent: request_refund, style: mixed, split: train}
+  - {id: UTT-SUP-027, text: "tôi không nhận hàng nữa, xin hoàn tiền", intent: request_refund, style: formal, split: validation}
+  - {id: UTT-SUP-028, text: "tiền của mình xử lý sao rồi", intent: request_refund, style: indirect, split: validation}
+
+  - {id: UTT-SUP-029, text: "mình muốn mua sỉ", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-SUP-030, text: "có chính sách đại lý không", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-SUP-031, text: "công ty mình cần mua số lượng lớn", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-SUP-032, text: "muốn hợp tác phân phối", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-SUP-033, text: "xin liên hệ bộ phận kinh doanh", intent: b2b_inquiry, style: formal, split: train}
+  - {id: UTT-SUP-034, text: "mua si lien he ai", normalized_text: "mua sỉ liên hệ ai", intent: b2b_inquiry, style: accentless, split: train}
+
+  - {id: UTT-SUP-035, text: "mình cần hỗ trợ gấp", intent: request_consultation, style: urgent, split: train}
+  - {id: UTT-SUP-036, text: "nhờ kiểm tra giúp vấn đề này", intent: request_consultation, style: contextual, split: train}
+  - {id: UTT-SUP-037, text: "cho mình gặp người phụ trách", intent: request_consultation, style: handoff_request, split: train}
+  - {id: UTT-SUP-038, text: "tôi cần nhân viên hỗ trợ", intent: request_consultation, style: formal, split: train}
+  - {id: UTT-SUP-039, text: "ht minh voi", normalized_text: "hỗ trợ mình với", intent: request_consultation, style: abbreviation, split: validation}
+  - {id: UTT-SUP-040, text: "có thể giúp mình xử lý không", intent: request_consultation, style: standard, split: validation}

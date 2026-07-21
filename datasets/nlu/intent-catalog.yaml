@@ -1,0 +1,326 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_intent_catalog
+version: 1.1.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+defaults:
+  locale: vi-VN
+  confidence_threshold: 0.85
+  low_confidence_threshold: 0.65
+  low_confidence_action: clarify
+  max_candidates: 3
+
+semantic_routing:
+  auto_accept_threshold: 0.85
+  fallback_threshold: 0.65
+  min_top1_top2_margin: 0.10
+  ambiguous_action: context_or_lightweight_rerank
+  low_confidence_action: ask_one_question
+
+routing:
+  precedence:
+    - privacy_and_safety
+    - explicit_transaction_action
+    - high_precision_rules
+    - entity_aware_rules
+    - semantic_router
+    - contextual_rerank
+    - clarify
+  greeting_policy:
+    substantive_intent_overrides_greeting: true
+    strip_vocative_prefix_before_routing: true
+  rules_source: routing-rules.yaml
+
+route_types:
+  - knowledge
+  - tool
+  - playbook
+  - handoff
+  - clarify
+  - out_of_scope
+
+entities:
+  - product
+  - quantity
+  - unit
+  - location
+  - taste_preference
+  - brewing_method
+  - temperature
+  - order_id
+  - payment_method
+  - health_context
+  - business_type
+
+intents:
+  - intent: greeting
+    description: Khách chào hỏi hoặc mở đầu cuộc trò chuyện.
+    priority: P1
+    route:
+      type: playbook
+      targets: [SKL-CS-001]
+    confidence_threshold: 0.80
+
+  - intent: request_consultation
+    description: Khách yêu cầu được tư vấn nhưng chưa nêu nhu cầu cụ thể.
+    priority: P1
+    route:
+      type: playbook
+      targets: [SKL-CS-002, SKL-SAL-003]
+    missing_entity_action:
+      type: ask_one_question
+
+  - intent: ask_brand
+    description: Khách hỏi 3S Coffee là gì, thuộc đơn vị nào hoặc thông tin thương hiệu.
+    priority: P1
+    route:
+      type: knowledge
+      targets: [SKL-BRAND-001]
+
+  - intent: ask_product
+    description: Khách hỏi tổng quan về sản phẩm cà phê đang bán.
+    priority: P1
+    route:
+      type: knowledge
+      targets: [SKL-PRD-001, SKL-PRD-002, SKL-FAQ-001]
+
+  - intent: ask_freeze_dried
+    description: Khách hỏi cà phê sấy lạnh là gì hoặc công nghệ sản xuất.
+    priority: P1
+    route:
+      type: knowledge
+      targets: [SKL-PRD-001]
+
+  - intent: ask_ingredients
+    description: Khách hỏi nguyên liệu, Robusta, Arabica hoặc tỷ lệ phối trộn.
+    priority: P1
+    route:
+      type: knowledge
+      targets: [SKL-PRD-002, SKL-FAQ-001]
+
+  - intent: ask_taste
+    description: Khách hỏi hương thơm, vị đậm, đắng, chua, hậu vị hoặc cảm giác uống.
+    priority: P1
+    optional_entities: [taste_preference]
+    route:
+      type: knowledge
+      targets: [SKL-PRD-003, SKL-SAL-004]
+
+  - intent: compare_coffee
+    description: Khách so sánh với cà phê pha máy, pha phin hoặc thương hiệu khác.
+    priority: P1
+    route:
+      type: knowledge
+      targets: [SKL-PRD-003, SKL-FAQ-001, SKL-SAL-005]
+
+  - intent: ask_brewing
+    description: Khách hỏi cách pha chung nhưng chưa nêu nóng hay nguội.
+    priority: P1
+    optional_entities: [brewing_method]
+    route:
+      type: knowledge
+      targets: [SKL-PRD-004, SKL-FAQ-002]
+
+  - intent: ask_hot_brewing
+    description: Khách hỏi cách pha nóng, nhiệt độ hoặc thời gian hòa tan.
+    priority: P1
+    route:
+      type: knowledge
+      targets: [SKL-PRD-004, SKL-FAQ-002]
+
+  - intent: ask_cold_brewing
+    description: Khách hỏi pha nước nguội, lạnh hoặc thêm đá.
+    priority: P1
+    route:
+      type: knowledge
+      targets: [SKL-PRD-004, SKL-FAQ-002]
+
+  - intent: ask_caffeine
+    description: Khách hỏi hàm lượng caffeine hoặc quy đổi theo muỗng.
+    priority: P1
+    optional_entities: [quantity, unit]
+    route:
+      type: knowledge
+      targets: [SKL-PRD-004, SKL-FAQ-004]
+    confidence_threshold: 0.90
+
+  - intent: health_question
+    description: Khách hỏi sử dụng liên quan thai kỳ, bệnh lý, thuốc hoặc phản ứng bất thường.
+    priority: P0
+    optional_entities: [health_context]
+    route:
+      type: playbook
+      targets: [SKL-FAQ-004, RT-002-RUNTIME-GUARDRAILS-AND-FALLBACKS]
+      handoff: conditional
+    confidence_threshold: 0.95
+
+  - intent: ask_price
+    description: Khách hỏi giá hiện tại của sản phẩm.
+    priority: P0
+    required_entities: [product]
+    route:
+      type: tool
+      target: get_current_price
+    missing_entity_action:
+      type: ask_one_question
+      entity: product
+    confidence_threshold: 0.90
+
+  - intent: ask_stock
+    description: Khách hỏi sản phẩm còn hàng hay hết hàng.
+    priority: P0
+    required_entities: [product]
+    route:
+      type: tool
+      target: get_current_stock
+    missing_entity_action:
+      type: ask_one_question
+      entity: product
+    confidence_threshold: 0.90
+
+  - intent: ask_promotion
+    description: Khách hỏi chương trình khuyến mãi, voucher hoặc ưu đãi hiện tại.
+    priority: P0
+    route:
+      type: tool
+      target: get_current_promotions
+    confidence_threshold: 0.90
+
+  - intent: purchase_product
+    description: Khách thể hiện mong muốn mua hoặc đặt sản phẩm.
+    priority: P1
+    required_entities: [product]
+    optional_entities: [quantity, unit]
+    route:
+      type: playbook
+      targets: [SKL-SAL-005, SKL-CON-002]
+    missing_entity_action:
+      type: ask_one_question
+      entity: product
+
+  - intent: confirm_order
+    description: Khách xác nhận chốt đơn sau khi đã có sản phẩm và số lượng.
+    priority: P0
+    required_entities: [product, quantity]
+    route:
+      type: tool
+      target: create_or_confirm_order
+    confidence_threshold: 0.95
+
+  - intent: ask_payment
+    description: Khách hỏi phương thức hoặc quy trình thanh toán.
+    priority: P1
+    optional_entities: [payment_method]
+    route:
+      type: tool
+      target: get_payment_options
+
+  - intent: ask_cod
+    description: Khách hỏi có hỗ trợ thanh toán khi nhận hàng hay không.
+    priority: P1
+    route:
+      type: tool
+      target: get_cod_policy
+
+  - intent: ask_shipping_availability
+    description: Khách hỏi có giao tới khu vực cụ thể hay không.
+    priority: P1
+    required_entities: [location]
+    route:
+      type: tool
+      target: check_shipping_availability
+    missing_entity_action:
+      type: ask_one_question
+      entity: location
+
+  - intent: ask_shipping_fee
+    description: Khách hỏi phí giao hàng.
+    priority: P0
+    required_entities: [location]
+    optional_entities: [product, quantity]
+    route:
+      type: tool
+      target: get_shipping_quote
+    missing_entity_action:
+      type: ask_one_question
+      entity: location
+    confidence_threshold: 0.90
+
+  - intent: ask_delivery_time
+    description: Khách hỏi thời gian dự kiến nhận hàng.
+    priority: P1
+    required_entities: [location]
+    route:
+      type: tool
+      target: get_delivery_estimate
+    missing_entity_action:
+      type: ask_one_question
+      entity: location
+
+  - intent: ask_order_status
+    description: Khách hỏi tình trạng xử lý hoặc giao của đơn hàng cá nhân.
+    priority: P0
+    optional_entities: [order_id]
+    route:
+      type: tool
+      target: get_order_status
+      requires_identity_verification: true
+    confidence_threshold: 0.95
+
+  - intent: ask_tracking
+    description: Khách hỏi mã vận đơn hoặc tiến trình vận chuyển.
+    priority: P0
+    optional_entities: [order_id]
+    route:
+      type: tool
+      target: get_tracking_information
+      requires_identity_verification: true
+    confidence_threshold: 0.95
+
+  - intent: complaint
+    description: Khách phản ánh trải nghiệm không tốt, sản phẩm hoặc dịch vụ có vấn đề.
+    priority: P0
+    route:
+      type: playbook
+      targets: [SKL-CON-003, SKL-CS-003]
+      handoff: conditional
+    confidence_threshold: 0.90
+
+  - intent: request_return
+    description: Khách yêu cầu đổi hoặc trả sản phẩm.
+    priority: P0
+    optional_entities: [order_id, product]
+    route:
+      type: handoff
+      target: returns_support
+    confidence_threshold: 0.95
+
+  - intent: request_refund
+    description: Khách yêu cầu hoàn tiền.
+    priority: P0
+    optional_entities: [order_id]
+    route:
+      type: handoff
+      target: refund_support
+    confidence_threshold: 0.95
+
+  - intent: b2b_inquiry
+    description: Khách hỏi mua số lượng lớn, đại lý, doanh nghiệp hoặc hợp tác phân phối.
+    priority: P1
+    optional_entities: [quantity, business_type, location]
+    route:
+      type: handoff
+      target: b2b_sales
+
+  - intent: end_conversation
+    description: Khách xác nhận không cần hỗ trợ thêm hoặc muốn kết thúc hội thoại.
+    priority: P1
+    route:
+      type: playbook
+      targets: [SKL-CON-001]
+    confidence_threshold: 0.80

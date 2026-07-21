@@ -1,0 +1,52 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_greetings
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+locale: vi-VN
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+utterances:
+  - {id: UTT-GREET-001, text: "xin chào", intent: greeting, style: standard, split: train}
+  - {id: UTT-GREET-002, text: "chào shop", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-003, text: "shop ơi", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-004, text: "alo shop", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-005, text: "alo alo", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-006, text: "hello", intent: greeting, style: english, split: train}
+  - {id: UTT-GREET-007, text: "hello shop", intent: greeting, style: mixed, split: train}
+  - {id: UTT-GREET-008, text: "hi", intent: greeting, style: english, split: train}
+  - {id: UTT-GREET-009, text: "hi shop", intent: greeting, style: mixed, split: train}
+  - {id: UTT-GREET-010, text: "ad ơi", intent: greeting, style: abbreviation, split: train}
+  - {id: UTT-GREET-011, text: "admin ơi", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-012, text: "có ai không", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-013, text: "có ai trực không", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-014, text: "bên mình có ai hỗ trợ không", intent: greeting, style: standard, split: train}
+  - {id: UTT-GREET-015, text: "shop còn online không", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-016, text: "cho mình hỏi chút", intent: request_consultation, style: colloquial, split: train}
+  - {id: UTT-GREET-017, text: "mình cần tư vấn", intent: request_consultation, style: standard, split: train}
+  - {id: UTT-GREET-018, text: "tư vấn giúp mình với", intent: request_consultation, style: colloquial, split: train}
+  - {id: UTT-GREET-019, text: "nhờ shop tư vấn", intent: request_consultation, style: standard, split: train}
+  - {id: UTT-GREET-020, text: "cần shop hỗ trợ xíu", intent: request_consultation, style: colloquial, split: train}
+  - {id: UTT-GREET-021, text: "cho hỏi cái này", intent: request_consultation, style: colloquial, split: train}
+  - {id: UTT-GREET-022, text: "em ơi tư vấn anh", intent: request_consultation, style: colloquial, split: train}
+  - {id: UTT-GREET-023, text: "chị muốn hỏi sản phẩm", intent: request_consultation, style: colloquial, split: train}
+  - {id: UTT-GREET-024, text: "shop tư vấn cà phê nhé", intent: request_consultation, style: colloquial, split: train}
+  - {id: UTT-GREET-025, text: "mình muốn tìm hiểu", intent: request_consultation, style: standard, split: train}
+  - {id: UTT-GREET-026, text: "chao shop", normalized_text: "chào shop", intent: greeting, style: accentless, split: train}
+  - {id: UTT-GREET-027, text: "shop oi", normalized_text: "shop ơi", intent: greeting, style: accentless, split: train}
+  - {id: UTT-GREET-028, text: "alo co ai ko", normalized_text: "alo có ai không", intent: greeting, style: accentless, split: train}
+  - {id: UTT-GREET-029, text: "ad oi tu van", normalized_text: "admin ơi tư vấn", intent: request_consultation, style: accentless, split: train}
+  - {id: UTT-GREET-030, text: "tu van mk voi", normalized_text: "tư vấn mình với", intent: request_consultation, style: teencode, split: train}
+  - {id: UTT-GREET-031, text: "helo shop", normalized_text: "hello shop", intent: greeting, style: typo, split: train}
+  - {id: UTT-GREET-032, text: "amin oi", normalized_text: "admin ơi", intent: greeting, style: typo, split: train}
+  - {id: UTT-GREET-033, text: "hí shop", normalized_text: "hi shop", intent: greeting, style: playful, split: train}
+  - {id: UTT-GREET-034, text: "ê shop", intent: greeting, style: informal, split: train}
+  - {id: UTT-GREET-035, text: "shop nghe không", intent: greeting, style: colloquial, split: train}
+  - {id: UTT-GREET-036, text: "tôi cần người hỗ trợ", intent: request_consultation, style: formal, split: validation}
+  - {id: UTT-GREET-037, text: "bên bạn tư vấn giúp tôi được không", intent: request_consultation, style: formal, split: validation}
+  - {id: UTT-GREET-038, text: "mình hỏi nhanh một chút nhé", intent: request_consultation, style: colloquial, split: validation}
+  - {id: UTT-GREET-039, text: "cho tui hỏi cà phê với", intent: request_consultation, style: southern, split: validation}
+  - {id: UTT-GREET-040, text: "shop rảnh tư vấn hông", normalized_text: "shop rảnh tư vấn không", intent: request_consultation, style: southern, split: validation}

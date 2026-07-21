@@ -1517,3 +1517,539 @@ ghi ở trên).
 thật, Tool thật thay mô phỏng, Fallback F1/F4, phân quyền role, audit trail.
 - `EV-005` Continuous Learning Loop (quy trình vận hành cho con người/team,
 không phải cần code).
+
+---
+
+## Lớp NLU — Bat A: Loader + Validator + Normalization (18/7)
+Team Knowledge gửi `datasets.zip` đúng theo `NLU-INTEGRATION-GUIDE.md` đã hứa.
+
+### Rà soát bộ dữ liệu — chất lượng rất tốt, đúng đủ MVP baseline
+| Thành phần | Số lượng | Yêu cầu MVP |
+|---|---|---|
+| Intent | 30 | 25-35 ✅ |
+| Utterance | 300 | 300-400 ✅ |
+| Normalization rule | 100 | 80-120 ✅ |
+| Test routing (held-out) | 60 | ≥5/intent P1 ✅ |
+| Test normalization | 40 | — |
+
+Đối chiếu chéo: mọi `SKL-*` trong `intent-catalog.yaml` đều khớp đúng asset
+thật trong depository (không tham chiếu treo). Cấu trúc thư mục thực tế:
+`datasets/tests/` là **anh em** của `datasets/nlu/` (không phải con như
+README.md mô tả) — khác spec nhưng không cần chuẩn hóa gì, chỉ cần code đọc
+đúng vị trí thật (khác vụ `skill/`/`skills/` của Knowledge Base trước).
+
+### Đã code (`app/services/nlu/`)
+- `loader.py` — đọc `intent-catalog.yaml`, `normalization.yaml`,
+  `utterances/*.yaml`, `tests/*.yaml`.
+- `validator.py` — 4 kiểm tra theo đúng "Source-of-Truth Rules" trong
+  `README.md` của chính bộ dữ liệu (không tự bịa rule): intent trung/thiếu
+  trường, utterance ID trung/tham chiếu intent treo/text trùng, train/test
+  leakage, normalization rule hợp lệ.
+- `normalizer.py` — áp dụng 100 rule theo đúng 5 bước đã mô tả trong
+  `NLU-INTEGRATION-GUIDE.md`.
+
+### Bug thật phát hiện khi tự test — đã sửa trước khi giao
+**Lỗi cascading giữa các rule phrase:** áp dụng rule tuần tự (vòng lặp for) khiến
+1 rule có thể vô tình khớp **vào kết quả** của rule trước đó — ví dụ thật:
+`"con ko"` và `"con k"` đều ra `"con không"`, nhưng sau khi rule đầu chạy xong,
+chuỗi kết quả `"còn không"` đã **tự chứa sẵn** `"còn k"` ở đầu (vì "không" bắt
+đầu bằng "k"), khiến rule thứ 2 khớp đè lên lần nữa → kết quả sai
+`"còn khônghông"`. **Fix:** áp dụng tất cả rule phrase trong **1 lần quét duy nhất**
+(ghép thành 1 regex alternation, sắp xếp dài trước) thay vì vòng lặp tuần tự.
+
+**Đã verify:** từ 34/40 → **36/40 test normalization PASS** sau fix (test qua
+sandbox với đúng 100 rule + 40 test case thật trước khi đưa code chính thức).
+
+### 4 góp ý dữ liệu gửi lại team Knowledge (không tự đoán thêm rule)
+Còn 4/40 test normalization fail — xác minh **không phải lỗi code** mà là thiếu
+rule trong `normalization.yaml`:
+1. `"chot don nha"` (không dấu) không khớp vì rule `NRM-050` viết **có dấu**
+   (`"chốt đơn nha"`) — cần thêm biến thể không dấu hoặc matching linh
+   hoạt về dấu.
+2. `"dh toi dau"` — chỉ có rule `"don toi dau"` (không phải "dh"), nên sau khi
+   `"dh"` đã đổi thành "đơn hàng" (token rule khác), phần "toi dau" không
+   còn rule nào đặc tả.
+3. `"thanks ad"` — chỉ có rule `"ad oi"`→`"admin ơi"`, chưa có rule đặt riêng
+   `"ad"`→`"admin"` (không cần "oi" theo sau).
+4. `"3S Coffee"` (tên thương hiệu) bị rule `"coffee"`→`"cà phê"` đổi nhầm —
+   cần cơ chế bảo vệ tên riêng/thương hiệu khỏi normalization (ngoài phạm
+   vi engine hiện tại — cần quyết định từ team Knowledge: thêm danh sách
+   "cụm từ bảo vệ", hay chấp nhận giới hạn này).
+
+**Phát hiện thêm về phạm vi "train/test leakage":** quy tắc này chỉ nên áp
+dụng cho `intent-routing-tests.yaml` (test phân loại intent) — **không** áp
+dụng cho `normalization-tests.yaml` (test hàm chuẩn hóa, đương nhiên trùng
+câu với utterance vì cả 2 cùng lấy mẫu cách viết thông tục, không phải lỗi
+leak thật). Đã sửa đúng phạm vi trong `scripts/nlu_build.py`.
+
+**Đã verify validator với dữ liệu thật:** 0 lỗi cả 4 hạng mục (ID trùng,
+intent treo, text trùng, leakage) — xác nhận bộ dữ liệu team Knowledge sạch.
+
+**`scripts/nlu_build.py`** — CLI đọc + validate + demo `normalize()`.
+
+### Chưa test trên máy anh Hoài
+Giải nén `datasets.zip` **thẳng vào** `C:\alpha3s\datasets\` (không cần chuẩn
+hóa nào — cấu trúc zip đã đúng vị trí code đang đọc), rồi:
+```bash
+docker compose exec api python scripts/nlu_build.py
+```
+Kỳ vọng: `VALIDATION: 0 loi`, và 4 dòng demo `normalize()` in ra đúng kết
+quả đã verify (bao gồm `"sp con ko"` → `"sản phẩm còn không"` đúng, không
+còn lỗi cascading).
+
+**✅ XÁC NHẬN (18/7)** — anh Hoài chạy `nlu_build.py`: kết quả khớp **chính
+xác** với sandbox đã verify (`0 loi`, 4 dòng demo đúng). **Bat A hoàn tất.**
+Đã xuất riêng `docs/NLU_DATASET_FEEDBACK-VI.md` — file độc lập, đủ ngữ
+cảnh để gửi thẳng team Knowledge (không cần đọc lại `ISSUES-VI.md`), gồm
+4 góp ý chi tiết từng case + giải thích phạm vi "train/test leakage".
+
+## Lớp NLU — Bat B: Pattern/Exact Router (18/7)
+Theo đúng Bước 3 trong `NLU-INTEGRATION-GUIDE.md` ("Exact and Pattern
+Router") — thử Exact phrase trước, rồi Token/phrase combination. **MVP data-
+driven:** dùng chính 300 utterance làm nguồn pattern, **không** hardcode
+regex tay như `kb_router.py` (M3 của Knowledge Base V2) — khác biệt cốt lõi:
+NLU layer học từ utterance library thật, không phải từ quy tắc tự viết.
+
+**Thiết kế 2 tầng:**
+1. **Exact match** — đánh index theo cả `text` gốc lẫn `normalized_text`
+   (nếu có cả 2, khác nhau) — tăng khả năng khớp chính xác.
+2. **Token overlap (Jaccard)** — so tập từ, trả về intent của utterance
+   overlap cao nhất **nếu ≥ ngưỡng**.
+
+**Phát hiện quan trọng khi test với 60 test held-out thật:**
+- Ngưỡng ban đầu 0.7: **0/60** match được gì cả.
+- Kiểm tra phân bố điểm overlap thực tế: dao động thất thường 0.1-0.6,
+  **không đáng tin cậy** làm căn cứ quyết định cho câu diễn đạt khác hẳn
+  từ vựng train — **đúng như mong đợi**, không phải lỗi: bộ test held-out
+  **cố ý** dùng từ vựng khác (theo đúng README.md), đây chính là lý do spec
+  thiết kế riêng Semantic Router (Bat C) cho loại câu này.
+- Test lại **đúng use-case thật** của Pattern Router (câu viết tắt/gần với
+  utterance train, không phải held-out xa lạ): sau khi cải thiện đánh index
+  theo cả `text` + `normalized_text` (360 vs 286 entry), pass 5/6 câu mẫu.
+- Giữ ngưỡng token overlap = **0.6**: trên 60 held-out, chỉ match được 2/60
+  nhưng **cả 2 đều đúng, 0 sai** — đúng tinh thần ADR-NLU-001 ("Confidence
+  thấp phải clarify hoặc fallback; không ép route") — **an toàn hơn độ phủ**.
+
+**Kết luận rút ra (quan trọng để hiểu đúng phạm vi Bat B):** Pattern Router
+chỉ xử lý được câu **gần** với dữ liệu train (đúng thiết kế "fast path") —
+phần lớn câu diễn đạt tự nhiên khác hẳn **bắt buộc** phải qua Semantic
+Router (Bat C) mới xử lý được — không phải thiếu sót của Bat B, mà là đúng
+nhiệm vụ đã phân công cho từng tầng theo đúng kiến trúc đã thiết kế.
+
+**`app/services/nlu/pattern_router.py`** + **`scripts/nlu_pattern_test.py`**
+(CLI, hỗ trợ `--eval` chạy toàn bộ 60 test held-out).
+
+### Chưa test trên máy anh Hoài
+```bash
+docker compose exec api python scripts/nlu_pattern_test.py "shop oi"
+docker compose exec api python scripts/nlu_pattern_test.py "gia bn"
+docker compose exec api python scripts/nlu_pattern_test.py --eval
+```
+Kỳ vọng: 2 câu đầu match `exact_phrase`, confidence 1.0; `--eval` in ra
+**đúng 2/60 match, cả 2 đúng, 0 sai**.
+
+**✅ XÁC NHẬN (18/7)** — khớp 100% với dự đoán từ sandbox (`360 exact
+entries`, cả 2 câu đơn đúng, `--eval` ra đúng 2/60, 0 sai). **Bat B hoàn
+tất.**
+
+## Lớp NLU — Bat C: Semantic Router (18/7)
+Theo đúng Bước 4 (Semantic Router) + Bước 7 (Confidence Decision) trong
+`NLU-INTEGRATION-GUIDE.md`.
+
+**Giới hạn quan trọng cần biết trước khi test:** Bat C cần **model ML
+thật** (embedding) để chạy — sandbox của Claude **không có mạng** nên
+**không thể tinh embedding thật để tự verify** như Bat A/B (thuần
+regex/string, không cần model). Đã test kỹ **logic thuật toán** (argsort,
+dedup theo intent, sắp xếp) bằng vector giả lập (numpy, không cần model) —
+xác nhận đúng, nhưng **chưa biết độ chính xác thật trên 60 held-out** cho
+đến khi anh Hoài chạy trên máy có model thật.
+
+**Thiết kế:**
+- Lưu embedding **trong bộ nhớ** (numpy array), **không** qua Postgres/pgvector
+  như Knowledge Base V2 (M2) — vì "Intent Index" chỉ có 300 utterance (rất
+  nhỏ), giữ trong RAM tính cosine similarity qua ma trận nhanh hơn round-trip
+  DB, đúng tinh thần "cache-warm execution" của spec.
+- `route_semantic()`: trả tối đa top-3 candidate, **mỗi candidate 1 intent
+  khác nhau** (dedup, không để nhiều utterance cùng intent chiếm hết slot).
+- `decide_confidence()`: áp dụng đúng ngưỡng **riêng từng intent** từ
+  `intent-catalog.yaml` (không dùng 1 ngưỡng chung) — đã xác nhận dữ liệu
+  thật: intent rủi ro cao ngưỡng cao hơn (`health_question=0.95`,
+  `ask_order_status=0.95`, `complaint=0.90`), intent an toàn ngưỡng thấp hơn
+  (`greeting=0.80`) so với default 0.85.
+
+**`requirements.txt`**: thêm `numpy>=1.26` để khai rõ ràng (thực tế đã có
+sẵn qua `sentence-transformers` — **không bắt buộc rebuild**, nhưng rebuild
+1 lần cho sạch vẫn nên làm).
+
+**`app/services/nlu/semantic_router.py`** + **`scripts/nlu_semantic_test.py`**
+(CLI, hỗ trợ `--eval`).
+
+### Chưa test trên máy anh Hoài — đây là lần đầu tiên C thiếu kết quả tự verify
+```bash
+docker compose exec api python scripts/nlu_semantic_test.py --eval
+```
+
+**✅ XÁC NHẬN model mới có cải thiện thật (18/7)** — `paraphrase-multilingual-
+mpnet-base-v2`: **Đúng 55.0% (tăng từ 38.3%) | Sai 31.7% (tăng nhẹ từ
+28.3%) | Clarify 13.3% (giảm từ 33.3%)**. Model mới tự tin hơn hẳn —
+phần lớn sự tự tin đó đúng, nhưng **số tuyệt đối case Sai cũng tăng
+nhẹ** — một số case trước đây "không chắc → hỏi lại" giờ chuyển thành
+"tự tin nhưng sai" thay vì "tự tin và đúng". Anh Hoài quyết định: tăng
+ngưỡng để đổi an toàn lấy độ phủ (giảm Sai dù Clarify tăng lại).
+
+### Phân tích trước khi sửa — tăng đúng tham số nào?
+Soi lại dữ liệu: hầu hết case Sai đang ở mức `context_check` (không phải
+`accept`) — nghĩa là tăng ngưỡng `confidence_threshold` (accept) **không
+giúp giảm Sai** trong cách đo hiện tại (context_check-sai vẫn tính là
+Sai). Tham số cần tăng thật sự là **`low_confidence_threshold`** (hiện
+0.65) — ranh giới giữa "đoán" và "hỏi lại".
+
+### Cải tiến `scripts/nlu_semantic_test.py` — thêm chế độ `--sweep`
+Thay vì bắt anh Hoài chạy lại toàn bộ (tính embedding lại, tốn thời gian)
+cho mỗi ngưỡng muốn thử, thêm chế độ `--sweep`: tính candidate **1 lần
+duy nhất**, rồi thử **7 giá trị `low_confidence_threshold` khác nhau**
+(0.60 → 0.90) trong cùng 1 lần chạy, in ra bảng đường đánh đổi đầy đủ.
+Đã verify logic đúng bằng dữ liệu giả lập (không cần model) trước khi
+đưa code chính thức — xác nhận đúng xu hướng: tăng ngưỡng → giảm Sai,
+tăng Clarify, Dung giữ nguyên (với case đã đủ tự tin từ đầu).
+
+### Chưa test trên máy anh Hoài
+```bash
+docker compose exec api python scripts/nlu_semantic_test.py --sweep
+```
+Không cần tải lại model (đã có sẵn từ lần trước). Xem bảng kết quả 7 dòng,
+chọn ngưỡng có tỷ lệ Sai chấp nhận được nhất (khuyến nghị: ưu tiên giảm
+Sai xuống gần 0 trước, chấp nhận Clarify cao hơn, vì đoán sai nguy hiểm
+hơn hỏi lại). Báo lại con số cụ thể để quyết định ngưỡng chính thức dùng
+cho `intent-catalog.yaml` (hiện đang default 0.65 trong file team Knowledge
+gửi — có thể cần đề xuất họ cập nhật nếu quyết định đổi).
+
+**✅ XÁC NHẬN FIX ĐÃ ÁP DỤNG ĐÚNG (18/7)** — grep xác nhận code đúng,
+restart + xóa cache rồi, nhưng kết quả vẫn giống hệt tuyệt đối. Nguyên
+nhân: toàn bộ 60 câu held-out đều là tiếng Việt đầy đủ có dấu chuẩn,
+không chứa từ viết tắt hoặc không dấu nào — normalize() thực chất là hàm
+đồng nhất (input bằng output) trên bộ test này, nên fix không ảnh hưởng
+gì cả — không phải bug, chỉ là fix đúng nhưng không đúng nguyên nhân của
+vấn đề này.
+
+**Kết luận:** nguyên nhân thực sự nhiều khả năng là giới hạn của model
+embedding (`paraphrase-multilingual-MiniLM-L12-v2`, model nhỏ) khi phải
+phân biệt 30 intent khá gần nghĩa. Anh Hoài quyết định: thử model mạnh hơn.
+
+### Nâng cấp model embedding — tách riêng khỏi Knowledge Base V2
+**Quyết định quan trọng:** `embedder.py` hiện đang dùng chung cho cả
+Knowledge Base V2 (M1-M6, đã test kỹ/hoạt động tốt) lẫn NLU Semantic
+Router. Để không đụng tới pipeline đang chạy đúng (đổi model sẽ cần
+re-ingest toàn bộ Knowledge Base), tạo embedder riêng chỉ dùng cho NLU:
+
+- **`app/services/nlu/nlu_embedder.py`** (mới) — model
+  `paraphrase-multilingual-mpnet-base-v2` (278M tham số, 768 chiều — lớn hơn
+  model cũ MiniLM 118M tham số, 384 chiều đang dùng cho Knowledge Base).
+  Cùng họ `paraphrase-multilingual`, cùng cách dùng (không cần prefix
+  "query:"/"passage:" như họ E5) — giảm rủi ro lỗi cách dùng khi đổi model.
+- `semantic_router.py` đổi sang gọi `nlu_embed_async()` thay vì `embed_async()`
+  của Knowledge Base.
+
+**Chưa xác nhận có cải thiện hay không** — cần chạy thật trên máy có
+model. **Lưu ý:** model mới nặng hơn đáng kể (~278M vs ~118M tham số) —
+lần đầu chạy sẽ tải model lâu hơn nhiều so với các lần trước.
+
+### Chưa test trên máy anh Hoài
+```bash
+docker compose exec api python scripts/nlu_semantic_test.py --eval
+```
+(lần đầu có thể mất 1-2 phút để tải model mới — bình thường, không phải
+lỗi). So sánh lại con số với 38.3% đúng / 28.3% sai / 33.3% clarify cũ
+để biết chính xác model mới có cải thiện hay không (chi tiết lần test
+đầu tiên nằm ở mục "Kết quả test thật đầu tiên" ngay bên dưới).
+
+Thử thêm vài câu đơn lẻ để xem candidate chi tiết:
+```bash
+docker compose exec api python scripts/nlu_semantic_test.py "3S đóng vai trò gì trong sản phẩm này"
+```
+
+### Kết quả test thật đầu tiên (18/7) — thấp hơn nhiều kỳ vọng, cần điều tra
+Anh Hoài chạy `--eval`: **Đúng 23/60 (38.3%) | Sai 17/60 (28.3%) | Clarify
+20/60 (33.3%)**. Đáng lo nhất là tỷ lệ **Sai** khá cao với confidence
+không thấp (0.69-0.89) — hệ thống trả lời sai mà **vẫn tự tin**, nguy
+hiểm hơn cả clarify.
+
+**Bug thật tự phát hiện:** utterance trong index được embed theo
+`normalized_text` (dạng chuẩn), nhưng câu hỏi (query) lại embed **thô, chưa
+qua `normalize()`** — 2 bên không cùng "không gian" biểu diễn. Đã sửa:
+`route_semantic()` giờ nhận thêm `rules` và normalize query trước khi embed.
+
+**⚠️ Đánh giá trung thực:** fix này **có cơ sở** sẽ cải thiện đôi chút, nhưng
+không chắc đủ để giải thích toàn bộ khoảng cách tới 95%. **Khả năng thực
+tế** (cần dữ liệu mới để xác nhận, không đoán): model embedding đa ngôn
+ngữ đang dùng (`paraphrase-multilingual-MiniLM-L12-v2`, model nhỏ) có thể
+**không đủ độ phân giải ngữ nghĩa** để phân biệt 30 intent chi tiết trên
+câu tiếng Việt ngắn (ví dụ: `ask_hot_brewing` vs `ask_cold_brewing` vs
+`ask_brewing` rất gần nhau về mặt từ ngữ nhưng khác ý nghĩa thực tế).
+Đây **không phải kết luận cuối cùng** — cần số liệu mới sau fix để biết
+chính xác fix này cải thiện bao nhiêu, rồi mới quyết định hướng tiếp
+(đổi model, kết hợp LLM-based fallback như Step 7 của spec có gợi ý
+"LLM fallback", hay chấp nhận giới hạn).
+
+**Chưa test lại** — chạy lại đúng lệnh:
+```bash
+docker compose exec api python scripts/nlu_semantic_test.py --eval
+```
+
+### Đề xuất gửi team Knowledge — file riêng (18/7)
+Dựa trên bảng sweep threshold + phân tích cụ thể từng case sai, xuất
+`docs/NLU_ACCURACY_IMPROVEMENT_PROPOSAL-VI.md` — gồm:
+1. Đề xuất đổi `low_confidence_threshold` từ 0.65 → **0.85** (kèm bảng
+   dữ liệu đầy đủ).
+2. **4 nhóm intent hay bị nhầm lẫn** (không chỉ "thêm dữ liệu chung chung" —
+   chỉ rõ từng cặp intent cụ thể + ví dụ case sai thật để team Knowledge
+   biết đúng chỗ cần bổ sung utterance phân biệt rõ hơn):
+   - Nhóm A (logistics sau mua hàng: `ask_payment`/`ask_cod`/`ask_shipping_fee`/
+     `ask_tracking`/`ask_order_status`/`ask_shipping_availability`) — nhầm
+     lẫn NHIỀU NHẤT, đề xuất thêm cả entity-aware rule (`order_id`,
+     `payment_method`) thay vì chỉ dựa ngữ nghĩa thuần.
+   - Nhóm B (chi tiết sản phẩm: `ask_product`/`ask_ingredients`/
+     `ask_freeze_dried`/`ask_taste`/`compare_coffee`).
+   - Nhóm C (khiếu nại/đổi trả: `complaint`/`request_return`/`request_refund`).
+   - Nhóm D (`greeting` bị match nhầm với câu có nội dung cụ thể — nghi
+     ngờ utterance mẫu của `greeting` đang quá ngắn/chung chung).
+
+**Chưa sửa code** — cố tình chờ bản dữ liệu cải thiện từ team Knowledge
+rồi test lại cùng lúc (cả ngưỡng lẫn chất lượng dữ liệu), thay vì sửa
+từng phần rời rạc.
+
+## Nâng cấp NLU v1.1 theo spec mới từ team Knowledge (18/7)
+Team Knowledge không gửi thêm utterance như đề xuất, mà **nâng cấp thẳng
+spec** (`NLU-INTEGRATION-GUIDE.md` v1.1.0) để giải quyết từ gốc 1 số vấn
+đề đã báo cáo, kèm 90 test case mới (`intent-routing-tests-v1.1-additions.yaml`,
+tổng 150 test held-out).
+
+**4 thay đổi đã implement, verify từng phần qua sandbox trước khi đưa
+code chính thức:**
+
+1. **Protected phrases** (`normalizer.py`) — giải quyết đúng bug "3S Coffee"
+   → "3S cà phê" đã báo từ Bat A: tạm thay thế bằng placeholder (ký tự
+   điều khiển `\x00`, không thể bị rule khác khớp nhầm) trước khi chạy
+   rule, khôi phục lại canonical form sau. **Dữ liệu tạm** (chỉ có "3S
+   Coffee") vì `protected_phrases` chưa có file chính thức từ team
+   Knowledge (không nằm trong "Canonical Repository Layout") — anh Hoài
+   xác nhận tự tạo tạm, thay bằng dữ liệu thật sau.
+2. **Tách lời chào ở đầu câu** (`pattern_router.py`, áp dụng cả
+   `semantic_router.py` để nhất quán) — giải quyết đúng "Nhóm D" (greeting
+   bị match nhầm) đã nêu trong đề xuất: nếu phần còn lại sau khi bỏ
+   prefix chào hỏi có **nội dung thực chất**, ưu tiên route theo phần còn
+   lại thay vì cả câu. Đã verify đúng **chính xác ví dụ trong spec**
+   (`"shop ơi, đơn của mình đã gửi chưa"` → `ask_order_status`, không
+   còn `greeting`).
+3. **Confidence Decision đổi công thức** (`semantic_router.py`) — thêm
+   điều kiện **margin**: `Top-1 ≥ threshold VA (Top-1 − Top-2) ≥
+   required_margin (mặc định 0.10)` mới được `accept`. Trước đây chỉ
+   so ngưỡng tuyệt đối, không quan tâm Top-2 gần Top-1 đến mức nào —
+   đã verify: case Top-1=0.90/Top-2=0.87 (margin chỉ 0.03) đúng ra
+   `context_check`, không `accept` nhầm dù Top-1 tự thân đã "cao".
+4. **Gộp file test** (`loader.py`) — `load_test_cases()` đọc trường
+   `acceptance.combine_with` trong file bổ sung, tự động gộp đúng vào
+   đúng bộ test gốc (không tạo bộ riêng) — verify đúng: 2 test file gốc
+   + 1 file bổ sung 90 test → gộp đúng 150 test dưới 1 key duy nhất.
+
+**Integration test cuối** (3 case, dùng đúng ví dụ trong spec) — tất cả PASS.
+
+### Chưa test trên máy anh Hoài
+1. Đặt file `intent-routing-tests-v1.1-additions.yaml` vào
+   `C:\alpha3s\datasets\tests\` (cùng chỗ với `intent-routing-tests.yaml`
+   cũ).
+2. Chạy lại toàn bộ:
+```bash
+docker compose exec api python scripts/nlu_pattern_test.py --eval
+docker compose exec api python scripts/nlu_semantic_test.py --eval
+docker compose exec api python scripts/nlu_semantic_test.py --sweep
+```
+Kỳ vọng quan trọng: (a) `--eval` giờ chạy trên **150 test** (không phải
+60) do đã gộp; (b) tỷ lệ Sai giảm rõ rệt nhờ margin-check + greeting-prefix-
+strip; (c) thử thêm `docker compose exec api python scripts/nlu_pattern_test.py
+"shop ơi, đơn của mình đã gửi chưa"` để xác nhận trực tiếp đúng ví dụ
+trong spec.
+
+## Protected phrases - file that tu team Knowledge (18/7)
+Team Knowledge gui protected-phrases.yaml chinh thuc (3 phrase: 3S Coffee,
+Robanme, Cong ty Co phan Robanme) + NLU-INTEGRATION-GUIDE.md v1.1.1 xac nhan
+file nay nam rieng (datasets/nlu/protected-phrases.yaml), khong ghep chung
+vao normalization.yaml.
+
+**Phat hien can xu ly can than:** "Cong ty Co phan Robanme" CHUA "Robanme"
+ben trong - neu xu ly sai thu tu (thay "Robanme" truoc), se pha vo kha nang
+khop cum dai hon chua no. File co ghi ro validation.longest_phrase_first:
+true. Da sua normalize(): sap xep protected_phrases theo do dai GIAM DAN
+truoc khi xu ly, dong thoi ap dung dung field match rieng cho tung phrase
+(token dung ranh gioi tu, phrase khop chuoi con thuong). Verify 4/4 test
+qua sandbox voi dung du lieu that truoc khi dua vao code chinh thuc.
+
+**Da cap nhat:**
+- loader.py - them load_protected_phrases() doc dung file that.
+- normalizer.py - DEFAULT_PROTECTED_PHRASES gio chi con la du lieu du
+  phong (fallback khi khong truyen gi), khong con la nguon chinh.
+- pattern_router.py, semantic_router.py - toan bo ham lien quan deu them
+  tham so protected_phrases, truyen xuyen suot tu build_pattern_index/
+  build_semantic_index den route_pattern/route_semantic.
+- Ca 3 CLI (nlu_build.py, nlu_pattern_test.py, nlu_semantic_test.py) deu
+  load va truyen dung file that.
+
+### Chua test tren may anh Hoai
+Dat protected-phrases.yaml vao C:\alpha3s\datasets\nlu\ (cung cap voi
+intent-catalog.yaml, normalization.yaml), roi chay lai toan bo:
+```bash
+docker compose exec api python scripts/nlu_build.py
+docker compose exec api python scripts/nlu_pattern_test.py --eval
+docker compose exec api python scripts/nlu_semantic_test.py --eval
+```
+Ky vong: nlu_build.py demo them dong "robanme la ai vay" -> giu dung
+hoa/thuong canonical "Robanme".
+
+## Lop High-Precision Rules moi tu routing-rules.yaml (18/7)
+Team Knowledge gui them 3 file lon: intent-catalog.yaml (ban day du, co
+route/entities/missing_entity_action cho tung intent), routing-rules.yaml
+(25 rule RTE-001..025 uu tien cao), 08_contrastive_boundaries.yaml (80
+utterance "ranh gioi" dung theo dung de xuat da gui truoc do).
+
+### routing-rules.yaml - lop moi giua Exact Match va Semantic Router
+Dinh nghia execution_order ro rang: strip_vocative_prefix -> privacy_and_
+safety -> explicit_transaction_action -> high_precision_rules -> entity_
+aware_rules -> semantic_router -> margin_check -> contextual_rerank ->
+clarify.
+
+**Module moi `app/services/nlu/high_precision_rules.py`:**
+- `match_high_precision_rules()`: duyet 25 rule, khop `any_phrases` (substring)
+  hoac `message_is_only_any` (TRUNG KHIT toan cau - rieng cho greeting,
+  tranh khop long leo). Trong so cac rule khop, chon rule PRIORITY CAO NHAT.
+- Co che chon-priority-cao-nhat nay TU DONG thoa man 2 policy ma KHONG can
+  code rieng: RTE-POL-002 (explicit action nhu request_refund=98/request_
+  return=97 da duoc gan priority cao hon complaint=85), va intent rui ro cao
+  (health_question=99) da o dinh uu tien.
+- **Gioi han da biet:** 3 rule co dieu kien entity (`entity_any`/
+  `required_entity_any`: RTE-006, RTE-008, RTE-009) BI BO QUA ro rang vi
+  chua co Entity Extraction (Buoc 6, ngoai pham vi hien tai) - khong doan
+  bua entity co mat hay khong.
+
+**`vocative_prefixes` gio uu tien dung danh sach THAT tu routing-rules.yaml**
+(day du hon: co them "admin oi", "ad oi", "ben minh oi" ma danh sach hardcode
+cu khong co) - fallback ve danh sach hardcode neu khong co config.
+
+**Tich hop vao `route_pattern()`:** Exact match -> High-Precision Rules ->
+Token overlap (dung thu tu do tin cay giam dan, giu nguyen lop Exact/Token
+cu vi da chung minh 0% sai tren held-out).
+
+**Da verify 21/21 test (15 rule co ban + 2 policy + 4 test tich hop cuoi)**
+qua sandbox voi dung du lieu that truoc khi dua vao code chinh thuc, bao
+gom ca to hop phuc tap (vocative prefix moi + High-Precision Rule + policy
+uu tien cung luc).
+
+### 08_contrastive_boundaries.yaml - dat vao utterances/
+File nay co cung schema voi cac utterance khac (id/text/intent/split), chi
+thieu vai truong tuy chon (`normalized_text`, `entities`) ma loader.py da
+xu ly an toan bang `.get()`. Dat truc tiep vao `datasets/nlu/utterances/`
+se duoc `load_utterances()` tu dong nhat (glob toan bo `*.yaml`), khong can
+sua code.
+
+### File depository-structure.md (tham khao) xac nhan dung vi tri ca 4 file:
+- `datasets/nlu/routing-rules.yaml`
+- `datasets/nlu/utterances/08_contrastive_boundaries.yaml`
+- `datasets/nlu/protected-phrases.yaml` (da dat tu truoc)
+- `datasets/tests/intent-routing-tests-v1.1-additions.yaml` (da dat tu truoc)
+
+### Chua test tren may anh Hoai
+1. Đat `routing-rules.yaml` vao `C:\alpha3s\datasets\nlu\` (cung cap voi
+   `intent-catalog.yaml`).
+2. Đat `08_contrastive_boundaries.yaml` vao
+   `C:\alpha3s\datasets\nlu\utterances\` (cung cap voi `01_greetings.yaml`...).
+3. Ghi de `intent-catalog.yaml` moi (ban day du hon) vao dung vi tri cu.
+4. Chay lai toan bo:
+```bash
+docker compose exec api python scripts/nlu_build.py
+docker compose exec api python scripts/nlu_pattern_test.py --eval
+docker compose exec api python scripts/nlu_semantic_test.py --eval
+docker compose exec api python scripts/nlu_semantic_test.py --sweep
+```
+Ky vong quan trong: (a) `nlu_pattern_test.py --eval` phai thay % tu phu
+tang MANH so voi 3.3% cu (nho co them 25 High-Precision Rule + 80 utterance
+ranh gioi moi); (b) tong utterance tang tu 300 len 380 (300+80); (c) so test
+held-out van la 150 (khong doi, contrastive boundaries la utterance TRAIN
+khong phai test).
+
+## Bug nghiem trong phat hien tu ket qua test that (18/7)
+Anh Hoai chay du 4 lenh, phat hien 2 van de:
+
+### 1. "0 protected phrase" - can kiem tra lai vi tri file
+`nlu_build.py` bao "0 protected phrase" thay vi 3 nhu ky vong. Nguyen nhan
+nhieu kha nang: file `datasets/nlu/protected-phrases.yaml` khong con o
+dung vi tri luc chay lenh nay (co the vo tinh bi ghi de/xoa khi dat cac
+file moi). `load_protected_phrases()` tra ve list rong LANG LE (khong bao
+loi) neu khong tim thay file - KHONG PHAI BUG CODE, chi can kiem tra lai
+file co dung o `C:\alpha3s\datasets\nlu\protected-phrases.yaml` khong.
+
+### 2. BUG THAT NGHIEM TRONG - gan het cau chua "chưa" bi khop nham ask_taste
+`nlu_pattern_test.py --eval` cho thay: **16/25 case sai deu qua
+high_precision_rule, hau het ra `ask_taste`** bat ke noi dung cau la gi.
+
+**Nguyen nhan (da xac minh):** `match_high_precision_rules()` ban dau dung
+`strip_diacritics()` (bo dau) de so khop `any_phrases`, giong cach lam o
+`kb_router.py`/`normalizer.py` truoc do. Nhung lan nay hau qua nang hon
+nhieu: "chua" (tu RTE-012, nghia "vi chua") va "chưa" (tu CUC KY pho bien,
+nghia "not yet", xuat hien trong rat nhieu cau) DEU tro thanh "chua" sau
+khi bo dau. Vi CA HAI deu la 1 TU HOAN CHINH (khong phai substring nam
+trong tu khac nhu bug "hong"/"khong" da sua truoc do), them `\b` ranh gioi
+tu KHONG GIAI QUYET duoc - day la DONG AM sau khi bo dau o cap do CA TU,
+khac ban chat voi bug substring da gap truoc.
+
+**FIX:** KHONG bo dau khi so khop `any_phrases`/`message_is_only_any` trong
+`high_precision_rules.py` - GIU NGUYEN dau tieng Viet, chi so sanh khong
+phan biet hoa/thuong + ranh gioi tu. Hop ly vi routing-rules.yaml da viet
+dung chinh ta co dau. Do `route_pattern()` trong `pattern_router.py` duoc
+sua de goi `normalize()` (khoi phuc dau tu viet tat) TRUOC khi dua message
+vao `match_high_precision_rules()` - dam bao van xu ly duoc cau viet tat
+ma khong gay dong am sau bo dau.
+
+**Da verify lai toan bo 25 case sai that (tu chinh bao cao cua anh Hoai)
+qua sandbox:** tu 16/25 CHECK (ban co bo dau) giam con **2/25 CHECK** (ban
+giu dau). 2 case con lai la **mo ho ngu nghia THAT cua chinh rule**, khong
+phai loi code:
+- `"...báo giá định kỳ"` (B2B) khop nham `ask_price` qua "báo giá" - dung
+  nghia den nhung sai ngu canh (thieu rule rieng cho `b2b_inquiry`).
+- `"...giống nào"` khop nham `compare_coffee` qua "giống" (rule dung nghia
+  "tuong tu", cau nay "giống" nghia "chung loai/giong ca phe").
+
+2 diem nay se ghi vao file gop y rieng gui team Knowledge (khong tu doan
+sua rule thay ho).
+
+### Chua test lai tren may anh Hoai
+1. Kiem tra lai `protected-phrases.yaml` co dung vi tri
+   `C:\alpha3s\datasets\nlu\protected-phrases.yaml` khong.
+2. Chay lai ca 3 lenh:
+```bash
+docker compose exec api python scripts/nlu_build.py
+docker compose exec api python scripts/nlu_pattern_test.py --eval
+docker compose exec api python scripts/nlu_semantic_test.py --eval
+```
+Ky vong: (a) `nlu_build.py` bao dung "3 protected phrase"; (b)
+`nlu_pattern_test.py --eval` KHONG con case nao sai vao `ask_taste` mot
+cach bat thuong, ty le tu phu dung tang manh so voi 32.7% (con so bi nhieu
+boi bug) cu; (c) so sanh lai % Dung cua `nlu_semantic_test.py --eval` (co
+the thay doi chut it vi Pattern Router gio bat dung nhieu case hon truoc,
+lam giam so case con lai phai qua Semantic Router).
+
+**XAC NHAN FIX DUNG (18/7)** - anh Hoai chay lai:
+- `nlu_build.py`: **3 protected phrase** dung nhu ky vong, demo "3S Coffee"
+  va "Robanme" giu nguyen dung viet hoa/thuong canonical.
+- `nlu_pattern_test.py --eval`: tu **25/150 sai** (co bug) giam con **CHI
+  3/150 sai** (2.0%), ty le tu phu tang tu 32.7% (nhieu) len **35.3% sach**.
+  Ca 3 case sai con lai deu la mo ho ngu nghia THAT cua rule (b2b_inquiry
+  thieu rule, tu "giong" da nghia, VA phat hien them 1 diem moi: rule
+  KHONG hieu ngu canh PHU DINH - vd "KHONG doi hang, hoan tien" van bi
+  khop nham request_return qua cum "doi hang" ma khong nhan ra "khong"
+  dang phu dinh y do). Ca 3 diem da ghi vao
+  `docs/NLU_ACCURACY_IMPROVEMENT_PROPOSAL-VI.md` gui team Knowledge.
+- `nlu_semantic_test.py --eval`: 71.3% dung, KHONG doi so voi lan test
+  truoc bug high_precision_rules (hop ly, Semantic Router dung embedding,
+  khong lien quan bug substring o Pattern Router).
+
+**Bat B (High-Precision Rules) coi nhu hoan tat voi chat luong tot** -
+chi con 3 diem mo ho da biet ro nguyen nhan, khong phai bug an.

@@ -1,0 +1,72 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_language_variants
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+locale: vi-VN
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+utterances:
+  - {id: UTT-VAR-001, text: "shop còn thức hông", normalized_text: "shop còn trực không", intent: greeting, style: southern, split: train}
+  - {id: UTT-VAR-002, text: "ê có ai ở đây hem", normalized_text: "có ai ở đây không", intent: greeting, style: teencode, split: train}
+  - {id: UTT-VAR-003, text: "tu van tui xiu", normalized_text: "tư vấn tôi một chút", intent: request_consultation, style: accentless, split: train}
+  - {id: UTT-VAR-004, text: "cần người rành cf chỉ giúp", normalized_text: "cần người hiểu cà phê tư vấn giúp", intent: request_consultation, style: colloquial, split: train}
+  - {id: UTT-VAR-005, text: "3s là bên nào z", normalized_text: "3S là thương hiệu nào vậy", intent: ask_brand, style: teencode, split: train}
+  - {id: UTT-VAR-006, text: "thương hiệu này của ai ta", intent: ask_brand, style: indirect, split: train}
+  - {id: UTT-VAR-007, text: "bên b có món cf j", normalized_text: "bên bạn có sản phẩm cà phê gì", intent: ask_product, style: abbreviation, split: train}
+  - {id: UTT-VAR-008, text: "coi thử mặt hàng cà phê đi shop", intent: ask_product, style: southern, split: train}
+  - {id: UTT-VAR-009, text: "freeze kiểu gì á", normalized_text: "freeze-dried là công nghệ gì", intent: ask_freeze_dried, style: colloquial, split: train}
+  - {id: UTT-VAR-010, text: "cf sao mà sấy lạnh được hay z", normalized_text: "cà phê làm sao sấy lạnh được vậy", intent: ask_freeze_dried, style: teencode, split: train}
+  - {id: UTT-VAR-011, text: "ruột bên trong làm từ hạt j", normalized_text: "nguyên liệu làm từ hạt gì", intent: ask_ingredients, style: colloquial, split: train}
+  - {id: UTT-VAR-012, text: "blend ro với ara hả", normalized_text: "phối trộn Robusta với Arabica phải không", intent: ask_ingredients, style: coffee_slang, split: train}
+  - {id: UTT-VAR-013, text: "uống vô vị ra sao ta", intent: ask_taste, style: colloquial, split: train}
+  - {id: UTT-VAR-014, text: "gu có mạnh với gắt hông", normalized_text: "vị có đậm và gắt không", intent: ask_taste, style: southern, split: train}
+  - {id: UTT-VAR-015, text: "na ná ly máy ngoài quán ko", normalized_text: "có gần giống cà phê pha máy ngoài quán không", intent: compare_coffee, style: colloquial, split: train}
+  - {id: UTT-VAR-016, text: "với phin truyền thống cái nào khác", intent: compare_coffee, style: indirect, split: train}
+  - {id: UTT-VAR-017, text: "múc mấy muỗng mới vừa", intent: ask_brewing, style: southern, split: train}
+  - {id: UTT-VAR-018, text: "chỉ tui pha ly cơ bản coi", normalized_text: "hướng dẫn tôi pha ly cơ bản", intent: ask_brewing, style: southern, split: train}
+  - {id: UTT-VAR-019, text: "nước ấm quậy mấy giây", normalized_text: "pha nóng khuấy bao lâu", intent: ask_hot_brewing, style: colloquial, split: train}
+  - {id: UTT-VAR-020, text: "pha nóng thơm hơn hả", intent: ask_hot_brewing, style: colloquial, split: train}
+  - {id: UTT-VAR-021, text: "đổ nước mát vô tan hem", normalized_text: "pha nước nguội có tan không", intent: ask_cold_brewing, style: teencode, split: train}
+  - {id: UTT-VAR-022, text: "pha thẳng với nước lạnh nha", intent: ask_cold_brewing, style: colloquial, split: train}
+  - {id: UTT-VAR-023, text: "độ cafein nhiu", normalized_text: "hàm lượng caffeine bao nhiêu", intent: ask_caffeine, style: typo, split: train}
+  - {id: UTT-VAR-024, text: "ba muỗng cỡ bao nhiêu mg", intent: ask_caffeine, style: technical_colloquial, split: train}
+  - {id: UTT-VAR-025, text: "đang uống thuốc xài món này ổn k", normalized_text: "đang uống thuốc dùng sản phẩm này được không", intent: health_question, style: colloquial, split: train}
+  - {id: UTT-VAR-026, text: "tim yếu có nên uống hem", normalized_text: "có bệnh tim có nên uống không", intent: health_question, style: teencode, split: train}
+  - {id: UTT-VAR-027, text: "bao xèng một hũ vậy", normalized_text: "bao nhiêu tiền một hũ", intent: ask_price, style: slang, split: train}
+  - {id: UTT-VAR-028, text: "cho cái giá chốt đi shop", normalized_text: "cho biết giá hiện tại", intent: ask_price, style: social_commerce, split: train}
+  - {id: UTT-VAR-029, text: "kho còn hũ nào hem", normalized_text: "kho còn sản phẩm không", intent: ask_stock, style: teencode, split: train}
+  - {id: UTT-VAR-030, text: "giờ bấm mua có sẵn không", intent: ask_stock, style: ecommerce, split: train}
+  - {id: UTT-VAR-031, text: "nay săn được deal gì", normalized_text: "hôm nay có ưu đãi gì", intent: ask_promotion, style: ecommerce, split: train}
+  - {id: UTT-VAR-032, text: "có code nào áp được hông", normalized_text: "có mã giảm giá nào dùng được không", intent: ask_promotion, style: mixed, split: train}
+  - {id: UTT-VAR-033, text: "quăng tui một hũ", normalized_text: "đặt cho tôi một hũ", intent: purchase_product, style: informal, split: train}
+  - {id: UTT-VAR-034, text: "lên giỏ hai hũ nha", normalized_text: "đặt hai hũ", intent: purchase_product, style: ecommerce, split: train}
+  - {id: UTT-VAR-035, text: "ừ vậy triển đơn luôn", normalized_text: "xác nhận đơn như vậy", intent: confirm_order, style: colloquial, split: train}
+  - {id: UTT-VAR-036, text: "okela chốt nhiêu đó", normalized_text: "đồng ý chốt số lượng đó", intent: confirm_order, style: teen_code, split: train}
+  - {id: UTT-VAR-037, text: "trả xiền kiểu j", normalized_text: "thanh toán như thế nào", intent: ask_payment, style: playful, split: train}
+  - {id: UTT-VAR-038, text: "banking được ha", normalized_text: "chuyển khoản được không", intent: ask_payment, style: mixed, split: train}
+  - {id: UTT-VAR-039, text: "cầm hàng mới đưa tiền nha", normalized_text: "thanh toán khi nhận hàng", intent: ask_cod, style: colloquial, split: train}
+  - {id: UTT-VAR-040, text: "ship cod ok hông", normalized_text: "có hỗ trợ COD không", intent: ask_cod, style: mixed, split: train}
+  - {id: UTT-VAR-041, text: "vùng tui có chạy đơn tới k", normalized_text: "khu vực tôi có giao hàng không", intent: ask_shipping_availability, style: colloquial, split: train}
+  - {id: UTT-VAR-042, text: "tận xã có ship hem", normalized_text: "có giao hàng tới xã không", intent: ask_shipping_availability, style: teencode, split: train}
+  - {id: UTT-VAR-043, text: "cước tới chỗ tui nhiu", normalized_text: "phí giao tới chỗ tôi bao nhiêu", intent: ask_shipping_fee, style: southern, split: train}
+  - {id: UTT-VAR-044, text: "tiền vận chuyển tính sao ta", intent: ask_shipping_fee, style: indirect, split: train}
+  - {id: UTT-VAR-045, text: "chừng nào hàng đáp", normalized_text: "khi nào hàng tới", intent: ask_delivery_time, style: slang, split: train}
+  - {id: UTT-VAR-046, text: "đợi cỡ mấy bữa", normalized_text: "đợi khoảng mấy ngày", intent: ask_delivery_time, style: southern, split: train}
+  - {id: UTT-VAR-047, text: "đơn đang nằm khúc nào", normalized_text: "đơn hàng đang ở trạng thái nào", intent: ask_order_status, style: colloquial, split: train}
+  - {id: UTT-VAR-048, text: "đơn im re vậy shop", normalized_text: "đơn hàng chưa cập nhật", intent: ask_order_status, style: southern, split: train}
+  - {id: UTT-VAR-049, text: "quăng mã vận chuyển đây", normalized_text: "cho tôi mã vận đơn", intent: ask_tracking, style: informal, split: train}
+  - {id: UTT-VAR-050, text: "coi giùm kiện đang chạy đâu", normalized_text: "kiểm tra kiện hàng đang ở đâu", intent: ask_tracking, style: southern, split: train}
+  - {id: UTT-VAR-051, text: "làm ăn kiểu gì vậy", intent: complaint, style: angry_indirect, split: train}
+  - {id: UTT-VAR-052, text: "mình bực vụ này lắm rồi", intent: complaint, style: emotional, split: train}
+  - {id: UTT-VAR-053, text: "gửi ngược hũ này về nha", normalized_text: "tôi muốn trả lại sản phẩm", intent: request_return, style: colloquial, split: train}
+  - {id: UTT-VAR-054, text: "đổi qua hũ khác giùm", normalized_text: "đổi sang sản phẩm khác giúp", intent: request_return, style: southern, split: train}
+  - {id: UTT-VAR-055, text: "trả xiền lại tui", normalized_text: "hoàn tiền cho tôi", intent: request_refund, style: playful, split: train}
+  - {id: UTT-VAR-056, text: "reverse khoản thanh toán nha", normalized_text: "hoàn lại khoản thanh toán", intent: request_refund, style: mixed, split: train}
+  - {id: UTT-VAR-057, text: "mình muốn ôm số lượng về bán", normalized_text: "mình muốn mua số lượng lớn để bán", intent: b2b_inquiry, style: business_colloquial, split: train}
+  - {id: UTT-VAR-058, text: "xin deal kênh phân phối", normalized_text: "xin trao đổi hợp tác phân phối", intent: b2b_inquiry, style: business_mixed, split: train}
+  - {id: UTT-VAR-059, text: "thế nha khỏi cần nữa", normalized_text: "không cần hỗ trợ thêm", intent: end_conversation, style: colloquial, split: train}
+  - {id: UTT-VAR-060, text: "oke tới đây thôi", normalized_text: "đồng ý kết thúc tại đây", intent: end_conversation, style: teen_code, split: train}

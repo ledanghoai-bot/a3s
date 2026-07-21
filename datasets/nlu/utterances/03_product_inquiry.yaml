@@ -1,0 +1,59 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_product_inquiry
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+locale: vi-VN
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+utterances:
+  - {id: UTT-PROD-001, text: "bên mình bán cà phê gì", intent: ask_product, style: standard, split: train}
+  - {id: UTT-PROD-002, text: "giới thiệu sản phẩm giúp mình", intent: ask_product, style: standard, split: train}
+  - {id: UTT-PROD-003, text: "shop có loại cà phê nào", intent: ask_product, style: colloquial, split: train}
+  - {id: UTT-PROD-004, text: "cho xem thông tin sản phẩm", intent: ask_product, style: standard, split: train}
+  - {id: UTT-PROD-005, text: "cf bên shop là loại gì", normalized_text: "cà phê bên shop là loại gì", intent: ask_product, style: abbreviation, split: train}
+
+  - {id: UTT-PROD-006, text: "cà phê sấy lạnh là gì", intent: ask_freeze_dried, style: standard, split: train}
+  - {id: UTT-PROD-007, text: "freeze-dried coffee nghĩa là sao", intent: ask_freeze_dried, style: mixed, split: train}
+  - {id: UTT-PROD-008, text: "đây có phải cà phê hòa tan không", intent: ask_freeze_dried, style: standard, split: train}
+  - {id: UTT-PROD-009, text: "sấy lạnh khác sấy nóng thế nào", intent: ask_freeze_dried, style: technical, split: train}
+  - {id: UTT-PROD-010, text: "quy trình làm cf sấy lạnh ntn", normalized_text: "quy trình làm cà phê sấy lạnh như thế nào", intent: ask_freeze_dried, style: abbreviation, split: train}
+
+  - {id: UTT-PROD-011, text: "nguyên liệu gồm những gì", intent: ask_ingredients, style: standard, split: train}
+  - {id: UTT-PROD-012, text: "dùng Robusta hay Arabica", intent: ask_ingredients, style: standard, split: train}
+  - {id: UTT-PROD-013, text: "có phải 100 phần trăm Robusta không", intent: ask_ingredients, style: standard, split: train}
+  - {id: UTT-PROD-014, text: "tỷ lệ Robusta Arabica bao nhiêu", intent: ask_ingredients, style: technical, split: train}
+  - {id: UTT-PROD-015, text: "nguyen lieu cf gi vay", normalized_text: "nguyên liệu cà phê gì vậy", intent: ask_ingredients, style: accentless, split: train}
+
+  - {id: UTT-PROD-016, text: "vị cà phê thế nào", intent: ask_taste, style: standard, split: train}
+  - {id: UTT-PROD-017, text: "có đắng không", intent: ask_taste, style: standard, split: train}
+  - {id: UTT-PROD-018, text: "cà phê có chua nhiều không", intent: ask_taste, style: standard, split: train}
+  - {id: UTT-PROD-019, text: "uống có thơm không shop", intent: ask_taste, style: colloquial, split: train}
+  - {id: UTT-PROD-020, text: "vi co em khong", normalized_text: "vị có êm không", intent: ask_taste, style: accentless, split: train}
+
+  - {id: UTT-PROD-021, text: "có giống cà phê pha máy không", intent: compare_coffee, style: standard, split: train}
+  - {id: UTT-PROD-022, text: "so với cà phê phin thì sao", intent: compare_coffee, style: standard, split: train}
+  - {id: UTT-PROD-023, text: "khác cà phê hòa tan thường chỗ nào", intent: compare_coffee, style: colloquial, split: train}
+  - {id: UTT-PROD-024, text: "so với G7 có gì khác", intent: compare_coffee, style: comparison, split: train}
+  - {id: UTT-PROD-025, text: "co giong espresso ko", normalized_text: "có giống espresso không", intent: compare_coffee, style: accentless, split: train}
+
+  - {id: UTT-PROD-026, text: "pha cà phê thế nào", intent: ask_brewing, style: standard, split: train}
+  - {id: UTT-PROD-027, text: "một ly dùng mấy muỗng", intent: ask_brewing, style: standard, split: train}
+  - {id: UTT-PROD-028, text: "pha nóng bao lâu tan", intent: ask_hot_brewing, style: colloquial, split: train}
+  - {id: UTT-PROD-029, text: "pha nước nguội được không", intent: ask_cold_brewing, style: standard, split: train}
+  - {id: UTT-PROD-030, text: "cho đá uống được chứ", intent: ask_cold_brewing, style: colloquial, split: train}
+
+  - {id: UTT-PROD-031, text: "hàm lượng caffeine bao nhiêu", intent: ask_caffeine, style: technical, split: train}
+  - {id: UTT-PROD-032, text: "một muỗng có bao nhiêu caffeine", intent: ask_caffeine, style: standard, split: train}
+  - {id: UTT-PROD-033, text: "uống có mất ngủ không", intent: health_question, style: standard, split: train}
+  - {id: UTT-PROD-034, text: "cao huyết áp uống được không", intent: health_question, style: health, split: train}
+  - {id: UTT-PROD-035, text: "đang mang thai dùng được không", intent: health_question, style: health, split: train}
+
+  - {id: UTT-PROD-036, text: "sản phẩm còn hàng không", intent: ask_stock, style: standard, split: train}
+  - {id: UTT-PROD-037, text: "hũ này còn không shop", intent: ask_stock, style: colloquial, split: train}
+  - {id: UTT-PROD-038, text: "còn sẵn hàng chứ", intent: ask_stock, style: colloquial, split: validation}
+  - {id: UTT-PROD-039, text: "cf say lanh con ko", normalized_text: "cà phê sấy lạnh còn không", intent: ask_stock, style: accentless, split: validation}
+  - {id: UTT-PROD-040, text: "mình muốn biết loại này còn để mua không", intent: ask_stock, style: indirect, split: validation}

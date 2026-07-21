@@ -1,0 +1,109 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_intent_routing_tests_v1_1_additions
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-21
+split: test
+
+tests:
+  - {id: NLU-RT-061, input: "chào buổi sáng bên mình", expected_intent: greeting}
+  - {id: NLU-RT-062, input: "alo có người trực chứ", expected_intent: greeting}
+  - {id: NLU-RT-063, input: "xin chào ạ", expected_intent: greeting}
+  - {id: NLU-RT-064, input: "mình cần được gợi ý lựa chọn", expected_intent: request_consultation}
+  - {id: NLU-RT-065, input: "chưa biết loại nào hợp, tư vấn nhé", expected_intent: request_consultation}
+  - {id: NLU-RT-066, input: "nhờ một bạn hỗ trợ tìm hiểu", expected_intent: request_consultation}
+  - {id: NLU-RT-067, input: "thương hiệu 3S hoạt động theo mô hình nào", expected_intent: ask_brand}
+  - {id: NLU-RT-068, input: "ai là đơn vị đóng gói cho 3S", expected_intent: ask_brand}
+  - {id: NLU-RT-069, input: "nguồn phôi của thương hiệu đến từ đâu", expected_intent: ask_brand}
+  - {id: NLU-RT-070, input: "shop ơi dòng hàng chính là gì", expected_intent: ask_product}
+  - {id: NLU-RT-071, input: "cho xem mô tả tổng quan hũ cà phê", expected_intent: ask_product}
+  - {id: NLU-RT-072, input: "bên bạn đang bán sản phẩm cà phê nào", expected_intent: ask_product}
+  - {id: NLU-RT-073, input: "quá trình thăng hoa diễn ra thế nào", expected_intent: ask_freeze_dried}
+  - {id: NLU-RT-074, input: "từ dịch chiết làm sao ra phôi khô", expected_intent: ask_freeze_dried}
+  - {id: NLU-RT-075, input: "tinh thể hòa tan được sản xuất bằng cách gì", expected_intent: ask_freeze_dried}
+  - {id: NLU-RT-076, input: "blend này gồm các giống cà phê nào", expected_intent: ask_ingredients}
+  - {id: NLU-RT-077, input: "phần nguyên liệu đầu vào có Arabica chứ", expected_intent: ask_ingredients}
+  - {id: NLU-RT-078, input: "tỷ lệ hạt có được công khai không", expected_intent: ask_ingredients}
+  - {id: NLU-RT-079, input: "mùi lúc mở hũ có rõ không", expected_intent: ask_taste}
+  - {id: NLU-RT-080, input: "vị chua và đắng cân bằng ra sao", expected_intent: ask_taste}
+  - {id: NLU-RT-081, input: "cảm giác hậu vị sau khi uống thế nào", expected_intent: ask_taste}
+  - {id: NLU-RT-082, input: "khác ly phin truyền thống ở điểm nào", expected_intent: compare_coffee}
+  - {id: NLU-RT-083, input: "so với hòa tan phổ thông thì trải nghiệm sao", expected_intent: compare_coffee}
+  - {id: NLU-RT-084, input: "có gần phong cách cà phê máy không", expected_intent: compare_coffee}
+  - {id: NLU-RT-085, input: "pha một ly uống hằng ngày ra sao", expected_intent: ask_brewing}
+  - {id: NLU-RT-086, input: "tỷ lệ muỗng với nước nên bắt đầu thế nào", expected_intent: ask_brewing}
+  - {id: NLU-RT-087, input: "hướng dẫn dùng muỗng trong hũ", expected_intent: ask_brewing}
+  - {id: NLU-RT-088, input: "pha ở tám mươi lăm độ được chứ", expected_intent: ask_hot_brewing}
+  - {id: NLU-RT-089, input: "muốn aroma rõ thì dùng nước nóng sao", expected_intent: ask_hot_brewing}
+  - {id: NLU-RT-090, input: "khuấy ly nóng khoảng bao nhiêu giây", expected_intent: ask_hot_brewing}
+  - {id: NLU-RT-091, input: "nước mát mười tám độ có hòa tan không", expected_intent: ask_cold_brewing}
+  - {id: NLU-RT-092, input: "pha trực tiếp với nước nguội mất bao lâu", expected_intent: ask_cold_brewing}
+  - {id: NLU-RT-093, input: "mình muốn uống đá thì pha kiểu gì", expected_intent: ask_cold_brewing}
+  - {id: NLU-RT-094, input: "hai gram thành phẩm có bao nhiêu caffeine", expected_intent: ask_caffeine}
+  - {id: NLU-RT-095, input: "phần trăm cafein của phôi là bao nhiêu", expected_intent: ask_caffeine}
+  - {id: NLU-RT-096, input: "một muỗng tương đương mấy mg chất kích thích", expected_intent: ask_caffeine}
+  - {id: NLU-RT-097, input: "đang điều trị huyết áp thì có dùng được không", expected_intent: health_question}
+  - {id: NLU-RT-098, input: "tôi bị mất ngủ kéo dài có nên uống", expected_intent: health_question}
+  - {id: NLU-RT-099, input: "uống xong tim nhanh thì cần làm gì", expected_intent: health_question}
+  - {id: NLU-RT-100, input: "shop ơi cho biết giá hũ này", expected_intent: ask_price}
+  - {id: NLU-RT-101, input: "sản phẩm hiện niêm yết bao nhiêu", expected_intent: ask_price}
+  - {id: NLU-RT-102, input: "mình cần con số thanh toán cho một hũ", expected_intent: ask_price}
+  - {id: NLU-RT-103, input: "hôm nay kho còn sản phẩm để gửi không", expected_intent: ask_stock}
+  - {id: NLU-RT-104, input: "loại này có sẵn để chốt liền chứ", expected_intent: ask_stock}
+  - {id: NLU-RT-105, input: "kiểm tra tồn giúp mình hũ này", expected_intent: ask_stock}
+  - {id: NLU-RT-106, input: "voucher nào đang áp dụng cho cà phê", expected_intent: ask_promotion}
+  - {id: NLU-RT-107, input: "mua hôm nay có chương trình gì", expected_intent: ask_promotion}
+  - {id: NLU-RT-108, input: "đơn hai hũ được giảm gì không", expected_intent: ask_promotion}
+  - {id: NLU-RT-109, input: "chào shop mình lấy một hũ", expected_intent: purchase_product}
+  - {id: NLU-RT-110, input: "thêm ba hũ vào đơn giúp tôi", expected_intent: purchase_product}
+  - {id: NLU-RT-111, input: "mình muốn mua sản phẩm vừa tư vấn", expected_intent: purchase_product}
+  - {id: NLU-RT-112, input: "đúng sản phẩm và số lượng rồi, tạo đơn", expected_intent: confirm_order}
+  - {id: NLU-RT-113, input: "không thay đổi nữa, xác nhận mua", expected_intent: confirm_order}
+  - {id: NLU-RT-114, input: "chốt theo thông tin phía trên", expected_intent: confirm_order}
+  - {id: NLU-RT-115, input: "có nhận thanh toán tiền mặt không", expected_intent: ask_payment}
+  - {id: NLU-RT-116, input: "gửi số tài khoản để tôi chuyển", expected_intent: ask_payment}
+  - {id: NLU-RT-117, input: "tôi có thể quét QR trả tiền chứ", expected_intent: ask_payment}
+  - {id: NLU-RT-118, input: "tôi không muốn chuyển tiền trước", expected_intent: ask_cod}
+  - {id: NLU-RT-119, input: "giao hàng rồi mới thu tiền nhé", expected_intent: ask_cod}
+  - {id: NLU-RT-120, input: "shipper tới mình trả có được không", expected_intent: ask_cod}
+  - {id: NLU-RT-121, input: "shop giao được tới Lý Sơn không", expected_intent: ask_shipping_availability}
+  - {id: NLU-RT-122, input: "khu vực miền núi có nằm trong vùng giao", expected_intent: ask_shipping_availability}
+  - {id: NLU-RT-123, input: "địa chỉ ở xã này có nhận đơn được chứ", expected_intent: ask_shipping_availability}
+  - {id: NLU-RT-124, input: "cước gửi ba hũ về Hải Phòng bao nhiêu", expected_intent: ask_shipping_fee}
+  - {id: NLU-RT-125, input: "phần vận chuyển phải trả thêm thế nào", expected_intent: ask_shipping_fee}
+  - {id: NLU-RT-126, input: "đơn này có tốn phí giao không", expected_intent: ask_shipping_fee}
+  - {id: NLU-RT-127, input: "đặt tối nay thì khi nào tới", expected_intent: ask_delivery_time}
+  - {id: NLU-RT-128, input: "giao tới Nha Trang khoảng mấy ngày", expected_intent: ask_delivery_time}
+  - {id: NLU-RT-129, input: "có kịp nhận trong tuần này không", expected_intent: ask_delivery_time}
+  - {id: NLU-RT-130, input: "alo đơn của tôi được đóng gói chưa", expected_intent: ask_order_status}
+  - {id: NLU-RT-131, input: "mã đơn B456 đang xử lý bước nào", expected_intent: ask_order_status}
+  - {id: NLU-RT-132, input: "shop đã chuyển đơn sang đơn vị vận chuyển chưa", expected_intent: ask_order_status}
+  - {id: NLU-RT-133, input: "xin mã theo dõi của kiện B456", expected_intent: ask_tracking}
+  - {id: NLU-RT-134, input: "kiện hàng hiện qua bưu cục nào", expected_intent: ask_tracking}
+  - {id: NLU-RT-135, input: "cho link xem hành trình giao hàng", expected_intent: ask_tracking}
+  - {id: NLU-RT-136, input: "tôi không hài lòng với cách xử lý vừa rồi", expected_intent: complaint}
+  - {id: NLU-RT-137, input: "xin ghi nhận phản ánh về dịch vụ", expected_intent: complaint}
+  - {id: NLU-RT-138, input: "sản phẩm nhận được khiến tôi thất vọng", expected_intent: complaint}
+  - {id: NLU-RT-139, input: "tôi cần đổi hũ bị móp sang hũ khác", expected_intent: request_return}
+  - {id: NLU-RT-140, input: "hướng dẫn gửi lại sản phẩm để đổi", expected_intent: request_return}
+  - {id: NLU-RT-141, input: "shop giao sai nên đổi đúng loại giúp tôi", expected_intent: request_return}
+  - {id: NLU-RT-142, input: "tôi muốn nhận lại toàn bộ số tiền", expected_intent: request_refund}
+  - {id: NLU-RT-143, input: "không đổi hàng, vui lòng hoàn khoản thanh toán", expected_intent: request_refund}
+  - {id: NLU-RT-144, input: "hủy giao dịch và trả tiền lại giúp", expected_intent: request_refund}
+  - {id: NLU-RT-145, input: "doanh nghiệp tôi cần báo giá định kỳ", expected_intent: b2b_inquiry}
+  - {id: NLU-RT-146, input: "mình muốn đăng ký làm đại lý", expected_intent: b2b_inquiry}
+  - {id: NLU-RT-147, input: "quán cần nhập số lượng lớn mỗi tháng", expected_intent: b2b_inquiry}
+  - {id: NLU-RT-148, input: "cảm ơn, mình đã có đủ thông tin", expected_intent: end_conversation}
+  - {id: NLU-RT-149, input: "không cần hỗ trợ tiếp đâu", expected_intent: end_conversation}
+  - {id: NLU-RT-150, input: "hẹn shop sau nhé, kết thúc ở đây", expected_intent: end_conversation}
+
+acceptance:
+  combine_with: intent-routing-tests.yaml
+  total_held_out_tests: 150
+  no_train_test_duplicate: true
+  p0_accuracy: 1.0
+  p1_accuracy: 0.95
+  wrong_tool_route_rate: 0.0
+

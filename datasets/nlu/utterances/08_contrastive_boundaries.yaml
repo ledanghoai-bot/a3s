@@ -1,0 +1,102 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_contrastive_boundaries
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-21
+locale: vi-VN
+
+utterances:
+  # Logistics: payment vs COD
+  - {id: UTT-CTR-001, text: "shop nhận thanh toán qua ngân hàng nào", intent: ask_payment, confusable_with: [ask_cod], boundary: payment_method, split: train}
+  - {id: UTT-CTR-002, text: "tôi trả bằng tiền mặt được chứ", intent: ask_payment, confusable_with: [ask_cod], boundary: payment_method, split: train}
+  - {id: UTT-CTR-003, text: "có thể quét mã để thanh toán không", intent: ask_payment, confusable_with: [ask_cod], boundary: payment_method, split: train}
+  - {id: UTT-CTR-004, text: "bên bạn hỗ trợ những kênh trả tiền nào", intent: ask_payment, confusable_with: [ask_cod], boundary: payment_method, split: train}
+  - {id: UTT-CTR-005, text: "mình muốn chuyển khoản trước", intent: ask_payment, confusable_with: [ask_cod], boundary: payment_method, split: train}
+  - {id: UTT-CTR-006, text: "mình chỉ trả khi shipper mang hàng tới", intent: ask_cod, confusable_with: [ask_payment], boundary: payment_timing, split: train}
+  - {id: UTT-CTR-007, text: "không cọc trước có nhận hàng được không", intent: ask_cod, confusable_with: [ask_payment], boundary: payment_timing, split: train}
+  - {id: UTT-CTR-008, text: "cho kiểm hàng rồi thanh toán nhé", intent: ask_cod, confusable_with: [ask_payment], boundary: payment_timing, split: train}
+  - {id: UTT-CTR-009, text: "giao tới nơi mới thu tiền phải không", intent: ask_cod, confusable_with: [ask_payment], boundary: payment_timing, split: train}
+  - {id: UTT-CTR-010, text: "đơn này có hỗ trợ trả sau lúc nhận không", intent: ask_cod, confusable_with: [ask_payment], boundary: payment_timing, split: train}
+
+  # Logistics: fee, availability, time
+  - {id: UTT-CTR-011, text: "cước vận chuyển tới quận 7 là bao nhiêu", intent: ask_shipping_fee, confusable_with: [ask_shipping_availability, ask_delivery_time], boundary: shipping_cost, split: train}
+  - {id: UTT-CTR-012, text: "phần giao hàng cộng thêm mấy tiền", intent: ask_shipping_fee, confusable_with: [ask_price], boundary: shipping_cost, split: train}
+  - {id: UTT-CTR-013, text: "hai hũ gửi tỉnh tính cước sao", intent: ask_shipping_fee, confusable_with: [ask_shipping_availability], boundary: shipping_cost, split: train}
+  - {id: UTT-CTR-014, text: "tổng tiền vận chuyển chưa tính hàng là bao nhiêu", intent: ask_shipping_fee, confusable_with: [ask_price], boundary: shipping_cost, split: train}
+  - {id: UTT-CTR-015, text: "có phát sinh phí giao tới xã không", intent: ask_shipping_fee, confusable_with: [ask_shipping_availability], boundary: shipping_cost, split: train}
+  - {id: UTT-CTR-016, text: "shop có nhận giao về Cà Mau không", intent: ask_shipping_availability, confusable_with: [ask_shipping_fee], boundary: service_area, split: train}
+  - {id: UTT-CTR-017, text: "địa bàn này bên vận chuyển có phục vụ chứ", intent: ask_shipping_availability, confusable_with: [ask_tracking], boundary: service_area, split: train}
+  - {id: UTT-CTR-018, text: "ở đảo thì shop gửi được không", intent: ask_shipping_availability, confusable_with: [ask_shipping_fee], boundary: service_area, split: train}
+  - {id: UTT-CTR-019, text: "mã bưu chính này nằm trong vùng giao không", intent: ask_shipping_availability, confusable_with: [ask_tracking], boundary: service_area, split: train}
+  - {id: UTT-CTR-020, text: "shop có giao qua biên giới không", intent: ask_shipping_availability, confusable_with: [ask_shipping_fee], boundary: service_area, split: train}
+  - {id: UTT-CTR-021, text: "nếu đặt thứ hai thì khoảng ngày nào nhận", intent: ask_delivery_time, confusable_with: [ask_order_status], boundary: delivery_estimate, split: train}
+  - {id: UTT-CTR-022, text: "thời gian dự kiến từ kho tới nhà là bao lâu", intent: ask_delivery_time, confusable_with: [ask_tracking], boundary: delivery_estimate, split: train}
+  - {id: UTT-CTR-023, text: "giao tiêu chuẩn mất mấy ngày", intent: ask_delivery_time, confusable_with: [ask_shipping_fee], boundary: delivery_estimate, split: train}
+  - {id: UTT-CTR-024, text: "đặt bây giờ có kịp nhận trước thứ sáu không", intent: ask_delivery_time, confusable_with: [ask_stock], boundary: delivery_estimate, split: train}
+  - {id: UTT-CTR-025, text: "ETA tới Bình Dương là ngày nào", intent: ask_delivery_time, confusable_with: [ask_shipping_availability], boundary: delivery_estimate, split: train}
+
+  # Logistics: order status vs tracking
+  - {id: UTT-CTR-026, text: "đơn A123 đã được xác nhận chưa", intent: ask_order_status, confusable_with: [ask_tracking], boundary: order_processing_state, split: train}
+  - {id: UTT-CTR-027, text: "shop đang đóng gói đơn của mình phải không", intent: ask_order_status, confusable_with: [ask_tracking], boundary: order_processing_state, split: train}
+  - {id: UTT-CTR-028, text: "đơn đã chuyển sang bên giao vận chưa", intent: ask_order_status, confusable_with: [ask_tracking, ask_shipping_availability], boundary: order_processing_state, split: train}
+  - {id: UTT-CTR-029, text: "trạng thái xử lý đơn hiện giờ là gì", intent: ask_order_status, confusable_with: [ask_tracking], boundary: order_processing_state, split: train}
+  - {id: UTT-CTR-030, text: "đơn vẫn đang chờ shop xử lý à", intent: ask_order_status, confusable_with: [ask_tracking], boundary: order_processing_state, split: train}
+  - {id: UTT-CTR-031, text: "cho mình số tracking để theo dõi", intent: ask_tracking, confusable_with: [ask_order_status], boundary: carrier_journey, split: train}
+  - {id: UTT-CTR-032, text: "kiện đã qua bưu cục nào rồi", intent: ask_tracking, confusable_with: [ask_order_status], boundary: carrier_journey, split: train}
+  - {id: UTT-CTR-033, text: "link hành trình của đơn A123 ở đâu", intent: ask_tracking, confusable_with: [ask_order_status], boundary: carrier_journey, split: train}
+  - {id: UTT-CTR-034, text: "bên vận chuyển đang giữ kiện ở trạm nào", intent: ask_tracking, confusable_with: [ask_order_status], boundary: carrier_journey, split: train}
+  - {id: UTT-CTR-035, text: "tra cứu mã vận đơn giúp tôi", intent: ask_tracking, confusable_with: [ask_order_status], boundary: carrier_journey, split: train}
+
+  # Product boundaries
+  - {id: UTT-CTR-036, text: "dịch chiết được cấp đông rồi thành hạt ra sao", intent: ask_freeze_dried, confusable_with: [ask_ingredients], boundary: manufacturing_process, split: train}
+  - {id: UTT-CTR-037, text: "bước sấy thăng hoa loại nước như thế nào", intent: ask_freeze_dried, confusable_with: [ask_product], boundary: manufacturing_process, split: train}
+  - {id: UTT-CTR-038, text: "tại sao phôi sau sấy có dạng tinh thể", intent: ask_freeze_dried, confusable_with: [ask_ingredients], boundary: manufacturing_process, split: train}
+  - {id: UTT-CTR-039, text: "cô đặc nằm ở bước nào của quy trình", intent: ask_freeze_dried, confusable_with: [ask_brewing], boundary: manufacturing_process, split: train}
+  - {id: UTT-CTR-040, text: "công nghệ nào làm cà phê hòa tan này", intent: ask_freeze_dried, confusable_with: [ask_product], boundary: manufacturing_process, split: train}
+  - {id: UTT-CTR-041, text: "blend dùng những giống hạt nào", intent: ask_ingredients, confusable_with: [ask_freeze_dried], boundary: raw_material, split: train}
+  - {id: UTT-CTR-042, text: "nguồn cà phê nhân xanh là Robusta hay Arabica", intent: ask_ingredients, confusable_with: [ask_product], boundary: raw_material, split: train}
+  - {id: UTT-CTR-043, text: "công thức phối hạt có được công bố không", intent: ask_ingredients, confusable_with: [ask_freeze_dried], boundary: raw_material, split: train}
+  - {id: UTT-CTR-044, text: "tỷ lệ hai giống cà phê trong phôi là bao nhiêu", intent: ask_ingredients, confusable_with: [ask_caffeine], boundary: raw_material, split: train}
+  - {id: UTT-CTR-045, text: "nguyên liệu đầu vào trồng ở đâu", intent: ask_ingredients, confusable_with: [ask_brand], boundary: raw_material, split: train}
+  - {id: UTT-CTR-046, text: "hậu vị sau khi nuốt có sạch không", intent: ask_taste, confusable_with: [ask_delivery_time], boundary: sensory, split: train}
+  - {id: UTT-CTR-047, text: "aroma lúc pha có nổi rõ không", intent: ask_taste, confusable_with: [ask_hot_brewing], boundary: sensory, split: train}
+  - {id: UTT-CTR-048, text: "body của ly cà phê có dày không", intent: ask_taste, confusable_with: [ask_product], boundary: sensory, split: train}
+  - {id: UTT-CTR-049, text: "vị đắng có gắt ở cuối lưỡi không", intent: ask_taste, confusable_with: [health_question], boundary: sensory, split: train}
+  - {id: UTT-CTR-050, text: "uống lạnh thì cảm giác vị êm mức nào", intent: ask_taste, confusable_with: [ask_cold_brewing], boundary: sensory, split: train}
+  - {id: UTT-CTR-051, text: "so với espresso thì hương vị gần tới đâu", intent: compare_coffee, confusable_with: [ask_taste], boundary: explicit_comparison, split: train}
+  - {id: UTT-CTR-052, text: "người uống phin đậm chuyển qua có khác nhiều không", intent: compare_coffee, confusable_with: [ask_taste], boundary: explicit_comparison, split: train}
+  - {id: UTT-CTR-053, text: "đặt cạnh hòa tan thông thường thì điểm khác là gì", intent: compare_coffee, confusable_with: [ask_product], boundary: explicit_comparison, split: train}
+  - {id: UTT-CTR-054, text: "phong cách vị có giống ly Americano máy không", intent: compare_coffee, confusable_with: [ask_taste], boundary: explicit_comparison, split: train}
+  - {id: UTT-CTR-055, text: "khác G7 ở trải nghiệm nào", intent: compare_coffee, confusable_with: [ask_product], boundary: explicit_comparison, split: train}
+  - {id: UTT-CTR-056, text: "shop đang kinh doanh dòng cà phê nào", intent: ask_product, confusable_with: [greeting], boundary: product_overview, split: train}
+  - {id: UTT-CTR-057, text: "mặt hàng cà phê chính là sản phẩm nào", intent: ask_product, confusable_with: [greeting, ask_brand], boundary: product_overview, split: train}
+  - {id: UTT-CTR-058, text: "cho mình xem tổng quan sản phẩm trước", intent: ask_product, confusable_with: [request_consultation], boundary: product_overview, split: train}
+  - {id: UTT-CTR-059, text: "hũ này thuộc nhóm cà phê gì", intent: ask_product, confusable_with: [ask_ingredients], boundary: product_overview, split: train}
+  - {id: UTT-CTR-060, text: "shop ơi sản phẩm chủ lực là gì", intent: ask_product, confusable_with: [greeting], boundary: substantive_over_greeting, split: train}
+
+  # Support boundaries
+  - {id: UTT-CTR-061, text: "tôi muốn phản ánh thái độ phục vụ", intent: complaint, confusable_with: [request_consultation], boundary: dissatisfaction_without_remedy, split: train}
+  - {id: UTT-CTR-062, text: "trải nghiệm này không thể chấp nhận được", intent: complaint, confusable_with: [request_return], boundary: dissatisfaction_without_remedy, split: train}
+  - {id: UTT-CTR-063, text: "tôi cần ghi nhận khiếu nại chính thức", intent: complaint, confusable_with: [request_consultation], boundary: dissatisfaction_without_remedy, split: train}
+  - {id: UTT-CTR-064, text: "sản phẩm có lỗi nhưng tôi chưa yêu cầu đổi", intent: complaint, confusable_with: [request_return], boundary: dissatisfaction_without_remedy, split: train}
+  - {id: UTT-CTR-065, text: "dịch vụ lần này làm tôi rất thất vọng", intent: complaint, confusable_with: [request_refund], boundary: dissatisfaction_without_remedy, split: train}
+  - {id: UTT-CTR-066, text: "hũ bị hỏng nên đổi hũ khác giúp tôi", intent: request_return, confusable_with: [complaint], boundary: explicit_return_action, split: train}
+  - {id: UTT-CTR-067, text: "tôi muốn trả sản phẩm chứ chưa yêu cầu hoàn tiền", intent: request_return, confusable_with: [request_refund], boundary: explicit_return_action, split: train}
+  - {id: UTT-CTR-068, text: "gửi lại hàng để đổi như thế nào", intent: request_return, confusable_with: [complaint], boundary: explicit_return_action, split: train}
+  - {id: UTT-CTR-069, text: "đổi sản phẩm giao sai cho tôi", intent: request_return, confusable_with: [complaint], boundary: explicit_return_action, split: train}
+  - {id: UTT-CTR-070, text: "mình cần quy trình trả lại hũ", intent: request_return, confusable_with: [request_refund], boundary: explicit_return_action, split: train}
+  - {id: UTT-CTR-071, text: "không cần đổi hàng, tôi muốn lấy lại tiền", intent: request_refund, confusable_with: [request_return], boundary: explicit_refund_action, split: train}
+  - {id: UTT-CTR-072, text: "hoàn khoản thanh toán của đơn này giúp tôi", intent: request_refund, confusable_with: [complaint], boundary: explicit_refund_action, split: train}
+  - {id: UTT-CTR-073, text: "tôi yêu cầu trả tiền chứ không nhận hũ thay thế", intent: request_refund, confusable_with: [request_return], boundary: explicit_refund_action, split: train}
+  - {id: UTT-CTR-074, text: "thủ tục nhận lại tiền sau khi hủy là gì", intent: request_refund, confusable_with: [request_return], boundary: explicit_refund_action, split: train}
+  - {id: UTT-CTR-075, text: "xin refund toàn bộ giao dịch", intent: request_refund, confusable_with: [complaint], boundary: explicit_refund_action, split: train}
+
+  # Greeting boundary
+  - {id: UTT-CTR-076, text: "shop ơi hũ này giá bao nhiêu", intent: ask_price, confusable_with: [greeting], boundary: substantive_over_greeting, split: train}
+  - {id: UTT-CTR-077, text: "chào shop, mình muốn đặt hai hũ", intent: purchase_product, confusable_with: [greeting], boundary: substantive_over_greeting, split: train}
+  - {id: UTT-CTR-078, text: "alo đơn của mình đã gửi chưa", intent: ask_order_status, confusable_with: [greeting], boundary: substantive_over_greeting, split: train}
+  - {id: UTT-CTR-079, text: "hello, bên mình có giao Huế không", intent: ask_shipping_availability, confusable_with: [greeting], boundary: substantive_over_greeting, split: train}
+  - {id: UTT-CTR-080, text: "admin ơi mình cần hoàn tiền", intent: request_refund, confusable_with: [greeting], boundary: substantive_over_greeting, split: train}
+

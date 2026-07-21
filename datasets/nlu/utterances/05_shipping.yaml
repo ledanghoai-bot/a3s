@@ -1,0 +1,56 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_shipping
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+locale: vi-VN
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+utterances:
+  - {id: UTT-SHIP-001, text: "có giao hàng không", intent: ask_shipping_availability, style: standard, split: train}
+  - {id: UTT-SHIP-002, text: "shop có ship tỉnh không", intent: ask_shipping_availability, style: ecommerce, split: train}
+  - {id: UTT-SHIP-003, text: "giao về Đà Nẵng được không", intent: ask_shipping_availability, style: standard, split: train}
+  - {id: UTT-SHIP-004, text: "bên mình ship toàn quốc chứ", intent: ask_shipping_availability, style: colloquial, split: train}
+  - {id: UTT-SHIP-005, text: "địa chỉ này có giao tới không", intent: ask_shipping_availability, style: standard, split: train}
+  - {id: UTT-SHIP-006, text: "ship dc k shop", normalized_text: "có giao được không shop", intent: ask_shipping_availability, style: abbreviation, split: train}
+  - {id: UTT-SHIP-007, text: "giao tinh ko", normalized_text: "giao hàng tỉnh không", intent: ask_shipping_availability, style: accentless, split: train}
+  - {id: UTT-SHIP-008, text: "mình ở huyện thì nhận được không", intent: ask_shipping_availability, style: indirect, split: validation}
+
+  - {id: UTT-SHIP-009, text: "phí ship bao nhiêu", intent: ask_shipping_fee, style: standard, split: train}
+  - {id: UTT-SHIP-010, text: "giao tới đây hết bao nhiêu tiền", intent: ask_shipping_fee, style: standard, split: train}
+  - {id: UTT-SHIP-011, text: "ship về Hà Nội bao nhiêu", intent: ask_shipping_fee, style: ecommerce, split: train}
+  - {id: UTT-SHIP-012, text: "có miễn phí giao hàng không", intent: ask_shipping_fee, style: standard, split: train}
+  - {id: UTT-SHIP-013, text: "đơn này được freeship chứ", intent: ask_shipping_fee, style: ecommerce, split: train}
+  - {id: UTT-SHIP-014, text: "phi ship bn", normalized_text: "phí giao hàng bao nhiêu", intent: ask_shipping_fee, style: abbreviation, split: train}
+  - {id: UTT-SHIP-015, text: "fs ko shop", normalized_text: "miễn phí giao hàng không shop", intent: ask_shipping_fee, style: abbreviation, split: train}
+  - {id: UTT-SHIP-016, text: "cho mình xin cước giao hàng", intent: ask_shipping_fee, style: formal, split: validation}
+
+  - {id: UTT-SHIP-017, text: "bao lâu nhận được hàng", intent: ask_delivery_time, style: standard, split: train}
+  - {id: UTT-SHIP-018, text: "mấy ngày thì tới", intent: ask_delivery_time, style: colloquial, split: train}
+  - {id: UTT-SHIP-019, text: "giao về tỉnh mất bao lâu", intent: ask_delivery_time, style: standard, split: train}
+  - {id: UTT-SHIP-020, text: "mai có nhận được không", intent: ask_delivery_time, style: urgent, split: train}
+  - {id: UTT-SHIP-021, text: "thời gian giao dự kiến là khi nào", intent: ask_delivery_time, style: formal, split: train}
+  - {id: UTT-SHIP-022, text: "bao lau toi", normalized_text: "bao lâu nhận được", intent: ask_delivery_time, style: accentless, split: train}
+  - {id: UTT-SHIP-023, text: "may ngay co hang", normalized_text: "mấy ngày có hàng", intent: ask_delivery_time, style: accentless, split: train}
+  - {id: UTT-SHIP-024, text: "mình cần hàng trước cuối tuần", intent: ask_delivery_time, style: indirect, split: validation}
+
+  - {id: UTT-SHIP-025, text: "đơn của tôi tới đâu rồi", intent: ask_order_status, style: standard, split: train}
+  - {id: UTT-SHIP-026, text: "kiểm tra đơn giúp mình", intent: ask_order_status, style: standard, split: train}
+  - {id: UTT-SHIP-027, text: "đơn đã gửi chưa", intent: ask_order_status, style: colloquial, split: train}
+  - {id: UTT-SHIP-028, text: "tình trạng đơn hàng thế nào", intent: ask_order_status, style: formal, split: train}
+  - {id: UTT-SHIP-029, text: "check don giup mk", normalized_text: "kiểm tra đơn giúp mình", intent: ask_order_status, style: abbreviation, split: train}
+  - {id: UTT-SHIP-030, text: "dh cua toi sao roi", normalized_text: "đơn hàng của tôi sao rồi", intent: ask_order_status, style: accentless, split: train}
+  - {id: UTT-SHIP-031, text: "shop xem đơn hôm qua cho mình", intent: ask_order_status, style: contextual, split: validation}
+  - {id: UTT-SHIP-032, text: "đơn vẫn chưa thấy cập nhật", intent: ask_order_status, style: indirect, split: validation}
+
+  - {id: UTT-SHIP-033, text: "cho mình mã vận đơn", intent: ask_tracking, style: standard, split: train}
+  - {id: UTT-SHIP-034, text: "tracking đơn ở đâu", intent: ask_tracking, style: mixed, split: train}
+  - {id: UTT-SHIP-035, text: "tra cứu vận chuyển giúp mình", intent: ask_tracking, style: formal, split: train}
+  - {id: UTT-SHIP-036, text: "có link theo dõi đơn không", intent: ask_tracking, style: ecommerce, split: train}
+  - {id: UTT-SHIP-037, text: "ma vd la gi", normalized_text: "mã vận đơn là gì", intent: ask_tracking, style: abbreviation, split: train}
+  - {id: UTT-SHIP-038, text: "xin thông tin bên vận chuyển", intent: ask_tracking, style: standard, split: train}
+  - {id: UTT-SHIP-039, text: "tôi muốn biết kiện hàng đang ở đâu", intent: ask_tracking, style: formal, split: validation}
+  - {id: UTT-SHIP-040, text: "đơn đã đi tới trạm nào rồi", intent: ask_tracking, style: indirect, split: validation}

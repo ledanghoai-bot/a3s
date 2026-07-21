@@ -1,0 +1,127 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_normalization
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+locale: vi-VN
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+rules:
+  - {id: NRM-001, source: "shop oi", target: "shop ơi", match: phrase}
+  - {id: NRM-002, source: "ad oi", target: "admin ơi", match: phrase}
+  - {id: NRM-003, source: "add oi", target: "admin ơi", match: phrase}
+  - {id: NRM-004, source: "amin oi", target: "admin ơi", match: phrase}
+  - {id: NRM-005, source: "alo alo", target: "alo", match: phrase}
+  - {id: NRM-006, source: "hello shop", target: "chào shop", match: phrase}
+  - {id: NRM-007, source: "hi shop", target: "chào shop", match: phrase}
+  - {id: NRM-008, source: "helo", target: "hello", match: token}
+  - {id: NRM-009, source: "hí", target: "hi", match: token}
+  - {id: NRM-010, source: "chao", target: "chào", match: token}
+
+  - {id: NRM-011, source: "bn", target: "bao nhiêu", match: token}
+  - {id: NRM-012, source: "bnh", target: "bao nhiêu", match: token}
+  - {id: NRM-013, source: "bao nhieu", target: "bao nhiêu", match: phrase}
+  - {id: NRM-014, source: "nhiu", target: "nhiêu", match: token}
+  - {id: NRM-015, source: "nhju", target: "nhiêu", match: token}
+  - {id: NRM-016, source: "nhiu tien", target: "bao nhiêu tiền", match: phrase}
+  - {id: NRM-017, source: "gia bn", target: "giá bao nhiêu", match: phrase}
+  - {id: NRM-018, source: "gia sao", target: "giá thế nào", match: phrase}
+  - {id: NRM-019, source: "gia ntn", target: "giá thế nào", match: phrase}
+  - {id: NRM-020, source: "gia nhiu", target: "giá bao nhiêu", match: phrase}
+  - {id: NRM-021, source: "gia nhiêu", target: "giá bao nhiêu", match: phrase}
+  - {id: NRM-022, source: "mấy xèng", target: "bao nhiêu tiền", match: phrase}
+  - {id: NRM-023, source: "mấy củ", target: "bao nhiêu tiền", match: phrase}
+  - {id: NRM-024, source: "ib giá", target: "cho biết giá", match: phrase}
+  - {id: NRM-025, source: "inbox giá", target: "cho biết giá", match: phrase}
+
+  - {id: NRM-026, source: "sp", target: "sản phẩm", match: token}
+  - {id: NRM-027, source: "san pham", target: "sản phẩm", match: phrase}
+  - {id: NRM-028, source: "cf", target: "cà phê", match: token}
+  - {id: NRM-029, source: "cafe", target: "cà phê", match: token}
+  - {id: NRM-030, source: "coffee", target: "cà phê", match: token}
+  - {id: NRM-031, source: "say lanh", target: "sấy lạnh", match: phrase}
+  - {id: NRM-032, source: "freeze dry", target: "freeze-dried", match: phrase}
+  - {id: NRM-033, source: "freeze dried", target: "freeze-dried", match: phrase}
+  - {id: NRM-034, source: "hoa tan", target: "hòa tan", match: phrase}
+  - {id: NRM-035, source: "robusta", target: "Robusta", match: token}
+  - {id: NRM-036, source: "arabica", target: "Arabica", match: token}
+
+  - {id: NRM-037, source: "con k", target: "còn không", match: phrase}
+  - {id: NRM-038, source: "con ko", target: "còn không", match: phrase}
+  - {id: NRM-039, source: "còn k", target: "còn không", match: phrase}
+  - {id: NRM-040, source: "còn ko", target: "còn không", match: phrase}
+  - {id: NRM-041, source: "het hang", target: "hết hàng", match: phrase}
+  - {id: NRM-042, source: "co hang k", target: "có hàng không", match: phrase}
+  - {id: NRM-043, source: "có hàng k", target: "có hàng không", match: phrase}
+  - {id: NRM-044, source: "avail", target: "còn hàng", match: token}
+
+  - {id: NRM-045, source: "mua ntn", target: "mua như thế nào", match: phrase}
+  - {id: NRM-046, source: "dat hang", target: "đặt hàng", match: phrase}
+  - {id: NRM-047, source: "order", target: "đặt hàng", match: token}
+  - {id: NRM-048, source: "oder", target: "đặt hàng", match: token}
+  - {id: NRM-049, source: "chot", target: "chốt", match: token}
+  - {id: NRM-050, source: "chốt đơn nha", target: "xác nhận đặt hàng", match: phrase}
+  - {id: NRM-051, source: "lay 1", target: "lấy một", match: phrase}
+  - {id: NRM-052, source: "lấy 1", target: "lấy một", match: phrase}
+  - {id: NRM-053, source: "2 hu", target: "hai hũ", match: phrase}
+  - {id: NRM-054, source: "2 hũ", target: "hai hũ", match: phrase}
+
+  - {id: NRM-055, source: "ship k", target: "có giao hàng không", match: phrase}
+  - {id: NRM-056, source: "ship ko", target: "có giao hàng không", match: phrase}
+  - {id: NRM-057, source: "ship dc k", target: "có giao được không", match: phrase}
+  - {id: NRM-058, source: "ship đc k", target: "có giao được không", match: phrase}
+  - {id: NRM-059, source: "fs", target: "miễn phí giao hàng", match: token}
+  - {id: NRM-060, source: "freeship", target: "miễn phí giao hàng", match: token}
+  - {id: NRM-061, source: "phi ship", target: "phí giao hàng", match: phrase}
+  - {id: NRM-062, source: "cod", target: "thanh toán khi nhận hàng", match: token}
+  - {id: NRM-063, source: "cod dc k", target: "có thanh toán khi nhận hàng không", match: phrase}
+  - {id: NRM-064, source: "cod đc k", target: "có thanh toán khi nhận hàng không", match: phrase}
+  - {id: NRM-065, source: "giao tinh", target: "giao hàng tỉnh", match: phrase}
+  - {id: NRM-066, source: "bao lau toi", target: "bao lâu nhận được", match: phrase}
+  - {id: NRM-067, source: "may ngay toi", target: "mấy ngày nhận được", match: phrase}
+
+  - {id: NRM-068, source: "ck", target: "chuyển khoản", match: token}
+  - {id: NRM-069, source: "chuyen khoan", target: "chuyển khoản", match: phrase}
+  - {id: NRM-070, source: "tt", target: "thanh toán", match: token}
+  - {id: NRM-071, source: "thanh toan", target: "thanh toán", match: phrase}
+  - {id: NRM-072, source: "qr", target: "mã QR", match: token}
+
+  - {id: NRM-073, source: "dh", target: "đơn hàng", match: token}
+  - {id: NRM-074, source: "don hang", target: "đơn hàng", match: phrase}
+  - {id: NRM-075, source: "ma don", target: "mã đơn", match: phrase}
+  - {id: NRM-076, source: "ma vd", target: "mã vận đơn", match: phrase}
+  - {id: NRM-077, source: "tracking", target: "theo dõi vận chuyển", match: token}
+  - {id: NRM-078, source: "check don", target: "kiểm tra đơn hàng", match: phrase}
+  - {id: NRM-079, source: "don toi dau", target: "đơn hàng tới đâu", match: phrase}
+
+  - {id: NRM-080, source: "ht", target: "hỗ trợ", match: token}
+  - {id: NRM-081, source: "ho tro", target: "hỗ trợ", match: phrase}
+  - {id: NRM-082, source: "doi tra", target: "đổi trả", match: phrase}
+  - {id: NRM-083, source: "hoan tien", target: "hoàn tiền", match: phrase}
+  - {id: NRM-084, source: "khieu nai", target: "khiếu nại", match: phrase}
+  - {id: NRM-085, source: "loi sp", target: "sản phẩm lỗi", match: phrase}
+
+  - {id: NRM-086, source: "dc", target: "được", match: token}
+  - {id: NRM-087, source: "đc", target: "được", match: token}
+  - {id: NRM-088, source: "k", target: "không", match: token}
+  - {id: NRM-089, source: "ko", target: "không", match: token}
+  - {id: NRM-090, source: "kh", target: "không", match: token}
+  - {id: NRM-091, source: "hok", target: "không", match: token}
+  - {id: NRM-092, source: "hem", target: "không", match: token}
+  - {id: NRM-093, source: "z", target: "vậy", match: token}
+  - {id: NRM-094, source: "v", target: "vậy", match: token}
+  - {id: NRM-095, source: "ntn", target: "như thế nào", match: token}
+  - {id: NRM-096, source: "sao ta", target: "như thế nào", match: phrase}
+  - {id: NRM-097, source: "mk", target: "mình", match: token}
+  - {id: NRM-098, source: "m", target: "mình", match: token, risk: ambiguous}
+  - {id: NRM-099, source: "tks", target: "cảm ơn", match: token}
+  - {id: NRM-100, source: "thanks", target: "cảm ơn", match: token}
+
+validation:
+  reject_duplicate_source_same_match: true
+  preserve_original_message: true
+  generate_accentless_signal: true
+  do_not_mutate_entities: true

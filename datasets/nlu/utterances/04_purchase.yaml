@@ -1,0 +1,56 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_purchase
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+locale: vi-VN
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+utterances:
+  - {id: UTT-BUY-001, text: "mình muốn mua", intent: purchase_product, style: standard, split: train}
+  - {id: UTT-BUY-002, text: "đặt hàng thế nào", intent: purchase_product, style: standard, split: train}
+  - {id: UTT-BUY-003, text: "cho mình đặt một hũ", intent: purchase_product, style: standard, split: train}
+  - {id: UTT-BUY-004, text: "mình lấy một hũ nhé", intent: purchase_product, style: colloquial, split: train}
+  - {id: UTT-BUY-005, text: "shop lên đơn giúp mình", intent: purchase_product, style: social_commerce, split: train}
+  - {id: UTT-BUY-006, text: "tôi muốn đặt sản phẩm này", intent: purchase_product, style: formal, split: train}
+  - {id: UTT-BUY-007, text: "mua ở đâu vậy shop", intent: purchase_product, style: colloquial, split: train}
+  - {id: UTT-BUY-008, text: "cách mua như thế nào", intent: purchase_product, style: standard, split: train}
+  - {id: UTT-BUY-009, text: "order cho mình một hũ", normalized_text: "đặt hàng cho mình một hũ", intent: purchase_product, style: mixed, split: train}
+  - {id: UTT-BUY-010, text: "mk muon mua 2 hu", normalized_text: "mình muốn mua hai hũ", intent: purchase_product, style: accentless, split: train}
+  - {id: UTT-BUY-011, text: "lấy giúp anh ba hũ", intent: purchase_product, style: colloquial, split: train}
+  - {id: UTT-BUY-012, text: "chị đặt loại này nha", intent: purchase_product, style: colloquial, split: train}
+  - {id: UTT-BUY-013, text: "thêm sản phẩm này vào đơn", intent: purchase_product, style: ecommerce, split: train}
+  - {id: UTT-BUY-014, text: "tôi quyết định mua", intent: purchase_product, style: formal, split: train}
+  - {id: UTT-BUY-015, text: "chốt một hũ trước", intent: purchase_product, style: colloquial, split: train}
+
+  - {id: UTT-BUY-016, text: "chốt đơn nhé", intent: confirm_order, style: colloquial, split: train}
+  - {id: UTT-BUY-017, text: "ok lên đơn đi", intent: confirm_order, style: colloquial, split: train}
+  - {id: UTT-BUY-018, text: "xác nhận đơn giúp mình", intent: confirm_order, style: standard, split: train}
+  - {id: UTT-BUY-019, text: "đúng rồi gửi đơn này nhé", intent: confirm_order, style: colloquial, split: train}
+  - {id: UTT-BUY-020, text: "mình đồng ý đặt", intent: confirm_order, style: standard, split: train}
+  - {id: UTT-BUY-021, text: "chot don nha", normalized_text: "chốt đơn nhé", intent: confirm_order, style: accentless, split: train}
+  - {id: UTT-BUY-022, text: "ok lấy hai hũ", intent: confirm_order, style: colloquial, split: train}
+  - {id: UTT-BUY-023, text: "đơn vậy là được", intent: confirm_order, style: indirect, split: train}
+  - {id: UTT-BUY-024, text: "không cần sửa gì nữa, đặt đi", intent: confirm_order, style: colloquial, split: validation}
+  - {id: UTT-BUY-025, text: "xác nhận mua sản phẩm đã chọn", intent: confirm_order, style: formal, split: validation}
+
+  - {id: UTT-BUY-026, text: "thanh toán thế nào", intent: ask_payment, style: standard, split: train}
+  - {id: UTT-BUY-027, text: "có chuyển khoản không", intent: ask_payment, style: standard, split: train}
+  - {id: UTT-BUY-028, text: "cho mình xin thông tin thanh toán", intent: ask_payment, style: standard, split: train}
+  - {id: UTT-BUY-029, text: "quét mã QR được không", intent: ask_payment, style: ecommerce, split: train}
+  - {id: UTT-BUY-030, text: "shop nhận hình thức thanh toán nào", intent: ask_payment, style: standard, split: train}
+  - {id: UTT-BUY-031, text: "ck được chứ", normalized_text: "chuyển khoản được chứ", intent: ask_payment, style: abbreviation, split: train}
+  - {id: UTT-BUY-032, text: "tt khi nào", normalized_text: "thanh toán khi nào", intent: ask_payment, style: abbreviation, split: validation}
+
+  - {id: UTT-BUY-033, text: "có COD không", intent: ask_cod, style: ecommerce, split: train}
+  - {id: UTT-BUY-034, text: "nhận hàng rồi trả tiền được không", intent: ask_cod, style: standard, split: train}
+  - {id: UTT-BUY-035, text: "cod dc k", normalized_text: "có thanh toán khi nhận hàng không", intent: ask_cod, style: abbreviation, split: train}
+  - {id: UTT-BUY-036, text: "cho thanh toán lúc giao hàng nhé", intent: ask_cod, style: colloquial, split: validation}
+
+  - {id: UTT-BUY-037, text: "cảm ơn, mình không cần thêm", intent: end_conversation, style: standard, split: train}
+  - {id: UTT-BUY-038, text: "thôi để mình suy nghĩ thêm", intent: end_conversation, style: colloquial, split: train}
+  - {id: UTT-BUY-039, text: "vậy đủ rồi cảm ơn shop", intent: end_conversation, style: colloquial, split: validation}
+  - {id: UTT-BUY-040, text: "không cần tư vấn nữa nhé", intent: end_conversation, style: direct, split: validation}

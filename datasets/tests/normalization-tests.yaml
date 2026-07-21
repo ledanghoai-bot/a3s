@@ -1,0 +1,57 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_normalization_tests
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+tests:
+  - {id: NLU-NRM-T001, input: "shop oi", expected: "shop ơi"}
+  - {id: NLU-NRM-T002, input: "ad oi", expected: "admin ơi"}
+  - {id: NLU-NRM-T003, input: "helo shop", expected: "hello shop"}
+  - {id: NLU-NRM-T004, input: "chao shop", expected: "chào shop"}
+  - {id: NLU-NRM-T005, input: "gia bn", expected: "giá bao nhiêu"}
+  - {id: NLU-NRM-T006, input: "gia nhiu", expected: "giá bao nhiêu"}
+  - {id: NLU-NRM-T007, input: "hũ này bn z", expected: "hũ này bao nhiêu vậy"}
+  - {id: NLU-NRM-T008, input: "ib giá", expected: "cho biết giá"}
+  - {id: NLU-NRM-T009, input: "cf say lanh", expected: "cà phê sấy lạnh"}
+  - {id: NLU-NRM-T010, input: "freeze dry coffee", expected: "freeze-dried cà phê"}
+  - {id: NLU-NRM-T011, input: "sp con ko", expected: "sản phẩm còn không"}
+  - {id: NLU-NRM-T012, input: "co hang k", expected: "có hàng không"}
+  - {id: NLU-NRM-T013, input: "mua ntn", expected: "mua như thế nào"}
+  - {id: NLU-NRM-T014, input: "oder 2 hu", expected: "đặt hàng hai hũ"}
+  - {id: NLU-NRM-T015, input: "chot don nha", expected: "xác nhận đặt hàng"}
+  - {id: NLU-NRM-T016, input: "ship k", expected: "có giao hàng không"}
+  - {id: NLU-NRM-T017, input: "ship dc k", expected: "có giao được không"}
+  - {id: NLU-NRM-T018, input: "phi ship bn", expected: "phí giao hàng bao nhiêu"}
+  - {id: NLU-NRM-T019, input: "cod dc k", expected: "có thanh toán khi nhận hàng không"}
+  - {id: NLU-NRM-T020, input: "fs ko", expected: "miễn phí giao hàng không"}
+  - {id: NLU-NRM-T021, input: "ck dc k", expected: "chuyển khoản được không"}
+  - {id: NLU-NRM-T022, input: "tt ntn", expected: "thanh toán như thế nào"}
+  - {id: NLU-NRM-T023, input: "check don", expected: "kiểm tra đơn hàng"}
+  - {id: NLU-NRM-T024, input: "dh toi dau", expected: "đơn hàng tới đâu"}
+  - {id: NLU-NRM-T025, input: "ma vd", expected: "mã vận đơn"}
+  - {id: NLU-NRM-T026, input: "ho tro mk", expected: "hỗ trợ mình"}
+  - {id: NLU-NRM-T027, input: "doi tra dc k", expected: "đổi trả được không"}
+  - {id: NLU-NRM-T028, input: "hoan tien", expected: "hoàn tiền"}
+  - {id: NLU-NRM-T029, input: "khieu nai", expected: "khiếu nại"}
+  - {id: NLU-NRM-T030, input: "loi sp", expected: "sản phẩm lỗi"}
+  - {id: NLU-NRM-T031, input: "dc ko", expected: "được không"}
+  - {id: NLU-NRM-T032, input: "hok dc", expected: "không được"}
+  - {id: NLU-NRM-T033, input: "ntn z", expected: "như thế nào vậy"}
+  - {id: NLU-NRM-T034, input: "tks shop", expected: "cảm ơn shop"}
+  - {id: NLU-NRM-T035, input: "thanks ad", expected: "cảm ơn admin"}
+  - {id: NLU-NRM-T036, input: "Robusta Arabica", expected: "Robusta Arabica"}
+  - {id: NLU-NRM-T037, input: "3S Coffee", expected: "3S Coffee"}
+  - {id: NLU-NRM-T038, input: "một muỗng 1 g", expected: "một muỗng 1 g"}
+  - {id: NLU-NRM-T039, input: "80-90°C", expected: "80-90°C"}
+  - {id: NLU-NRM-T040, input: "đơn #A123", expected: "đơn #A123"}
+
+acceptance:
+  exact_match_rate: 1.0
+  preserve_entities: true
+  preserve_numbers: true
+  preserve_product_names: true

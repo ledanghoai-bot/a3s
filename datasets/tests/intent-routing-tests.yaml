@@ -1,0 +1,78 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_intent_routing_tests
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+split: test
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+tests:
+  - {id: NLU-RT-001, input: "xin phép làm phiền shop chút", expected_intent: greeting, min_confidence: 0.80}
+  - {id: NLU-RT-002, input: "bên kia màn hình có ai không nhỉ", expected_intent: greeting, min_confidence: 0.80}
+  - {id: NLU-RT-003, input: "mình chưa biết chọn gì, chỉ giúp nhé", expected_intent: request_consultation, min_confidence: 0.80}
+  - {id: NLU-RT-004, input: "cần một bạn hiểu cà phê tư vấn", expected_intent: request_consultation, min_confidence: 0.80}
+  - {id: NLU-RT-005, input: "3S đóng vai trò gì trong sản phẩm này", expected_intent: ask_brand, min_confidence: 0.85}
+  - {id: NLU-RT-006, input: "cho biết đơn vị đứng tên thương hiệu", expected_intent: ask_brand, min_confidence: 0.85}
+  - {id: NLU-RT-007, input: "mặt hàng chính của shop là gì", expected_intent: ask_product, min_confidence: 0.85}
+  - {id: NLU-RT-008, input: "có thể giới thiệu hũ đang bán không", expected_intent: ask_product, min_confidence: 0.85}
+  - {id: NLU-RT-009, input: "vì sao gọi là freeze-dried", expected_intent: ask_freeze_dried, min_confidence: 0.85}
+  - {id: NLU-RT-010, input: "dịch cà phê biến thành tinh thể kiểu gì", expected_intent: ask_freeze_dried, min_confidence: 0.85}
+  - {id: NLU-RT-011, input: "phần hạt ban đầu gồm giống nào", expected_intent: ask_ingredients, min_confidence: 0.85}
+  - {id: NLU-RT-012, input: "có công bố blend hạt không", expected_intent: ask_ingredients, min_confidence: 0.85}
+  - {id: NLU-RT-013, input: "ly pha ra cảm giác uống ra sao", expected_intent: ask_taste, min_confidence: 0.85}
+  - {id: NLU-RT-014, input: "hậu vị có lưu lâu không", expected_intent: ask_taste, min_confidence: 0.85}
+  - {id: NLU-RT-015, input: "đặt cạnh ly phin thì khác gì", expected_intent: compare_coffee, min_confidence: 0.85}
+  - {id: NLU-RT-016, input: "người quen uống máy có hợp không", expected_intent: compare_coffee, min_confidence: 0.85}
+  - {id: NLU-RT-017, input: "công thức khởi đầu cho người mới là gì", expected_intent: ask_brewing, min_confidence: 0.85}
+  - {id: NLU-RT-018, input: "muỗng đi kèm dùng thế nào", expected_intent: ask_brewing, min_confidence: 0.85}
+  - {id: NLU-RT-019, input: "muốn hương nổi rõ thì pha nhiệt nào", expected_intent: ask_hot_brewing, min_confidence: 0.85}
+  - {id: NLU-RT-020, input: "nước tám mươi độ tan mất bao lâu", expected_intent: ask_hot_brewing, min_confidence: 0.85}
+  - {id: NLU-RT-021, input: "không có nước nóng thì dùng được chứ", expected_intent: ask_cold_brewing, min_confidence: 0.85}
+  - {id: NLU-RT-022, input: "mình thích pha mát uống liền", expected_intent: ask_cold_brewing, min_confidence: 0.85}
+  - {id: NLU-RT-023, input: "bốn muỗng tương đương mấy mg caffeine", expected_intent: ask_caffeine, min_confidence: 0.90}
+  - {id: NLU-RT-024, input: "tỷ lệ cafein trên thành phẩm là nhiêu", expected_intent: ask_caffeine, min_confidence: 0.90}
+  - {id: NLU-RT-025, input: "mình đang cho con bú thì sao", expected_intent: health_question, min_confidence: 0.95}
+  - {id: NLU-RT-026, input: "uống xong hồi hộp thì xử lý thế nào", expected_intent: health_question, min_confidence: 0.95}
+  - {id: NLU-RT-027, input: "cho con số phải trả hiện giờ", expected_intent: ask_price, min_confidence: 0.90}
+  - {id: NLU-RT-028, input: "một hũ làm mình tốn bao nhiêu", expected_intent: ask_price, min_confidence: 0.90}
+  - {id: NLU-RT-029, input: "kho có đáp ứng đơn hôm nay không", expected_intent: ask_stock, min_confidence: 0.90}
+  - {id: NLU-RT-030, input: "nếu đặt liền thì có hàng gửi chứ", expected_intent: ask_stock, min_confidence: 0.90}
+  - {id: NLU-RT-031, input: "đơn đầu có ưu đãi nào áp dụng", expected_intent: ask_promotion, min_confidence: 0.90}
+  - {id: NLU-RT-032, input: "chương trình giảm hiện hành là gì", expected_intent: ask_promotion, min_confidence: 0.90}
+  - {id: NLU-RT-033, input: "mình muốn sở hữu hũ này", expected_intent: purchase_product, min_confidence: 0.85}
+  - {id: NLU-RT-034, input: "thêm cho tôi hai sản phẩm", expected_intent: purchase_product, min_confidence: 0.85}
+  - {id: NLU-RT-035, input: "giữ nguyên thông tin và tạo đơn", expected_intent: confirm_order, min_confidence: 0.95}
+  - {id: NLU-RT-036, input: "mọi thứ đúng rồi, xác nhận nhé", expected_intent: confirm_order, min_confidence: 0.95}
+  - {id: NLU-RT-037, input: "bên mình thu tiền qua kênh nào", expected_intent: ask_payment, min_confidence: 0.85}
+  - {id: NLU-RT-038, input: "tôi muốn trả bằng chuyển khoản", expected_intent: ask_payment, min_confidence: 0.85}
+  - {id: NLU-RT-039, input: "không trả trước có được không", expected_intent: ask_cod, min_confidence: 0.85}
+  - {id: NLU-RT-040, input: "bưu tá tới rồi tôi thanh toán nhé", expected_intent: ask_cod, min_confidence: 0.85}
+  - {id: NLU-RT-041, input: "đảo Phú Quốc nhận hàng được chứ", expected_intent: ask_shipping_availability, min_confidence: 0.85}
+  - {id: NLU-RT-042, input: "hệ thống có giao tới mã bưu chính này không", expected_intent: ask_shipping_availability, min_confidence: 0.85}
+  - {id: NLU-RT-043, input: "ước tính phần vận chuyển giúp tôi", expected_intent: ask_shipping_fee, min_confidence: 0.90}
+  - {id: NLU-RT-044, input: "giao hai hũ tới Huế tốn thêm bao nhiêu", expected_intent: ask_shipping_fee, min_confidence: 0.90}
+  - {id: NLU-RT-045, input: "nếu gửi sáng nay thì ngày nào tới", expected_intent: ask_delivery_time, min_confidence: 0.85}
+  - {id: NLU-RT-046, input: "tôi cần biết ETA của kiện hàng", expected_intent: ask_delivery_time, min_confidence: 0.85}
+  - {id: NLU-RT-047, input: "đơn 123 đang ở bước xử lý nào", expected_intent: ask_order_status, min_confidence: 0.95}
+  - {id: NLU-RT-048, input: "shop đã bàn giao đơn của mình chưa", expected_intent: ask_order_status, min_confidence: 0.95}
+  - {id: NLU-RT-049, input: "xin đường dẫn xem hành trình kiện", expected_intent: ask_tracking, min_confidence: 0.95}
+  - {id: NLU-RT-050, input: "tra mã giao vận ở đâu", expected_intent: ask_tracking, min_confidence: 0.95}
+  - {id: NLU-RT-051, input: "trải nghiệm lần này khiến tôi thất vọng", expected_intent: complaint, min_confidence: 0.90}
+  - {id: NLU-RT-052, input: "tôi cần phản ánh chính thức", expected_intent: complaint, min_confidence: 0.90}
+  - {id: NLU-RT-053, input: "tôi muốn gửi sản phẩm trở lại", expected_intent: request_return, min_confidence: 0.95}
+  - {id: NLU-RT-054, input: "hướng dẫn đổi hũ bị hỏng", expected_intent: request_return, min_confidence: 0.95}
+  - {id: NLU-RT-055, input: "vui lòng hoàn lại khoản tôi đã trả", expected_intent: request_refund, min_confidence: 0.95}
+  - {id: NLU-RT-056, input: "tôi yêu cầu hủy giao dịch và nhận lại tiền", expected_intent: request_refund, min_confidence: 0.95}
+  - {id: NLU-RT-057, input: "quán tôi cần nguồn hàng định kỳ", expected_intent: b2b_inquiry, min_confidence: 0.85}
+  - {id: NLU-RT-058, input: "xin trao đổi hợp đồng cung cấp cho văn phòng", expected_intent: b2b_inquiry, min_confidence: 0.85}
+  - {id: NLU-RT-059, input: "mình đã rõ hết rồi, chào shop", expected_intent: end_conversation, min_confidence: 0.80}
+  - {id: NLU-RT-060, input: "dừng ở đây nhé không cần hỗ trợ nữa", expected_intent: end_conversation, min_confidence: 0.80}
+
+acceptance:
+  no_train_test_duplicate: true
+  p0_accuracy: 1.0
+  p1_accuracy: 0.95
+  wrong_tool_route_rate: 0.0

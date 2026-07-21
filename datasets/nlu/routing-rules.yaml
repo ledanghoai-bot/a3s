@@ -1,0 +1,76 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_routing_rules
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-21
+
+execution_order:
+  - strip_vocative_prefix
+  - privacy_and_safety
+  - explicit_transaction_action
+  - high_precision_rules
+  - entity_aware_rules
+  - semantic_router
+  - margin_check
+  - contextual_rerank
+  - clarify
+
+vocative_prefixes:
+  - "shop ơi"
+  - "shop"
+  - "admin ơi"
+  - "ad ơi"
+  - "bên mình ơi"
+
+policies:
+  - id: RTE-POL-001
+    rule: substantive_intent_overrides_greeting
+    description: Nếu bỏ lời chào/xưng hô mà câu vẫn còn nội dung, không route greeting.
+
+  - id: RTE-POL-002
+    rule: explicit_action_overrides_general_complaint
+    description: Yêu cầu đổi/trả/hoàn tiền cụ thể được ưu tiên hơn complaint chung.
+
+  - id: RTE-POL-003
+    rule: tool_route_never_falls_back_to_static_knowledge
+    description: Dữ liệu động không được tạo từ Knowledge khi Tool lỗi.
+
+rules:
+  - {id: RTE-001, intent: ask_payment, any_phrases: ["chuyển khoản", "tiền mặt", "mã QR", "quét QR", "phương thức thanh toán", "kênh thanh toán"], priority: 90}
+  - {id: RTE-002, intent: ask_cod, any_phrases: ["COD", "nhận hàng trả tiền", "thanh toán khi nhận", "không trả trước", "giao tới rồi trả"], priority: 95}
+  - {id: RTE-003, intent: ask_shipping_fee, any_phrases: ["phí ship", "phí giao", "cước giao", "cước vận chuyển", "vận chuyển bao nhiêu", "tốn thêm bao nhiêu"], priority: 90}
+  - {id: RTE-004, intent: ask_tracking, any_phrases: ["mã vận đơn", "tracking", "link theo dõi", "hành trình kiện", "kiện đang ở đâu", "bên vận chuyển"], priority: 92}
+  - {id: RTE-005, intent: ask_order_status, any_phrases: ["đơn tới đâu", "trạng thái đơn", "đơn đã gửi chưa", "đơn đã bàn giao chưa", "kiểm tra đơn", "đơn đang xử lý"], priority: 92}
+  - {id: RTE-006, intent: ask_shipping_availability, any_phrases: ["có giao tới", "ship về", "giao về", "giao tới", "ship tỉnh", "giao toàn quốc"], required_entity_any: [location], priority: 88}
+  - {id: RTE-007, intent: ask_delivery_time, any_phrases: ["bao lâu tới", "mấy ngày nhận", "ngày nào tới", "khi nào giao", "thời gian giao", "ETA"], priority: 88}
+  - {id: RTE-008, intent: ask_order_status, entity_any: [order_id], any_phrases: ["trạng thái", "xử lý", "đã gửi", "bàn giao", "tới đâu"], priority: 96}
+  - {id: RTE-009, intent: ask_tracking, entity_any: [order_id], any_phrases: ["mã vận đơn", "tracking", "theo dõi", "hành trình", "kiện"], priority: 97}
+
+  - {id: RTE-010, intent: ask_freeze_dried, any_phrases: ["sấy lạnh", "freeze-dried", "thăng hoa", "dịch chiết", "cô đặc", "tinh thể", "quy trình sản xuất"], priority: 88}
+  - {id: RTE-011, intent: ask_ingredients, any_phrases: ["nguyên liệu", "Robusta", "Arabica", "blend hạt", "tỷ lệ phối", "giống cà phê"], priority: 88}
+  - {id: RTE-012, intent: ask_taste, any_phrases: ["hương thơm", "đắng", "chua", "hậu vị", "body", "êm", "gắt", "vị thế nào"], priority: 88}
+  - {id: RTE-013, intent: compare_coffee, any_phrases: ["so với", "giống", "khác", "pha máy", "pha phin", "espresso", "G7", "Nescafé"], min_phrase_hits: 1, priority: 87}
+  - {id: RTE-014, intent: ask_product, any_phrases: ["sản phẩm gì", "bán cà phê gì", "mặt hàng chính", "giới thiệu sản phẩm", "loại cà phê nào"], priority: 82}
+
+  - {id: RTE-015, intent: request_refund, any_phrases: ["hoàn tiền", "trả tiền lại", "hoàn lại khoản", "refund", "hủy giao dịch"], priority: 98}
+  - {id: RTE-016, intent: request_return, any_phrases: ["đổi hàng", "trả hàng", "gửi trả", "đổi sản phẩm", "đổi hũ"], priority: 97}
+  - {id: RTE-017, intent: complaint, any_phrases: ["khiếu nại", "phản ánh", "không hài lòng", "thất vọng", "làm ăn kiểu gì", "sản phẩm có vấn đề"], priority: 85}
+
+  - {id: RTE-018, intent: greeting, message_is_only_any: ["xin chào", "chào shop", "shop ơi", "alo", "hello", "hi", "có ai không", "có ai trực không"], priority: 70}
+  - {id: RTE-019, intent: ask_price, any_phrases: ["giá bao nhiêu", "bao nhiêu tiền", "xin giá", "báo giá", "mấy xèng", "giá hiện tại"], priority: 92}
+  - {id: RTE-020, intent: ask_stock, any_phrases: ["còn hàng", "có sẵn", "hết hàng", "kho còn", "đặt liền có hàng"], priority: 92}
+  - {id: RTE-021, intent: ask_promotion, any_phrases: ["khuyến mãi", "ưu đãi", "mã giảm", "voucher", "deal", "giảm giá"], priority: 91}
+  - {id: RTE-022, intent: purchase_product, any_phrases: ["muốn mua", "đặt một", "đặt hai", "lấy một hũ", "lấy hai hũ", "lên đơn giúp"], priority: 90}
+  - {id: RTE-023, intent: confirm_order, any_phrases: ["chốt đơn", "xác nhận đơn", "tạo đơn", "đúng rồi đặt", "giữ nguyên và đặt"], priority: 96}
+  - {id: RTE-024, intent: ask_caffeine, any_phrases: ["caffeine", "cafein", "bao nhiêu mg", "hàm lượng caffeine"], priority: 93}
+  - {id: RTE-025, intent: health_question, any_phrases: ["mang thai", "cho con bú", "cao huyết áp", "bệnh tim", "uống thuốc", "hồi hộp", "tim đập nhanh"], priority: 99}
+
+margin_policy:
+  auto_accept_threshold: 0.85
+  min_top1_top2_margin: 0.10
+  fallback_threshold: 0.65
+  ambiguous_action: context_or_lightweight_rerank
+  below_fallback_action: ask_one_question
+

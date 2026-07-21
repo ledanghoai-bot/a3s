@@ -1,0 +1,49 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_protected_phrases
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-21
+locale: vi-VN
+
+protected_phrases:
+  - id: PHR-BRAND-001
+    canonical: "3S Coffee"
+    variants:
+      - "3S Coffee"
+      - "3s coffee"
+    category: brand
+    match: phrase
+    case_sensitive: false
+    restore_before_output: true
+
+  - id: PHR-ORG-001
+    canonical: "Robanme"
+    variants:
+      - "Robanme"
+      - "robanme"
+    category: organization
+    match: token
+    case_sensitive: false
+    restore_before_output: true
+
+  - id: PHR-ORG-002
+    canonical: "Công ty Cổ phần Robanme"
+    variants:
+      - "Công ty Cổ phần Robanme"
+      - "Công ty CP Robanme"
+      - "công ty cổ phần robanme"
+      - "công ty cp robanme"
+    category: organization
+    match: phrase
+    case_sensitive: false
+    restore_before_output: true
+
+validation:
+  unique_ids: true
+  unique_canonical_values: true
+  longest_phrase_first: true
+  restore_canonical_form: true
+  preserve_original_message: true
+

@@ -1,0 +1,52 @@
+schema_version: 1.0.0
+dataset: alpha3s_nlu_price
+version: 1.0.0
+status: approved
+owner: Alpha3S
+approved_by: PO
+approved_at: 2026-07-20
+locale: vi-VN
+created_at: 2026-07-20
+last_updated: 2026-07-20
+
+utterances:
+  - {id: UTT-PRICE-001, text: "giá bao nhiêu", intent: ask_price, style: standard, split: train}
+  - {id: UTT-PRICE-002, text: "hũ này bao nhiêu tiền", intent: ask_price, style: standard, split: train}
+  - {id: UTT-PRICE-003, text: "cà phê này giá sao", intent: ask_price, style: colloquial, split: train}
+  - {id: UTT-PRICE-004, text: "shop báo giá giúp mình", intent: ask_price, style: standard, split: train}
+  - {id: UTT-PRICE-005, text: "cho mình xin giá", intent: ask_price, style: colloquial, split: train}
+  - {id: UTT-PRICE-006, text: "một hũ giá thế nào", intent: ask_price, style: standard, split: train}
+  - {id: UTT-PRICE-007, text: "giá một hũ là bao nhiêu", intent: ask_price, style: standard, split: train}
+  - {id: UTT-PRICE-008, text: "bên mình bán bao nhiêu vậy", intent: ask_price, style: colloquial, split: train}
+  - {id: UTT-PRICE-009, text: "sản phẩm này nhiêu vậy shop", intent: ask_price, style: southern, split: train}
+  - {id: UTT-PRICE-010, text: "hũ cà phê mấy tiền", intent: ask_price, style: colloquial, split: train}
+  - {id: UTT-PRICE-011, text: "mức giá hiện tại là bao nhiêu", intent: ask_price, style: formal, split: train}
+  - {id: UTT-PRICE-012, text: "xin thông tin giá sản phẩm", intent: ask_price, style: formal, split: train}
+  - {id: UTT-PRICE-013, text: "giá bán lẻ thế nào", intent: ask_price, style: business, split: train}
+  - {id: UTT-PRICE-014, text: "mua một hũ hết bao nhiêu", intent: ask_price, style: colloquial, split: train}
+  - {id: UTT-PRICE-015, text: "tầm bao nhiêu thì mua được", intent: ask_price, style: indirect, split: train}
+  - {id: UTT-PRICE-016, text: "ngân sách bao nhiêu là đủ", intent: ask_price, style: indirect, split: train}
+  - {id: UTT-PRICE-017, text: "ib giá", normalized_text: "cho biết giá", intent: ask_price, style: social_commerce, split: train}
+  - {id: UTT-PRICE-018, text: "inbox giá nha", normalized_text: "cho biết giá", intent: ask_price, style: social_commerce, split: train}
+  - {id: UTT-PRICE-019, text: "giá bn", normalized_text: "giá bao nhiêu", intent: ask_price, style: abbreviation, split: train}
+  - {id: UTT-PRICE-020, text: "hũ này bn z", normalized_text: "hũ này bao nhiêu vậy", intent: ask_price, style: teencode, split: train}
+  - {id: UTT-PRICE-021, text: "gia bao nhieu", normalized_text: "giá bao nhiêu", intent: ask_price, style: accentless, split: train}
+  - {id: UTT-PRICE-022, text: "gia nhiu shop", normalized_text: "giá bao nhiêu shop", intent: ask_price, style: accentless, split: train}
+  - {id: UTT-PRICE-023, text: "1 hu nhiu tien", normalized_text: "một hũ bao nhiêu tiền", intent: ask_price, style: accentless, split: train}
+  - {id: UTT-PRICE-024, text: "cf này mấy xèng", normalized_text: "cà phê này bao nhiêu tiền", intent: ask_price, style: slang, split: train}
+  - {id: UTT-PRICE-025, text: "mấy củ vậy shop", normalized_text: "bao nhiêu tiền vậy shop", intent: ask_price, style: slang, split: train}
+  - {id: UTT-PRICE-026, text: "cho xin giá sỉ", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-PRICE-027, text: "mua nhiều giá thế nào", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-PRICE-028, text: "lấy số lượng lớn có giá khác không", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-PRICE-029, text: "có giá đại lý không", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-PRICE-030, text: "báo giá cho công ty giúp mình", intent: b2b_inquiry, style: business, split: train}
+  - {id: UTT-PRICE-031, text: "đang có giảm giá không", intent: ask_promotion, style: standard, split: train}
+  - {id: UTT-PRICE-032, text: "có ưu đãi gì không", intent: ask_promotion, style: standard, split: train}
+  - {id: UTT-PRICE-033, text: "có mã giảm giá không", intent: ask_promotion, style: ecommerce, split: train}
+  - {id: UTT-PRICE-034, text: "hôm nay có khuyến mãi gì", intent: ask_promotion, style: standard, split: train}
+  - {id: UTT-PRICE-035, text: "mua hai hũ có giảm không", intent: ask_promotion, style: colloquial, split: train}
+  - {id: UTT-PRICE-036, text: "cho tôi biết giá hiện hành", intent: ask_price, style: formal, split: validation}
+  - {id: UTT-PRICE-037, text: "hũ cà phê này đang bán mức nào", intent: ask_price, style: indirect, split: validation}
+  - {id: UTT-PRICE-038, text: "tui muốn coi giá trước", intent: ask_price, style: southern, split: validation}
+  - {id: UTT-PRICE-039, text: "giá mềm không shop", intent: ask_price, style: indirect, split: validation}
+  - {id: UTT-PRICE-040, text: "mua giờ có deal gì hông", normalized_text: "mua bây giờ có ưu đãi gì không", intent: ask_promotion, style: southern, split: validation}
