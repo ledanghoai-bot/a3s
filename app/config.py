@@ -39,5 +39,12 @@ class Settings(BaseSettings):
     # cai do la bot ADMIN nhan thong bao/lenh - bot nay tiep khach truc tiep)
     telegram_customer_bot_token: str = ""
 
+    # Lop NLU (issue #12) tich hop vao orchestrator - feature flag, MAC DINH TAT.
+    # Khi bat: NLU Router chay THEM (khong thay the) flow hien tai, chi bo sung
+    # hint/context cho LLM - xem app/services/nlu_hint.py. Loi trong duong NLU
+    # (bat ky dau) deu bi bat va bo qua LANG LE, KHONG BAO GIO lam vo flow tra
+    # loi chinh - xem NLU-INTEGRATION-GUIDE.md "Orchestrator Responsibilities".
+    enable_nlu_router: bool = False
+
 
 settings = Settings()

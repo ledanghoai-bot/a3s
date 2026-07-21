@@ -1,39 +1,20 @@
 """High-Precision Rules (Alpha3S NLU layer - nang cap 18/7 tu
 routing-rules.yaml chinh thuc team Knowledge gui).
 
-Trien khai Buoc 3.3 ("Regex da review") + mot phan 3.4 ("Entity-aware rule")
+Trien khai Buoc 3.3 ("Regex da review") + Buoc 3.4 ("Entity-aware rule")
 trong NLU-INTEGRATION-GUIDE.md - 25 rule (RTE-001..025) uu tien theo
 `priority`, cao hon Pattern Router (exact/token-overlap) cu.
 
-BUG THUC TE NGHIEM TRONG PHAT HIEN KHI TEST (18/7): ban dau dung
-strip_diacritics() (bo dau) de so khop `any_phrases`, GIONG HET cach lam o
-kb_router.py/normalizer.py - nhung lan nay gay HAU QUA NANG hon nhieu: "chua"
-(tu RTE-012, nghia "vi chua") va "chưa" (tu rat thong dung, nghia "not yet")
-DEU tro thanh "chua" sau khi bo dau - va vi CA HAI deu la 1 TU HOAN CHINH
-(khong phai substring nam trong tu khac), them `\\b` ranh gioi tu KHONG GIAI
-QUYET duoc (khac han bug "hong" trong "khong" o kb_router.py - do la
-substring-trong-tu, con day la DONG AM sau khi bo dau o cap do CA TU). Ket
-qua: gan NHU MOI cau chua "chưa" (cuc ky pho bien) deu bi khop nham thanh
-ask_taste qua RTE-012 - 16/25 case that (`nlu_pattern_test.py --eval`) bi
-sai vi dung 1 nguyen nhan nay.
+v1.2 (18/7): TICH HOP Entity Extraction (Buoc 6, entity_extraction.py) -
+MO KHOA 2/3 rule truoc do bi bo qua hoan toan (RTE-008, RTE-009 - dieu
+kien order_id, gio da co the trich xuat that). RTE-006 (dieu kien location)
+VAN CHUA mo khoa duoc vi entity nay chua co gazetteer dia danh - tiep tuc
+bi bo qua RO RANG (khong doan bua), xem entity_extraction.py.
 
-FIX: KHONG bo dau khi so khop `any_phrases`/`message_is_only_any` - GIU
-NGUYEN dau tieng Viet, chi so sanh khong phan biet hoa/thuong + ranh gioi tu
-(\\b). Hop ly vi routing-rules.yaml da viet dung chinh ta co dau, va message
-NEN duoc normalize() truoc (khoi phuc dau tu viet tat) truoc khi vao ham
-nay - xem cach goi trong pattern_router.route_pattern().
-
-Da verify: tu 16/25 CHECK (voi ban co bo dau) giam con 2/25 CHECK (voi ban
-giu dau) - 2 case con lai la MO HO NGU NGHIA THAT cua chinh rule (vd "giống"
-vua co nghia "tuong tu" (RTE-013 compare_coffee) vua co nghia "chung loai"
-(can rule rieng cho ask_ingredients) - can bao lai team Knowledge, khong tu
-doan sua rule thay ho.
-
-QUAN TRONG - CHUA ho tro entity-gated rules: 3 rule (RTE-006, RTE-008,
-RTE-009) co dieu kien `entity_any`/`required_entity_any` - CAN Entity
-Extraction (Buoc 6 NLU-INTEGRATION-GUIDE.md), chua duoc trien khai trong
-pham vi hien tai. Cac rule nay BI BO QUA RO RANG (khong doan bua entity co
-mat hay khong) - xem ISSUES-VI.md.
+BUG DONG AM da fix truoc do (18/7): "chua"(RTE-012, vi chua) va "chưa"(rat
+pho bien, "not yet") deu thanh "chua" sau khi bo dau, gay khop nham hang
+loat - fix: so khop `any_phrases`/`message_is_only_any` GIU NGUYEN DAU
+tieng Viet, chi so sanh khong phan biet hoa/thuong + ranh gioi tu.
 
 Co che chon-theo-priority-cao-nhat TU DONG thoa man ca 2 policy trong
 routing-rules.yaml ma khong can code rieng:
@@ -45,7 +26,10 @@ routing-rules.yaml ma khong can code rieng:
 import re
 from dataclasses import dataclass
 
-_ENTITY_GATED_FIELDS = ("entity_any", "required_entity_any")
+# Entity type CHUA ho tro trich xuat (thieu gazetteer/du lieu) - rule co
+# dieu kien entity thuoc nhom nay se TIEP TUC bi bo qua ro rang, khong
+# doan bua entity co mat hay khong. Xem entity_extraction.py.
+_ENTITY_UNSUPPORTED = {"location", "product", "taste_preference", "brewing_method"}
 
 
 @dataclass
@@ -63,20 +47,42 @@ def _phrase_matches(phrase: str, message_lower: str) -> bool:
     return bool(pattern.search(message_lower))
 
 
+def _entity_condition_met(rule: dict, entities: dict) -> bool:
+    """Tra ve True neu dieu kien entity cua rule (neu co) duoc thoa man boi
+    entities da trich xuat (tu entity_extraction.py). Rule KHONG co dieu
+    kien entity -> True (khong bi anh huong). Neu dieu kien entity DUNG
+    NHUNG entity type do CHUA duoc ho tro trich xuat (vd location) -> False
+    (an toan, khong doan bua thay vi gia dinh co/khong)."""
+    entity_any = rule.get("entity_any") or rule.get("required_entity_any")
+    if not entity_any:
+        return True
+    for etype in entity_any:
+        if etype in _ENTITY_UNSUPPORTED:
+            continue  # chua ho tro trich xuat entity nay - khong the xac nhan
+        if etype in entities:
+            return True
+    return False
+
+
 def match_high_precision_rules(
-    message: str, routing_rules_config: dict
+    message: str, routing_rules_config: dict, entities: dict | None = None
 ) -> HighPrecisionMatch | None:
     """Tra ve rule khop co priority CAO NHAT, hoac None neu khong rule nao khop.
+
+    entities: dict tra ve tu entity_extraction.extract_entities(message) -
+    truyen None neu chua co (rule co dieu kien entity se tu dong bi bo qua,
+    giong hanh vi cu truoc khi co Entity Extraction).
 
     LUU Y: `message` NEN da qua normalize() (khoi phuc dau/viet tat) truoc
     khi goi ham nay - xem pattern_router.route_pattern() cho cach goi dung.
     """
+    entities = entities if entities is not None else {}
     msg_lower = message.strip().lower()
     best: HighPrecisionMatch | None = None
 
     for rule in routing_rules_config.get("rules", []):
-        if any(f in rule for f in _ENTITY_GATED_FIELDS):
-            continue  # chua ho tro entity extraction - bo qua ro rang, khong doan
+        if not _entity_condition_met(rule, entities):
+            continue
 
         matched = False
         if "message_is_only_any" in rule:

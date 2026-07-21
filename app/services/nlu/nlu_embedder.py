@@ -35,7 +35,32 @@ def nlu_embed(text: str) -> list[float]:
     return model.encode(text, normalize_embeddings=True).tolist()
 
 
+def nlu_embed_batch(texts: list[str]) -> list[list[float]]:
+    """Tinh embedding cho NHIEU cau CUNG LUC (dung sentence-transformers batch
+    encode noi bo, nhanh hon RAT NHIEU so voi goi tung cau rieng le trong 1
+    vong lap) - dung cho build_semantic_index() khoi tao Intent Index (300+
+    utterance).
+
+    BUG HIEU NANG THUC TE PHAT HIEN (18/7): ban dau build_semantic_index() goi
+    nlu_embed_async() TUNG CAU MOT trong vong lap (380 lan goi threadpool
+    rieng le) - voi model lon (mpnet-base-v2, 278M tham so) chay tren CPU, viec
+    nay co the mat rat lau (hang chuc giay den vai phut) o lan dau tien sau
+    khi container khoi dong lai - khien bot co ve "khong phan hoi" trong luc
+    do (that ra dang xu ly, khong bi treo/crash). Fix: gom TOAN BO text can
+    embed thanh 1 list, goi encode() DUY NHAT 1 LAN - sentence-transformers tu
+    batch hieu qua ben trong.
+    """
+    model = _get_nlu_model()
+    return model.encode(texts, normalize_embeddings=True).tolist()
+
+
 async def nlu_embed_async(text: str) -> list[float]:
     """Ban bat dong bo - offload sang threadpool giong het ly do trong
     app/services/embedder.py (tranh chan event loop, xem Bat 1 issue #9)."""
     return await asyncio.to_thread(nlu_embed, text)
+
+
+async def nlu_embed_batch_async(texts: list[str]) -> list[list[float]]:
+    """Ban bat dong bo cua nlu_embed_batch() - CHI 1 lan goi asyncio.to_thread
+    duy nhat cho toan bo danh sach, thay vi 1 lan cho MOI text rieng le."""
+    return await asyncio.to_thread(nlu_embed_batch, texts)

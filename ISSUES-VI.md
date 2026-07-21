@@ -17,7 +17,7 @@
 | 9 | CI/CD + deploy VPS + monitoring | 🟡 Đang làm (2/nhiều Bat) |
 | 10 | Kênh khách hàng dự phòng (Telegram) | ✅ Closed |
 | 11 | Knowledge Base V2 (Ingestion → Retrieval → Router → Prompt Assembly → Guardrails → Test Suite) | ✅ Closed (song song production) |
-| 12 | Lớp NLU (Normalization → Pattern Router → Semantic Router → Combined Pipeline) | ✅ Paused ở 80% (chấp nhận mốc) |
+| 12 | Lớp NLU (Normalization → Pattern Router → Semantic Router → Combined Pipeline → Tích hợp bot thật) | 🟡 Đang tích hợp (Bat 1-2/nhiều) |
 
 ---
 
@@ -331,8 +331,9 @@ milestone (M1-M6) theo `IMPLEMENTATION_PLAN.md` gốc, **tách biệt hoàn toà
 
 ---
 
-## #12 · Lớp NLU (Normalization → Pattern Router → Semantic Router → Combined Pipeline)
-**Trạng thái:** ✅ Paused ở 80% — anh Hoài chấp nhận mốc hiện tại, chuyển sang tích hợp bot thật
+## #12 · Lớp NLU (Normalization → Pattern Router → Semantic Router → Combined Pipeline → Tích hợp bot thật)
+**Trạng thái:** 🟡 Đang tích hợp vào bot production (Bat 1-2/nhiều) — xem chi tiết từ Bat A đến
+Bat 2 (tích hợp orchestrator + Entity Extraction) trong các mục dưới đây
 
 **Bối cảnh:** Nâng cấp Router M3 của #11 (vốn hardcode regex) lên hệ thống NLU học từ dữ liệu
 thật — team Knowledge gửi `datasets/nlu/` (intent-catalog, normalization rules, 300+ utterance,
@@ -391,11 +392,153 @@ thật — team Knowledge gửi `datasets/nlu/` (intent-catalog, normalization r
   không chọn: gửi kết quả cho team Knowledge đề nghị bổ sung utterance/rule để tăng độ phủ
   Pattern Router; xây Entity Extraction để mở khóa 3 rule đang bị bỏ qua).
 
-**Chưa làm (tạm dừng, ngoài phạm vi đã quyết định):**
-- [ ] Entity Extraction (Bước 6) — 3 rule trong `routing-rules.yaml` có điều kiện entity đang bị
-      bỏ qua rõ ràng vì chưa có tầng này
-- [ ] Route Resolution đầy đủ (Bước 8), Context-aware Resolution (Bước 5, multi-turn)
-- [ ] Tích hợp vào `orchestrator.py`/bot production thật — **ưu tiên tiếp theo**
+**Chưa làm (tiếp tục theo Integration Guide, ngoài phạm vi Bat A-D):**
+- [x] ~~Entity Extraction (Bước 6)~~ → đã làm 1 phần ở Bat 2 bên dưới (quantity/unit/order_id/
+      payment_method/health_context/temperature; location/product chưa làm)
+- [x] ~~Route Resolution (Bước 8)~~ → đã làm ở Bat 1 bên dưới
+- [ ] Context-aware Resolution (Bước 5, multi-turn)
+- [ ] Tích hợp vào `orchestrator.py`/bot production thật — **xem chi tiết ở Bat 1-2 ngay dưới đây**
+
+---
+
+## Tích hợp #11 + #12 vào bot production thật
+Làm theo đúng kiến trúc trong `NLU-INTEGRATION-GUIDE.md` Muc 6 ("Orchestrator
+Responsibilities"): NLU **KHONG** tự sinh câu trả lời/gọi Tool trực tiếp — chỉ trả
+về route hint, **Orchestrator** mới quyết định hành động thật.
+
+### Thiết kế an toàn đã thống nhất với anh Hoài
+- **Feature flag** `ENABLE_NLU_ROUTER` (mặc định `false`) — anh Hoài tự quyết định lúc bật.
+- **Chỉ bổ sung, không thay thế**: NLU Router chỉ thêm 1 đoạn hint vào system prompt hiện
+  tại (giống cách đang bơm `rag_context`/`agent_notes`) — không chặn/thay flow LLM+tool-calling
+  đang chạy đúng.
+- **An toàn tuyệt đối**: mọi lỗi trong đường NLU (thiếu file, model chưa tải được...) đều
+  bị bắt và bỏ qua LẶNG LẼ — không bao giờ làm vỡ flow trả lời chính, trả về chuỗi
+  rỗng thay vì raise lỗi.
+- **Fallback khi không chắc chắn**: nếu `decision.action != "accept"` (Semantic Router
+  context_check/clarify), **không bơm gì cả** — tránh gây nhiễu prompt với gợi ý mơ hồ.
+
+### Đã code
+- **`app/services/nlu/route_resolution.py`** — Route Resolution (Bước 8): tra `route` field
+  trong `intent-catalog.yaml` để biết chính xác loại hành động (knowledge/tool/playbook/
+  handoff) cho từng intent. Verify 8/8 test với dữ liệu thật qua sandbox.
+- **Phát hiện quan trọng khi đối chiếu với `tools.py` thật:** nhiều `target` trong
+  `intent-catalog.yaml` (vd `get_payment_options`, `get_cod_policy`, `get_shipping_quote`,
+  `get_delivery_estimate`, `get_tracking_information`) **CHƯA CÓ** tool thật tương ứng trong
+  production hiện tại — chỉ có ĐÚNG 3 cặp khớp thật: `get_current_price`→`search_products`,
+  `get_current_stock`→`check_stock`, `create_or_confirm_order`→`create_order`
+  (`TOOL_NAME_MAP` trong `route_resolution.py`). Các target chưa có tool thật vẫn trả đúng
+  kết quả resolve, nhưng module gọi nó (`nlu_hint.py`) tự biết không ép gọi tool không
+  tồn tại — chỉ hint chung chung cho loại này.
+- **`app/services/nlu_hint.py`** (mới) — cầu nối duy nhất orchestrator.py cần gọi:
+  `get_nlu_hint(message) -> str`. Tự cache index (pattern + semantic) ở module-level, chỉ tính
+  embedding 1 LẦN lúc tiến trình worker load lần đầu (không phải mỗi tin nhắn). Toàn bộ
+  hàm bọc trong try/except — verify qua sandbox: giả lập lỗi load, xác nhận trả về `""`
+  đúng thiết kế, không raise.
+- **Tích hợp vào `orchestrator.py`** — thêm đúng 1 khối sau bước RAG hiện tại, hoàn
+  toàn đặt sau `if settings.enable_nlu_router:` — không đổi bất kỳ logic nào khác của
+  flow hiện tại.
+- **`app/config.py`** + **`.env.example`** — thêm `ENABLE_NLU_ROUTER` (mặc định `false`).
+- **`scripts/nlu_hint_test.py`** (mới) — CLI test riêng `get_nlu_hint()` để kiểm tra TRƯỚC
+  KHI bật flag thật trong bot — an toàn hơn test trực tiếp qua Messenger/Telegram.
+
+### Chưa test trên máy anh Hoài
+**Bước 1 — test hint độc lập, KHÔNG cần bật flag:**
+```bash
+docker compose exec api python scripts/nlu_hint_test.py "giá bao nhiêu"
+docker compose exec api python scripts/nlu_hint_test.py "câu hỏi mơ hồ bất kỳ"
+```
+Câu đầu kỳ vọng có hint (route=tool, gợi ý gọi `search_products`); câu sau kỳ vọng **không
+có hint** (rỗng) vì không đủ tin cậy.
+
+**Bước 2 — chỉ khi Bước 1 ổn, bật flag thật để test qua chat:**
+```bash
+# them vao .env: ENABLE_NLU_ROUTER=true
+docker compose restart api worker telegram_bot telegram_customer_bot
+```
+Rồi chat thử qua Telegram customer bot (kênh test, #10) trước khi cân nhắc Messenger thật.
+
+**✅ XÁC NHẬN BƯỚC 1 (18/7)** — anh Hoài test 2 câu: “giá bao nhiêu” → có hint đúng
+(`ask_price`, `exact_phrase`, confidence 1.0, gợi ý gọi `search_products`); “hôm nay thứ
+mấy” (câu ngoài phạm vi) → **không có hint** (rỗng), đúng thiết kế không bơm gợi ý
+mơ hồ. Cầu nối `nlu_hint.py` hoạt động đúng. **Sẵn sàng cho Bước 2** (bật
+`ENABLE_NLU_ROUTER=true` thật để test qua chat).
+
+### Sự cố khi test Bước 2 (18/7) — không liên quan code NLU
+Sau khi bật flag, `telegram_customer_bot` và `api` **crash và dừng hẳn** (không
+tu khởi động lại vì môi trường dev không có restart policy) — bot im lặng
+hoàn toàn. Truy vết log: `OSError: [Errno 5] Input/output error: '/srv'` —
+lỗi I/O xảy ra lúc đang import `torch` (qua chuỗi `orchestrator.py` →
+`products.py` → `embedder.py`, dependency có sẵn TỪ TRƯỚC, không liên
+quan code NLU mới thêm). Đây là sự cố hạ tầng tạm thời của Docker Desktop
+trên Windows khi đọc file qua bind-mount (nhiều khả năng do nhiều container
+restart dồn dập lúc anh đang test) — không phải bug logic.
+
+**Khôi phục:** `docker compose up -d api telegram_customer_bot` (khác
+`restart` vì container đã dừng hẳn) — xác nhận cả 2 trở lại trạng thái "Up".
+
+### Chủ động sửa trước 1 vấn đề hiệu năng thật sự (18/7)
+Trong lúc chẩn đoán, phát hiện `build_semantic_index()` gọi
+`nlu_embed_async()` **từng câu một trong vòng lặp** (380 lần gọi threadpool
+riêng lẻ) thay vì gộp batch — với model lớn (mpnet-base-v2, 278M tham số)
+chạy trên CPU, điều này có thể khiến LẦN ĐẦU TIÊN sau khi container khởi
+động lại mất rất lâu (bot có vẻ "không phản hồi" dù không bị crash/treo
+thật). Đã sửa: thêm `nlu_embed_batch_async()` trong `nlu_embedder.py` (gọi
+`model.encode()` 1 LẦN DUY NHẤT cho toàn bộ danh sách, tận dụng batch nội bộ
+của sentence-transformers thay vì 380 lần gọi riêng lẻ) và cập nhật
+`build_semantic_index()` dùng hàm này. Verify qua sandbox: trả về đúng số
+lượng vector cho danh sách đầu vào.
+
+### Chưa test lại trên máy anh Hoài
+1. Xác nhận `docker compose ps` vẫn hiện cả 6 service đều "Up" (không
+còn crash).
+2. Restart (code Python thay đổi, không phải dependency mới nên chỉ cần
+restart, không cần `--build`):
+```bash
+docker compose restart api worker telegram_bot telegram_customer_bot
+```
+3. Chat thử qua Telegram customer bot lần nữa — lần này tin nhắn đầu tiên
+sau restart nên nhanh hơn nhiều (batch embedding thay vì tuần tự).
+
+**✅ XÁC NHẬN QUA CHAT THẬT (18/7)** — anh Hoài test hội thoại nhiều lượt qua
+Telegram customer bot (#10) sau khi khôi phục + fix hiệu năng — chất lượng tốt,
+không lỗi: trả lời đúng giá/COD/cách pha/SKU xưởng, hiểu đúng tiếng lóng
+("mấy xèng"), không bịa SKU. Việc xác minh NLU có trực tiếp đóng góp vào từng
+câu trả lời hay không (thiết kế hint "vô hình" trong output) được đánh giá
+không quan trọng bằng việc tiếp tục theo Integration Guide. **Bat 1 hoàn tất.**
+
+### Bat 2 — Entity Extraction (Bước 6, 18/7)
+`app/services/nlu/entity_extraction.py` (mới) — trích xuất regex/từ khóa (không dùng ML
+NER), hỗ trợ: `quantity`, `unit`, `order_id`, `payment_method`, `health_context`,
+`temperature`. **Chưa hỗ trợ** `location`/`product`/`taste_preference`/`brewing_method`
+(cần gazetteer/dữ liệu chưa có).
+
+**Bug đồng âm tái diễn — áp dụng lại đúng bài học từ `high_precision_rules.py`:** "ly"
+(đơn vị cốc) và "lý" (trong "xử lý") đều thành "ly" sau khi bỏ dấu, gây khớp nhầm unit
+trong câu không liên quan. Fix: so khớp giữ nguyên dấu tiếng Việt (chỉ `quantity`/
+`order_id` — chữ số — mới dùng bản bỏ dấu, vì không nhạy cảm dấu).
+
+**Tích hợp vào `high_precision_rules.py`:** thêm entity-gating — rule có điều kiện
+`entity_any`/`required_entity_any` giờ kiểm tra đúng entity đã trích xuất được, thay vì
+bỏ qua tất cả như trước. Mở khóa `RTE-008` (`ask_order_status`), `RTE-009` (`ask_tracking`)
+— cả 2 cần `order_id`. `RTE-006` (cần `location`) **vẫn bị bỏ qua rõ ràng** vì chưa có
+gazetteer địa danh — không đoán bừa.
+
+**✅ XÁC NHẬN (18/7)** — `nlu_pattern_test.py --eval`: tự phủ tăng từ 35.3% → **37.3%**
+(tương ứng đúng số case dùng `order_id` được mở khóa), không phát sinh case sai mới.
+**Bat 2 hoàn tất.**
+
+**✅ XÁC NHẬN ACCURACY TỔNG THỂ SAU BAT 1-2 (18/7)** — `nlu_combined_test.py --eval`:
+Đúng 121/150 (**80.7%**, tăng nhẹ từ 80.0%) | Sai 22/150 (14.7%) | Clarify 7/150 (4.7%).
+Pattern Router xử lý 59/150 (**39.3%**, tăng từ 37.3%). Cải thiện nhỏ nhưng đúng hướng —
+đúng 2 điểm phần trăm tương ứng đúng số case `order_id` mới mở khóa ở Bat 2, nhất
+quán với thiết kế.
+
+**Chưa làm (tiếp tục từ đây theo Integration Guide):**
+- [ ] Mở rộng Entity Extraction (`location`, `product`) để mở khóa `RTE-006`
+- [ ] Context-aware Resolution (Bước 5, multi-turn, dùng `conversation_state`)
+- [ ] Tích hợp sâu hơn Knowledge Base V2 (#11) vào `nlu_hint.py` (hiện type=knowledge chỉ
+      hint chung chung, chưa thực sự gọi `kb_retrieval.search_kb()`)
+- [ ] Cache (Bước 10)
 
 ---
 

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from app.services.nlu.nlu_embedder import nlu_embed_async
+from app.services.nlu.nlu_embedder import nlu_embed_async, nlu_embed_batch_async
 from app.services.nlu.normalizer import normalize
 from app.services.nlu.pattern_router import is_substantive, strip_greeting_prefix
 
@@ -35,16 +35,18 @@ class SemanticIndex:
 
 async def build_semantic_index(utterances: list[dict]) -> SemanticIndex:
     """Tinh embedding cho toan bo utterance - goi 1 LAN luc khoi dong (KHONG
-    phai moi request), tai su dung cho moi lan route_semantic() sau do."""
-    vectors = []
-    intents = []
-    ids = []
-    for u in utterances:
-        text = u.get("normalized_text") or u.get("text", "")
-        vec = await nlu_embed_async(text)
-        vectors.append(vec)
-        intents.append(u["intent"])
-        ids.append(u["id"])
+    phai moi request), tai su dung cho moi lan route_semantic() sau do.
+
+    Dung nlu_embed_batch_async() - GOM TOAN BO text thanh 1 list, embed
+    trong 1 LAN GOI DUY NHAT (thay vi vong lap goi tung cau) - fix bug hieu
+    nang thuc te 18/7: ban dau goi 380 lan rieng le khien lan dau tien sau
+    khi container khoi dong lai co the mat rat lau (bot co ve "khong phan
+    hoi" trong luc do) - xem nlu_embedder.py:nlu_embed_batch().
+    """
+    texts = [u.get("normalized_text") or u.get("text", "") for u in utterances]
+    intents = [u["intent"] for u in utterances]
+    ids = [u["id"] for u in utterances]
+    vectors = await nlu_embed_batch_async(texts)
     return SemanticIndex(vectors=np.array(vectors), intents=intents, ids=ids)
 
 

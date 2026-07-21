@@ -213,8 +213,10 @@ def route_pattern(
     # TRUOC (khoi phuc dau/viet tat) nhung KHONG bo dau khi so khop - xem
     # canh bao bug "chưa"/"chua" dong am trong docstring high_precision_rules.py.
     if routing_rules_config:
+        from app.services.nlu.entity_extraction import extract_entities
         normalized_for_hp = normalize(message, rules, protected_phrases)
-        hp_match = match_high_precision_rules(normalized_for_hp, routing_rules_config)
+        entities = extract_entities(normalized_for_hp)
+        hp_match = match_high_precision_rules(normalized_for_hp, routing_rules_config, entities)
         if hp_match:
             return PatternMatch(
                 intent=hp_match.intent, confidence=0.95, matched_by="high_precision_rule",

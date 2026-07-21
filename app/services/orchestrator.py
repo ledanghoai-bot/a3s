@@ -22,6 +22,7 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.services import conversation_log, handoff, products, tools
 from app.services.messenger_profile import get_user_profile
+from app.services.nlu_hint import get_nlu_hint
 from app.services.rag import search_knowledge
 
 SYSTEM_PROMPT = (
@@ -129,6 +130,15 @@ async def handle_message(sender_id: str, text: str) -> str:
             )
         if rag_context:
             system += f"\n\n## Thong tin tham khao lien quan\n{rag_context}"
+
+        # 2.5. Lop NLU (issue #12) - CHI khi bat co ENABLE_NLU_ROUTER, CHI bo
+        # sung THEM 1 doan hint ngan cho LLM, KHONG thay the/chan flow hien
+        # tai. An toan tuyet doi: get_nlu_hint() tu bat moi loi ben trong,
+        # khong bao gio raise ra day - xem app/services/nlu_hint.py.
+        if settings.enable_nlu_router:
+            nlu_hint = await get_nlu_hint(text)
+            if nlu_hint:
+                system += f"\n\n## Goi y tu he thong phan loai NLU (tham khao, khong bat buoc)\n{nlu_hint}"
 
         # Bom THANG danh sach SKU vao system prompt moi luot chat - KHONG phu
         # thuoc viec LLM co tu quyet dinh goi search_products hay khong (bug
