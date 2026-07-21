@@ -2053,3 +2053,21 @@ lam giam so case con lai phai qua Semantic Router).
 
 **Bat B (High-Precision Rules) coi nhu hoan tat voi chat luong tot** -
 chi con 3 diem mo ho da biet ro nguyen nhan, khong phai bug an.
+
+## Bat D - Combined Router (ghep Pattern + Semantic thanh 1 pipeline)
+`app/services/nlu/router.py` - ham `route()` chay Pattern Router TRUOC
+(nhanh, khong can model, da chung minh chi 2% sai), CHAP NHAN NGAY neu
+khop; chi khi Pattern khong khop gi moi roi xuong Semantic Router (fallback,
+can model, cham hon). Day la lan DAU TIEN do duoc accuracy THAT cua toan bo
+NLU layer (Bat A->D), khong phai tung tang rieng le nhu truoc.
+
+**`scripts/nlu_combined_test.py`** - CLI, ho tro `--eval` chay toan bo 150
+test held-out, bao ca ty le xu ly qua Pattern Router vs Semantic Router
+(fallback).
+
+### Chua test tren may anh Hoai
+```bash
+docker compose exec api python scripts/nlu_combined_test.py --eval
+```
+Đây là con so quan trong nhất để đối chiếu với tiêu chuẩn “P1 routing
+accuracy ≥ 95%” trong README.md - không đoán trước, cần số liệu thật.
