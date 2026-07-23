@@ -331,7 +331,8 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
       (DuckDNS `alpha3s(-dash).duckdns.org` was a temporary stand-in while DNS propagated)
 - [x] Basic alerting: `/root/bin/alert_check.sh` (5-min cron) — Redis dead-letter / non-Up
       container / disk >85% → Telegram "Alpha3s admin" group, 1h/type rate limit. Real send tested
-- [x] `docs/DEPLOYMENT.md` — full, settled deploy runbook
+- [x] Docs (VI+EN): `docs/DEPLOYMENT-{VI,EN}.md` (technical reference) +
+      `docs/VPS-RUNBOOK-{VI,EN}.md` (hands-on runbook for staff to operate the VPS without AI)
 - [x] GitLab cleanup: removed gitlab-runner from the VPS, deleted the GitLab CI variables, pulled
       the old GitLab CI public key out of `authorized_keys` (left: dev key + GitHub CI key). User
       may cancel the paid GitLab plan.

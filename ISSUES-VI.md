@@ -317,7 +317,8 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
       (DuckDNS `alpha3s(-dash).duckdns.org` dùng tạm lúc chờ DNS, giờ đã chuyển sang robanme)
 - [x] Alert cơ bản: `/root/bin/alert_check.sh` (cron 5 phút) — dead-letter Redis / container
       không Up / disk >85% → Telegram group "Alpha3s admin", rate-limit 1h/loại. Đã test gửi thật
-- [x] `docs/DEPLOYMENT.md` — quy trình deploy đầy đủ (đã chốt)
+- [x] Tài liệu (VI+EN): `docs/DEPLOYMENT-{VI,EN}.md` (tham chiếu kỹ thuật) +
+      `docs/VPS-RUNBOOK-{VI,EN}.md` (runbook cầm-tay-chỉ-việc cho staff tự vận hành không cần AI)
 - [x] Dọn GitLab: gỡ gitlab-runner khỏi VPS, xóa CI variables GitLab, rút public key CI-GitLab cũ
       khỏi `authorized_keys` (còn: key máy dev + key GitHub CI). User có thể hủy gói GitLab trả phí.
 
@@ -1103,12 +1104,11 @@ hardcode trong `system_prompt.md` — số ly/hũ và đơn giá ly phải là D
   nguyên KB+NLU trên VPS 4GB, 2 phương án, số đo A3 (căn cứ quyết định PO 23/7)
 - `docs/NLU_DATASET_FEEDBACK-VI.md`, `docs/NLU_ACCURACY_IMPROVEMENT_PROPOSAL-VI.md` — góp ý dữ
   liệu gửi team Knowledge cho #12
-- `docs/DEPLOYMENT.md` — **(mới, #9 Bat 5)** tham chiếu kỹ thuật hạ tầng: VPS, service,
-  CI/CD GitHub, HTTPS, secrets, cutover, backup/alert
-- `docs/VPS-RUNBOOK.md` — **(mới, #9 Bat 5)** runbook cầm-tay-chỉ-việc cho **staff tự vận
-  hành không cần AI**: SSH, xem log, restart, deploy, KB ingest, backup/restore, DNS/HTTPS,
-  cutover Meta, bảng xử lý sự cố, rollback
+- `docs/DEPLOYMENT-VI.md` + `-EN.md` — **(mới, #9 Bat 5)** tham chiếu kỹ thuật hạ tầng: VPS,
+  service, CI/CD GitHub, HTTPS, secrets, cutover, backup/alert
+- `docs/VPS-RUNBOOK-VI.md` + `-EN.md` — **(mới, #9 Bat 5)** runbook cầm-tay-chỉ-việc cho
+  **staff tự vận hành không cần AI**: SSH, xem log, restart, deploy, KB ingest, backup/restore,
+  DNS/HTTPS, cutover Meta, bảng xử lý sự cố, rollback
 - Các file `-VI` chính (DATABASE, DASHBOARD, TELEGRAM_BOT, BACKEND_API, NLU_LAYER,
-  KB_NLU_RESOURCE_ASSESSMENT) có bản dịch `-EN` tương ứng. **Chưa có -EN:**
-  KNOWLEDGE_BASE_V2_DESIGN, NLU_DATASET_FEEDBACK, NLU_ACCURACY_IMPROVEMENT_PROPOSAL,
-  DEPLOYMENT, VPS-RUNBOOK.
+  KB_NLU_RESOURCE_ASSESSMENT, DEPLOYMENT, VPS-RUNBOOK) có bản dịch `-EN` tương ứng.
+  **Chưa có -EN:** KNOWLEDGE_BASE_V2_DESIGN, NLU_DATASET_FEEDBACK, NLU_ACCURACY_IMPROVEMENT_PROPOSAL.

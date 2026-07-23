@@ -139,6 +139,7 @@ hạ tầng trước khi debug sâu vào code.
   (GitLab trả phí + chặn CI vì chưa xác minh danh tính; xem #9 Bat 5). CI/CD = GitHub Actions,
   push `main` → tự deploy VPS. GitLab còn lại chỉ là remote phụ `gitlab`, sẽ hủy. Kiểm tra
   `git remote -v` nếu cần.
-- **Đã có VPS production thật** (`160.30.157.235`, xem `docs/DEPLOYMENT.md` + `docs/VPS-RUNBOOK.md`
-  và memory `vps-production`). HTTPS live tại `a3s.robanme.com`. Việc còn lại của #9 chỉ là cutover
-  webhook Meta sang VPS (đụng khách thật — cần user chốt).
+- **Đã có VPS production thật** (`160.30.157.235`, xem `docs/DEPLOYMENT-VI.md` +
+  `docs/VPS-RUNBOOK-VI.md`, đều có bản `-EN`, và memory `vps-production`). HTTPS live tại
+  `a3s.robanme.com`. Việc còn lại của #9 chỉ là cutover webhook Meta sang VPS (đụng khách thật
+  — cần user chốt).

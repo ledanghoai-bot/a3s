@@ -2,7 +2,8 @@
 
 > Tài liệu **cầm tay chỉ việc** để nhân viên kỹ thuật tự vận hành server production
 > mà **không cần AI hỗ trợ**. Mỗi mục có lệnh copy-paste được + giải thích lệnh làm gì.
-> Đọc kèm `docs/DEPLOYMENT.md` (bản tóm tắt kỹ thuật) và `ISSUES-VI.md` (#9).
+> Đọc kèm `docs/DEPLOYMENT-VI.md` (bản tóm tắt kỹ thuật) và `ISSUES-VI.md` (#9).
+> English version: `docs/VPS-RUNBOOK-EN.md`.
 >
 > **Quy ước:** dòng bắt đầu bằng `$` là lệnh chạy trên **máy của bạn**; dòng bắt đầu bằng
 > `root@vps:#` là lệnh chạy **trên VPS** (sau khi đã SSH vào). Không gõ ký tự `$`/`#`.
