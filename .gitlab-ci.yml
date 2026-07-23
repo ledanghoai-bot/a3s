@@ -2,6 +2,7 @@ stages:
   - lint
   - test
   - build
+  - deploy
 
 default:
   image: python:3.12-slim
@@ -33,5 +34,29 @@ build:
   # luc deploy that tren VPS.
   script:
     - docker build -t alpha3s-api:ci-test .
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  # Ghi de before_script mac dinh (khong can pip o job nay)
+  before_script:
+    - apk add --no-cache openssh-client git >/dev/null
+  # Issue #9 Bat 4: push len main -> tu dong deploy VPS qua SSH.
+  # - VPS_HOST / VPS_SSH_KEY: CI/CD variables (protected — chi co tren nhanh
+  #   protected `main`). VPS_SSH_KEY la variable type=file, GitLab tu mount
+  #   thanh file tam va bien nay chua DUONG DAN toi file do.
+  # - Buoc fetch/reset chay truoc scripts/deploy.sh de chinh script do cung
+  #   duoc cap nhat truoc khi thuc thi (tranh chicken-and-egg).
+  script:
+    - chmod 600 "$VPS_SSH_KEY"
+    - ssh -i "$VPS_SSH_KEY" -o StrictHostKeyChecking=accept-new "root@$VPS_HOST"
+        "cd /srv/alpha3s
+         && git fetch origin main
+         && git reset --hard origin/main
+         && bash scripts/deploy.sh"
+  environment:
+    name: production
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
