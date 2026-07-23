@@ -216,10 +216,13 @@ chứ không loại trừ được hoàn toàn.
 
 ---
 
-## #9 · CI/CD GitLab + deploy VPS + monitoring
-**Trạng thái:** 🟡 Đang làm — Bat 1-3 xong (VPS thật đã chạy stack production), còn HTTPS/cutover/CI-deploy/backup/alert
+## #9 · CI/CD (GitHub) + deploy VPS + monitoring
+**Trạng thái:** 🟢 Gần đóng — push `main` → tự deploy VPS + HTTPS live; chỉ còn **cutover webhook Meta** (cần thao tác có chủ đích) + dọn nốt
 
-**Mục tiêu:** Hệ thống chạy 24/7 trên VPS, deploy tự động qua GitLab CI/CD.
+**Mục tiêu:** Hệ thống chạy 24/7 trên VPS, deploy tự động khi push `main`. **ĐÃ ĐẠT** (trừ cutover kênh khách thật).
+
+> ⚠️ Đổi tên: mục tiêu ban đầu là "GitLab CI/CD" nhưng đã **chuyển hẳn sang GitHub**
+> (GitLab trả phí + chặn CI vì tài khoản chưa xác minh danh tính — xem Bat 5).
 
 ### Bat 1 — Dọn nợ kỹ thuật + chuẩn bị production
 - [x] Dedupe theo `mid` (Redis `SET NX EX`, chặn xử lý trùng webhook event)
@@ -290,16 +293,41 @@ VPS: 160.30.157.235 (Ubuntu 24.04, 4 vCPU/8GB/60GB — Plan 3 đã mua), SSH ali
       runner tự dựng. Xong việc này thì test push → auto deploy end-to-end.
 
 **Còn lại:**
-- [ ] Test end-to-end push `main` → runner VPS chạy lint/test/build → deploy (chờ xác minh
-      danh tính GitLab ở trên)
-- [ ] Bật Caddy + HTTPS thật (chờ 2 subdomain DuckDNS trỏ về VPS), đổi
-      `NEXT_PUBLIC_API_URL` sang https
-- [ ] Cutover: trỏ webhook Meta về VPS, stop bot Telegram local → start trên VPS (sửa
-      `SERVICES` trong `scripts/deploy.sh`)
-- [ ] Alert khi webhook lỗi liên tiếp / LLM API fail (tối thiểu: gửi Telegram admin)
-- [ ] `docs/DEPLOYMENT.md` (viết khi quy trình deploy đã chốt)
+### Bat 5 — Chuyển GitLab → GitHub + HTTPS thật (24/7/2026)
+**Vì sao đổi:** GitLab chặn "Identity verification is required" cho MỌI CI job (kể cả runner
+tự dựng) → 32/32 pipeline lịch sử fail 0 giây, chưa từng chạy thật. Tài khoản GitLab lại trả
+phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledanghoai-bot/a3s`).
+- [x] Push toàn bộ code + lịch sử lên GitHub. Máy dev: `origin`=GitHub, giữ `gitlab` làm remote
+      phụ. Credential helper tách theo host (github.com dùng `GITHUB_TOKEN`, gitlab.com dùng
+      `GITLAB_TOKEN`) — trước đó helper generic trả nhầm token GitLab cho GitHub gây "Invalid token"
+- [x] `.github/workflows/deploy.yml`: job `lint-test` (ruff + pytest, runner GitHub miễn phí) +
+      job `deploy` (SSH vào VPS, fetch/reset + `scripts/deploy.sh`). Secrets `VPS_HOST`/`VPS_SSH_KEY`
+      (keypair CI→VPS riêng). VPS `/srv/alpha3s` đổi remote sang GitHub (deploy key read-only riêng)
+- [x] **Bug lint thật CI mới lộ:** GitLab CI chưa từng chạy nên `ruff` chưa bao giờ soi được. Trên
+      GitHub, `ruff check app` fail 40 lỗi. Phân tích: **0 lỗi E/F (lỗi thật)** — cả 40 là rule
+      "quan điểm" (BLE001/B008/SIM/PIE/RUF...) mà ruff 0.16 bật rộng theo mặc định, dự án chưa
+      opt-in và nhiều mẫu là CỐ Ý (`except Exception` phòng thủ quanh NLU/worker — CLAUDE.md;
+      `B008` là idiom FastAPI `Depends()`). Fix: thêm `ruff.toml` chỉ bật `E/F/I`, autofix 4 import,
+      pin `ruff==0.16.0` cho tái lập
+- [x] **CI xanh end-to-end:** `lint-test` (ruff + 38 pytest) + `deploy` đều success; VPS tự kéo
+      đúng SHA, api/worker/dashboard rebuild. **Push `main` → auto-deploy đã chạy thật.**
+- [x] HTTPS thật: DNS robanme (PA Vietnam — panel "Quản lý bản ghi", KHÔNG phải "Tạo DNS con phụ")
+      trỏ `a3s`/`a3s-dash` → `160.30.157.235`; Caddy tự lấy Let's Encrypt. Cả 2 domain trả 200,
+      cert hợp lệ, HTTP→HTTPS 308. `NEXT_PUBLIC_API_URL=https://a3s.robanme.com`.
+      (DuckDNS `alpha3s(-dash).duckdns.org` dùng tạm lúc chờ DNS, giờ đã chuyển sang robanme)
+- [x] Alert cơ bản: `/root/bin/alert_check.sh` (cron 5 phút) — dead-letter Redis / container
+      không Up / disk >85% → Telegram group "Alpha3s admin", rate-limit 1h/loại. Đã test gửi thật
+- [x] `docs/DEPLOYMENT.md` — quy trình deploy đầy đủ (đã chốt)
+- [x] Dọn GitLab: gỡ gitlab-runner khỏi VPS, xóa CI variables GitLab, rút public key CI-GitLab cũ
+      khỏi `authorized_keys` (còn: key máy dev + key GitHub CI). User có thể hủy gói GitLab trả phí.
 
-**Tiêu chí hoàn thành:** Push lên `main` → tự động deploy; uptime webhook > 99%.
+**Còn lại (chỉ còn cutover — cần user chốt vì đụng traffic khách thật):**
+- [ ] **Cutover kênh khách sang VPS:** thêm `telegram_bot`+`telegram_customer_bot` vào `SERVICES`
+      trong `scripts/deploy.sh`, **stop 2 bot Telegram local trước** (tránh 409 tranh `getUpdates`),
+      trỏ webhook Messenger (Meta App) về `https://a3s.robanme.com/<webhook>`, xác nhận log VPS nhận
+- [ ] (Tùy chọn) fine-tune CORS API cho origin dashboard https; theo dõi uptime webhook >99% sau cutover
+
+**Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).
 
 ---
 

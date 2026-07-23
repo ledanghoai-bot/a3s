@@ -223,10 +223,13 @@ results re-asserting themselves) rather than eliminated entirely.
 
 ---
 
-## #9 · CI/CD GitLab + VPS deploy + monitoring
-**Status:** 🟡 In progress — Batches 1-3 done (production stack running on a real VPS); HTTPS/cutover/CI-deploy/backup/alerting remain
+## #9 · CI/CD (GitHub) + VPS deploy + monitoring
+**Status:** 🟢 Nearly closed — push to `main` → auto-deploys to VPS + HTTPS live; only the **Meta webhook cutover** (a deliberate action) + final cleanup remain
 
-**Goal:** The system runs 24/7 on a VPS, deployed automatically via GitLab CI/CD.
+**Goal:** The system runs 24/7 on a VPS, auto-deployed on push to `main`. **ACHIEVED** (except the real customer-channel cutover).
+
+> ⚠️ Renamed: the original goal said "GitLab CI/CD" but we **fully switched to GitHub**
+> (GitLab is paid + blocked CI due to unverified identity — see Batch 5).
 
 ### Batch 1 — Technical debt cleanup + production prep
 - [x] Dedup by `mid` (Redis `SET NX EX`, blocks duplicate webhook event processing)
@@ -297,23 +300,51 @@ VPS: 160.30.157.235 (Ubuntu 24.04, 4 vCPU/8GB/60GB — Plan 3 purchased), SSH al
       container run). Cause: the GitLab account has no identity verification.
 - [x] Self-hosted GitLab Runner on the VPS (docker executor, privileged for dind) —
       registered + verified successfully, no dependency on shared runners/free minutes
-- [ ] **WAITING:** user identity verification on GitLab
-      (https://gitlab.com/-/identity_verification) — GitLab blocks with "Identity verification
-      is required in order to run CI jobs" even for self-hosted runners. Once done, test
-      push → auto-deploy end-to-end.
+- [x] (superseded by Batch 5) The GitLab identity-verification block was the reason we moved to
+      GitHub instead of waiting.
 
-**Remaining:**
-- [ ] End-to-end test: push to `main` → the VPS runner runs lint/test/build → deploy (waiting
-      on the GitLab identity verification above)
-- [ ] Turn on Caddy + real HTTPS (waiting on 2 DuckDNS subdomains pointed at the VPS), switch
-      `NEXT_PUBLIC_API_URL` to https
-- [ ] Cutover: point the Meta webhook at the VPS, stop the local Telegram bots → start them on
-      the VPS (edit `SERVICES` in `scripts/deploy.sh`)
-- [ ] Alerting on repeated webhook failures / LLM API failure (minimum: message the Telegram
-      admin)
-- [ ] `docs/DEPLOYMENT.md` (write it once the deploy process is settled)
+### Batch 5 — Migrate GitLab → GitHub + real HTTPS (2026-07-24)
+**Why the switch:** GitLab blocked "Identity verification is required" for EVERY CI job (even a
+self-hosted runner) → all 32 historical pipelines failed in 0s, never actually ran. The GitLab
+account is also paid. User chose to move to GitHub (new repo `github.com/ledanghoai-bot/a3s`).
+- [x] Pushed all code + history to GitHub. Dev machine: `origin`=GitHub, kept `gitlab` as a
+      secondary remote. Per-host credential helpers (github.com uses `GITHUB_TOKEN`, gitlab.com
+      uses `GITLAB_TOKEN`) — the earlier generic helper wrongly returned the GitLab token for
+      GitHub, causing "Invalid token"
+- [x] `.github/workflows/deploy.yml`: `lint-test` job (ruff + pytest on free GitHub runners) +
+      `deploy` job (SSH into VPS, fetch/reset + `scripts/deploy.sh`). Secrets `VPS_HOST`/
+      `VPS_SSH_KEY` (dedicated CI→VPS keypair). VPS `/srv/alpha3s` remote switched to GitHub
+      (its own read-only deploy key)
+- [x] **Real lint bug the CI finally caught:** GitLab CI never ran, so `ruff` never actually
+      checked anything. On GitHub `ruff check app` failed with 40 errors. Analysis: **0 E/F
+      (real) errors** — all 40 are opinionated rules (BLE001/B008/SIM/PIE/RUF...) that ruff 0.16
+      enables broadly by default, which the project never opted into and many of which are
+      deliberate (defensive `except Exception` around NLU/worker — CLAUDE.md; `B008` is the
+      FastAPI `Depends()` idiom). Fix: added `ruff.toml` selecting only `E/F/I`, autofixed 4
+      imports, pinned `ruff==0.16.0` for reproducibility
+- [x] **CI green end-to-end:** `lint-test` (ruff + 38 pytest) + `deploy` both success; the VPS
+      pulled the right SHA and rebuilt api/worker/dashboard. **Push to `main` → auto-deploy is
+      live.**
+- [x] Real HTTPS: robanme DNS (PA Vietnam — the "record management" panel, NOT "create child
+      DNS") points `a3s`/`a3s-dash` → `160.30.157.235`; Caddy obtained Let's Encrypt certs. Both
+      domains return 200 with valid certs, HTTP→HTTPS 308. `NEXT_PUBLIC_API_URL=https://a3s.robanme.com`.
+      (DuckDNS `alpha3s(-dash).duckdns.org` was a temporary stand-in while DNS propagated)
+- [x] Basic alerting: `/root/bin/alert_check.sh` (5-min cron) — Redis dead-letter / non-Up
+      container / disk >85% → Telegram "Alpha3s admin" group, 1h/type rate limit. Real send tested
+- [x] `docs/DEPLOYMENT.md` — full, settled deploy runbook
+- [x] GitLab cleanup: removed gitlab-runner from the VPS, deleted the GitLab CI variables, pulled
+      the old GitLab CI public key out of `authorized_keys` (left: dev key + GitHub CI key). User
+      may cancel the paid GitLab plan.
 
-**Definition of done:** Pushing to `main` → auto-deploys; webhook uptime > 99%.
+**Remaining (only the cutover — needs user sign-off since it touches real customer traffic):**
+- [ ] **Cutover the customer channel to the VPS:** add `telegram_bot`+`telegram_customer_bot` to
+      `SERVICES` in `scripts/deploy.sh`, **stop the 2 local Telegram bots first** (avoid the 409
+      `getUpdates` clash), point the Messenger webhook (Meta App) to
+      `https://a3s.robanme.com/<webhook>`, confirm the VPS logs receive it
+- [ ] (Optional) fine-tune API CORS for the https dashboard origin; watch webhook uptime >99%
+      after cutover
+
+**Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).
 
 ---
 
