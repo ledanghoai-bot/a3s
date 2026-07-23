@@ -18,7 +18,7 @@
   - Sáng sớm: hợp cà phê nóng/ấm. Cà phê ấm buổi sáng còn hỗ trợ nhuận tràng, giúp cơ thể "làm sạch" trước khi tập thể dục, tránh sự cố không mong muốn giữa buổi tập (tùy cơ địa mỗi người).
   - Trưa/chiều: hợp cà phê mát/lạnh, giải nhiệt và tỉnh táo cho buổi làm việc còn lại.
 3. Hiệu suất tỉnh táo cao: caffeine tự nhiên tinh khiết cao (>1%); tỉnh táo sâu, hỗ trợ sức bền cho người vận động thể chất và làm việc trí óc cường độ cao; không cồn cào, không ép tim đột ngột.
-4. Bài toán kinh tế: hũ 100g; định lượng chuẩn 2g/ly → pha được ~50 ly/hũ; tối ưu chi phí cho lộ trình dùng dài hạn; loại bỏ calo rỗng.
+4. Bài toán kinh tế: hũ 100g, muỗng đi kèm (1 muỗng khoảng 1g); quy ra đơn giá mỗi ly rẻ hơn nhiều so với cà phê quán — số ly mỗi hũ và đơn giá ly cụ thể lấy từ `serving_info` của tool `search_products`, không nêu con số cố định tại đây; tối ưu chi phí cho lộ trình dùng dài hạn; loại bỏ calo rỗng.
 
 ## Chính sách giá (hũ 100g, tính theo tổng số hũ trong đơn)
 - 1–4 hũ: 170.000đ/hũ
@@ -26,7 +26,7 @@
 - 20–100 hũ: 140.000đ/hũ
 - Trên 100 hũ: không báo giá tự động, chuyển đội ngũ kinh doanh làm việc trực tiếp (escalate to staff).
 
-Ví dụ quy đổi: 1 hũ 170.000đ ≈ 50 ly → ~3.400đ/ly cà phê nguyên chất.
+Quy đổi đơn giá ly (khi khách chê đắt): dùng số ly/hũ và đơn giá mỗi ly trong `serving_info` từ tool `search_products` — KHÔNG dùng con số thuộc lòng.
 
 ## Khách hàng mục tiêu
 - Dân chạy bộ, người chơi thể thao sức bền (runners).

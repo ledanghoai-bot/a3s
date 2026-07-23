@@ -949,9 +949,52 @@ file `knowledge-base/` đối chiếu `app/prompts/system_prompt.md`.
       thành: lấy giá thật từ `search_products`, không dùng số thuộc lòng. Việc
       thêm dữ liệu quy đổi vào tool: đã tạo task riêng (chip trên máy PO).
 
-**Chưa test:** cần chạy lại 8 kịch bản (đặc biệt S02 giá/chê đắt, S04 y khoa) với
-prompt mới — phối hợp session đang làm search_kb() chạy chung trước khi commit+push.
-**ISSUES-EN.md:** chưa dịch mục này — để session đồng bộ EN xử lý (đang có worktree riêng).
+~~**Chưa test:** cần chạy lại 8 kịch bản với prompt mới~~ → ĐÃ test (xem mục "Kết
+quả 8 kịch bản LẦN 3" phía trên — 7/8 PASS, sau đó fix nốt S05).
+**ISSUES-EN.md:** chưa dịch mục này — để session đồng bộ EN xử lý.
+
+### Quy đổi đơn giá ly: chuyển từ hardcode prompt sang tool `search_products` — quyết định PO 23/7, đã làm (23/7, session worktree, merge về main cùng ngày)
+PO quyết định: phép quy đổi "170k/50 ly = ~3.400đ/ly" khi khách chê đắt KHÔNG được
+hardcode trong `system_prompt.md` — số ly/hũ và đơn giá ly phải là DỮ LIỆU (bảng
+`products`), đổi được qua DB/dashboard mà không phải sửa prompt.
+
+- `migrations/012_products_serving.sql` — thêm `products.net_weight_g` (INTEGER) +
+  `products.serving_size_g` (NUMERIC(5,2)); seed `3S-100G` = 100g, 2g/ly — giữ đúng
+  con số brand hiện hành (~50 ly/hũ, ~3.400đ/ly), diễn đạt muỗng theo KB V2
+  SKL-PRD-004 ("1 muỗng ≈ 1g" → 2g = ~2 muỗng). **Đã áp tay vào DB đang chạy**
+  qua `docker exec psql` (mount initdb chỉ chạy khi tạo volume mới).
+- `app/services/tools.py` — helper `_serving_info()` mới; `search_products` trả thêm
+  field `serving_info`: `servings_per_unit_approx`, `price_per_serving_vnd_approx`
+  (giá lẻ) + `price_per_serving_by_tier` (từng bậc), kèm note dặn LLM chỉ nói
+  "khoảng/xấp xỉ". Sản phẩm thiếu định lượng (cột NULL) → KHÔNG có field này, bot
+  không được tự bịa số ly. Description trong `TOOL_DEFINITIONS` dặn rõ BẮT BUỘC dùng
+  `serving_info` khi quy đổi, không tự tính/tự nhớ.
+- `app/prompts/system_prompt.md` — xóa 2 hardcode: mục "Đắt quá" (170k/50 ly =
+  ~3.400đ/ly) và dòng "Hũ 100g, 2g/ly → ~50 ly/hũ", thay bằng chỉ dẫn lấy từ
+  `serving_info`. Lưu ý: task giao ghi "đã xóa" nhưng thực tế file CHƯA xóa — đã
+  xóa trong đợt này. (Mốc so sánh "cà phê quán 25-30k/ly" giữ nguyên — là bối cảnh
+  thị trường, không phải dữ liệu sản phẩm.)
+- RAG cũ `data/knowledge/product_profile.md` + `faq.md` — bỏ quy đổi cứng
+  "2g/ly → 50 ly → 3.400đ/ly"; sửa luôn mâu thuẫn định nghĩa muỗng (faq cũ:
+  "2g = 1 muỗng gạt ngang" ≠ KB V2 "1 muỗng ≈ 1g" → thành "~2 muỗng đi kèm ≈ 2g").
+  ⚠️ **CHƯA re-ingest**: `knowledge_chunks` trên DB vẫn là text cũ — cần chạy
+  `docker compose exec api python scripts/ingest.py` SAU khi merge nhánh worktree
+  vào checkout chính (container mount `D:\alpha3s`, không thấy file trong worktree).
+- Sandbox TRƯỚC khi sửa file thật (đúng quy trình): (1) dry-run SQL trong
+  transaction ROLLBACK; (2) test logic thuần 9/9 PASS (NULL/0/âm, chia không hết
+  250g÷1.5g, `Decimal` từ NUMERIC, JSON-serializable); (3) chạy bản copy rồi chạy
+  CHÍNH file `tools.py` đã sửa trong container api trên DB thật → 50 ly/hũ,
+  3.400đ/ly (lẻ), 3.200đ (bậc 5+), 2.800đ (bậc 20+).
+- Phát hiện trong lúc làm: description `3S-100G` trên DB thật ĐÃ khác seed 001
+  (đã ghi "1 muỗng khoảng 1g", không còn "50 ly" — sửa qua dashboard trước đó) —
+  migration 012 dùng guard `LIKE '%50 ly%'` nên không đè bản mới.
+- `docs/BACKEND_API-VI.md` + `-EN.md` — cập nhật row `search_products`.
+
+**Chưa test trên máy anh Hoài (sau khi merge nhánh):**
+- [ ] Restart api/worker để nạp `tools.py` + `system_prompt.md` mới, chạy lại kịch
+      bản S01/S03 (hỏi giá / chê đắt) — kỳ vọng con số hiển thị KHÔNG đổi
+      (~3.400đ/ly) nhưng nguồn là `serving_info` từ tool.
+- [ ] Re-ingest RAG cũ (lệnh ở trên) rồi kiểm tra chunk "Bài toán kinh tế" mới.
 
 ## Đề xuất thứ tự ưu tiên tiếp theo
 > **Từ 22/7: thứ tự ưu tiên theo AGW-ROADMAP-001 §9** (Chặng A → B song song). Danh
