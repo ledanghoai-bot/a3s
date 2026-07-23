@@ -101,7 +101,10 @@ def _build_hint_text(decision, resolved) -> str:
         lines.append(
             "Day co the la tinh huong can chuyen nguoi that xu ly (khieu nai/doi "
             "tra/hoan tien) - can nhac goi escalate_to_human neu phu hop voi noi "
-            "dung cau hoi that su cua khach."
+            "dung cau hoi that su cua khach. LUU Y tuan thu THU TU trong system "
+            "prompt: neu la khieu nai ma khach CHUA cung cap ma don/chi tiet su "
+            "viec, phai HOI truoc (ghi nhan cam xuc + xin loi + hoi ma don) roi "
+            "moi escalate o luot sau - TRU khi khach doi gap nhan vien truc tiep."
         )
 
     return "\n".join(lines)

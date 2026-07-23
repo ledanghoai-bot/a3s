@@ -886,9 +886,18 @@ Chạy sau khi session bridge sửa `system_prompt.md` đồng bộ KB V2 (mục
 - ✅ S03: không còn quy đổi "3.400đ/ly" — ĐÚNG quyết định PO mới (logic quy đổi
   thuộc về tool). **Tiêu chí kịch bản S03 trong `scenarios_20.md` cần cập nhật**
   (đang ghi "quy đổi ra đơn giá/ly" theo prompt cũ).
-- ⚠️ S05 khiếu nại: duy nhất còn lại — bot escalate + xin lỗi đúng nhưng vẫn
-  **không hỏi mã đơn** trước khi escalate (prompt đã ghi bước 3 nhưng LLM bỏ qua
-  khi khách chưa đưa mã — cần thử ép thứ tự bước trong prompt hoặc chấp nhận).
+- ~~⚠️ S05 khiếu nại: bot không hỏi mã đơn trước khi escalate~~ → **ĐÃ FIX (23/7
+  tối, PO xác nhận test Telegram thật OK rồi yêu cầu fix nốt):**
+  - `system_prompt.md` mục khiếu nại: ép **thứ tự bắt buộc** — lượt đầu phải ghi
+    nhận cảm xúc + xin lỗi + HỎI mã đơn/SĐT/sự việc, CHỈ escalate sau khi có thông
+    tin (hoặc khách không cung cấp); ngoại lệ escalate ngay: khách đòi gặp nhân
+    viên, hoặc tin nhắn có sẵn mã đơn + vấn đề.
+  - `nlu_hint.py` hint handoff: thêm nhắc tuân thủ thứ tự trên (hint cũ "cân nhắc
+    escalate" từng xúi LLM nhảy cóc bước hỏi).
+  - Verify 4 ca bằng LLM thật: khiếu nại chưa mã đơn → hỏi mã đơn ✅; khách đưa mã
+    lượt 2 → escalate ✅; có sẵn mã A456 → hỏi thêm SĐT rồi mới escalate (thận
+    trọng hơn ngoại lệ cho phép, chấp nhận); S23 đòi gặp nhân viên → **vẫn escalate
+    ngay lượt 1, không vỡ** ✅.
 - [x] **Môi trường máy mới HOÀN TẤT (23/7):** WSL2 + Docker Desktop cài xong (VT-x
       sẵn trong BIOS, chỉ thiếu WSL2 — `wsl --install --no-distribution` + reboot),
       7/7 container Up. **DB volume mới tinh không mang dữ liệu máy cũ theo** — đã
