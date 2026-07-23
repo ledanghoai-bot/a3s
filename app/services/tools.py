@@ -28,6 +28,47 @@ def _db_url() -> str:
     return settings.database_url.replace("+asyncpg", "")
 
 
+def _serving_info(net_weight_g, serving_size_g, default_price_vnd, tiers) -> dict | None:
+    """Quy doi don gia moi ly tu du lieu DB (quyet dinh PO 23/7/2026).
+
+    So ly/hu va don gia ly KHONG duoc hardcode trong system_prompt.md nua -
+    tinh tu products.net_weight_g / products.serving_size_g (migration 012).
+    Theo KB V2 (SKL-PRD-004): muong di kem, 1 muong ~ 1g.
+    Tra ve None neu san pham chua co du lieu dinh luong (2 cot NULL) - tool
+    khi do khong tra serving_info va bot khong duoc tu bia so ly.
+    """
+    if not net_weight_g or not serving_size_g:
+        return None
+    size = float(serving_size_g)  # asyncpg tra NUMERIC ve Decimal - ep float de JSON-serializable
+    if size <= 0:
+        return None
+    servings = int(net_weight_g / size)
+    if servings <= 0:
+        return None
+    return {
+        "net_weight_g": net_weight_g,
+        "serving_size_g": size,
+        "servings_per_unit_approx": servings,
+        "price_per_serving_vnd_approx": (
+            round(default_price_vnd / servings) if default_price_vnd else None
+        ),
+        "price_per_serving_by_tier": [
+            {
+                "min_qty": t["min_qty"],
+                "price_per_serving_vnd_approx": round(t["unit_price_vnd"] / servings),
+            }
+            for t in tiers
+        ],
+        "note": (
+            f"Dung khi khach che dat: quy ve don gia moi ly. 1 don vi "
+            f"{net_weight_g}g pha duoc KHOANG {servings} ly (dinh luong tham "
+            f"khao ~{size:g}g/ly; theo KB 1 muong ~ 1g). Luon noi 'khoang/xap "
+            f"xi', KHONG khang dinh so ly chinh xac - khach thich dam co the "
+            f"dung nhieu muong hon nen so ly thuc te it hon."
+        ),
+    }
+
+
 async def search_products(query: str | None = None) -> dict:
     """Tra ve danh sach san pham dang ban kem bang gia theo bac so luong.
 
@@ -37,7 +78,8 @@ async def search_products(query: str | None = None) -> dict:
     conn = await asyncpg.connect(_db_url())
     try:
         products = await conn.fetch(
-            "SELECT id, sku, name, description, price_vnd, stock FROM products"
+            "SELECT id, sku, name, description, price_vnd, stock, "
+            "net_weight_g, serving_size_g FROM products"
         )
         result = []
         for p in products:
@@ -46,26 +88,32 @@ async def search_products(query: str | None = None) -> dict:
                 "WHERE product_id = $1 ORDER BY min_qty",
                 p["id"],
             )
-            result.append(
-                {
-                    "sku": p["sku"],
-                    "name": p["name"],
-                    "description": p["description"],
-                    "stock": p["stock"],
-                    "price_vnd_default": p["price_vnd"],
-                    "price_tiers_vnd_per_unit": [
-                        {"min_qty": t["min_qty"], "unit_price_vnd": t["unit_price_vnd"]}
-                        for t in tiers
-                    ],
-                    "note": (
-                        f"Neu khong co bac gia nao khop so luong khach hoi, DUNG "
-                        f"'price_vnd_default' lam gia mac dinh (khong duoc noi la "
-                        f"'chua co gia' chi vi price_tiers_vnd_per_unit rong - san pham "
-                        f"van co gia le binh thuong). Tren {MAX_AUTO_QUANTITY} hu: KHONG "
-                        "tu bao gia, phai goi escalate_to_human."
-                    ),
-                }
+            item = {
+                "sku": p["sku"],
+                "name": p["name"],
+                "description": p["description"],
+                "stock": p["stock"],
+                "price_vnd_default": p["price_vnd"],
+                "price_tiers_vnd_per_unit": [
+                    {"min_qty": t["min_qty"], "unit_price_vnd": t["unit_price_vnd"]}
+                    for t in tiers
+                ],
+                "note": (
+                    f"Neu khong co bac gia nao khop so luong khach hoi, DUNG "
+                    f"'price_vnd_default' lam gia mac dinh (khong duoc noi la "
+                    f"'chua co gia' chi vi price_tiers_vnd_per_unit rong - san pham "
+                    f"van co gia le binh thuong). Tren {MAX_AUTO_QUANTITY} hu: KHONG "
+                    "tu bao gia, phai goi escalate_to_human."
+                ),
+            }
+            # PO 23/7: quy doi don gia ly la DU LIEU (tu DB), khong hardcode
+            # trong prompt. Chi tra serving_info khi san pham co du dinh luong.
+            serving = _serving_info(
+                p["net_weight_g"], p["serving_size_g"], p["price_vnd"], tiers
             )
+            if serving:
+                item["serving_info"] = serving
+            result.append(item)
         return {
             "products": result,
             "note": (
@@ -277,7 +325,9 @@ TOOL_DEFINITIONS = [
             "description": (
                 "Tra ve danh sach san pham dang ban kem bang gia theo bac so luong. "
                 "BAT BUOC goi truoc khi tra loi ve gia cu the, mo ta san pham, khuyen mai, "
-                "hoac bien the san pham."
+                "hoac bien the san pham. Ket qua kem 'serving_info' (so ly pha duoc moi "
+                "don vi + don gia moi ly da tinh san) - BAT BUOC dung du lieu nay khi "
+                "quy doi don gia ly (vd khach che dat), KHONG tu tinh/tu nho so ly."
             ),
             "parameters": {
                 "type": "object",

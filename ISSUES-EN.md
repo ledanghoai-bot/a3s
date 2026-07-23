@@ -762,6 +762,54 @@ place name); it must not drop.
 
 ---
 
+### Per-cup price conversion: moved from prompt hardcode to the `search_products` tool — PO decision 7/23, done (7/23)
+> Note: ISSUES-EN is still missing several other 7/23 entries (see ISSUES-VI); this
+> section is added to keep the pair in sync for this specific change.
+
+PO decision: the "170k/50 cups = ~3,400đ/cup" conversion used when a customer says
+"too expensive" must NOT be hardcoded in `system_prompt.md` — cups-per-jar and
+price-per-cup must be DATA (the `products` table), changeable via DB/dashboard
+without touching the prompt.
+
+- `migrations/012_products_serving.sql` — adds `products.net_weight_g` (INTEGER) +
+  `products.serving_size_g` (NUMERIC(5,2)); seeds `3S-100G` = 100g, 2g/cup — keeps
+  the current brand numbers (~50 cups/jar, ~3,400đ/cup), phrased per KB V2
+  SKL-PRD-004 ("1 scoop ≈ 1g" → 2g = ~2 scoops). **Already applied by hand to the
+  running DB** via `docker exec psql` (the initdb mount only runs on a fresh volume).
+- `app/services/tools.py` — new `_serving_info()` helper; `search_products` now
+  returns `serving_info`: `servings_per_unit_approx`, `price_per_serving_vnd_approx`
+  (retail) + `price_per_serving_by_tier`, with a note telling the LLM to say
+  "about/approximately" only. Products without serving data (NULL columns) → field
+  omitted; the bot must not invent cup counts. The `TOOL_DEFINITIONS` description
+  mandates using `serving_info` for the conversion instead of computing/remembering.
+- `app/prompts/system_prompt.md` — removed both hardcodes (the "too expensive"
+  bullet and "jar 100g, 2g/cup → ~50 cups/jar"), replaced with instructions to use
+  `serving_info`. Note: the task description said the hardcode was "already
+  deleted", but the file still had it — deleted in this pass. (The "coffee-shop
+  25-30k/cup" comparison stays — market context, not product data.)
+- Legacy RAG `data/knowledge/product_profile.md` + `faq.md` — removed the hard
+  "2g/cup → 50 cups → 3,400đ/cup" conversions; also fixed the scoop-definition
+  conflict (old faq: "2g = 1 level teaspoon" ≠ KB V2 "1 scoop ≈ 1g" → now "~2
+  included scoops ≈ 2g"). ⚠️ **NOT re-ingested yet**: `knowledge_chunks` still holds
+  the old text — run `docker compose exec api python scripts/ingest.py` AFTER
+  merging this worktree branch into the main checkout (containers mount `D:\alpha3s`,
+  they can't see worktree files).
+- Sandboxed BEFORE touching real files (per project process): (1) SQL dry-run in a
+  ROLLBACK transaction; (2) pure-logic tests 9/9 PASS (NULL/0/negative, non-integer
+  division 250g÷1.5g, `Decimal` from NUMERIC, JSON-serializable); (3) ran a copy and
+  then the ACTUAL edited `tools.py` inside the api container against the live DB →
+  50 cups/jar, 3,400đ/cup (retail), 3,200đ (tier 5+), 2,800đ (tier 20+).
+- Found along the way: the live `3S-100G` description already differs from the 001
+  seed (it already says "1 scoop ≈ 1g", no "50 cups" — edited via dashboard
+  earlier) — migration 012 guards with `LIKE '%50 ly%'` so it won't overwrite it.
+- `docs/BACKEND_API-VI.md` + `-EN.md` — `search_products` row updated.
+
+**Not yet tested on anh Hoài's machine (after merging the branch):**
+- [ ] Restart api/worker to load the new `tools.py` + `system_prompt.md`, re-run
+      scenarios S01/S03 (price question / "too expensive") — displayed numbers
+      should be UNCHANGED (~3,400đ/cup) but sourced from `serving_info`.
+- [ ] Re-ingest legacy RAG (command above) and check the new "unit economics" chunk.
+
 ## Suggested next priority order
 1. **Integrate #11 + #12 into `orchestrator.py`/the real production bot** — the latest decision
    (7/18), replacing further #12 accuracy optimization.

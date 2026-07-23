@@ -119,7 +119,7 @@ vào lúc thực thi (tránh model tự bịa/nhầm sender).
 
 | Tool | Tham số LLM cung cấp | Ghi chú |
 |---|---|---|
-| `search_products` | `query` (tuỳ chọn) | Trả về sản phẩm + bảng giá **thật từ DB**, không hardcode trong prompt. Từ 17/7, mỗi sản phẩm kèm cả `price_vnd_default` (giá lẻ, fallback khi chưa có bậc giá nào) và 1 `note` nhắc rõ đây là danh sách đầy đủ (fix bug bot từ chối/bịa SKU) |
+| `search_products` | `query` (tuỳ chọn) | Trả về sản phẩm + bảng giá **thật từ DB**, không hardcode trong prompt. Từ 17/7, mỗi sản phẩm kèm cả `price_vnd_default` (giá lẻ, fallback khi chưa có bậc giá nào) và 1 `note` nhắc rõ đây là danh sách đầy đủ (fix bug bot từ chối/bịa SKU). Từ 23/7 (quyết định PO), kèm thêm `serving_info` — quy đổi đơn giá ly tính từ `products.net_weight_g` + `products.serving_size_g` (migration 012): `servings_per_unit_approx`, `price_per_serving_vnd_approx` (theo giá lẻ) + `price_per_serving_by_tier`; chỉ trả về khi sản phẩm có đủ định lượng (NULL → không có field, bot không được tự bịa số ly) |
 | `check_stock` | `sku`, `quantity` | |
 | `create_order` | `customer_name`, `phone`, `address`, `sku`, `quantity` | Validate SĐT VN (regex), chặn `quantity > 100` **trừ khi** có `price_overrides` khớp chính xác (staff duyệt qua `/approve`). Transaction `FOR UPDATE` tránh race condition khi trừ tồn kho. |
 | `escalate_to_human` | `reason` | Set `bot_paused=TRUE`, ghi `escalations`, gửi Telegram admin (kèm nút Resume) |

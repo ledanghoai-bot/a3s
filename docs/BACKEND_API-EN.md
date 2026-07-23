@@ -131,7 +131,7 @@ up the sender).
 
 | Tool | Parameters the LLM provides | Notes |
 |---|---|---|
-| `search_products` | `query` (optional) | Returns products + price tiers **straight from the DB**, not hardcoded in the prompt. Since 7/17, each product also includes `price_vnd_default` (the base retail price, used as a fallback when no tier matches) and a `note` explicitly stating this is the complete list (fixes a bug where the bot denied/invented SKUs) |
+| `search_products` | `query` (optional) | Returns products + price tiers **straight from the DB**, not hardcoded in the prompt. Since 7/17, each product also includes `price_vnd_default` (the base retail price, used as a fallback when no tier matches) and a `note` explicitly stating this is the complete list (fixes a bug where the bot denied/invented SKUs). Since 7/23 (PO decision), also includes `serving_info` — per-cup price conversion computed from `products.net_weight_g` + `products.serving_size_g` (migration 012): `servings_per_unit_approx`, `price_per_serving_vnd_approx` (retail) + `price_per_serving_by_tier`; only returned when the product has serving data (NULL → field omitted, the bot must not invent cup counts) |
 | `check_stock` | `sku`, `quantity` | |
 | `create_order` | `customer_name`, `phone`, `address`, `sku`, `quantity` | Validates the phone number (VN regex), blocks `quantity > 100` **unless** a `price_overrides` record exactly matches (staff-approved via `/approve`). Uses a `FOR UPDATE` transaction to avoid race conditions when decrementing stock. |
 | `escalate_to_human` | `reason` | Sets `bot_paused=TRUE`, logs to `escalations`, sends a Telegram notification to admin (with a Resume button) |
