@@ -17,7 +17,7 @@
 | 9 | CI/CD + VPS deploy + monitoring | 🟡 In progress (2/several batches) |
 | 10 | Fallback customer channel (Telegram) | ✅ Closed |
 | 11 | Knowledge Base V2 (Ingestion → Retrieval → Router → Prompt Assembly → Guardrails → Test Suite) | ✅ Closed (parallel to production) |
-| 12 | NLU layer (Normalization → Pattern Router → Semantic Router → Combined Pipeline) | ✅ Paused at 80% (accepted milestone) |
+| 12 | NLU layer (Normalization → Pattern Router → Semantic Router → Combined Pipeline → Real bot integration) | 🟡 Integration in progress (Batches 1-2/several) |
 
 ---
 
@@ -343,8 +343,9 @@ all 6 milestones (M1-M6) per the original `IMPLEMENTATION_PLAN.md`, **fully sepa
 
 ---
 
-## #12 · NLU layer (Normalization → Pattern Router → Semantic Router → Combined Pipeline)
-**Status:** ✅ Paused at 80% — anh Hoài accepted the current milestone, moving to real bot integration
+## #12 · NLU layer (Normalization → Pattern Router → Semantic Router → Combined Pipeline → Real bot integration)
+**Status:** 🟡 Being integrated into the production bot (Batches 1-2/several) — see the details from
+Batch A through Batch 2 (orchestrator integration + Entity Extraction) in the sections below
 
 **Context:** Upgrading #11's M3 Router (originally hardcoded regex) into an NLU system that
 learns from real data — the Knowledge team sent `datasets/nlu/` (an intent catalog, normalization
@@ -407,11 +408,357 @@ rules, 300+ utterances, 150 held-out tests) per `NLU-INTEGRATION-GUIDE.md`.
   utterances/rules to grow Pattern Router coverage; building Entity Extraction to unlock the 3
   skipped rules).
 
-**Not yet done (paused, out of the decided scope):**
-- [ ] Entity Extraction (Step 6) — 3 rules in `routing-rules.yaml` with entity conditions are
-      explicitly skipped since this layer doesn't exist yet
-- [ ] Full Route Resolution (Step 8), Context-aware Resolution (Step 5, multi-turn)
-- [ ] Integration into `orchestrator.py`/the real production bot — **next priority**
+**Not yet done (continuing per the Integration Guide, beyond the Batch A-D scope):**
+- [x] ~~Entity Extraction (Step 6)~~ → partially done in Batch 2 below (quantity/unit/order_id/
+      payment_method/health_context/temperature; location/product not yet)
+- [x] ~~Route Resolution (Step 8)~~ → done in Batch 1 below
+- [ ] Context-aware Resolution (Step 5, multi-turn)
+- [ ] Integration into `orchestrator.py`/the real production bot — **see the details in Batches 1-2 right below**
+
+---
+
+## Integrating #11 + #12 into the real production bot
+Following the architecture in `NLU-INTEGRATION-GUIDE.md` Section 6 ("Orchestrator
+Responsibilities"): the NLU does **NOT** generate answers or call Tools directly — it only
+returns a route hint; the **Orchestrator** makes the actual decision.
+
+### Safety design agreed with anh Hoài
+- **Feature flag** `ENABLE_NLU_ROUTER` (default `false`) — anh Hoài decides when to turn it on.
+- **Additive only, no replacement**: the NLU Router only adds one hint block to the current
+  system prompt (the same way `rag_context`/`agent_notes` are already injected) — it doesn't
+  block or replace the LLM+tool-calling flow that already works correctly.
+- **Absolute safety**: every error on the NLU path (missing files, model failing to load...)
+  is caught and SILENTLY ignored — it can never break the main reply flow; it returns an
+  empty string instead of raising.
+- **Fallback when unsure**: if `decision.action != "accept"` (Semantic Router
+  context_check/clarify), **nothing is injected at all** — avoiding prompt noise from
+  ambiguous suggestions.
+
+### Coded
+- **`app/services/nlu/route_resolution.py`** — Route Resolution (Step 8): looks up the `route`
+  field in `intent-catalog.yaml` to know the exact action type (knowledge/tool/playbook/
+  handoff) for each intent. Verified 8/8 tests against real data via sandbox.
+- **An important finding when cross-checking against the real `tools.py`:** many `target`s in
+  `intent-catalog.yaml` (e.g. `get_payment_options`, `get_cod_policy`, `get_shipping_quote`,
+  `get_delivery_estimate`, `get_tracking_information`) have **NO corresponding real tool** in
+  current production — only EXACTLY 3 pairs truly match: `get_current_price`→`search_products`,
+  `get_current_stock`→`check_stock`, `create_or_confirm_order`→`create_order`
+  (`TOOL_NAME_MAP` in `route_resolution.py`). Targets without a real tool still resolve
+  correctly, but the calling module (`nlu_hint.py`) knows not to force a call to a nonexistent
+  tool — it only emits a generic hint for that type.
+- **`app/services/nlu_hint.py`** (new) — the single bridge orchestrator.py needs to call:
+  `get_nlu_hint(message) -> str`. Caches the index (pattern + semantic) at module level,
+  computing embeddings only ONCE when the worker process first loads (not on every message).
+  The entire function is wrapped in try/except — verified via sandbox: simulated a load
+  failure, confirmed it returns `""` as designed, without raising.
+- **Integration into `orchestrator.py`** — exactly 1 block added after the current RAG step,
+  entirely behind `if settings.enable_nlu_router:` — no other logic in the current flow changed.
+- **`app/config.py`** + **`.env.example`** — added `ENABLE_NLU_ROUTER` (default `false`).
+- **`scripts/nlu_hint_test.py`** (new) — a standalone CLI test for `get_nlu_hint()` to check
+  BEFORE enabling the real flag in the bot — safer than testing directly via Messenger/Telegram.
+
+### Not yet tested on anh Hoài's machine
+**Step 1 — test the hint standalone, WITHOUT enabling the flag:**
+```bash
+docker compose exec api python scripts/nlu_hint_test.py "giá bao nhiêu"
+docker compose exec api python scripts/nlu_hint_test.py "câu hỏi mơ hồ bất kỳ"
+```
+The first is expected to produce a hint (route=tool, suggesting `search_products`); the second
+is expected to produce **no hint** (empty) since it isn't confident enough.
+
+**Step 2 — only once Step 1 is fine, enable the real flag to test via chat:**
+```bash
+# add to .env: ENABLE_NLU_ROUTER=true
+docker compose restart api worker telegram_bot telegram_customer_bot
+```
+Then chat through the Telegram customer bot (the test channel, #10) before considering real
+Messenger.
+
+**✅ STEP 1 CONFIRMED (7/18)** — anh Hoài tested 2 utterances: "giá bao nhiêu" ("how much") →
+correct hint (`ask_price`, `exact_phrase`, confidence 1.0, suggesting `search_products`);
+"hôm nay thứ mấy" ("what day is it today", out of scope) → **no hint** (empty), matching the
+design of not injecting ambiguous suggestions. The `nlu_hint.py` bridge works correctly.
+**Ready for Step 2** (actually enabling `ENABLE_NLU_ROUTER=true` to test via chat).
+
+### Incident while testing Step 2 (7/18) — unrelated to the NLU code
+After enabling the flag, `telegram_customer_bot` and `api` **crashed and stayed down** (no
+auto-restart since the dev environment has no restart policy) — the bot went completely
+silent. Log trace: `OSError: [Errno 5] Input/output error: '/srv'` — an I/O error while
+importing `torch` (via the chain `orchestrator.py` → `products.py` → `embedder.py`, a
+PRE-EXISTING dependency, unrelated to the newly added NLU code). This is a transient
+infrastructure issue of Docker Desktop on Windows reading files over a bind-mount (most
+likely triggered by many containers restarting in rapid succession during testing) — not a
+logic bug.
+
+**Recovery:** `docker compose up -d api telegram_customer_bot` (not `restart`, since the
+containers had fully stopped) — confirmed both back to "Up".
+
+### A real performance issue proactively fixed (7/18)
+While diagnosing, discovered that `build_semantic_index()` was calling `nlu_embed_async()`
+**one utterance at a time in a loop** (380 individual threadpool calls) instead of batching —
+with a large model (mpnet-base-v2, 278M params) running on CPU, this could make the VERY
+FIRST message after a container restart take a very long time (the bot appears
+"unresponsive" even though it isn't actually crashed/hung). Fixed: added
+`nlu_embed_batch_async()` in `nlu_embedder.py` (calls `model.encode()` EXACTLY ONCE for the
+whole list, leveraging sentence-transformers' internal batching instead of 380 individual
+calls) and updated `build_semantic_index()` to use it. Verified via sandbox: returns the
+correct number of vectors for the input list.
+
+### Not yet re-tested on anh Hoài's machine
+1. Confirm `docker compose ps` still shows all 6 services "Up" (no more crashes).
+2. Restart (Python code changed, no new dependency, so a restart is enough — no `--build`):
+```bash
+docker compose restart api worker telegram_bot telegram_customer_bot
+```
+3. Chat through the Telegram customer bot again — this time the first message after the
+restart should be much faster (batch embedding instead of sequential).
+
+**✅ CONFIRMED VIA REAL CHAT (7/18)** — anh Hoài tested a multi-turn conversation through
+the Telegram customer bot (#10) after the recovery + performance fix — good quality, no
+errors: correct answers on price/COD/brewing/factory SKUs, correctly understood slang
+("mấy xèng"), no invented SKUs. Verifying whether the NLU directly contributed to each
+individual answer (the hint is "invisible" in the output by design) was judged less
+important than continuing with the Integration Guide. **Batch 1 complete.**
+
+### Batch 2 — Entity Extraction (Step 6, 7/18)
+`app/services/nlu/entity_extraction.py` (new) — regex/keyword extraction (no ML NER),
+supporting: `quantity`, `unit`, `order_id`, `payment_method`, `health_context`,
+`temperature`. **Not yet supported:** `location`/`product`/`taste_preference`/`brewing_method`
+(needs a gazetteer/data that doesn't exist yet).
+
+**The homonym bug recurred — the exact lesson from `high_precision_rules.py` re-applied:**
+"ly" (a cup unit) and "lý" (as in "xử lý", "to handle") both become "ly" after stripping
+diacritics, causing false unit matches in unrelated sentences. Fix: match with Vietnamese
+diacritics preserved (only `quantity`/`order_id` — digits — use the stripped form, since
+they're diacritic-insensitive).
+
+**Integration into `high_precision_rules.py`:** added entity-gating — rules with
+`entity_any`/`required_entity_any` conditions now check the actually extracted entities
+instead of being skipped wholesale as before. Unlocks `RTE-008` (`ask_order_status`) and
+`RTE-009` (`ask_tracking`) — both need `order_id`. `RTE-006` (needs `location`) **remains
+explicitly skipped** since there's no place-name gazetteer yet — no wild guessing.
+
+**✅ CONFIRMED (7/18)** — `nlu_pattern_test.py --eval`: self-coverage up from 35.3% →
+**37.3%** (matching exactly the number of `order_id` cases unlocked), no new wrong cases.
+**Batch 2 complete.**
+
+**✅ OVERALL ACCURACY CONFIRMED AFTER BATCHES 1-2 (7/18)** — `nlu_combined_test.py --eval`:
+Correct 121/150 (**80.7%**, up slightly from 80.0%) | Wrong 22/150 (14.7%) | Clarify 7/150
+(4.7%). The Pattern Router handles 59/150 (**39.3%**, up from 37.3%). A small improvement
+but in the right direction — exactly the 2 percentage points corresponding to the `order_id`
+cases newly unlocked in Batch 2, consistent with the design.
+
+**Not yet done (continuing from here per the Integration Guide):**
+- [ ] Extend Entity Extraction (`location`, `product`) to unlock `RTE-006`
+- [x] ~~Context-aware Resolution (Step 5, multi-turn, using `conversation_state`)~~ → done in Batch 3 below
+- [ ] Deeper Knowledge Base V2 (#11) integration into `nlu_hint.py` (currently type=knowledge
+      only emits a generic hint, doesn't actually call `kb_retrieval.search_kb()`)
+- [ ] Cache (Step 10)
+
+### Batch 3 — Context-aware Resolution (Step 5, 7/18)
+`app/services/nlu/context_state.py` (new) — uses a `conversation_state` stored in Redis (24h
+TTL, same as chat history) to help resolve ambiguous FOLLOW-UP questions (e.g. "Can this be
+brewed cold?" then "What about two spoons then?"). True to the guide's spirit — "don't use
+state to override the current message's clear intent" — state is **only** consulted when the
+Router (Pattern+Semantic) is **already unsure** (`action != accept`), and the result is
+**only** an additional reference hint, never forced.
+
+**Finding while self-testing the "follow-up utterance" heuristic:** using the standalone
+word "vậy" as an initial signal caused **2/6 wrong cases** — "3S Coffee là gì vậy" (a
+complete, common question) and "Giá bao nhiêu" (≤ 4 words) were both mistaken for
+follow-ups, because "vậy" is too common as an ordinary sentence-final particle. Fix: dropped
+standalone "vậy", keeping only CLEARER-meaning phrases ("vậy còn", "thì sao"...) plus a list
+of short-but-self-contained common utterances ("giá", "còn hàng"...) as exclusions.
+Re-verified 7/7 tests via sandbox before landing the code.
+
+**Integration:** `get_nlu_hint()` (`nlu_hint.py`) takes a new optional `sender_id` parameter
+— on a successful route (`accept`), it stores the intent as context for next time; when
+unsure AND the utterance "looks like a follow-up", it consults the stored context to suggest
+(not force). `orchestrator.py` passes `sender_id` into the single existing call site.
+`scripts/nlu_hint_test.py` gains `--context`, demoing 2 consecutive messages with the same
+simulated `sender_id`.
+
+### Not yet tested on anh Hoài's machine
+```bash
+docker compose exec api python scripts/nlu_hint_test.py --context
+```
+Expected: message 1 ("Loại này pha lạnh được không?" / "Can this be brewed cold?") gets a
+normal hint (routed via Pattern/Semantic); message 2 ("Vậy hai muỗng thì sao?" / "What about
+two spoons then?") is expected to get a hint like "possibly a follow-up question from prior
+context..." rather than being completely empty.
+
+**⚠️ A demo-utterance mistake self-detected and fixed (7/18):** in reality both messages
+came back empty — it turned out message 1 ("Loại này pha lạnh được không?") **itself never
+reaches `accept`** (no High-Precision Rule matches "pha lạnh" / "brew cold" specifically),
+so nothing was ever stored in `context_state.py` for message 2 to consult — **not a
+mechanism bug**, just a bad choice of demo utterance. Fixed `nlu_hint_test.py --context` to
+use `"gia bao nhieu"` as message 1 (confirmed many times before to ALWAYS `accept` via
+`exact_phrase`), and changed message 2 to "Vậy 60g thì sao?" ("What about 60g then?").
+
+### Not yet re-tested on anh Hoài's machine
+```bash
+docker compose exec api python scripts/nlu_hint_test.py --context
+```
+Expected this time: message 1 gets an `ask_price` hint; message 2 gets a context-reference
+hint (not empty).
+
+**✅ FULLY CONFIRMED (7/18)** — after a restart, a Redis DNS issue (`Error -5 connecting to
+redis:6379`) self-recovered (a transient Docker Desktop infrastructure issue, the same kind
+as the earlier `/srv` error — not a code bug). Results: message 1 ("gia bao nhieu") →
+correct `ask_price` hint; message 2 ("Vậy 60g thì sao?") → **a correct context-reference
+hint**: "possibly a FOLLOW-UP question from prior context (most recent topic:
+'ask_price')..." — exactly the intended design. **Batch 3 complete.**
+
+🎉 **All 10/10 Steps in `NLU-INTEGRATION-GUIDE.md` are now implemented** (with some limits
+noted explicitly: `location`/`product` entities not done, the Step 10 Cache not done,
+Knowledge Base V2 still only a generic hint without real retrieval calls). This is a
+reasonable stopping point for an overall evaluation before considering enabling
+`ENABLE_NLU_ROUTER=true` for real Messenger (so far only tested via the Telegram customer
+bot #10).
+
+### Batch 4 — Really wiring Knowledge Base V2 (#11) into `nlu_hint.py` (7/18)
+**A serious finding during anh Hoài's full review of the integration:** re-reading the
+actual code confirmed that `nlu_hint.py` (from Batch 1) **NEVER calls**
+`kb_retrieval.search_kb()` — the `type="knowledge"` branch only returns **1 generic
+suggestion sentence**, never fetching real Knowledge Unit content from M1-M6. This is
+exactly why in an earlier real conversation ("3s coffee của ai?" / "who owns 3s coffee?")
+the bot answered "no specific information yet" instead of "Công ty Cổ phần Robanme"
+(ingested as `SKL-BRAND-001` back in M1) — the bot was still using the old RAG (#4),
+**not** Knowledge Base V2.
+
+**Verified before fixing:** checked `kb_config.active_index_version` — confirmed it was
+activated (`value = 3`), so `search_kb()` is ready to work correctly.
+
+**Fixed:** added `_build_knowledge_hint()` (async) that really calls
+`kb_retrieval.search_kb(message, top_k=2)`, injecting real Knowledge Unit content (not a
+generic sentence) into the hint. **No specific domain filter** — the `targets` in
+`intent-catalog.yaml` are asset-level (e.g. `SKL-PRD-001`) and don't map directly onto
+`search_kb()`'s domain-level filter (e.g. `product`/`brand`) — for simplicity and safety,
+`search_kb()`'s semantic+lexical ranking finds the most relevant content on its own.
+Everything wrapped in try/except — keeping the safety principle applied throughout.
+
+### Not yet tested on anh Hoài's machine
+```bash
+docker compose exec api python scripts/nlu_hint_test.py "3s coffee cua ai"
+```
+Expected: the hint now includes a "Related knowledge from the Knowledge Base..." section
+with real content from `SKL-BRAND-001` (mentioning "Robanme"), instead of only the generic
+sentence as before. Then re-test through the Telegram customer bot with the exact utterance
+that hit the bug earlier ("3s coffee của ai?") to confirm the bot answers "Công ty Cổ phần
+Robanme".
+
+**✅ MECHANISM CONFIRMED WORKING (7/18)** — tested `"nguyên liệu là gì"` ("what are the
+ingredients"; `ask_ingredients`, `high_precision_rule`, conf 0.95) → the hint now
+**contains real Knowledge Unit content** (`[SKL-SAL-002]`, `[SKL-PRD-001]`) instead of the
+generic sentence as before — confirming the Knowledge Base V2 wiring works correctly.
+
+**An observation noted (non-blocking, a refinement for later):** `SKL-SAL-002` ("Customer
+Intent Recognition") leaked into the results — it's an INTERNAL guidance document (an
+intent-recognition playbook), not real customer-facing answer content — it got mixed in
+because it also mentions "ingredients" as an illustrative example within the document.
+Suggestion for later: filter the `conversation`/`playbook` domains out of
+`_build_knowledge_hint()` (keeping only `product`/`brand`/`faq`/`sales` as genuine content)
+to keep internal process documents out of the customer-answer context.
+
+The specific utterances "3s coffee của ai?"/"3S Coffee là gì" need the Semantic Router
+(Batch C) to be classified (the plain Pattern Router reports "no match") — this exact
+utterance hasn't been tested end-to-end through `nlu_hint_test.py` yet (it needs the
+Semantic Router to actually accept, not just Pattern), but the wiring mechanism is
+confirmed correct. **Batch 4 complete mechanism-wise.**
+
+### Batch 5 — Filtering internal documents out of the customer-facing context (7/18)
+SQL investigation confirmed: `SKL-SAL-002` (domain=`sales`) is **an entire internal
+playbook document** (26 units: "Purpose", "Priority rules", "Do"/"Don't", "Escalation",
+"Traceability"...), not customer-facing answer content — and all 5 assets in the `sales`
+domain (SKL-SAL-001..005) are the same playbook style. The `sales` domain has **113 units**
+(the most of the 7 domains), so without filtering, the risk of pulling internal process
+documents into the customer-answer context is very high.
+
+**Fixed:** `_build_knowledge_hint()` now calls `search_kb(message, top_k=2,
+allowed_domains=["brand", "product", "faq"])` — only the 3 domains confirmed REPEATEDLY in
+this session to be genuine customer-facing content (FAQ-BREW-001, FAQ-BRAND-001, the
+freeze-dried information...). Excludes `sales`/`conversation`/`customer_service`/`playbook`.
+
+### Not yet tested on anh Hoài's machine
+```bash
+docker compose exec api python scripts/nlu_hint_test.py "nguyen lieu la gi"
+```
+Expected: the hint **no longer** contains `[SKL-SAL-002]`, only content from
+`product`/`brand`/`faq` (e.g. `SKL-PRD-001`/`SKL-PRD-002`/`SKL-FAQ-001`).
+
+### Batch 6 — Extending Entity Extraction: `location`/`product` (7/18)
+`app/services/nlu/entity_extraction.py` — added `_extract_location()` (a gazetteer of 34
+common Vietnamese place names, using stable names independent of administrative-boundary
+changes) and `_extract_product()` (MVP — only recognizes size variants like "100g"/"25kg",
+not full SKU names yet). Updated `high_precision_rules.py`: removed `location`/`product`
+from `_ENTITY_UNSUPPORTED` — **unlocking the last rule, `RTE-006`**
+(`ask_shipping_availability`, needs `location`) — all 3 entity-conditioned rules in
+`routing-rules.yaml` are now unlocked (RTE-006/008/009). Only
+`taste_preference`/`brewing_method` remain unsupported (more ambiguous, needing more
+keywords to be precise).
+
+Verified 7/7 entity tests + 2/2 `RTE-006` unlock tests via sandbox before landing the code.
+
+#### The "unaccented Ca Mau" patch — a paste error found and fixed (7/23, new machine D:\alpha3s)
+The `_extract_location` patch (matching place names when customers type without diacritics —
+stripping diacritics on BOTH sides, returning the canonical accented form) had previously
+been pasted by hand due to an MCP disconnection. Re-checking on the new machine found **a
+paste error: the old `def` line wasn't deleted → 2 nested `def`s → SyntaxError, the whole
+module failed to import** (the bot was running without entity extraction, the error
+silently swallowed by the NLU path's try/except). Removed the redundant `def` line — the
+remaining patch body is intact as originally written.
+
+- Verified: the patch logic was simulated identically in Node (the new machine doesn't have
+  Python/Docker yet) — 14/14 PASS, including real accented/unaccented pairs ("ship ve Ca Mau
+  giup em", "giao hang di da nang", "minh o buon ma thuot"...) plus a word-boundary case
+  ("camau" run together must NOT match).
+- Added `scripts/nlu_entity_test.py` (a CLI test following the convention of the existing
+  nlu_*_test.py scripts) for a real-Python confirmation once Docker is up.
+
+### Not yet tested on anh Hoài's machine
+```bash
+docker compose exec api python scripts/nlu_entity_test.py --eval
+docker compose exec api python scripts/nlu_pattern_test.py "shop co giao toi Ca Mau khong"
+```
+Expected: command 1 — all PASS (confirming the module imports + unaccented location matching
+with real Python). Command 2 — `intent=ask_shipping_availability`,
+`via=high_precision_rule` (previously it would have been skipped entirely due to `RTE-006`).
+
+### Batch 7 — Cache (Step 10, 7/18)
+`app/services/nlu/cache.py` (new) — caches only exactly what the guide's allowlist permits
+("Normalized query → intent candidate"), 1h TTL. **Only `action="accept"` results are
+cached** (already confident) — `context_check`/`clarify` are not cached (they depend on the
+Batch 3 context; caching could cause mixups between different customers). **Knowledge Base
+content is not cached** (`search_kb()` is still called fresh every time) — true to the
+guide's "don't cache dynamic data" spirit.
+
+Integrated into `get_nlu_hint()`: checks the cache before calling `route()`, writes to the
+cache only when the result is `accept`.
+
+### Not yet tested on anh Hoài's machine
+```bash
+docker compose restart api worker telegram_bot telegram_customer_bot
+docker compose exec api python scripts/nlu_hint_test.py "gia bao nhieu"
+docker compose exec api python scripts/nlu_hint_test.py "gia bao nhieu"
+```
+Run the same utterance **twice in a row** — the results must be identical (nothing
+observable changes from the outside — the cache is an internal optimization, not a change
+in displayed results).
+
+### Batch 8 — No-regression check (7/18)
+After all of Batches 4-7 (real KB V2 calls, domain filtering, new entities, cache),
+`nlu_combined_test.py --eval` needs to be re-run to confirm no drop in accuracy on the 150
+held-out tests (in theory there should be no impact, since the test suite measures intent
+classification, not answer content/caching — but the new `location`/`product` entities
+COULD change results, since they additionally unlock RTE-006).
+
+### Not yet tested on anh Hoài's machine
+```bash
+docker compose exec api python scripts/nlu_combined_test.py --eval
+```
+Expected: accuracy **unchanged or slightly higher** than the previous **80.7%** mark (a
+slight increase is plausible if any of the 150 tests are shipping questions mentioning a
+place name); it must not drop.
 
 ---
 
