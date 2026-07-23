@@ -646,13 +646,128 @@ phân loại được (Pattern Router đơn thuần báo “Khong match duoc”)
 đúng câu này qua `nlu_hint_test.py` (cần Semantic Router thật sự accept, không phải
 chỉ Pattern), nhưng cơ chế kết nối đã xác nhận đúng. **Bat 4 hoàn tất về mặt cơ chế.**
 
+### Bat 5 — Loc tai lieu noi bo khoi context tra khach (18/7)
+Điều tra qua SQL xác nhận: `SKL-SAL-002` (domain=`sales`) là **toàn bộ 1 tài liệu
+playbook nội bộ** (26 mục: “Purpose”, “Priority rules”, “Do”/“Don't”, “Escalation”,
+“Traceability”...), không phải nội dung trả lời khách hàng — vẫn cả 5 asset trong domain
+`sales` (SKL-SAL-001..005) đều cùng dạng playbook. Domain `sales` có **113 unit** (nhiều
+nhất trong 7 domain), nên nếu không lọc, rủi ro lấy nhầm tài liệu quy trình nội bộ vào
+context trả khách rất cao.
+
+**Đã sửa:** `_build_knowledge_hint()` giờ gọi `search_kb(message, top_k=2,
+allowed_domains=["brand", "product", "faq"])` — chỉ 3 domain đã xác nhận NHIỀU LẦN trong
+phiên này là nội dung thật sự cho khách (FAQ-BREW-001, FAQ-BRAND-001, thông tin freeze-
+dried...). Loại trừ `sales`/`conversation`/`customer_service`/`playbook`.
+
+### Chưa test trên máy anh Hoài
+```bash
+docker compose exec api python scripts/nlu_hint_test.py "nguyen lieu la gi"
+```
+Kỳ vọng: hint **không còn** `[SKL-SAL-002]` nữa, chỉ còn nội dung từ `product`/`brand`/`faq`
+(vd `SKL-PRD-001`/`SKL-PRD-002`/`SKL-FAQ-001`).
+
+### Bat 6 — Mở rộng Entity Extraction: `location`/`product` (18/7)
+`app/services/nlu/entity_extraction.py` — thêm `_extract_location()` (gazetteer 34
+địa danh Việt Nam phổ biến, dùng tên gọi ổn định không phụ thuộc thay đổi địa giới
+hành chính) và `_extract_product()` (MVP — chỉ nhận diện biến thể kích thước như
+“100g”/“25kg”, chưa phải tên SKU đầy đủ). Cập nhật `high_precision_rules.py`: bỏ
+`location`/`product` khỏi `_ENTITY_UNSUPPORTED` — **mở khóa nốt `RTE-006`** (`ask_shipping_
+availability`, cần `location`) — cả 3 rule có điều kiện entity trong `routing-rules.yaml`
+giờ đều đã mo khóa (RTE-006/008/009). Chỉ còn `taste_preference`/`brewing_method` chưa
+hỗ trợ (mơ hồ hơn, cần nhiều từ khóa hơn để chính xác).
+
+Đã verify 7/7 test entity + 2/2 test mở khóa `RTE-006` qua sandbox trước khi đưa vào code.
+
+#### Bản vá "Ca Mau không dấu" — phát hiện dán lỗi, đã sửa (23/7, máy mới D:\alpha3s)
+Bản vá `_extract_location` (khớp địa danh khi khách gõ không dấu — bỏ dấu CẢ 2 phía,
+trả về dạng canonical có dấu) trước đây dán tay do MCP mất kết nối. Kiểm tra lại trên
+máy mới phát hiện **dán lỗi: dòng `def` cũ không bị xóa → 2 `def` lồng nhau →
+SyntaxError, cả module không import được** (bot chạy mà không có entity extraction,
+lỗi bị nuốt im lặng bởi try/except của đường NLU). Đã xóa dòng `def` thừa — thân hàm
+bản vá còn lại đúng nguyên bản.
+
+- Đã verify: logic bản vá mô phỏng y hệt bằng Node (máy mới chưa có Python/Docker) —
+  14/14 PASS, gồm các cặp có dấu/không dấu thật ("ship ve Ca Mau giup em",
+  "giao hang di da nang", "minh o buon ma thuot"...) + case ranh giới từ ("camau"
+  dính liền không được khớp).
+- Thêm `scripts/nlu_entity_test.py` (CLI test theo chuẩn các script nlu_*_test.py
+  sẵn có) để chạy xác nhận bằng Python thật khi Docker lên.
+
+### Chưa test trên máy anh Hoài
+```bash
+docker compose exec api python scripts/nlu_entity_test.py --eval
+docker compose exec api python scripts/nlu_pattern_test.py "shop co giao toi Ca Mau khong"
+```
+Kỳ vọng: lệnh 1 — toàn bộ PASS (xác nhận module import được + location khớp không dấu
+bằng Python thật). Lệnh 2 — `intent=ask_shipping_availability`, `via=high_precision_rule`
+(trước đây sẽ bị bỏ qua hoàn toàn do `RTE-006`).
+
+### Bat 7 — Cache (Bước 10, 18/7)
+`app/services/nlu/cache.py` (mới) — chỉ cache đúng theo danh sách được phép trong
+guide (“Normalized query → intent candidate”), TTL 1h. **Chỉ cache kết quả
+`action="accept"`** (đã chắc chắn) — không cache `context_check`/`clarify` (phụ thuộc
+ngữ cảnh Bat 3, cache có thể gây sai lệch giữa các khách khác nhau). **Không cache**
+nội dung Knowledge Base (`search_kb()` vẫn luôn gọi mới mỗi lần) — đúng tinh thần
+“không cache dữ liệu động” của guide.
+
+Tích hợp vào `get_nlu_hint()`: tra cache trước khi gọi `route()`, chỉ ghi cache khi
+kết quả là `accept`.
+
+### Chưa test trên máy anh Hoài
+```bash
+docker compose restart api worker telegram_bot telegram_customer_bot
+docker compose exec api python scripts/nlu_hint_test.py "gia bao nhieu"
+docker compose exec api python scripts/nlu_hint_test.py "gia bao nhieu"
+```
+Chạy **2 lần liên tiếp** cùng 1 câu — kết quả phải giống hệt nhau (không thay đổi gì quan
+sát được từ bên ngoài — cache là tối ưu nội bộ, không đổi kết quả hiển thị).
+
+### Bat 8 — Kiểm tra không hồi quy (18/7)
+Sau toàn bộ Bat 4-7 (gọi KB V2 thật, lọc domain, entity mới, cache), cần chạy lại
+`nlu_combined_test.py --eval` để xác nhận không làm giảm accuracy 150 test held-out
+(về lý thuyết không nên ảnh hưởng vì bộ test đo intent classification, không đo nội
+dung trả lời/cache, nhưng entity `location`/`product` mới CO THE thay đổi kết quả
+vi mo khoa them RTE-006).
+
+### Chưa test trên máy anh Hoài
+```bash
+docker compose exec api python scripts/nlu_combined_test.py --eval
+```
+Kỳ vọng: accuracy **giữ nguyên hoặc tăng nhẹ** so với mốc cũ **80.7%** (tăng nhẹ là hợp
+lý nếu có câu hỏi về vận chuyển có nhắc địa danh trong 150 test), không được giảm.
+
 ---
 
+## Chặng A — AGW-ROADMAP-001 (23/7, máy mới D:\alpha3s)
+Roadmap `AGW-ROADMAP-001-diem-bat-dau.md` đã được thả vào gốc repo (22/7). Trạng thái
+Chặng A theo §9 roadmap:
+
+- [x] **A2 (một phần)** — vá `_extract_location`: phát hiện bản vá cũ dán lỗi gây
+      SyntaxError, đã sửa + sandbox 14/14 PASS (chi tiết ở mục "Bản vá Ca Mau không
+      dấu" phía trên, Bat 6).
+- [x] **A3 (chuẩn bị)** — tạo `scripts/measure_embedding_rss.py`: đo VmRSS/VmHWM của
+      2 model embedding (MiniLM-L12-v2 + mpnet-base-v2) trong 4 kịch bản, mỗi kịch
+      bản 1 process con riêng, đo cả sau khi `encode()` thật. Chạy trong container
+      (đọc `/proc`), in bảng + kết luận sơ bộ so với budget VPS 4GB.
+- [ ] **A3 (chạy thật)** — cần Docker: `docker compose exec api python scripts/measure_embedding_rss.py`
+      → ghi số vào đây + quyết định freeze KB V2 hay đổi model (REV2-03).
+- [x] **Việc 1 §9 (CA amendments)** — anh Hoài đã thả 4 file AGW vào gốc repo (23/7):
+      `ALPHA3S_GATEWAY_ARCHITECTURE_SPEC_V2.md` (= AGW-ARCH-001 v2.0.0),
+      `ALPHA3S_GATEWAY_DEV_HANDOFF_V2.md` (= AGW-IMPL-001 v2.0.0), 2 file AGW-REVIEW-002.
+      Kiểm tra nội dung: **cả 3 amendment đã được gấp sẵn trong bản v2** — REV2-11 trong
+      HOST-004 (key ngoài production host + total-loss restore drill), REV2-12 trong
+      CH-006 (reserve chi phí idempotent theo `idempotency_key`), câu nguồn REV2-06 đã
+      sửa ("8 tin" = unconfirmed tới CH-004, REV2-06 Closed trong traceability).
+      **PO (anh Hoài) đã xác nhận lock v2.0.0 ngày 23/7** — roadmap §4 đã cập nhật
+      tương ứng. Chặng A + B song song chính thức bắt đầu.
+
 ## Đề xuất thứ tự ưu tiên tiếp theo
+> **Từ 22/7: thứ tự ưu tiên theo AGW-ROADMAP-001 §9** (Chặng A → B song song). Danh
+> sách dưới đây là thứ tự cũ trước khi có roadmap, giữ lại để tham chiếu.
 1. **Tích hợp #11 + #12 vào `orchestrator.py`/bot production thật** — quyết định mới nhất (18/7),
    thay cho việc tiếp tục tối ưu accuracy #12.
 2. **#1** — rotate `META_APP_SECRET`/`PAGE_ACCESS_TOKEN` (độc lập, nên làm sớm nếu chưa làm).
-3. **#9** — deploy VPS thật khi có hạ tầng, để #11/#12 có môi trường hoạt động thật sự.
+3. **#9** — deploy VPS thật khi có hạ tầng, để #11/#12 có môi trường hoạt động thật sự (nay = Chặng B).
 
 ## Tài liệu tham chiếu (`docs/`)
 - `docs/DATABASE-VI.md` — schema, lịch sử migration, câu SQL tra cứu thường dùng
