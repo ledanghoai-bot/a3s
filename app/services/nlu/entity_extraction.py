@@ -5,15 +5,12 @@ Entity MVP theo dung guide: product, quantity, unit, location, taste_preference,
 brewing_method, temperature, order_id, payment_method, health_context.
 
 HO TRO (co the trich xuat that): quantity, unit, order_id, payment_method,
-health_context, temperature.
+health_context, temperature, location (v1.1, 18/7), product (v1.1, 18/7 -
+MVP chi nhan dien bien the kich thuoc nhu "100g"/"25kg", chua phai ten SKU
+day du).
 
-CHUA HO TRO (can du lieu/gazetteer chua co, KHONG doan bua):
-- location: can danh sach dia danh Viet Nam (tinh/thanh pho/quan huyen) -
-  chua co nguon du lieu nay trong datasets/nlu/.
-- product: can danh sach SKU/ten san pham chuan hoa - co the lay tu
-  products.py nhung chua noi day de giu module doc lap don gian.
-- taste_preference, brewing_method: mo ho hon, can nhieu tu khoa hon de
-  chinh xac, de danh gia sau khi co du lieu that.
+CHUA HO TRO (mo ho hon, can nhieu tu khoa hon de chinh xac):
+- taste_preference, brewing_method.
 
 BUG DONG AM da hoc duoc tu high_precision_rules.py (18/7) - AP DUNG LAI O DAY:
 so khop tu khoa GIU NGUYEN DAU tieng Viet (khong bo dau) - vi du thuc te:
@@ -34,6 +31,19 @@ _NUMBER_WORDS = {
 _UNIT_WORDS = ["hũ", "túi", "thùng", "kg", "g", "gói", "ly"]
 _PAYMENT_PHRASES = ["chuyển khoản", "tiền mặt", "mã qr", "quét qr", "cod"]
 _HEALTH_PHRASES = ["mang thai", "cho con bú", "cao huyết áp", "bệnh tim", "uống thuốc"]
+
+# Danh sach dia danh Viet Nam pho bien (thanh pho/tinh khach hay nhac khi
+# hoi van chuyen) - dung TEN GOI ON DINH, khong phu thuoc thay doi dia gioi
+# hanh chinh (vd sap nhap tinh) vi day la NHAN DIEN TEN GOI trong cau noi,
+# khong phai xac thuc dia gioi hanh chinh chinh thuc.
+_LOCATIONS = [
+    "hà nội", "hồ chí minh", "sài gòn", "đà nẵng", "cần thơ", "hải phòng",
+    "nha trang", "huế", "vũng tàu", "đà lạt", "buôn ma thuột", "quy nhơn",
+    "biên hòa", "hạ long", "vinh", "thanh hóa", "nam định", "hải dương",
+    "bắc ninh", "thái nguyên", "việt trì", "cà mau", "phú quốc", "sa pa",
+    "hà giang", "lào cai", "điện biên", "sơn la", "tây ninh", "long an",
+    "an giang", "bến tre", "cần giờ", "lý sơn", "côn đảo",
+]
 
 
 def strip_diacritics(text: str) -> str:
@@ -105,6 +115,35 @@ def _extract_temperature(text_lower: str) -> Entity | None:
     return None
 
 
+def _extract_location(text_lower: str) -> Entity | None:
+    """So khop tren BAN DA BO DAU (ca text dau vao lan gazetteer) - BUG THUC
+    TE phat hien (18/7): khach thuong go khong dau (vd "Ca Mau" thay vi
+    "Cà Mau"), nhung gazetteer viet co dau -> khong khop neu so truc tiep
+    tren text_lower (chi ha hoa/thuong, chua bo dau). Fix: bo dau CA 2 ben
+    truoc khi so, tra ve dang co dau (canonical) du input khong dau."""
+    text_stripped = strip_diacritics(text_lower)
+    for loc in _LOCATIONS:
+        loc_stripped = strip_diacritics(loc)
+        if re.search(r"\b" + re.escape(loc_stripped) + r"\b", text_stripped, re.UNICODE):
+            return Entity(value=loc, source="message")
+    return None
+
+
+_PRODUCT_SIZE_RE = re.compile(r"\b(\d+)\s*(g|kg)\b", re.IGNORECASE)
+
+
+def _extract_product(text_lower: str) -> Entity | None:
+    """MVP - chi nhan dien BIEN THE KICH THUOC (vd "100g", "25kg") theo dung
+    cac SKU da xac nhan trong session nay (60g/100g/200g/25kg), CHUA phai
+    ten SKU day du (vd "3S-100G") - can du lieu tu products.py de lam chinh
+    xac hon, ngoai pham vi hien tai de giu module doc lap khong phu thuoc DB.
+    """
+    m = _PRODUCT_SIZE_RE.search(text_lower)
+    if m:
+        return Entity(value=f"{m.group(1)}{m.group(2)}", source="message")
+    return None
+
+
 def extract_entities(message: str) -> dict[str, Entity]:
     """Tra ve dict {ten_entity: Entity}. Chi cac entity TIM THAY moi co mat
     trong dict (khong co key voi value None)."""
@@ -119,6 +158,8 @@ def extract_entities(message: str) -> dict[str, Entity]:
         ("payment_method", _extract_payment_method(text_lower)),
         ("health_context", _extract_health_context(text_lower)),
         ("temperature", _extract_temperature(text_lower)),
+        ("location", _extract_location(text_lower)),
+        ("product", _extract_product(text_lower)),
     ):
         if result:
             entities[name] = result
