@@ -284,8 +284,15 @@ See `.env.example` at the repo root. Grouped by purpose:
 | Embedding | `EMBEDDING_MODEL`, `EMBEDDING_DIM` |
 | Human handoff | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID` |
 | Dashboard | `DASHBOARD_CORS_ORIGINS` |
+| NLU layer (#12) | `ENABLE_NLU_ROUTER` (toggles the whole NLU hint layer — currently `true`), `ENABLE_SEMANTIC_ROUTER` (semantic tier using mpnet, ~1.1GB RAM — **`false` per PO decision 23/7**, see `docs/NLU_LAYER-EN.md` + `docs/KB_NLU_RESOURCE_ASSESSMENT-EN.md`) |
 | ⚠️ Legacy (no longer used) | `ADMIN_API_TOKEN` — replaced by `staff_users`/`staff_sessions` since Batch 4 |
 | Fallback channel | `TELEGRAM_CUSTOMER_BOT_TOKEN` |
+
+> **Orchestrator knowledge source (changed 23/7):** the "Reference information"
+> section of the system prompt now comes from **Knowledge Base V2**
+> (`kb_retrieval.search_kb`, domains brand/product/faq) instead of the legacy RAG
+> (`rag.search_knowledge`/`knowledge_chunks`); the legacy RAG remains only as an
+> except-branch fallback when KB V2 errors out.
 
 ---
 

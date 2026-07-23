@@ -1019,7 +1019,13 @@ hardcode trong `system_prompt.md` — số ly/hũ và đơn giá ly phải là D
 - `docs/TELEGRAM_BOT-VI.md` — 2 bot Telegram (admin/khách hàng), lệnh, cách tạo bot mới
 - `docs/BACKEND_API-VI.md` — toàn bộ FastAPI, service/worker, biến môi trường, giới hạn đã biết
 - `docs/KNOWLEDGE_BASE_V2_DESIGN-VI.md` — thiết kế chi tiết #11
+- `docs/NLU_LAYER-VI.md` — **(mới 23/7)** Lớp NLU #12 as-built: kiến trúc, bản đồ
+  file, flag, trạng thái từng tầng + số đo, các loại hint, bài học tiếng Việt
+- `docs/KB_NLU_RESOURCE_ASSESSMENT-VI.md` — **(mới 23/7)** đánh giá độc lập tài
+  nguyên KB+NLU trên VPS 4GB, 2 phương án, số đo A3 (căn cứ quyết định PO 23/7)
 - `docs/NLU_DATASET_FEEDBACK-VI.md`, `docs/NLU_ACCURACY_IMPROVEMENT_PROPOSAL-VI.md` — góp ý dữ
   liệu gửi team Knowledge cho #12
-- Mỗi file `-VI` có bản dịch `-EN` tương ứng
-- **Chưa làm:** `docs/DEPLOYMENT.md` (để dành khi #9 có VPS thật)
+- Các file `-VI` chính (DATABASE, DASHBOARD, TELEGRAM_BOT, BACKEND_API, NLU_LAYER,
+  KB_NLU_RESOURCE_ASSESSMENT) có bản dịch `-EN` tương ứng. **Chưa có -EN:**
+  KNOWLEDGE_BASE_V2_DESIGN, NLU_DATASET_FEEDBACK, NLU_ACCURACY_IMPROVEMENT_PROPOSAL.
+- **Chưa làm:** `docs/DEPLOYMENT.md` (để dành khi #9 có VPS thật — Chặng B)

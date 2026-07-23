@@ -266,8 +266,14 @@ Xem `.env.example` ở root repo. Nhóm theo chức năng:
 | Embedding | `EMBEDDING_MODEL`, `EMBEDDING_DIM` |
 | Human handoff | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID` |
 | Dashboard | `DASHBOARD_CORS_ORIGINS` |
+| Lớp NLU (#12) | `ENABLE_NLU_ROUTER` (bật/tắt toàn bộ NLU hint — hiện `true`), `ENABLE_SEMANTIC_ROUTER` (tầng semantic mpnet ~1,1GB RAM — **`false` theo quyết định PO 23/7**, xem `docs/NLU_LAYER-VI.md` + `docs/KB_NLU_RESOURCE_ASSESSMENT-VI.md`) |
 | ⚠️ Legacy (không còn dùng) | `ADMIN_API_TOKEN` — thay thế bởi `staff_users`/`staff_sessions` từ Bat 4 |
 | Kênh dự phòng | `TELEGRAM_CUSTOMER_BOT_TOKEN` |
+
+> **Nguồn kiến thức của orchestrator (đổi 23/7):** mục "Thông tin tham khảo" trong
+> system prompt lấy từ **Knowledge Base V2** (`kb_retrieval.search_kb`, domain
+> brand/product/faq) thay cho RAG cũ (`rag.search_knowledge`/`knowledge_chunks`);
+> RAG cũ chỉ còn là đường lui trong nhánh except khi KB V2 lỗi.
 
 ---
 
