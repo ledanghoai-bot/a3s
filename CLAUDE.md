@@ -53,7 +53,8 @@ theo thứ tự: Node.js (xong) → Git → WSL2 → Docker Desktop. **Trước 
 `docker compose` nào, xác nhận `docker --version` và `git --version` đều chạy được.**
 
 `.env` đã được copy đầy đủ (đã xác nhận có đủ các biến quan trọng: Meta, Telegram x3, GitLab,
-LLM, DB, Redis) — không cần tạo lại.
+LLM, DB, Redis; nay thêm `GITHUB_TOKEN` cho CI/CD + đẩy code GitHub) — không cần tạo lại.
+`.env.bridge` (gitignore) chứa token cầu nối Telegram 2 chiều — xem memory `telegram-bridge`.
 
 ## 5. Roadmap mới — "Customer Terminal" (nếu có AGW-ROADMAP-001 trong repo)
 
@@ -134,4 +135,10 @@ hạ tầng trước khi debug sâu vào code.
 - Không có gì trong file này thay thế `ISSUES-VI.md` — file này chỉ là điểm khởi động nhanh.
 - Nếu làm xong việc gì, **luôn cập nhật `ISSUES-VI.md`** theo đúng format đã thiết lập, không chỉ
   báo cáo trong chat rồi thôi.
-- Repo dùng GitLab (không phải GitHub) — kiểm tra remote (`git remote -v`) nếu cần xác nhận.
+- **Repo dùng GitHub** (`github.com/ledanghoai-bot/a3s`) từ 24/7/2026 — đã chuyển hẳn từ GitLab
+  (GitLab trả phí + chặn CI vì chưa xác minh danh tính; xem #9 Bat 5). CI/CD = GitHub Actions,
+  push `main` → tự deploy VPS. GitLab còn lại chỉ là remote phụ `gitlab`, sẽ hủy. Kiểm tra
+  `git remote -v` nếu cần.
+- **Đã có VPS production thật** (`160.30.157.235`, xem `docs/DEPLOYMENT.md` + `docs/VPS-RUNBOOK.md`
+  và memory `vps-production`). HTTPS live tại `a3s.robanme.com`. Việc còn lại của #9 chỉ là cutover
+  webhook Meta sang VPS (đụng khách thật — cần user chốt).
