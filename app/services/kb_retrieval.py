@@ -75,13 +75,17 @@ async def search_kb(
 
         vector_rows = await conn.fetch(
             f"""
-            SELECT id FROM kb_units
+            SELECT id, embedding <=> $3::vector AS dist FROM kb_units
             WHERE index_version = $1 AND status = ANY($2) {domain_clause}
             ORDER BY embedding <=> $3::vector
             LIMIT 20
             """,
             index_version, status_filter, vec_str, *extra,
         )
+        # cosine distance that (0=trung khop, 2=nguoc huong) - RRF vut bo thong
+        # tin nay khi xep hang, nhung caller can no de LOC lien quan that
+        # (fallback knowledge hint trong nlu_hint.py, 23/7) - tra kem ket qua.
+        vector_dist: dict[str, float] = {r["id"]: float(r["dist"]) for r in vector_rows}
 
         lexical_rows = await conn.fetch(
             f"""
@@ -136,6 +140,10 @@ async def search_kb(
                 "status": row["status"],
                 "priority": row["priority"],
                 "score": round(score, 8),
+                # None neu unit chi den tu nhanh lexical (khong co trong top-20
+                # vector) - caller muon loc theo do gan ngu nghia phai tu xu ly
+                # truong hop nay.
+                "vector_distance": round(vector_dist[row["id"]], 4) if row["id"] in vector_dist else None,
             })
 
         # Dedup theo content_hash - giu ban diem cao nhat neu trung
