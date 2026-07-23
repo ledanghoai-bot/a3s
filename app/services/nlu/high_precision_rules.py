@@ -7,9 +7,12 @@ trong NLU-INTEGRATION-GUIDE.md - 25 rule (RTE-001..025) uu tien theo
 
 v1.2 (18/7): TICH HOP Entity Extraction (Buoc 6, entity_extraction.py) -
 MO KHOA 2/3 rule truoc do bi bo qua hoan toan (RTE-008, RTE-009 - dieu
-kien order_id, gio da co the trich xuat that). RTE-006 (dieu kien location)
-VAN CHUA mo khoa duoc vi entity nay chua co gazetteer dia danh - tiep tuc
-bi bo qua RO RANG (khong doan bua), xem entity_extraction.py.
+kien order_id, gio da co the trich xuat that).
+
+v1.3 (18/7): mo rong Entity Extraction them location/product - MO KHOA NOT
+RTE-006 (dieu kien location, dung gazetteer dia danh Viet Nam pho bien).
+Chi con `taste_preference`/`brewing_method` chua ho tro (mo ho hon, chua co
+du lieu du chinh xac).
 
 BUG DONG AM da fix truoc do (18/7): "chua"(RTE-012, vi chua) va "chưa"(rat
 pho bien, "not yet") deu thanh "chua" sau khi bo dau, gay khop nham hang
@@ -26,10 +29,10 @@ routing-rules.yaml ma khong can code rieng:
 import re
 from dataclasses import dataclass
 
-# Entity type CHUA ho tro trich xuat (thieu gazetteer/du lieu) - rule co
-# dieu kien entity thuoc nhom nay se TIEP TUC bi bo qua ro rang, khong
-# doan bua entity co mat hay khong. Xem entity_extraction.py.
-_ENTITY_UNSUPPORTED = {"location", "product", "taste_preference", "brewing_method"}
+# Entity type CHUA ho tro trich xuat (mo ho hon, can nhieu tu khoa hon de
+# chinh xac) - rule co dieu kien entity thuoc nhom nay se TIEP TUC bi bo
+# qua ro rang, khong doan bua entity co mat hay khong. Xem entity_extraction.py.
+_ENTITY_UNSUPPORTED = {"taste_preference", "brewing_method"}
 
 
 @dataclass

@@ -97,29 +97,24 @@ def _build_hint_text(decision, resolved) -> str:
 
 
 async def _build_knowledge_hint(message: str) -> str:
-    """MOI (18/7) - goi THAT Knowledge Base V2 (#11, M1-M6) qua
-    kb_retrieval.search_kb() de lay noi dung Knowledge Unit that, thay vi
-    chi 1 cau goi y chung chung nhu truoc.
+    """Goi THAT Knowledge Base V2 (#11, M1-M6) qua kb_retrieval.search_kb()
+    de lay noi dung Knowledge Unit that.
 
-    PHAT HIEN QUAN TRONG luc sua: truoc ban sua nay, nlu_hint.py CHUA BAO
-    GIO goi Knowledge Base V2 that - moi type=knowledge chi tra ve 1 cau
-    hint chung chung, khien bot van dung RAG cu (#4, knowledge_chunks) chu
-    khong phai KB V2. Da xac nhan qua chat that: cau "3s coffee cua ai?"
-    bot tra loi "chua co thong tin cu the" trong khi SKL-BRAND-001 (da
-    ingest o M1) co ghi ro "Cong ty Co phan Robanme".
-
-    KHONG loc theo domain cu the (targets trong intent-catalog.yaml la
-    asset-level nhu "SKL-PRD-001", khong khop truc tiep voi domain-level
-    filter cua search_kb() nhu "product"/"brand" - de don gian va an toan,
-    dung xep hang ngu nghia+lexical cua search_kb() tu tim noi dung phu hop
-    nhat, khong can anh xa thu cong).
-
-    An toan: moi loi (DB chua san sang, kb_config chua kich hoat...) deu bi
-    bat, tra ve cau hint du phong chung chung thay vi raise.
+    v1.1 (18/7) - CHI cho phep domain "brand"/"product"/"faq" - da xac nhan
+    nhieu lan qua session nay day la noi dung THAT SU danh cho khach (FAQ-
+    BREW-001, FAQ-BRAND-001, thong tin freeze-dried...). LOAI TRU domain
+    "sales"/"conversation"/"customer_service"/"playbook" - phat hien thuc te:
+    `SKL-SAL-002` (domain="sales") hoa ra la 1 tai lieu PLAYBOOK NOI BO
+    nguyen ven (26 muc: "Purpose", "Priority rules", "Do"/"Don't",
+    "Escalation", "Traceability"...) - khong phai noi dung tra loi khach
+    hang, nhung van bi lay ra vi tinh co nhac toi "nguyen lieu" nhu vi du
+    minh hoa trong tai lieu. Da kiem tra qua SQL: ca 5 asset trong domain
+    "sales" (SKL-SAL-001..005) deu cung dang playbook - loai het domain nay
+    la an toan.
     """
     try:
         from app.services.kb_retrieval import search_kb
-        units = await search_kb(message, top_k=2)
+        units = await search_kb(message, top_k=2, allowed_domains=["brand", "product", "faq"])
         if not units:
             return (
                 "Cau hoi lien quan toi kien thuc san pham/thuong hieu nhung khong tim "
@@ -161,15 +156,34 @@ async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
         from app.services.nlu.route_resolution import resolve_route
         from app.services.nlu.router import route
 
-        decision = await route(
-            message,
-            _state["rules"],
-            _state["pattern_index"],
-            _state["semantic_index"],
-            _state["catalog"],
-            protected_phrases=_state["protected_phrases"],
-            routing_rules_config=_state["routing_rules_config"],
-        )
+        # Buoc 10 (Cache) - kiem tra cache truoc, CHI cho ket qua "accept"
+        # da tung xac nhan (dung theo danh sach duoc phep trong guide:
+        # "Normalized query -> intent candidate"). Cache MISS la binh thuong,
+        # khong phai loi - van tiep tuc route() binh thuong.
+        from app.services.nlu.cache import get_cached_decision, set_cached_decision
+        from app.services.nlu.normalizer import normalize
+        normalized_msg = normalize(message, _state["rules"], _state["protected_phrases"])
+
+        cached = await get_cached_decision(normalized_msg)
+        if cached:
+            from app.services.nlu.router import NluDecision
+            decision = NluDecision(**cached)
+        else:
+            decision = await route(
+                message,
+                _state["rules"],
+                _state["pattern_index"],
+                _state["semantic_index"],
+                _state["catalog"],
+                protected_phrases=_state["protected_phrases"],
+                routing_rules_config=_state["routing_rules_config"],
+            )
+            if decision.action == "accept":
+                await set_cached_decision(normalized_msg, {
+                    "intent": decision.intent, "confidence": decision.confidence,
+                    "action": decision.action, "matched_by": decision.matched_by,
+                    "detail": decision.detail,
+                })
 
         if decision.action == "accept":
             resolved = resolve_route(decision.intent, _state["catalog"])
