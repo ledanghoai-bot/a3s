@@ -217,7 +217,7 @@ chứ không loại trừ được hoàn toàn.
 ---
 
 ## #9 · CI/CD GitLab + deploy VPS + monitoring
-**Trạng thái:** 🟡 Đang làm — Bat 1-2/nhiều đã xong (phần không cần VPS)
+**Trạng thái:** 🟡 Đang làm — Bat 1-3 xong (VPS thật đã chạy stack production), còn HTTPS/cutover/CI-deploy/backup/alert
 
 **Mục tiêu:** Hệ thống chạy 24/7 trên VPS, deploy tự động qua GitLab CI/CD.
 
@@ -241,13 +241,41 @@ chứ không loại trừ được hoàn toàn.
       thêm stage `build` (xác nhận `docker build` thành công trên nhánh `main`)
 - [x] Xác nhận chạy thật: 38/38 PASSED trong container
 
-**Còn lại (chưa làm, cần VPS/domain thật):**
-- [ ] Build Docker image → deploy VPS (SSH)
-- [ ] Secrets trong GitLab CI/CD variables (masked, protected)
-- [ ] Reverse proxy + HTTPS (Caddy/Nginx + Let's Encrypt)
-- [ ] Backup PostgreSQL hằng ngày
-- [ ] Alert khi webhook lỗi liên tiếp / LLM API fail
-- [ ] `docs/DEPLOYMENT.md` (để dành khi có quy trình deploy thật)
+### Bat 3 — VPS thật + deploy tay lần đầu (23/7/2026)
+VPS: 160.30.157.235 (Ubuntu 24.04, 4 vCPU/8GB/60GB — Plan 3 đã mua), SSH alias `alpha3s-vps`.
+- [x] Nền VPS: apt upgrade, Docker 29.6.2 + Compose v5.3.1 (repo chính thức), swap 2G,
+      ufw chỉ mở 22/80/443
+- [x] SSH hardening: key ed25519 riêng (`~/.ssh/alpha3s_vps` máy dev — NHỚ BACKUP),
+      `PasswordAuthentication no` qua drop-in `00-hardening.conf`, đã verify password bị từ
+      chối hẳn + key vẫn vào được; mật khẩu root cũ coi như đã lộ (gửi qua chat/email),
+      fallback là console nhà cung cấp
+- [x] Deploy tay: code lên `/srv/alpha3s` (git archive HEAD — chỉ file tracked), `.env`
+      production riêng (APP_ENV=production, POSTGRES_PASSWORD sinh ngẫu nhiên 48 hex ghi
+      thẳng trên server, DATABASE_URL khớp), `docker compose -f docker-compose.prod.yml up
+      -d --build` — 7 container Up, 17 bảng migration tự chạy qua initdb
+- [x] KB V2 trên VPS: chạy `scripts/kb_ingest.py` trong container api (24 asset approved,
+      0 từ chối), atomic switch `active_index_version=1`, **364 kb_units khớp local 100%**
+- [x] Verify: API `/docs` 200, dashboard 200, worker nối Redis; RAM cả stack ~1.2GB/7.8GB
+- [x] **2 bot Telegram trên VPS chủ động STOP** — máy local vẫn là production thực tế
+      (Messenger webhook + Telegram polling); chạy cả 2 nơi sẽ tranh token `getUpdates`
+      (409). Cutover sang VPS chỉ làm sau khi có HTTPS.
+- [x] Caddy reverse proxy trong repo: service `caddy` trong `docker-compose.prod.yml` +
+      `docker/caddy/Caddyfile` (DOMAIN/DASH_DOMAIN bắt buộc trong .env); api/dashboard đổi
+      sang bind `127.0.0.1` vì Docker publish đi tắt qua iptables, ufw không chặn được —
+      đã validate cú pháp trên VPS, **chưa chạy thật vì chờ domain DuckDNS**
+- [x] Dọn 8 file rác từng commit nhầm (lỗi CMD message nhiều dòng): `0.1`, `buildBD.bat`,
+      `don`, `dung`, `FAQ-BRAND-001`, `python`, `docker` (file rỗng chặn tạo thư mục
+      `docker/`), `results.md` (output test cũ 14/7 — còn trong git history)
+
+**Còn lại:**
+- [ ] Bật Caddy + HTTPS thật (chờ 2 subdomain DuckDNS trỏ về VPS), đổi
+      `NEXT_PUBLIC_API_URL` sang https
+- [ ] Cutover: trỏ webhook Meta về VPS, stop bot Telegram local → start trên VPS
+- [ ] Secrets trong GitLab CI/CD variables (masked, protected) + stage deploy qua SSH
+      (push `main` → tự deploy)
+- [ ] Backup PostgreSQL hằng ngày (cron `pg_dump` — nhà cung cấp chỉ backup tuần)
+- [ ] Alert khi webhook lỗi liên tiếp / LLM API fail (tối thiểu: gửi Telegram admin)
+- [ ] `docs/DEPLOYMENT.md` (viết khi quy trình deploy đã chốt)
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy; uptime webhook > 99%.
 

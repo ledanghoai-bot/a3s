@@ -224,7 +224,7 @@ results re-asserting themselves) rather than eliminated entirely.
 ---
 
 ## #9 · CI/CD GitLab + VPS deploy + monitoring
-**Status:** 🟡 In progress — Batches 1-2/several done (the part that doesn't need a VPS)
+**Status:** 🟡 In progress — Batches 1-3 done (production stack running on a real VPS); HTTPS/cutover/CI-deploy/backup/alerting remain
 
 **Goal:** The system runs 24/7 on a VPS, deployed automatically via GitLab CI/CD.
 
@@ -248,13 +248,46 @@ results re-asserting themselves) rather than eliminated entirely.
       fails; added a `build` stage (confirms `docker build` succeeds on the `main` branch)
 - [x] Confirmed with a real run: 38/38 PASSED in the container
 
-**Remaining (not yet done, needs a real VPS/domain):**
-- [ ] Build a Docker image → deploy to VPS (SSH)
-- [ ] Secrets in GitLab CI/CD variables (masked, protected)
-- [ ] Reverse proxy + HTTPS (Caddy/Nginx + Let's Encrypt)
-- [ ] Daily PostgreSQL backups
-- [ ] Alerting on repeated webhook failures / LLM API failure
-- [ ] `docs/DEPLOYMENT.md` (saved for when a real deployment process exists)
+### Batch 3 — Real VPS + first manual deploy (2026-07-23)
+VPS: 160.30.157.235 (Ubuntu 24.04, 4 vCPU/8GB/60GB — Plan 3 purchased), SSH alias `alpha3s-vps`.
+- [x] VPS base: apt upgrade, Docker 29.6.2 + Compose v5.3.1 (official repo), 2G swap,
+      ufw allowing only 22/80/443
+- [x] SSH hardening: dedicated ed25519 key (`~/.ssh/alpha3s_vps` on the dev machine — BACK IT
+      UP), `PasswordAuthentication no` via `00-hardening.conf` drop-in, verified password auth
+      is fully rejected while key login still works; the old root password is considered leaked
+      (sent over chat/email), provider console is the fallback
+- [x] Manual deploy: code to `/srv/alpha3s` (git archive HEAD — tracked files only), separate
+      production `.env` (APP_ENV=production, random 48-hex POSTGRES_PASSWORD written directly
+      on the server, DATABASE_URL matching), `docker compose -f docker-compose.prod.yml up -d
+      --build` — 7 containers Up, 17 tables auto-migrated via initdb
+- [x] KB V2 on the VPS: ran `scripts/kb_ingest.py` inside the api container (24 approved
+      assets, 0 rejected), atomic switch `active_index_version=1`, **364 kb_units — a 100%
+      match with local**
+- [x] Verified: API `/docs` 200, dashboard 200, worker connected to Redis; whole stack
+      ~1.2GB/7.8GB RAM
+- [x] **Both Telegram bots on the VPS deliberately STOPPED** — the local machine remains the
+      de-facto production (Messenger webhook + Telegram polling); running both sides would
+      fight over the `getUpdates` token (409). Cutover to the VPS only after HTTPS is up.
+- [x] Caddy reverse proxy in the repo: a `caddy` service in `docker-compose.prod.yml` +
+      `docker/caddy/Caddyfile` (DOMAIN/DASH_DOMAIN required in .env); api/dashboard switched
+      to binding `127.0.0.1` because Docker's published ports bypass ufw via iptables —
+      syntax validated on the VPS, **not yet running for real, waiting on the DuckDNS domains**
+- [x] Removed 8 junk files committed by accident in the past (the multi-line CMD message bug):
+      `0.1`, `buildBD.bat`, `don`, `dung`, `FAQ-BRAND-001`, `python`, `docker` (an empty file
+      blocking creation of the `docker/` directory), `results.md` (old test output from Jul 14
+      — still in git history)
+
+**Remaining:**
+- [ ] Turn on Caddy + real HTTPS (waiting on 2 DuckDNS subdomains pointed at the VPS), switch
+      `NEXT_PUBLIC_API_URL` to https
+- [ ] Cutover: point the Meta webhook at the VPS, stop the local Telegram bots → start them on
+      the VPS
+- [ ] Secrets in GitLab CI/CD variables (masked, protected) + an SSH deploy stage
+      (push to `main` → auto-deploy)
+- [ ] Daily PostgreSQL backups (a `pg_dump` cron — the provider only backs up weekly)
+- [ ] Alerting on repeated webhook failures / LLM API failure (minimum: message the Telegram
+      admin)
+- [ ] `docs/DEPLOYMENT.md` (write it once the deploy process is settled)
 
 **Definition of done:** Pushing to `main` → auto-deploys; webhook uptime > 99%.
 
