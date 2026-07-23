@@ -17,11 +17,15 @@
 # - Tat ca service co `restart: unless-stopped` — tu khoi dong lai neu crash
 #   hoac VPS reboot.
 #
-# CHUA co trong file nay (se lam o Bat sau cua issue #9 khi co VPS/domain that):
-# - Reverse proxy + HTTPS (Caddy/Nginx + Let's Encrypt) — Meta bat buoc HTTPS
-#   cho webhook, nhung can domain that truoc, chua lam duoc tren may dev.
+# CHUA co trong file nay (se lam o Bat sau cua issue #9):
 # - Backup PostgreSQL tu dong.
 # - Alert/monitoring.
+#
+# Reverse proxy + HTTPS: service `caddy` ben duoi (them khi da co VPS + domain
+# that). Yeu cau .env tren VPS co DOMAIN va DASH_DOMAIN (khong co gia tri mac
+# dinh — thieu la caddy khong route duoc). api/dashboard chi bind 127.0.0.1
+# tren host: Docker publish port di tat qua iptables nen ufw KHONG chan duoc,
+# bind loopback la cach duy nhat dam bao ngoai chi vao duoc qua Caddy (HTTPS).
 #
 # LUU Y QUAN TRONG: sau khi sua code (bat ky file .py/.js nao), PHAI chay lai
 # `docker compose -f docker-compose.prod.yml up -d --build <service>` —
@@ -33,7 +37,7 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     env_file: .env
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       - db
       - redis
@@ -71,9 +75,26 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - api
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?Phai dat DOMAIN trong .env (domain tro ve VPS, cho webhook/API)}
+      DASH_DOMAIN: ${DASH_DOMAIN:?Phai dat DASH_DOMAIN trong .env (domain dashboard)}
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - dashboard
     restart: unless-stopped
 
   db:
@@ -96,3 +117,5 @@ services:
 
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,18 @@
+# Caddyfile — reverse proxy + HTTPS tu dong (Let's Encrypt) cho production (issue #9)
+#
+# DOMAIN / DASH_DOMAIN doc tu bien moi truong (khai bao trong .env tren VPS,
+# truyen vao container caddy qua `environment` trong docker-compose.prod.yml).
+# Caddy tu xin + gia han chung chi Let's Encrypt, khong can cron certbot.
+#
+# Luu y: api/dashboard chi bind 127.0.0.1 tren host (xem docker-compose.prod.yml)
+# — moi truy cap tu ngoai bat buoc di qua Caddy (HTTPS).
+
+{$DOMAIN} {
+	# API FastAPI — webhook Meta (bat buoc HTTPS), API cho dashboard goi
+	reverse_proxy api:8000
+}
+
+{$DASH_DOMAIN} {
+	# Dashboard Next.js
+	reverse_proxy dashboard:3000
+}
