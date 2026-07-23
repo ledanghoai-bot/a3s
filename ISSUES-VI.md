@@ -857,13 +857,38 @@ classification: không đoán intent, chỉ hỏi "có nội dung KB gần câu 
   cũ, S04/05/21 giữ nguyên các điểm prompt-level có sẵn từ trước (không liên quan
   fallback).
 
-**Việc tinh chỉnh prompt còn lại (phát hiện qua 2 lần chạy kịch bản, chưa làm):**
-- [ ] S05 khiếu nại: bot escalate + xin lỗi đúng nhưng **không hỏi mã đơn**.
-- [ ] S04 y khoa: xưng "bạn/mình" lệch brand voice "anh chị/em"; vẫn nêu số
-      400mg/3-4 ly dù có disclaimer; lần 2 còn hỏi sâu thêm tình trạng bệnh.
-- [ ] S21: bot luôn xin 1 lượt xác nhận trước khi `create_order` — quyết định cần
-      PO: chấp nhận hành vi thận trọng này (khuyến nghị) hay ép tạo đơn ngay khi đủ
-      thông tin; nếu chấp nhận thì sửa kịch bản test thêm lượt "đúng rồi".
+### Orchestrator chuyển nguồn kiến thức: RAG cũ → KB V2 (23/7 tối, sau khi PO test Telegram thật)
+PO test qua bot Telegram khách phát hiện bot trả lời sai kiến thức ("muỗng 2g",
+cách pha không theo quy trình KB V2). Nguyên nhân: **xung đột 2 nguồn** — RAG cũ
+(`data/knowledge`, "định lượng chuẩn 2g/ly") được bơm cho MỌI câu, KB V2 ("1 muỗng
+≈ 1g", không công thức cứng) chỉ vào khi hint kích hoạt → LLM nghe nguồn sai.
+Thêm nữa `products.description` (seed migration) cũng ghi "2g/ly ~50 ly".
+
+**Đã sửa:**
+- `orchestrator.py` — mục "Thông tin tham khảo" đổi nguồn từ `search_knowledge`
+  (RAG cũ #4) sang `search_kb` (KB V2, top_k=4, domain brand/product/faq); RAG cũ
+  GIỮ NGUYÊN làm đường lui trong nhánh except khi KB V2 lỗi.
+- `migrations/001_init.sql` + DB live — mô tả `3S-100G` đồng bộ KB V2 (muỗng ~1g,
+  bỏ "2g/ly ~50 ly").
+- Verify trực tiếp: "1 muong la bao nhieu gam" → "khoảng 1g"; "cach pha sao cho
+  chuan" → đúng quy trình KB V2 (nóng 80-90°C khuấy ~30s, nguội 16-18°C khuấy
+  ~3 phút, chỉnh muỗng theo khẩu vị).
+
+### Kết quả 8 kịch bản LẦN 3 (prompt mới + KB V2 context + fallback, 23/7 tối)
+Chạy sau khi session bridge sửa `system_prompt.md` đồng bộ KB V2 (mục dưới):
+**7/8 PASS trọn** — cải thiện rõ so với 2 lần trước:
+- ✅ S04 y khoa: **hết hẳn "400mg/3-4 ly"** — từ chối đưa số ly/ngày chung, khuyên
+  bác sĩ đúng chuẩn KB (giải quyết xong ý 2; còn xưng "bạn/mình" — minor).
+- ✅ S21: **bot gọi `create_order` THẬT ngay khi đủ thông tin** — đơn #1 nằm trong
+  DB (Nguyễn Thị Lan, 800.000đ), hết cả vấn đề "xin thêm 1 lượt xác nhận".
+- ✅ S22: vẫn không tạo đơn khi thiếu tên (DB xác nhận chỉ có đúng 1 đơn của S21).
+- ✅ S02: cách pha nguội 16-18°C/3 phút đúng KB V2; không bịa flavor notes.
+- ✅ S03: không còn quy đổi "3.400đ/ly" — ĐÚNG quyết định PO mới (logic quy đổi
+  thuộc về tool). **Tiêu chí kịch bản S03 trong `scenarios_20.md` cần cập nhật**
+  (đang ghi "quy đổi ra đơn giá/ly" theo prompt cũ).
+- ⚠️ S05 khiếu nại: duy nhất còn lại — bot escalate + xin lỗi đúng nhưng vẫn
+  **không hỏi mã đơn** trước khi escalate (prompt đã ghi bước 3 nhưng LLM bỏ qua
+  khi khách chưa đưa mã — cần thử ép thứ tự bước trong prompt hoặc chấp nhận).
 - [x] **Môi trường máy mới HOÀN TẤT (23/7):** WSL2 + Docker Desktop cài xong (VT-x
       sẵn trong BIOS, chỉ thiếu WSL2 — `wsl --install --no-distribution` + reboot),
       7/7 container Up. **DB volume mới tinh không mang dữ liệu máy cũ theo** — đã
@@ -881,6 +906,43 @@ classification: không đoán intent, chỉ hỏi "có nội dung KB gần câu 
       sửa ("8 tin" = unconfirmed tới CH-004, REV2-06 Closed trong traceability).
       **PO (anh Hoài) đã xác nhận lock v2.0.0 ngày 23/7** — roadmap §4 đã cập nhật
       tương ứng. Chặng A + B song song chính thức bắt đầu.
+
+### Rà soát đồng bộ system prompt ↔ KB V2 — PO yêu cầu qua Telegram, đã làm (23/7, session bridge)
+PO phát hiện đúng: system prompt (viết từ #5, trước khi có KB V2) chứa nhiều claim
+mà KB V2 (nguồn chuẩn PO đã duyệt) viết ra ĐỂ CẤM. Rà bằng agent đọc toàn bộ 25
+file `knowledge-base/` đối chiếu `app/prompts/system_prompt.md`.
+
+**Xung đột đã sửa trong `system_prompt.md` (KB là chuẩn):**
+- [x] "100% Robusta" (bị SKL-PRD-002 cấm đích danh) → nhân xanh Robusta + Arabica
+      VN, không công bố tỷ lệ; "phôi Ro-Express R100 (Robanme)" (không tồn tại
+      trong KB) → Robanme = đơn vị ĐÓNG GÓI, không nêu tên nhà cung cấp phôi,
+      đòi hồ sơ nguồn gốc → escalate.
+- [x] Pha nguội "khuấy 30 giây" → **16–18°C khuấy ~3 phút** (KB lặp 6 lần); pha
+      nóng 85°C/10-15s → **80–90°C khuấy ~30s**; bỏ mốc 99°C (nhiệt độ kỹ thuật
+      cũ PO đã loại); định lượng "2g/ly, 50 ly/hũ" (không có trong KB) → chuẩn
+      "1 muỗng ≈ 1g", không ấn định số muỗng chung.
+- [x] Caffeine ">1%" → **4,1%** (≈41mg/muỗng) + Total Glucose 1,06% / Moisture
+      3,43%; bỏ "400mg ≈ 3-4 ly/ngày" (KB cấm quy đổi chung — đồng thời giải
+      quyết ý 2 của mục S04 y khoa ở trên); bỏ "Robusta gấp đôi Arabica".
+- [x] Hương "Caramel–Chocolate, không đắng gắt" (SKL-FAQ-002 cấm bịa flavor
+      notes/mức đắng tuyệt đối) → chỉ nói cảm nhận chung nóng-thơm/nguội-êm.
+- [x] Bỏ claim "nhuận tràng trước khi tập" (vi phạm cấm tuyên bố y khoa
+      PBK-BRAND-VOICE); target "runners/sức bền" → định vị đối tượng, không hứa
+      công dụng thể thao.
+- [x] Bổ sung từ KB: quy trình khách báo TRIỆU CHỨNG (dừng bán → khuyên ngừng →
+      escalate); cấm suy diễn "không đường"/calorie/tiểu đường; cấm tư vấn tương
+      tác thuốc; cấm gọi pha nguội là "cold brew"; không tự đưa "pha xong để được
+      bao lâu"; mở rộng danh sách từ cấm (tốt nhất/ngon nhất/duy nhất/độc quyền);
+      cấm emoji trong khiếu nại/hoàn tiền/sức khỏe; câu chuẩn thiếu thông tin đổi
+      sang ngôi "em" theo PBK-RESPONSE-STANDARD (bỏ "Chúng tôi").
+- [x] **Quyết định PO qua Telegram (23/7):** bỏ phép quy đổi "170k/50 ly =
+      3.400đ/ly" khỏi prompt — logic này thuộc về tool. Đã sửa mục "Đắt quá"
+      thành: lấy giá thật từ `search_products`, không dùng số thuộc lòng. Việc
+      thêm dữ liệu quy đổi vào tool: đã tạo task riêng (chip trên máy PO).
+
+**Chưa test:** cần chạy lại 8 kịch bản (đặc biệt S02 giá/chê đắt, S04 y khoa) với
+prompt mới — phối hợp session đang làm search_kb() chạy chung trước khi commit+push.
+**ISSUES-EN.md:** chưa dịch mục này — để session đồng bộ EN xử lý (đang có worktree riêng).
 
 ## Đề xuất thứ tự ưu tiên tiếp theo
 > **Từ 22/7: thứ tự ưu tiên theo AGW-ROADMAP-001 §9** (Chặng A → B song song). Danh
