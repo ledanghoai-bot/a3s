@@ -990,11 +990,20 @@ hardcode trong `system_prompt.md` — số ly/hũ và đơn giá ly phải là D
   migration 012 dùng guard `LIKE '%50 ly%'` nên không đè bản mới.
 - `docs/BACKEND_API-VI.md` + `-EN.md` — cập nhật row `search_products`.
 
-**Chưa test trên máy anh Hoài (sau khi merge nhánh):**
-- [ ] Restart api/worker để nạp `tools.py` + `system_prompt.md` mới, chạy lại kịch
-      bản S01/S03 (hỏi giá / chê đắt) — kỳ vọng con số hiển thị KHÔNG đổi
-      (~3.400đ/ly) nhưng nguồn là `serving_info` từ tool.
-- [ ] Re-ingest RAG cũ (lệnh ở trên) rồi kiểm tra chunk "Bài toán kinh tế" mới.
+**✅ Đã test trên máy anh Hoài (23/7 tối, ngay sau merge nhánh vào main):**
+- [x] Merge về main (1b1e4dd): giải đụng độ `system_prompt.md` — GIỮ bản đã đồng
+      bộ KB V2 (a7536c8, bên nhánh là prompt cũ trước sync), ghép 2 chỉ dẫn
+      `serving_info` của nhánh vào mục "Đắt quá" + "Kiến thức sản phẩm";
+      `ISSUES-VI.md` giữ cả 2 mục.
+- [x] Restart api/worker + re-ingest RAG cũ (51 chunks, text mới không còn "2g/ly").
+- [x] Tool trả `serving_info` đúng trên DB thật: 50 ly, 3.400đ (lẻ) / 3.200đ (5+) /
+      2.800đ (20+).
+- [x] **Bug bắt được nhờ test spy:** lượt đầu sau merge, câu "giá này đắt quá" LLM
+      KHÔNG gọi tool mà tự tính bịa (lần 1: "33 ly ~3g/ly 5.100đ", lần 2: "100 ly
+      1.700đ" — suy từ mô tả "muỗng ~1g", mỗi lần một kiểu). Fix: siết mục "Đắt
+      quá" trong prompt — BẮT BUỘC gọi `search_products` trước khi trả lời, cấm
+      nêu số ly/đ-ly khi chưa thấy `serving_info` trong lượt. Verify lại 2/2 lần
+      (spy xác nhận tool được gọi): số khớp chính xác serving_info cả 3 bậc.
 
 ## Đề xuất thứ tự ưu tiên tiếp theo
 > **Từ 22/7: thứ tự ưu tiên theo AGW-ROADMAP-001 §9** (Chặng A → B song song). Danh
