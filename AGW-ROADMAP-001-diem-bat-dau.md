@@ -50,6 +50,12 @@ Công việc "Gateway/Terminal" này **không viết lại Core** — nó bọc 
 
 1. Customer Terminal, không phải platform.
 2. Một VPS `2 vCPU / 4 GB / 60 GB` cho toàn bộ Alpha3S.
+   **[PO AMENDMENT 23/7/2026]** Nâng ngân sách RAM lên **6-8 GB** (giữ 1 VPS duy
+   nhất) — căn cứ số đo A3 + bản phân tích độc lập
+   `docs/KB_NLU_RESOURCE_ASSESSMENT-VI.md`: biên an toàn 4 GB quá mỏng (~0,6 GB)
+   cho các Chặng C-E sắp chồng thêm lên cùng VPS. Đồng thời PO chọn **chop
+   Semantic Router** (tầng mpnet ~1,1 GB, `ENABLE_SEMANTIC_ROUTER=false`) và
+   **KHÔNG freeze KB V2** (giữ quyền chỉnh sửa tiếp).
 3. Thứ tự kênh: Messenger → Web → Zalo; Telegram fallback.
 4. Web widget nhẹ trên website hiện có, Alpha3S sở hữu toàn bộ.
 5. **Backup-only host** chi phí thấp để lưu backup off-host — KHÔNG phải failover node.

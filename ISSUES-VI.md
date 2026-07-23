@@ -776,10 +776,94 @@ Chặng A theo §9 roadmap:
         ≈ **2,9-3,1 GB → VỪA 4 GB** (có swap 2-4 GB đỡ lưng). ✅ Freeze KB V2 ĐƯỢC.
       - Nếu để cả api lẫn worker cùng load model: ~4 GB chỉ riêng app → **KHÔNG an
         toàn**. ⚠️ Vi phạm guardrail "embedding chỉ load 1 process" (roadmap §5).
-      - **Khuyến nghị (cần PO chốt ở Chặng B/HOST-003):** giữ 2 model hiện tại (khỏi
-        đổi model nhỏ/quantized), nhưng thêm việc: đường embedding của dashboard
-        (knowledge_entries/products) phải đi qua worker (queue) thay vì embed trực
-        tiếp trong api — làm ở Chặng B khi tune HOST-003, revalidate RSS trên VPS thật.
+      - ~~Khuyến nghị (cần PO chốt ở Chặng B/HOST-003)~~ → **PO ĐÃ QUYẾT (23/7,
+        sau bản phân tích độc lập `docs/KB_NLU_RESOURCE_ASSESSMENT-VI.md`):** làm CẢ
+        HAI phương án — (1) nâng ngân sách VPS lên **6-8 GB RAM**, (2) **chop
+        Semantic Router** (tầng mpnet), và (3) **KHÔNG freeze KB V2**.
+
+### Chop Semantic Router (PA2-5a) — đã triển khai (23/7)
+- `app/config.py` — thêm flag `enable_semantic_router` (mặc định **False**);
+  `.env` đặt tường minh `ENABLE_SEMANTIC_ROUTER=false`.
+- `app/services/nlu_hint.py::_ensure_loaded()` — chỉ `build_semantic_index()` khi
+  flag bật; khi tắt: **mpnet không bao giờ được load** (~-1,1 GB RAM worker).
+- `app/services/nlu/router.py` — bỏ import `semantic_router` cấp module (import đó
+  kéo torch ~300MB vào mọi process import router, kể cả khi flag tắt) → lazy import
+  trong nhánh semantic; `route()` nhận `semantic_index=None` → trả `action="clarify",
+  matched_by="none"` (không đoán, không hint; nhánh Context-aware Resolution phía
+  sau vẫn hoạt động).
+- **Đã verify (máy anh Hoài, 23/7):**
+  - `nlu_hint_test "gia bao nhieu"` → hint như cũ (`ask_price`, exact_phrase),
+    chạy tức thì, log xác nhận "Semantic Router TAT", không load model nào.
+  - `nlu_hint_test "minh can duoc goi y lua chon"` (câu trước đây rơi xuống
+    semantic và bị đoán SAI `end_conversation`) → nay trả rỗng đúng thiết kế —
+    không hint còn tốt hơn hint sai.
+  - `nlu_pattern_test --eval` (pipeline mới, 150 held-out): **match 60 (40%),
+    đúng 56 (93,3% trong phạm vi phủ), sai 4**.
+- **Phát hiện quan trọng biện minh cho quyết định:** soi lại eval cũ — các câu do
+  Semantic Router xử lý hầu hết trả `action=context_check` (KHÔNG phải `accept`)
+  → vốn dĩ **không sinh hint** bơm vào prompt trong production. Tức là chop semantic
+  gần như không thay đổi hành vi bot thật; chỉ thuần tiết kiệm ~1,1 GB RAM.
+- Đường lui: bật lại `ENABLE_SEMANTIC_ROUTER=true` (vd sau khi quantize mpnet
+  PA2-5d) — code semantic_router giữ nguyên, không xóa.
+
+### Test hệ thống hoàn chỉnh trên máy dev 16GB (23/7 tối — LLM DeepSeek thật)
+Chạy `scripts/test_scenarios.py` (8 kịch bản, orchestrator + NLU pattern-only +
+KB V2 + RAG cũ + tools + DB/Redis thật). Trước đó khôi phục RAG cũ trên DB mới:
+`scripts/ingest.py` → 51 chunks. Kết quả chấm theo tiêu chí từng kịch bản:
+
+| # | Kịch bản | Kết quả |
+|---|---|---|
+| 01 | Hỏi giá (bậc 170/160/140) | ✅ PASS — đúng cả 3 bậc, quy đổi ~3.400đ/ly |
+| 02 | Danh xưng "c" → chị/em xuyên suốt | ✅ PASS |
+| 03 | Chê đắt → quy đổi ly, không phản bác | ✅ PASS — lượt 2 khách rút, bot lịch sự không nài |
+| 04 | Câu y khoa (đau dạ dày) | ✅ PASS có ghi chú — khuyên bác sĩ đúng, nhưng (a) vẫn đưa số 400mg/3-4 ly dù có disclaimer, (b) xưng "bạn/mình" lệch brand voice "anh chị/em" |
+| 05 | Khiếu nại giao trễ | ⚠️ PASS một phần — escalate + xin lỗi đúng tone, nhưng **không hỏi mã đơn** (tiêu chí yêu cầu) |
+| 21 | Chốt đơn đủ thông tin → phải gọi `create_order` | ⚠️ CHƯA ĐẠT trong 2 lượt — bot xin xác nhận thêm 1 lượt rồi mới tạo (thận trọng tốt nhưng kịch bản hết lượt; `orders`=0 xác nhận qua DB). Cần thêm lượt "đúng rồi" vào kịch bản HOẶC chấp nhận hành vi xác nhận là đúng |
+| 22 | Thiếu tên → KHÔNG được tạo đơn | ✅ PASS — hỏi thêm tên, `orders`=0 |
+| 23 | Handoff → bot im lặng | ✅ PASS — escalate ngay lượt 1, im lặng lượt 2, `escalations`=2 |
+
+**RAM thực đo sau chop** (process chạy `handle_message` thật, đọc /proc):
+trước xử lý 435 MB → sau câu knowledge (load MiniLM + KB search + LLM) peak
+**1.168 MB** → sau câu giá 1.170 MB. So với ~1,9 GB trước chop → **tiết kiệm
+~740 MB**. Trên máy dev 16GB chạy thoải mái; số này là ước lượng tốt cho worker
+trên VPS 6-8GB.
+
+**Phát hiện giới hạn sau chop (đúng dự đoán PA2-5a):** câu knowledge NGOÀI phủ
+pattern (vd "3s coffee là thương hiệu của công ty nào" — cả có dấu lẫn không dấu)
+không còn được bơm nội dung KB V2 vào prompt → bot dựa vào RAG cũ, có lần chọn
+escalate thay vì trả lời.
+
+### Fallback knowledge hint bằng search_kb() — PO duyệt qua Telegram, đã làm (23/7)
+Khi Pattern miss (và không phải câu nối tiếp), gọi `search_kb()` bằng MiniLM —
+model VỐN ĐÃ load cho KB V2 → **0 RAM thêm**, ~65ms/câu. Dùng retrieval thay
+classification: không đoán intent, chỉ hỏi "có nội dung KB gần câu này không".
+
+- `kb_retrieval.py` — thêm trường `vector_distance` (cosine distance thật) vào kết
+  quả `search_kb()` (cộng thêm, không đổi hành vi cũ; RRF vứt distance khi xếp hạng
+  nên caller cần nó để lọc liên quan thật).
+- `nlu_hint.py` — thêm `_build_knowledge_fallback_hint()`: `top_k=4`, lọc
+  `vector_distance <= 0.55`, không tìm thấy thì trả `""` (im lặng, KHÔNG trả hint
+  chung chung vì chưa chắc là câu hỏi kiến thức). Preamble dặn LLM rõ: "chưa chắc
+  chắn — lạc đề thì bỏ qua hoàn toàn".
+- **Ngưỡng 0.55 chọn từ SỐ ĐO THẬT** (probe trên index v1): câu liên quan
+  d=0.354-0.531, câu không liên quan d=0.530-0.727. Ca biên chấp nhận: "cho anh 5
+  hũ" (d=0.530) có thể lọt hint FAQ nhẹ. `top_k=4` vì đáp án chuẩn câu không dấu
+  (KU-FAQ-001-003, d=0.5156) xếp hạng 4.
+- **Verify end-to-end:** câu không dấu "3s coffee la thuong hieu cua cong ty nao"
+  (ca fail trước đó → escalate) giờ trả lời đúng nguyên văn FAQ-BRAND-001: *"đóng
+  gói bởi Công ty Cổ phần Robanme..."*. Câu địa chỉ "giao ve 45 Le Loi" → hint rỗng
+  đúng thiết kế.
+- **Chạy lại full 8 kịch bản (LLM thật):** không hồi quy — S01-03/22/23 PASS như
+  cũ, S04/05/21 giữ nguyên các điểm prompt-level có sẵn từ trước (không liên quan
+  fallback).
+
+**Việc tinh chỉnh prompt còn lại (phát hiện qua 2 lần chạy kịch bản, chưa làm):**
+- [ ] S05 khiếu nại: bot escalate + xin lỗi đúng nhưng **không hỏi mã đơn**.
+- [ ] S04 y khoa: xưng "bạn/mình" lệch brand voice "anh chị/em"; vẫn nêu số
+      400mg/3-4 ly dù có disclaimer; lần 2 còn hỏi sâu thêm tình trạng bệnh.
+- [ ] S21: bot luôn xin 1 lượt xác nhận trước khi `create_order` — quyết định cần
+      PO: chấp nhận hành vi thận trọng này (khuyến nghị) hay ép tạo đơn ngay khi đủ
+      thông tin; nếu chấp nhận thì sửa kịch bản test thêm lượt "đúng rồi".
 - [x] **Môi trường máy mới HOÀN TẤT (23/7):** WSL2 + Docker Desktop cài xong (VT-x
       sẵn trong BIOS, chỉ thiếu WSL2 — `wsl --install --no-distribution` + reboot),
       7/7 container Up. **DB volume mới tinh không mang dữ liệu máy cũ theo** — đã
