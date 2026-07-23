@@ -78,7 +78,9 @@ CREATE TABLE price_tiers (
 INSERT INTO products (sku, name, description, price_vnd, stock) VALUES (
   '3S-100G',
   '3S Coffee – Hũ 100g',
-  'Cà phê sấy lạnh nguyên chất, 100% Robusta (phôi Ro-Express R100). Hòa tan 3 giây với nước nguội/đá. ~50 ly/hũ (2g/ly).',
+  -- Mo ta dong bo voi KB V2 (SKL-PRD-004/PBK-RESPONSE-STANDARD): muong di kem ~1g,
+  -- KHONG dua dinh luong cung "2g/ly" (ban cu lech KB V2, sua 23/7 theo chi dao PO)
+  'Cà phê sấy lạnh nguyên chất, 100% Robusta (phôi Ro-Express R100). Hòa tan nhanh với nước nóng ~85°C, nước nguội hoặc nước đá. Hũ 100g, muỗng đi kèm (1 muỗng khoảng 1g), pha đậm/nhạt tùy chỉnh số muỗng.',
   170000,
   1000
 );

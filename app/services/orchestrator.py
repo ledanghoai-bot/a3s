@@ -115,9 +115,25 @@ async def handle_message(sender_id: str, text: str) -> str:
         else:
             profile = await get_user_profile(redis, sender_id)
 
-        # 2. RAG: tim chunks lien quan (kien thuc san pham tinh, khong phai gia/ton kho)
-        chunks = await search_knowledge(text, top_k=4)
-        rag_context = "\n\n".join(chunks) if chunks else ""
+        # 2. Kien thuc tham khao: Knowledge Base V2 (#11) THAY THE RAG cu (#4)
+        # tu 23/7 theo chi dao PO ("cach pha phai tuan theo quy trinh KB V2") -
+        # phat hien XUNG DOT kien thuc khi test Telegram that: RAG cu
+        # (data/knowledge, vd "dinh luong chuan 2g/ly", "muong 2g") lech voi
+        # KB V2 da duyet ("1 muong ~ 1g", khong dua cong thuc cung, caffeine
+        # 4,1%). KB V2 phu rong hon han (BRAND/PRD/ORD/TASTE/BREW/CAF/HEALTH,
+        # 364 unit vs 51 chunk). Chi lay domain danh cho khach (bai hoc Bat 5:
+        # sales/playbook la tai lieu noi bo). rag.py/knowledge_chunks GIU
+        # NGUYEN lam duong lui khi KB V2 loi - khong xoa.
+        try:
+            from app.services.kb_retrieval import search_kb
+            units = await search_kb(text, top_k=4, allowed_domains=["brand", "product", "faq"])
+            rag_context = "\n\n".join(
+                f"[{u['asset_id']}] {u['heading']}:\n{u['content'][:600]}" for u in units
+            )
+        except Exception as e:
+            print(f"[orchestrator] KB V2 loi, dung tam RAG cu: {e}")
+            chunks = await search_knowledge(text, top_k=4)
+            rag_context = "\n\n".join(chunks) if chunks else ""
 
         # 3. Xay dung messages cho LLM
         system = SYSTEM_PROMPT
