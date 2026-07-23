@@ -267,13 +267,35 @@ VPS: 160.30.157.235 (Ubuntu 24.04, 4 vCPU/8GB/60GB — Plan 3 đã mua), SSH ali
       `don`, `dung`, `FAQ-BRAND-001`, `python`, `docker` (file rỗng chặn tạo thư mục
       `docker/`), `results.md` (output test cũ 14/7 — còn trong git history)
 
+### Bat 4 — CI/CD deploy tự động + backup (23/7/2026, đang chờ 1 việc phía user)
+- [x] Backup PostgreSQL hằng ngày: `/root/bin/backup_db.sh` + `/etc/cron.d/alpha3s-backup`
+      (03:00 giờ VN, giữ 14 bản, log `/root/backups/backup.log`) — đã chạy thử thật, dump 836K
+- [x] Git trên máy dev mới: remote đổi sang HTTPS + credential helper đọc `GITLAB_TOKEN`
+      động từ `.env` (không lưu token vào config; phải vô hiệu GCM toàn cục bằng entry
+      helper rỗng vì GCM treo GUI prompt làm fetch timeout)
+- [x] `/srv/alpha3s` trên VPS chuyển từ tarball sang **git clone thật** (deploy key
+      read-only ed25519 riêng của VPS đã add vào project GitLab), `.env` untracked giữ nguyên
+- [x] Secrets CI: `VPS_HOST` + `VPS_SSH_KEY` (type file, protected — khớp nhánh `main`
+      protected); keypair CI→VPS riêng, không dùng chung key máy dev
+- [x] Stage `deploy` trong `.gitlab-ci.yml`: alpine + ssh, fetch/reset trước rồi mới chạy
+      `scripts/deploy.sh` (versioned trong repo — danh sách service chạy production nằm ở
+      đây; tạm chưa up 2 bot telegram + caddy, xem ghi chú cutover trong script)
+- [x] **Phát hiện quan trọng: toàn bộ 32 pipeline lịch sử của project đều failed ngay 0
+      giây, 0 job** — CI GitLab.com chưa bao giờ thực sự chạy (ghi "38/38 PASSED" ở Bat 2 là
+      chạy container local). Nguyên nhân: tài khoản GitLab chưa xác minh danh tính.
+- [x] GitLab Runner tự dựng trên VPS (executor docker, privileged cho dind) — đã đăng ký +
+      verify thành công, không phụ thuộc shared runner/phút miễn phí
+- [ ] **ĐANG CHỜ:** user xác minh danh tính GitLab (https://gitlab.com/-/identity_verification)
+      — GitLab chặn "Identity verification is required in order to run CI jobs" kể cả với
+      runner tự dựng. Xong việc này thì test push → auto deploy end-to-end.
+
 **Còn lại:**
+- [ ] Test end-to-end push `main` → runner VPS chạy lint/test/build → deploy (chờ xác minh
+      danh tính GitLab ở trên)
 - [ ] Bật Caddy + HTTPS thật (chờ 2 subdomain DuckDNS trỏ về VPS), đổi
       `NEXT_PUBLIC_API_URL` sang https
-- [ ] Cutover: trỏ webhook Meta về VPS, stop bot Telegram local → start trên VPS
-- [ ] Secrets trong GitLab CI/CD variables (masked, protected) + stage deploy qua SSH
-      (push `main` → tự deploy)
-- [ ] Backup PostgreSQL hằng ngày (cron `pg_dump` — nhà cung cấp chỉ backup tuần)
+- [ ] Cutover: trỏ webhook Meta về VPS, stop bot Telegram local → start trên VPS (sửa
+      `SERVICES` trong `scripts/deploy.sh`)
 - [ ] Alert khi webhook lỗi liên tiếp / LLM API fail (tối thiểu: gửi Telegram admin)
 - [ ] `docs/DEPLOYMENT.md` (viết khi quy trình deploy đã chốt)
 

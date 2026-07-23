@@ -277,14 +277,38 @@ VPS: 160.30.157.235 (Ubuntu 24.04, 4 vCPU/8GB/60GB — Plan 3 purchased), SSH al
       blocking creation of the `docker/` directory), `results.md` (old test output from Jul 14
       — still in git history)
 
+### Batch 4 — Auto-deploy CI/CD + backups (2026-07-23, waiting on 1 user-side action)
+- [x] Daily PostgreSQL backups: `/root/bin/backup_db.sh` + `/etc/cron.d/alpha3s-backup`
+      (03:00 VN time, keeps 14 copies, log at `/root/backups/backup.log`) — real test run done,
+      836K dump
+- [x] Git on the new dev machine: remote switched to HTTPS + a credential helper that reads
+      `GITLAB_TOKEN` dynamically from `.env` (no token stored in config; the global GCM had to
+      be disabled with an empty helper entry because its GUI prompt hung fetches)
+- [x] `/srv/alpha3s` on the VPS converted from a tarball to a **real git clone** (the VPS's own
+      read-only ed25519 deploy key added to the GitLab project), untracked `.env` kept intact
+- [x] CI secrets: `VPS_HOST` + `VPS_SSH_KEY` (file type, protected — matches the protected
+      `main` branch); a dedicated CI→VPS keypair, not the dev machine's key
+- [x] `deploy` stage in `.gitlab-ci.yml`: alpine + ssh, fetch/reset first and only then run
+      `scripts/deploy.sh` (versioned in the repo — the list of production services lives
+      there; the 2 telegram bots + caddy deliberately not up yet, see the cutover note in the
+      script)
+- [x] **Key discovery: all 32 historical pipelines of this project failed instantly with 0
+      jobs** — GitLab.com CI has never actually run (the "38/38 PASSED" in Batch 2 was a local
+      container run). Cause: the GitLab account has no identity verification.
+- [x] Self-hosted GitLab Runner on the VPS (docker executor, privileged for dind) —
+      registered + verified successfully, no dependency on shared runners/free minutes
+- [ ] **WAITING:** user identity verification on GitLab
+      (https://gitlab.com/-/identity_verification) — GitLab blocks with "Identity verification
+      is required in order to run CI jobs" even for self-hosted runners. Once done, test
+      push → auto-deploy end-to-end.
+
 **Remaining:**
+- [ ] End-to-end test: push to `main` → the VPS runner runs lint/test/build → deploy (waiting
+      on the GitLab identity verification above)
 - [ ] Turn on Caddy + real HTTPS (waiting on 2 DuckDNS subdomains pointed at the VPS), switch
       `NEXT_PUBLIC_API_URL` to https
 - [ ] Cutover: point the Meta webhook at the VPS, stop the local Telegram bots → start them on
-      the VPS
-- [ ] Secrets in GitLab CI/CD variables (masked, protected) + an SSH deploy stage
-      (push to `main` → auto-deploy)
-- [ ] Daily PostgreSQL backups (a `pg_dump` cron — the provider only backs up weekly)
+      the VPS (edit `SERVICES` in `scripts/deploy.sh`)
 - [ ] Alerting on repeated webhook failures / LLM API failure (minimum: message the Telegram
       admin)
 - [ ] `docs/DEPLOYMENT.md` (write it once the deploy process is settled)
