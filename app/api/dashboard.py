@@ -8,11 +8,15 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import require_staff_session
 from app.config import settings
-from app.services import conversation_log, price_overrides, products as products_service
-from app.services import knowledge_entries
-from app.services import metrics
+from app.services import (
+    conversation_log,
+    knowledge_entries,
+    metrics,
+    price_overrides,
+    tools,
+)
 from app.services import orders as orders_service
-from app.services import tools
+from app.services import products as products_service
 from app.services.handoff import log_note, pause_bot, resume_bot
 
 router = APIRouter(

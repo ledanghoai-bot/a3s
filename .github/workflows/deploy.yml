@@ -23,7 +23,7 @@ jobs:
       - name: Install deps (torch CPU-only truoc cho nhe/nhanh, giong Dockerfile)
         run: |
           pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-          pip install --no-cache-dir -r requirements.txt ruff pytest
+          pip install --no-cache-dir -r requirements.txt ruff==0.16.0 pytest
       - name: Lint
         run: ruff check app
       - name: Test (ham logic thuan, khong cham DB)

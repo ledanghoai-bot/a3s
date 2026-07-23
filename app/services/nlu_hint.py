@@ -17,7 +17,9 @@ phai moi request).
 
 from pathlib import Path
 
-from app.services.nlu.high_precision_rules import get_vocative_prefixes  # noqa: F401 (doc de ro nguon)
+from app.services.nlu.high_precision_rules import (
+    get_vocative_prefixes,  # noqa: F401 (doc de ro nguon)
+)
 
 _NLU_ROOT = Path(__file__).resolve().parents[2] / "datasets" / "nlu"
 
@@ -215,15 +217,14 @@ async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
         return ""
 
     try:
-        from app.services.nlu.route_resolution import resolve_route
-        from app.services.nlu.router import route
-
         # Buoc 10 (Cache) - kiem tra cache truoc, CHI cho ket qua "accept"
         # da tung xac nhan (dung theo danh sach duoc phep trong guide:
         # "Normalized query -> intent candidate"). Cache MISS la binh thuong,
         # khong phai loi - van tiep tuc route() binh thuong.
         from app.services.nlu.cache import get_cached_decision, set_cached_decision
         from app.services.nlu.normalizer import normalize
+        from app.services.nlu.route_resolution import resolve_route
+        from app.services.nlu.router import route
         normalized_msg = normalize(message, _state["rules"], _state["protected_phrases"])
 
         cached = await get_cached_decision(normalized_msg)
@@ -265,7 +266,10 @@ async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
         # buoc theo intent cu - dung theo guide "khong ghi de intent ro rang
         # cua tin nhan hien tai".
         if sender_id:
-            from app.services.nlu.context_state import get_conversation_state, looks_like_continuation
+            from app.services.nlu.context_state import (
+                get_conversation_state,
+                looks_like_continuation,
+            )
             if looks_like_continuation(message):
                 state = await get_conversation_state(sender_id)
                 if state and state.get("previous_intent"):

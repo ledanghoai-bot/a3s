@@ -1,0 +1,12 @@
+target-version = "py312"
+
+# Issue #9: cau hinh ruff tuong minh de CI on dinh (mac dinh ruff 0.16 bat rat
+# nhieu rule "quan diem", doi theo version). Chi bat:
+#   E/F = loi that (cu phap, ten chua dinh nghia, import thua...)
+#   I   = sap xep import (tu sua)
+# KHONG bat BLE/B/SIM/PIE/UP/RUF... vi du an chua opt-in va nhieu mau la CO Y
+# (vd 'except Exception' phong thu quanh NLU/worker de khong vo luong chinh —
+# xem CLAUDE.md). Muon siet them sau thi mo rong 'select' co chu dich.
+[lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]  # do dai dong: nhieu URL/chuoi tieng Viet dai
