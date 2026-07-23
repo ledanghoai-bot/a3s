@@ -2,6 +2,10 @@
 
 Tài liệu quy trình deploy thật, cập nhật sau khi VPS + CI/CD GitHub đã chạy (24/07/2026).
 
+> 👉 Cần hướng dẫn **thao tác từng bước cho staff tự vận hành** (SSH, xem log, restart,
+> deploy, restore backup, xử lý sự cố...)? Xem **[`docs/VPS-RUNBOOK.md`](VPS-RUNBOOK.md)**.
+> File này (DEPLOYMENT.md) là bản tham chiếu kỹ thuật "cái gì / ở đâu".
+
 ## 1. Tổng quan hạ tầng
 
 | Thành phần | Giá trị |

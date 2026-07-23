@@ -1103,7 +1103,12 @@ hardcode trong `system_prompt.md` — số ly/hũ và đơn giá ly phải là D
   nguyên KB+NLU trên VPS 4GB, 2 phương án, số đo A3 (căn cứ quyết định PO 23/7)
 - `docs/NLU_DATASET_FEEDBACK-VI.md`, `docs/NLU_ACCURACY_IMPROVEMENT_PROPOSAL-VI.md` — góp ý dữ
   liệu gửi team Knowledge cho #12
+- `docs/DEPLOYMENT.md` — **(mới, #9 Bat 5)** tham chiếu kỹ thuật hạ tầng: VPS, service,
+  CI/CD GitHub, HTTPS, secrets, cutover, backup/alert
+- `docs/VPS-RUNBOOK.md` — **(mới, #9 Bat 5)** runbook cầm-tay-chỉ-việc cho **staff tự vận
+  hành không cần AI**: SSH, xem log, restart, deploy, KB ingest, backup/restore, DNS/HTTPS,
+  cutover Meta, bảng xử lý sự cố, rollback
 - Các file `-VI` chính (DATABASE, DASHBOARD, TELEGRAM_BOT, BACKEND_API, NLU_LAYER,
   KB_NLU_RESOURCE_ASSESSMENT) có bản dịch `-EN` tương ứng. **Chưa có -EN:**
-  KNOWLEDGE_BASE_V2_DESIGN, NLU_DATASET_FEEDBACK, NLU_ACCURACY_IMPROVEMENT_PROPOSAL.
-- **Chưa làm:** `docs/DEPLOYMENT.md` (để dành khi #9 có VPS thật — Chặng B)
+  KNOWLEDGE_BASE_V2_DESIGN, NLU_DATASET_FEEDBACK, NLU_ACCURACY_IMPROVEMENT_PROPOSAL,
+  DEPLOYMENT, VPS-RUNBOOK.
