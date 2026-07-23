@@ -47,7 +47,6 @@ async def _ensure_loaded() -> bool:
             load_utterances,
         )
         from app.services.nlu.pattern_router import build_pattern_index
-        from app.services.nlu.semantic_router import build_semantic_index
 
         catalog = load_intent_catalog(_NLU_ROOT / "intent-catalog.yaml")
         rules = load_normalization_rules(_NLU_ROOT / "normalization.yaml")
@@ -56,7 +55,19 @@ async def _ensure_loaded() -> bool:
         utterances = load_utterances(_NLU_ROOT / "utterances")
 
         pattern_index = build_pattern_index(utterances, rules, protected_phrases)
-        semantic_index = await build_semantic_index(utterances)
+
+        # Semantic Router (model mpnet ~1.1GB RAM) - CHI build khi flag bat
+        # (quyet dinh PO 23/7: mac dinh TAT, xem config.py va
+        # docs/KB_NLU_RESOURCE_ASSESSMENT-VI.md PA2-5a). Khi tat: import
+        # semantic_router KHONG xay ra o day -> mpnet khong bao gio duoc load.
+        from app.config import settings
+        if settings.enable_semantic_router:
+            from app.services.nlu.semantic_router import build_semantic_index
+            semantic_index = await build_semantic_index(utterances)
+        else:
+            semantic_index = None
+            print("[nlu_hint] Semantic Router TAT (ENABLE_SEMANTIC_ROUTER=false) - "
+                  "chi dung Pattern Router + Rules + Entity, khong load model mpnet.")
 
         _state.update(
             catalog=catalog, rules=rules, protected_phrases=protected_phrases,
@@ -132,6 +143,54 @@ async def _build_knowledge_hint(message: str) -> str:
             "Cau hoi lien quan toi kien thuc san pham/thuong hieu - uu tien dung thong "
             "tin tham khao da co san trong prompt, khong bia them."
         )
+
+
+# Nguong cosine distance cho fallback knowledge hint (PO duyet 23/7 qua
+# Telegram). Chon tu SO DO THAT (scripts probe, KB index v1): cau lien quan
+# d=0.354-0.531, cau khong lien quan d=0.530-0.727. 0.55 = uu tien bat du cau
+# kien thuc (ke ca go khong dau, d~0.48), chap nhan ca bien "cho anh 5 hu"
+# (d=0.530) lot hint FAQ nhe - preamble da dan LLM bo qua neu lac de.
+_KB_FALLBACK_MAX_DIST = 0.55
+
+
+async def _build_knowledge_fallback_hint(message: str) -> str:
+    """Fallback khi Pattern Router KHONG khop (PO duyet 23/7): thay vi im lang
+    hoan toan (hanh vi ngay sau khi chop Semantic Router), thu search_kb()
+    bang MiniLM - model VON DA load cho KB V2, khong ton them RAM (~65ms/cau).
+    Dung RETRIEVAL thay CLASSIFICATION: khong doan intent, chi kiem tra "co
+    noi dung KB gan cau nay khong" qua cosine distance that.
+
+    Khac _build_knowledge_hint() (duong intent da xac nhan): ham nay KHONG
+    biet cau co phai cau hoi kien thuc hay khong -> loc bang nguong distance,
+    khong tim thay thi tra ve "" (im lang), TUYET DOI khong tra hint chung
+    chung kieu "cau hoi lien quan kien thuc" vi chua chac dung.
+    """
+    try:
+        from app.services.kb_retrieval import search_kb
+        # top_k=4 (khong phai 2 nhu duong intent da xac nhan): fallback khong co
+        # intent dan duong nen can luoi rong hon - so do that 23/7: cau khong dau
+        # "3s coffee la thuong hieu cua cong ty nao" co dap an chuan
+        # (KU-FAQ-001-003/FAQ-BRAND-001, dist=0.5156) xep hang 4; ban co dau xep
+        # hang 3. Nguong distance van loc noi dung lac de o duoi.
+        units = await search_kb(message, top_k=4, allowed_domains=["brand", "product", "faq"])
+        units = [
+            u for u in units
+            if u.get("vector_distance") is not None
+            and u["vector_distance"] <= _KB_FALLBACK_MAX_DIST
+        ]
+        if not units:
+            return ""
+        lines = [
+            "He thong tim thay noi dung Knowledge Base CO THE lien quan toi tin nhan "
+            "nay (chua chac chan - CHI dung neu dung chu de cau hoi cua khach, lac de "
+            "thi bo qua hoan toan, khong bia them):"
+        ]
+        for u in units:
+            lines.append(f"[{u['asset_id']}] {u['heading']}: {u['content'][:500]}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[nlu_hint] Loi fallback knowledge hint (bo qua): {e}")
+        return ""
 
 
 async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
@@ -213,7 +272,11 @@ async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
                         f"Can nhac ngu canh nay khi tra loi, nhung KHONG bat buoc phai theo neu "
                         f"noi dung cau hien tai ro rang la chu de khac."
                     )
-        return ""
+
+        # Fallback cuoi (PO duyet 23/7): cau khong khop pattern, khong phai cau
+        # noi tiep -> thu tim noi dung KB gan ve ngu nghia (loc bang cosine
+        # distance) truoc khi chiu im lang. Xem _build_knowledge_fallback_hint().
+        return await _build_knowledge_fallback_hint(message)
     except Exception as e:
         print(f"[nlu_hint] Loi khi chay NLU Router (bo qua, dung flow cu): {e}")
         return ""

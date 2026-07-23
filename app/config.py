@@ -46,5 +46,14 @@ class Settings(BaseSettings):
     # loi chinh - xem NLU-INTEGRATION-GUIDE.md "Orchestrator Responsibilities".
     enable_nlu_router: bool = False
 
+    # Semantic Router (tang fallback dung model mpnet ~1.1GB RAM) - MAC DINH TAT
+    # theo quyet dinh PO 23/7 (xem docs/KB_NLU_RESOURCE_ASSESSMENT-VI.md PA2-5a):
+    # Pattern Router + High-precision Rules + Entity Extraction van chay du
+    # (94.6% chinh xac trong pham vi phu ~40% cau), cau khong khop se KHONG co
+    # hint intent (LLM tu xu ly nhu truoc #12). Khi TAT: model mpnet KHONG BAO
+    # GIO duoc load -> tiet kiem ~1.1GB RAM cua worker. Bat lai neu sau nay
+    # quantize model (PA2-5d) hoac VPS du RAM.
+    enable_semantic_router: bool = False
+
 
 settings = Settings()
