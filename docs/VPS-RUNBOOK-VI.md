@@ -324,6 +324,20 @@ HTTPS **tự động** — Caddy tự xin và gia hạn chứng chỉ Let's Encr
 
 ---
 
+## 8b. Đăng nhập dashboard lần đầu
+
+Dashboard yêu cầu tài khoản staff, và 2 điều dễ vướng khi chạy trên domain:
+1. **CORS** — API phải cho phép origin của dashboard. Đảm bảo `.env` có
+   `DASHBOARD_CORS_ORIGINS=https://a3s-dash.robanme.com` (thiếu là login báo *fetch error*).
+   Sửa xong: `docker compose -f docker-compose.prod.yml up -d api`.
+2. **Chưa có tài khoản** — bảng `staff_users` rỗng lúc mới deploy. Tạo tài khoản admin đầu tiên
+   (chạy 1 lần, thay `<...>` bằng thông tin thật):
+   ```
+   docker compose -f docker-compose.prod.yml exec -T api \
+     python scripts/create_staff_user.py <username> '<password>' '<ten hien thi>'
+   ```
+   Các tài khoản sau tạo ngay trên dashboard (mục Nhân viên), không cần chạy lại lệnh này.
+
 ## 9. Cutover: chuyển kênh khách sang VPS (⚠️ đụng khách thật)
 
 Hiện **máy local vẫn là nơi phục vụ khách thật** (webhook Messenger + 2 bot Telegram).

@@ -56,7 +56,18 @@ bash scripts/deploy.sh
 
 Differs from dev: `APP_ENV=production`, a randomly generated `POSTGRES_PASSWORD` (48 hex),
 a matching `DATABASE_URL`, `DOMAIN`/`DASH_DOMAIN` = the two robanme domains,
-`NEXT_PUBLIC_API_URL=https://a3s.robanme.com`. File is `chmod 600`.
+`NEXT_PUBLIC_API_URL=https://a3s.robanme.com`,
+`DASHBOARD_CORS_ORIGINS=https://a3s-dash.robanme.com` (REQUIRED when the dashboard runs on a
+different domain than the API — missing it makes login fail with a "fetch error" as CORS blocks
+it). File is `chmod 600`.
+
+**First dashboard login:** the `staff_users` table is empty on a fresh deploy → you must create
+the first admin account (one-time bootstrap):
+```
+docker compose -f docker-compose.prod.yml exec -T api \
+  python scripts/create_staff_user.py <username> '<password>' '<display name>'
+```
+Subsequent accounts are created from the dashboard (Staff section).
 
 ## 6. Cutover to the VPS (NOT done yet — a deliberate action)
 

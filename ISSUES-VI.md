@@ -14,7 +14,7 @@
 | 6 | Tool calling (search_products/check_stock/create_order/escalate_to_human) | ✅ Closed |
 | 7 | Human handoff: bot_paused | ✅ Closed |
 | 8 | Dashboard admin + analytics | ✅ Closed |
-| 9 | CI/CD + deploy VPS + monitoring | 🟡 Đang làm (2/nhiều Bat) |
+| 9 | CI/CD + deploy VPS + monitoring | ✅ Closed (VPS live 24/7, CI/CD GitHub, HTTPS, toàn bộ kênh đã cutover) |
 | 10 | Kênh khách hàng dự phòng (Telegram) | ✅ Closed |
 | 11 | Knowledge Base V2 (Ingestion → Retrieval → Router → Prompt Assembly → Guardrails → Test Suite) | ✅ Closed (song song production) |
 | 12 | Lớp NLU (Normalization → Pattern Router → Semantic Router → Combined Pipeline → Tích hợp bot thật) | 🟡 Đang tích hợp (Bat 1-2/nhiều) |
@@ -217,7 +217,7 @@ chứ không loại trừ được hoàn toàn.
 ---
 
 ## #9 · CI/CD (GitHub) + deploy VPS + monitoring
-**Trạng thái:** 🟢 Gần đóng — push `main` → tự deploy VPS + HTTPS live; chỉ còn **cutover webhook Meta** (cần thao tác có chủ đích) + dọn nốt
+**Trạng thái:** ✅ Closed (24/7/2026) — VPS chạy 24/7, push `main` → tự deploy, HTTPS live, **toàn bộ kênh (Telegram khách + admin + Messenger) đã cutover sang VPS**. Còn treo: rotate secret Meta (#1) + Meta App review trước khi mở khách thật.
 
 **Mục tiêu:** Hệ thống chạy 24/7 trên VPS, deploy tự động khi push `main`. **ĐÃ ĐẠT** (trừ cutover kênh khách thật).
 
@@ -322,11 +322,29 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
 - [x] Dọn GitLab: gỡ gitlab-runner khỏi VPS, xóa CI variables GitLab, rút public key CI-GitLab cũ
       khỏi `authorized_keys` (còn: key máy dev + key GitHub CI). User có thể hủy gói GitLab trả phí.
 
-**Còn lại (chỉ còn cutover — cần user chốt vì đụng traffic khách thật):**
-- [ ] **Cutover kênh khách sang VPS:** thêm `telegram_bot`+`telegram_customer_bot` vào `SERVICES`
-      trong `scripts/deploy.sh`, **stop 2 bot Telegram local trước** (tránh 409 tranh `getUpdates`),
-      trỏ webhook Messenger (Meta App) về `https://a3s.robanme.com/<webhook>`, xác nhận log VPS nhận
-- [ ] (Tùy chọn) fine-tune CORS API cho origin dashboard https; theo dõi uptime webhook >99% sau cutover
+### Bat 6 — Cutover toàn bộ kênh sang VPS (24/7/2026)
+- [x] **Telegram Customer Care lên VPS + test đầy đủ:** bật `telegram_customer_bot` trên VPS,
+      gỡ hẳn 2 bot local (`docker compose rm`) để không tranh `getUpdates` (409). Test thật:
+      tư vấn pha chế (KB), guardrail honest-uncertainty (không bịa tỷ lệ Ro/Ara), **lên đơn #1
+      khớp** (1 hũ×170k, thu đúng tên/SĐT/địa chỉ). Độ trễ ~0 (VPS đặt VN).
+- [x] **Kiểm chứng eval VPS vs local GIỐNG HỆT:** KB smoke 10/10 cả hai; NLU 121/150 (80.7%)
+      cả hai, case sai y hệt, confidence trùng 4 chữ số → ngưỡng embedding ổn định qua CPU khác
+      nhau (chỉ hiệu năng khác môi trường, logic/độ chính xác đo trên local vẫn đáng tin).
+- [x] **Dữ liệu:** local cũng chỉ 1 sản phẩm thật (Hũ 100g, 170k, 3 bậc giá) = VPS → không cần
+      sync; bot VPS đã đủ dữ liệu báo giá/đặt hàng.
+- [x] **Admin bot lên VPS:** thêm `telegram_bot` vào `SERVICES`. Cả 2 kênh Telegram nay trên VPS.
+- [x] **Messenger cutover:** callback webhook cấp app (app `robanme.com` id 541838039979536) đổi
+      từ ngrok máy local → `https://a3s.robanme.com/webhook` qua Graph API (`{app_id}/subscriptions`,
+      `success:true`, Meta tự verify endpoint). Page "3S Coffee" đã subscribe đủ field messaging.
+- [x] `scripts/deploy.sh` `SERVICES` = db redis api worker dashboard telegram_customer_bot telegram_bot.
+      8/8 container Up, cả 2 bot poll sạch (pending 0, no 409).
+
+**Còn treo (không chặn — phụ thuộc bên ngoài):**
+- [ ] **Rotate secret Meta** (`META_APP_SECRET`/`PAGE_ACCESS_TOKEN`) — vẫn là secret cũ đã lộ
+      trong git history (xem #1). Cần anh Hoài làm qua Meta Developer Console.
+- [ ] **Meta App review** — xin approve app trước khi mở Messenger cho khách thật (fanpage hiện
+      chưa có khách nên đã cutover sớm để dev/test).
+- [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).
 

@@ -326,6 +326,20 @@ HTTPS is **automatic** — Caddy obtains and renews Let's Encrypt certificates i
 
 ---
 
+## 8b. First dashboard login
+
+The dashboard requires a staff account, and two things commonly trip you up on a domain:
+1. **CORS** — the API must allow the dashboard's origin. Make sure `.env` has
+   `DASHBOARD_CORS_ORIGINS=https://a3s-dash.robanme.com` (missing it makes login report a
+   *fetch error*). After changing: `docker compose -f docker-compose.prod.yml up -d api`.
+2. **No account yet** — `staff_users` is empty on a fresh deploy. Create the first admin account
+   (one-time, replace `<...>` with real values):
+   ```
+   docker compose -f docker-compose.prod.yml exec -T api \
+     python scripts/create_staff_user.py <username> '<password>' '<display name>'
+   ```
+   Later accounts are created right in the dashboard (Staff section) — no need to rerun this.
+
 ## 9. Cutover: move the customer channel to the VPS (⚠️ touches real customers)
 
 The **local machine is still serving real customers** (Messenger webhook + 2 Telegram bots).

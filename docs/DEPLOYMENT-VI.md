@@ -55,7 +55,17 @@ bash scripts/deploy.sh
 
 Khác bản dev: `APP_ENV=production`, `POSTGRES_PASSWORD` sinh ngẫu nhiên (48 hex),
 `DATABASE_URL` khớp mật khẩu đó, `DOMAIN`/`DASH_DOMAIN` = 2 domain robanme,
-`NEXT_PUBLIC_API_URL=https://a3s.robanme.com`. File `chmod 600`.
+`NEXT_PUBLIC_API_URL=https://a3s.robanme.com`,
+`DASHBOARD_CORS_ORIGINS=https://a3s-dash.robanme.com` (BẮT BUỘC khi dashboard chạy trên
+domain khác API — thiếu là login báo "fetch error" do CORS chặn). File `chmod 600`.
+
+**Đăng nhập dashboard lần đầu:** bảng `staff_users` rỗng lúc mới deploy → phải tạo tài khoản
+admin đầu tiên (bootstrap, chạy 1 lần):
+```
+docker compose -f docker-compose.prod.yml exec -T api \
+  python scripts/create_staff_user.py <username> '<password>' '<ten hien thi>'
+```
+Sau đó các tài khoản tiếp theo tạo qua dashboard (mục Nhân viên).
 
 ## 6. Cutover sang VPS (CHƯA làm — cần thao tác có chủ đích)
 
