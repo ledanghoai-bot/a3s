@@ -243,6 +243,24 @@ async def create_order(
         if override:
             await price_overrides.mark_override_used(override["id"])
 
+        # Thong bao don moi cho admin qua Telegram (ngoai transaction, boc
+        # try/except - don DA commit, loi thong bao khong duoc lam create_order
+        # tra ve error nham).
+        try:
+            await handoff.notify_admin_new_order({
+                "order_id": order_id,
+                "customer_name": customer_name,
+                "phone": phone_clean,
+                "address": address,
+                "sku": sku,
+                "quantity": quantity,
+                "unit_price_vnd": unit_price,
+                "total_vnd": total,
+                "status": "new",
+            })
+        except Exception as e:  # noqa: BLE001 - thong bao phu, khong chan tao don
+            print(f"[tools] notify_admin_new_order loi (bo qua): {e}")
+
         return {
             "order_id": order_id,
             "status": "new",

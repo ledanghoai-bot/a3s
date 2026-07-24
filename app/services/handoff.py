@@ -276,3 +276,42 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
     except Exception as e:
         # Loi gui thong bao KHONG duoc lam sap luong tra loi khach - chi log.
         print(f"[handoff] Gui Telegram that bai: {e}")
+
+
+def _fmt_vnd(n: object) -> str:
+    """Dinh dang so tien kieu VN (170000 -> '170.000d'). Loi thi tra nguyen ban."""
+    try:
+        return f"{int(n):,}d".replace(",", ".")
+    except (ValueError, TypeError):
+        return str(n)
+
+
+async def notify_admin_new_order(order: dict) -> None:
+    """Gui thong bao Telegram cho admin khi co DON HANG MOI (goi tu create_order).
+    Bao ve try/except - loi gui (vd Telegram down) KHONG duoc lam sap luong tao don:
+    don da ghi vao DB roi, thong bao chi la phu."""
+    if not settings.telegram_bot_token or not settings.telegram_admin_chat_id:
+        print("[handoff] Telegram chua cau hinh, bo qua thong bao don moi.")
+        return
+
+    text = (
+        "\U0001F6D2 3S Coffee - DON HANG MOI\n"
+        f"Ma don: #{order.get('order_id')}\n"
+        f"Khach: {order.get('customer_name') or '(chua co ten)'} - "
+        f"{order.get('phone') or '(chua co sdt)'}\n"
+        f"Dia chi: {order.get('address') or '(chua co)'}\n"
+        f"San pham: {order.get('sku')} x {order.get('quantity')} @ "
+        f"{_fmt_vnd(order.get('unit_price_vnd'))}\n"
+        f"Tong: {_fmt_vnd(order.get('total_vnd'))}\n"
+        f"Trang thai: {order.get('status', 'new')}"
+    )
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                url,
+                json={"chat_id": settings.telegram_admin_chat_id, "text": text},
+            )
+            resp.raise_for_status()
+    except Exception as e:
+        print(f"[handoff] Gui Telegram don moi that bai: {e}")
