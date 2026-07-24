@@ -14,7 +14,7 @@
 | 6 | Tool calling (search_products/check_stock/create_order/escalate_to_human) | ✅ Closed |
 | 7 | Human handoff: bot_paused | ✅ Closed |
 | 8 | Admin dashboard + analytics | ✅ Closed |
-| 9 | CI/CD + VPS deploy + monitoring | 🟡 In progress (2/several batches) |
+| 9 | CI/CD + VPS deploy + monitoring | ✅ Closed (VPS live 24/7, GitHub CI/CD, HTTPS, all channels cut over) |
 | 10 | Fallback customer channel (Telegram) | ✅ Closed |
 | 11 | Knowledge Base V2 (Ingestion → Retrieval → Router → Prompt Assembly → Guardrails → Test Suite) | ✅ Closed (parallel to production) |
 | 12 | NLU layer (Normalization → Pattern Router → Semantic Router → Combined Pipeline → Real bot integration) | 🟡 Integration in progress (Batches 1-2/several) |
@@ -224,9 +224,9 @@ results re-asserting themselves) rather than eliminated entirely.
 ---
 
 ## #9 · CI/CD (GitHub) + VPS deploy + monitoring
-**Status:** 🟢 Nearly closed — push to `main` → auto-deploys to VPS + HTTPS live; only the **Meta webhook cutover** (a deliberate action) + final cleanup remain
+**Status:** ✅ Closed (2026-07-24) — VPS runs 24/7, push `main` → auto-deploy, HTTPS live, **all channels (customer + admin Telegram + Messenger) cut over to the VPS**. Still open: rotate Meta secrets (#1) + Meta App review before opening to real customers.
 
-**Goal:** The system runs 24/7 on a VPS, auto-deployed on push to `main`. **ACHIEVED** (except the real customer-channel cutover).
+**Goal:** The system runs 24/7 on a VPS, auto-deployed on push to `main`. **ACHIEVED.**
 
 > ⚠️ Renamed: the original goal said "GitLab CI/CD" but we **fully switched to GitHub**
 > (GitLab is paid + blocked CI due to unverified identity — see Batch 5).
@@ -337,13 +337,30 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
       the old GitLab CI public key out of `authorized_keys` (left: dev key + GitHub CI key). User
       may cancel the paid GitLab plan.
 
-**Remaining (only the cutover — needs user sign-off since it touches real customer traffic):**
-- [ ] **Cutover the customer channel to the VPS:** add `telegram_bot`+`telegram_customer_bot` to
-      `SERVICES` in `scripts/deploy.sh`, **stop the 2 local Telegram bots first** (avoid the 409
-      `getUpdates` clash), point the Messenger webhook (Meta App) to
-      `https://a3s.robanme.com/<webhook>`, confirm the VPS logs receive it
-- [ ] (Optional) fine-tune API CORS for the https dashboard origin; watch webhook uptime >99%
-      after cutover
+### Batch 6 — Full channel cutover to the VPS (2026-07-24)
+- [x] **Customer Care Telegram on the VPS + fully tested:** started `telegram_customer_bot` on the
+      VPS, fully removed the 2 local bots (`docker compose rm`) to avoid the `getUpdates` 409 clash.
+      Real test: brewing advice (KB), honest-uncertainty guardrail (didn't fabricate the Ro/Ara
+      ratio), **order #1 placed correctly** (1× 100g jar × 170k, name/phone/address captured). ~0 latency.
+- [x] **Verified eval VPS ≡ local:** KB smoke 10/10 both; NLU 121/150 (80.7%) both, identical
+      failing cases, confidence matching to 4 decimals → embedding thresholds stable across CPUs.
+- [x] **Data:** local also has just 1 real product (100g jar, 170k, 3 tiers) = VPS → no sync needed.
+- [x] **Admin bot on the VPS:** added `telegram_bot` to `SERVICES`. Both Telegram channels now on VPS.
+- [x] **Messenger cutover:** app-level webhook callback (app `robanme.com` id 541838039979536)
+      changed from the local ngrok tunnel → `https://a3s.robanme.com/webhook` via the Graph API
+      (`{app_id}/subscriptions`, `success:true`, Meta verified the endpoint). Page "3S Coffee"
+      subscribed with all messaging fields.
+- [x] `scripts/deploy.sh` `SERVICES` = db redis api worker dashboard telegram_customer_bot telegram_bot.
+      8/8 containers Up, both bots polling cleanly (pending 0, no 409).
+- [x] Dashboard on domain: added `DASHBOARD_CORS_ORIGINS=https://a3s-dash.robanme.com` to VPS `.env`
+      (login was failing with a CORS "fetch error"). Documented the first-login staff bootstrap.
+
+**Still open (non-blocking — external dependencies):**
+- [ ] **Rotate Meta secrets** (`META_APP_SECRET`/`PAGE_ACCESS_TOKEN`) — still the old ones leaked in
+      git history (see #1). Hoài to do via the Meta Developer Console.
+- [ ] **Meta App review** — get the app approved before opening Messenger to real customers (the
+      fanpage has no customers yet, so cutover was done early for dev/test).
+- [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).
 
