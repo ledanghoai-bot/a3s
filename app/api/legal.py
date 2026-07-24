@@ -317,6 +317,21 @@ async def data_deletion_callback(request: Request) -> JSONResponse:
     )
 
 
+# GET tren callback (vd mo bang browser) tra 200 giai thich thay vi 405 kho hieu.
+# Meta van goi bang POST - handler POST o tren moi la duong chinh.
+@router.get("/datadeletion/callback")
+async def data_deletion_callback_info() -> JSONResponse:
+    return JSONResponse(
+        {
+            "message": (
+                "Meta Data Deletion Callback endpoint. Chi nhan POST voi "
+                "signed_request tu Facebook. Trang huong dan cho khach: "
+                "https://a3s.robanme.com/datadeletion"
+            )
+        }
+    )
+
+
 @router.get("/datadeletion/status", response_class=HTMLResponse)
 async def data_deletion_status(code: str = Query(default="")) -> HTMLResponse:
     rec = await deletion_svc.get_status(code) if code else None
