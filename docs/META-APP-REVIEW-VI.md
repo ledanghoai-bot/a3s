@@ -142,8 +142,23 @@ soi. Trang **Xóa dữ liệu** hướng dẫn 2 cách: nhắn "XÓA DỮ LIỆU
 > liên hệ, số điện thoại** (tìm ký tự `[` để ra hết). Chỉnh `EFFECTIVE_DATE` nếu cần. Sau đó dán 3 URL
 > trên vào **App Settings → Basic** (Privacy Policy, Terms of Service, User Data Deletion).
 
-> **Data Deletion Callback URL** (endpoint nhận `signed_request` POST) là phương án nâng cao — chưa
-> làm vì Instructions URL đã đủ cho App Review. Cần thì bổ sung sau.
+**Ô "Xóa dữ liệu người dùng" có 2 lựa chọn — cả 2 đã hiện thực, chọn 1 trong Meta:**
+
+| Lựa chọn trong dropdown | URL đặt vào Meta | Cơ chế |
+|---|---|---|
+| URL hướng dẫn xóa dữ liệu | `https://a3s.robanme.com/datadeletion` | Trang hướng dẫn; khách tự yêu cầu (nhắn "XÓA DỮ LIỆU"/email), nhân viên xử lý |
+| **URL gọi lại (Callback)** — *khuyến nghị* | `https://a3s.robanme.com/datadeletion/callback` | Meta POST `signed_request` khi khách gỡ app → hệ thống **tự xác thực + xóa ngay** |
+
+**Callback (`POST /datadeletion/callback`)** — `app/services/data_deletion.py` + route trong `legal.py`:
+xác thực `signed_request` bằng `META_APP_SECRET` (HMAC-SHA256), lấy PSID, rồi trong 1 transaction:
+**xóa hẳn** messages/escalations/conversations, **ẩn danh** đơn hàng (bỏ tên/SĐT/địa chỉ, giữ đơn cho
+kế toán), **ẩn danh** customer (đổi `psid → deleted:<code>`), **xóa** cache Redis `chat:`/`profile:`.
+Trả `{url, confirmation_code}`; khách tra tại `GET /datadeletion/status?code=`. Đã test E2E: xóa đúng,
+chữ ký sai → HTTP 400. Lưu yêu cầu ở bảng `data_deletion_requests` (**migration 013**).
+
+> ⚠️ **Deploy:** migration `013_data_deletion_requests.sql` **KHÔNG tự chạy** trên VPS (initdb chỉ
+> chạy lúc tạo volume) — sau khi push, phải chạy tay trên DB VPS **trước khi** bật callback (thiếu
+> bảng → callback 500). Lệnh ở §9.
 
 ---
 
@@ -262,7 +277,13 @@ khai báo**, không chỉ khi bị hỏi.
 2. **[Ngay]** **Rotate** `META_APP_SECRET` + `PAGE_ACCESS_TOKEN` (#1), cập nhật `.env` VPS, redeploy.
 3. **[Quyết]** Chọn Hướng A/B cho khai báo bot (§7).
 4. Bổ sung App Icon, Category, contact email, Privacy Policy URL vào App Settings.
-5. Điền use case + upload screencast + instructions → **Submit** (§6). Sau duyệt: bật **Live**.
+5. **[Sau khi push code callback]** Chạy migration 013 trên DB VPS **trước khi** chọn callback URL:
+   ```bash
+   docker compose exec -T db psql -U alpha3s -d alpha3s < migrations/013_data_deletion_requests.sql
+   ```
+   Rồi đặt ô "Xóa dữ liệu người dùng" = **URL gọi lại** `https://a3s.robanme.com/datadeletion/callback`
+   (khuyến nghị) hoặc **URL hướng dẫn** `https://a3s.robanme.com/datadeletion` (§5).
+6. Điền use case + upload screencast + instructions → **Submit** (§6). Sau duyệt: bật **Live**.
 
 **Claude Code:**
 1. ✅ **Xong** — dựng 3 trang `/privacy`, `/terms`, `/data-deletion` (`app/api/legal.py` + `main.py`),

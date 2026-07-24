@@ -144,8 +144,24 @@ DỮ LIỆU" to the Page, or email.
 > phone** (search for `[` to find them all). Adjust `EFFECTIVE_DATE` if needed. Then paste the 3 URLs
 > into **App Settings → Basic** (Privacy Policy, Terms of Service, User Data Deletion).
 
-> **Data Deletion Callback URL** (an endpoint receiving a `signed_request` POST) is the advanced
-> option — not built, since the Instructions URL is sufficient for App Review. Add later if needed.
+**The "User Data Deletion" field has 2 options — both implemented, pick one in Meta:**
+
+| Dropdown option | URL to set in Meta | Mechanism |
+|---|---|---|
+| Data Deletion Instructions URL | `https://a3s.robanme.com/datadeletion` | Instructions page; user self-requests (message "XÓA DỮ LIỆU"/email), staff processes |
+| **Data Deletion Callback URL** — *recommended* | `https://a3s.robanme.com/datadeletion/callback` | Meta POSTs `signed_request` on app removal → system **auto-verifies + deletes immediately** |
+
+**Callback (`POST /datadeletion/callback`)** — `app/services/data_deletion.py` + route in `legal.py`:
+verifies `signed_request` with `META_APP_SECRET` (HMAC-SHA256), extracts the PSID, then in one
+transaction: **hard-deletes** messages/escalations/conversations, **anonymizes** orders (drops
+name/phone/address, keeps the order for accounting), **anonymizes** the customer (`psid → deleted:<code>`),
+**deletes** Redis `chat:`/`profile:` caches. Returns `{url, confirmation_code}`; the user checks status
+at `GET /datadeletion/status?code=`. E2E tested: correct deletion, bad signature → HTTP 400. Requests
+recorded in `data_deletion_requests` (**migration 013**).
+
+> ⚠️ **Deploy:** migration `013_data_deletion_requests.sql` **does not auto-run** on the VPS (initdb
+> only runs on volume creation) — after pushing, run it manually on the VPS DB **before** enabling the
+> callback (missing table → callback 500). Command in §9.
 
 ---
 
@@ -273,7 +289,14 @@ directly*, but Meta wants **proactive disclosure**, not only on demand.
 2. **[Now]** **Rotate** `META_APP_SECRET` + `PAGE_ACCESS_TOKEN` (#1), update VPS `.env`, redeploy.
 3. **[Decide]** Pick Direction A/B for bot disclosure (§7).
 4. Add App Icon, Category, contact email, Privacy Policy URL in App Settings.
-5. Fill the use case + upload the screencast + instructions → **Submit** (§6). After approval:
+5. **[After pushing the callback code]** Run migration 013 on the VPS DB **before** selecting the
+   callback URL:
+   ```bash
+   docker compose exec -T db psql -U alpha3s -d alpha3s < migrations/013_data_deletion_requests.sql
+   ```
+   Then set "User Data Deletion" = **Callback URL** `https://a3s.robanme.com/datadeletion/callback`
+   (recommended) or **Instructions URL** `https://a3s.robanme.com/datadeletion` (§5).
+6. Fill the use case + upload the screencast + instructions → **Submit** (§6). After approval:
    flip to **Live**.
 
 **Claude Code:**

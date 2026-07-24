@@ -14,8 +14,11 @@ truc tiep). Caddy da proxy {$DOMAIN} -> api:8000 nen tu phuc vu tai:
 het cho can dien. Ngay hieu luc mac dinh 24/07/2026 - doi neu can.
 """
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from app.config import settings
+from app.services import data_deletion as deletion_svc
 
 router = APIRouter()
 
@@ -287,3 +290,60 @@ Email: {CONTACT_EMAIL}<br>
 @router.get("/datadeletion", response_class=HTMLResponse)
 async def data_deletion_alias() -> HTMLResponse:
     return await data_deletion()
+
+
+# ---- Meta Data Deletion CALLBACK (tuy chon "URL goi lai xoa du lieu") ----
+# Meta POST toi day kem `signed_request` khi khach go app. Xac thuc chu ky bang
+# APP SECRET -> lay PSID -> xoa du lieu -> tra {url, confirmation_code}.
+# Path KHONG dau '-' (o callback cua Meta co the ky '-' giong o instructions).
+@router.post("/datadeletion/callback")
+async def data_deletion_callback(request: Request) -> JSONResponse:
+    from urllib.parse import parse_qs
+
+    raw = (await request.body()).decode("utf-8", "replace")
+    signed_request = parse_qs(raw).get("signed_request", [""])[0]
+
+    payload = deletion_svc.parse_signed_request(signed_request, settings.meta_app_secret)
+    if not payload or not payload.get("user_id"):
+        # Chu ky sai/thieu user_id -> 400, KHONG xoa gi
+        return JSONResponse({"error": "invalid signed_request"}, status_code=400)
+
+    confirmation_code = await deletion_svc.process_deletion(str(payload["user_id"]))
+    return JSONResponse(
+        {
+            "url": deletion_svc.status_url(confirmation_code),
+            "confirmation_code": confirmation_code,
+        }
+    )
+
+
+@router.get("/datadeletion/status", response_class=HTMLResponse)
+async def data_deletion_status(code: str = Query(default="")) -> HTMLResponse:
+    rec = await deletion_svc.get_status(code) if code else None
+    if rec is None:
+        inner = (
+            f'<h1>Trạng thái xóa dữ liệu</h1>'
+            f'<p class="updated">Mã xác nhận: {code or "(trống)"}</p>'
+            f'<div class="note">Không tìm thấy yêu cầu xóa dữ liệu với mã này. '
+            f'Nếu bạn vừa gửi yêu cầu, vui lòng thử lại sau ít phút, hoặc liên hệ '
+            f'{CONTACT_EMAIL}.</div>'
+        )
+        return _page("Trạng thái xóa dữ liệu", inner)
+
+    label = {
+        "received": "Đã tiếp nhận, đang xử lý",
+        "completed": "Đã hoàn tất — dữ liệu của bạn đã được xóa",
+        "failed": "Xử lý gặp lỗi — vui lòng liên hệ chúng tôi",
+    }.get(rec["status"], rec["status"])
+    done = rec.get("completed_at")
+    inner = f"""
+<h1>Trạng thái xóa dữ liệu</h1>
+<p class="updated">Mã xác nhận: {rec['confirmation_code']}</p>
+<p><strong>Trạng thái:</strong> {label}</p>
+<p>Thời điểm yêu cầu: {rec['requested_at']}</p>
+{f'<p>Thời điểm hoàn tất: {done}</p>' if done else ''}
+<div class="note">Dữ liệu đã xóa gồm: nội dung hội thoại của bạn, tên hồ sơ đã lưu tạm, và
+thông tin cá nhân trong đơn hàng (đơn hàng được giữ lại nhưng đã ẩn thông tin cá nhân theo
+nghĩa vụ kế toán). Chi tiết xem <a href="/privacy">Chính sách bảo mật</a>.</div>
+"""
+    return _page("Trạng thái xóa dữ liệu", inner)
