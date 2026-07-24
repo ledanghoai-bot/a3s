@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.admin import router as admin_router
 from app.api.auth_router import router as auth_router
 from app.api.dashboard import router as dashboard_router
+from app.api.legal import router as legal_router
 from app.api.webhook import router as webhook_router
 from app.config import settings
 
@@ -21,6 +22,7 @@ app.include_router(webhook_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(dashboard_router)
+app.include_router(legal_router)  # /privacy /terms /data-deletion (Meta App Review)
 
 
 @app.get("/health")

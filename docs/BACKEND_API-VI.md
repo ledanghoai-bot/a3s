@@ -46,10 +46,13 @@ Messenger/Telegram khách
         Postgres (messages, orders, price_overrides...) + Redis (context 24h)
 ```
 
-**Nguyên tắc cốt lõi:** `orchestrator.handle_message(sender_id, text) -> str`
-là **hàm duy nhất** chứa toàn bộ logic AI — hoàn toàn không quan tâm kênh nào
-gọi tới (Messenger, Telegram khách, hay tương lai Zalo/web widget). Thêm 1
-kênh mới chỉ cần viết phần nhận/gửi tin nhắn, tái sử dụng y nguyên hàm này.
+**Nguyên tắc cốt lõi:** `orchestrator.handle_message(sender_id, text, channel="messenger") -> str`
+là **hàm duy nhất** chứa toàn bộ logic AI — chạy như nhau trên mọi kênh
+(Messenger, Telegram khách, hay tương lai Zalo/web widget). Mỗi caller truyền
+`channel` **tường minh** (KHÔNG suy từ prefix `sender_id`); giá trị này chỉ chi
+phối mức khai báo trợ lý tự động (Messenger = bắt buộc, kênh khác = khuyến nghị —
+xem `DISCLOSURE_REQUIRED_CHANNELS` và `docs/META-APP-REVIEW-VI.md` §7). Thêm 1
+kênh mới chỉ cần viết phần nhận/gửi tin nhắn và truyền chuỗi `channel`.
 
 Không dùng SQLAlchemy ORM — toàn bộ service dùng **asyncpg thuần** (xem quy
 ước ở `app/services/rag.py`, service đầu tiên viết theo style này).

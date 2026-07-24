@@ -53,7 +53,7 @@ async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text
         print(f"[telegram_customer_listener] Bot dang paused cho {sender_id}, chi log.")
         return
 
-    reply = await handle_message(sender_id, text)
+    reply = await handle_message(sender_id, text, channel="telegram")
     await _send_reply(client, chat_id, reply)
 
 

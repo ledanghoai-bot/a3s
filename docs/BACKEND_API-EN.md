@@ -47,11 +47,14 @@ Messenger/Telegram customer
         Postgres (messages, orders, price_overrides...) + Redis (24h context)
 ```
 
-**Core principle:** `orchestrator.handle_message(sender_id, text) -> str` is
-the **single function** that contains all the AI logic — it is completely
-agnostic to which channel called it (Messenger, Telegram customer, or in the
-future Zalo/a web widget). Adding a new channel only requires writing the
-receive/send-message layer, reusing this exact function unchanged.
+**Core principle:** `orchestrator.handle_message(sender_id, text, channel="messenger") -> str`
+is the **single function** that contains all the AI logic — it works the same
+across channels (Messenger, Telegram customer, or in the future Zalo/a web
+widget). Each caller passes its `channel` **explicitly** (not inferred from a
+`sender_id` prefix); it only drives the automated-assistant disclosure level
+(Messenger = mandatory, others = recommended — see `DISCLOSURE_REQUIRED_CHANNELS`
+and `docs/META-APP-REVIEW-EN.md` §7). Adding a new channel only requires writing
+the receive/send-message layer and passing a `channel` string.
 
 No SQLAlchemy ORM is used — every service uses **plain asyncpg** (a
 convention established in `app/services/rag.py`, the first service written in

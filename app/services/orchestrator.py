@@ -32,6 +32,12 @@ SYSTEM_PROMPT = (
 MAX_HISTORY = 10  # so luot chat giu lai (moi luot = 1 user + 1 assistant)
 MAX_TOOL_ITERATIONS = 4  # chan vong lap tool_calls vo han neu model lien tuc goi tool
 
+# Kenh BAT BUOC khai bao "tro ly tu dong" o tin dau (yeu cau Meta App Review cho
+# Messenger). Cac kenh khac (telegram/zalo/web) chi KHUYEN NGHI - xem mo ta bom
+# vao system prompt ben duoi + docs/META-APP-REVIEW-VI.md §7. Truyen channel
+# TUONG MINH tu tung caller (khong suy tu prefix sender_id) - bai hoc CLAUDE.md.
+DISCLOSURE_REQUIRED_CHANNELS = {"messenger"}
+
 # Dau hieu reply DANG BAO da tao don (dung de chan bia don - xem guard trong
 # handle_message). Model chi duoc noi cac cum nay khi create_order that su tra
 # ve order_id trong luot hien tai.
@@ -97,7 +103,9 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
         return {"error": f"Loi he thong khi chay tool '{name}', vui long thu lai."}
 
 
-async def handle_message(sender_id: str, text: str) -> str:
+async def handle_message(sender_id: str, text: str, channel: str = "messenger") -> str:
+    # channel: kenh goi toi (tuong minh, do caller truyen) - quyet dinh muc do
+    # bat buoc khai bao "tro ly tu dong". Mac dinh "messenger" (kenh chinh).
     # Ket noi Redis
     redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
 
@@ -160,6 +168,23 @@ async def handle_message(sender_id: str, text: str) -> str:
 
         # 3. Xay dung messages cho LLM
         system = SYSTEM_PROMPT
+
+        # Boi canh phien: kenh + co phai tin dau khong + muc do bat buoc khai bao
+        # tro ly tu dong. Lich su rong = tin dau cua phien 24h (cung xap xi
+        # "sau khoang lang dai" theo yeu cau Meta). Quy tac chi tiet o
+        # system_prompt.md muc "Khai bao la tro ly tu dong".
+        is_first_turn = len(history) == 0
+        disclosure_level = (
+            "BAT BUOC" if channel in DISCLOSURE_REQUIRED_CHANNELS else "KHUYEN NGHI"
+        )
+        system += (
+            "\n\n## Boi canh phien hien tai\n"
+            f"- Kenh dang phuc vu: {channel}\n"
+            f"- Day la tin nhan DAU TIEN cua khach trong phien nay: "
+            f"{'CO' if is_first_turn else 'KHONG'}\n"
+            f"- Muc do yeu cau khai bao tro ly tu dong o tin dau: {disclosure_level}\n"
+        )
+
         full_name = f"{profile.get('last_name', '')} {profile.get('first_name', '')}".strip()
         if full_name:
             system += (

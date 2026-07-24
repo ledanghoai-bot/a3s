@@ -359,7 +359,10 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
 - [ ] **Rotate Meta secrets** (`META_APP_SECRET`/`PAGE_ACCESS_TOKEN`) — still the old ones leaked in
       git history (see #1). Hoài to do via the Meta Developer Console.
 - [ ] **Meta App review** — get the app approved before opening Messenger to real customers (the
-      fanpage has no customers yet, so cutover was done early for dev/test).
+      fanpage has no customers yet, so cutover was done early for dev/test). **Full execution
+      playbook:** `docs/META-APP-REVIEW-EN.md` (VI source `-VI`). Main blockers: Business
+      Verification (Robanme), Privacy Policy URL (none yet), and the "bot must disclose it's
+      automated" conflict vs the current system_prompt that makes the bot sound human — see §7.
 - [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).

@@ -98,7 +98,7 @@ async def _process_message_inner(event: dict) -> None:
         print(f"[worker] Bot dang paused cho {sender_id}, chi log, khong tra loi (nhan vien dang xu ly).")
         return
 
-    reply = await handle_message(sender_id, text)
+    reply = await handle_message(sender_id, text, channel="messenger")
     await send_text(sender_id, reply)
 
 

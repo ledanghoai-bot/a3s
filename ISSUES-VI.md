@@ -343,7 +343,10 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
 - [ ] **Rotate secret Meta** (`META_APP_SECRET`/`PAGE_ACCESS_TOKEN`) — vẫn là secret cũ đã lộ
       trong git history (xem #1). Cần anh Hoài làm qua Meta Developer Console.
 - [ ] **Meta App review** — xin approve app trước khi mở Messenger cho khách thật (fanpage hiện
-      chưa có khách nên đã cutover sớm để dev/test).
+      chưa có khách nên đã cutover sớm để dev/test). **Cẩm nang thực thi đầy đủ:**
+      `docs/META-APP-REVIEW-VI.md` (bản EN `-EN`). Rào cản chính: Business Verification (Robanme),
+      Privacy Policy URL (chưa có), và xung đột "bot phải khai báo tự động" vs system_prompt hiện
+      bắt bot nói như người thật — xem §7 tài liệu đó.
 - [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).
