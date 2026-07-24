@@ -32,6 +32,29 @@ SYSTEM_PROMPT = (
 MAX_HISTORY = 10  # so luot chat giu lai (moi luot = 1 user + 1 assistant)
 MAX_TOOL_ITERATIONS = 4  # chan vong lap tool_calls vo han neu model lien tuc goi tool
 
+# Dau hieu reply DANG BAO da tao don (dung de chan bia don - xem guard trong
+# handle_message). Model chi duoc noi cac cum nay khi create_order that su tra
+# ve order_id trong luot hien tai.
+_ORDER_CLAIM_MARKERS = (
+    "mã đơn",
+    "đơn hàng đã được tạo",
+    "đơn đã được tạo",
+    "đơn của anh đã được tạo",
+    "đơn của chị đã được tạo",
+    "đã tạo đơn",
+    "tạo đơn thành công",
+    "đặt hàng thành công",
+    "lên đơn thành công",
+    "đơn hàng thành công",
+)
+
+
+def _reply_claims_order_created(reply: str) -> bool:
+    """True neu reply co dau hieu bao KHACH rang don da duoc tao (de doi chieu
+    voi viec create_order co that su chay thanh cong trong luot nay hay khong)."""
+    low = reply.lower()
+    return any(marker in low for marker in _ORDER_CLAIM_MARKERS)
+
 
 def _redis_key(sender_id: str) -> str:
     return f"chat:{sender_id}"
@@ -206,6 +229,7 @@ async def handle_message(sender_id: str, text: str) -> str:
         client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
 
         reply = ""
+        created_order_ids: list = []  # order_id create_order tra ve THAT trong luot nay
         for _ in range(MAX_TOOL_ITERATIONS):
             response = await client.chat.completions.create(
                 model=settings.llm_model,
@@ -247,6 +271,13 @@ async def handle_message(sender_id: str, text: str) -> str:
                 except json.JSONDecodeError:
                     args = {}
                 result = await _execute_tool(tc.function.name, args, sender_id, text)
+                if (
+                    tc.function.name == "create_order"
+                    and isinstance(result, dict)
+                    and result.get("order_id")
+                    and not result.get("error")
+                ):
+                    created_order_ids.append(result["order_id"])
                 turn_messages.append(
                     {
                         "role": "tool",
@@ -269,6 +300,34 @@ async def handle_message(sender_id: str, text: str) -> str:
             .replace("##", "")
             .replace("`", "")
         )
+
+        # GUARD CHONG BIA DON (lop code, khong chi dua vao prompt): neu model bao
+        # KHACH rang don da duoc tao ("ma don #...", "dat hang thanh cong"...) nhung
+        # KHONG co create_order thanh cong nao trong luot nay -> gan nhu chac chan
+        # bia (da gap that: bot tu che "Ma don #3" ma khong goi tool -> DB khong co
+        # don, khach tuong da mua). Chuyen human that su + tra loi an toan, KHONG de
+        # khach tin nham la da dat hang thanh cong.
+        if not created_order_ids and _reply_claims_order_created(reply):
+            print(
+                f"[orchestrator] CHAN BIA DON: reply bao da tao don nhung khong co "
+                f"create_order thanh cong trong luot nay. sender={sender_id} "
+                f"reply_goc={reply[:200]!r}"
+            )
+            try:
+                await tools.escalate_to_human(
+                    psid=sender_id,
+                    reason=(
+                        "Nghi bia xac nhan don: model bao da tao don nhung khong "
+                        "goi create_order thanh cong trong luot nay"
+                    ),
+                    last_message=text,
+                )
+            except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
+                print(f"[orchestrator] escalate sau chan bia don loi: {e}")
+            reply = (
+                "Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "
+                "ngay ạ. Đội ngũ 3S Coffee sẽ liên hệ anh/chị trong ít phút để chốt đơn."
+            )
 
         # 5. Luu lich su - CHI luot user/assistant cuoi cung, khong luu buoc tool_calls
         # trung gian (giu Redis gon nhe, dung format cu tuong thich nguoc)
