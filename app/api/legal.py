@@ -279,3 +279,11 @@ Email: {CONTACT_EMAIL}<br>
 Điện thoại: {CONTACT_PHONE}</p>
 """
     return _page("Xóa dữ liệu người dùng", body)
+
+
+# Alias KHONG co dau gach ngang: o "URL huong dan xoa du lieu" cua Meta tu choi
+# path co dau '-' (bao "name_placeholder should represent a valid URL") du URL
+# live 200 - /privacy va /terms cung host van qua. Phuc vu y het /data-deletion.
+@router.get("/datadeletion", response_class=HTMLResponse)
+async def data_deletion_alias() -> HTMLResponse:
+    return await data_deletion()
