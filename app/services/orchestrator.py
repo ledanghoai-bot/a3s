@@ -20,7 +20,7 @@ import redis.asyncio as aioredis
 from openai import AsyncOpenAI
 
 from app.config import settings
-from app.services import conversation_log, handoff, products, tools
+from app.services import conversation_log, data_deletion, handoff, products, tools
 from app.services.messenger_profile import get_user_profile
 from app.services.nlu_hint import get_nlu_hint
 from app.services.rag import search_knowledge
@@ -127,6 +127,43 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
                 "Dạ, em đã chuyển yêu cầu này cho nhân viên hỗ trợ rồi ạ, "
                 "sẽ có người liên hệ anh/chị ngay nhé."
             )
+            history = await _get_history(redis, sender_id)
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": reply})
+            await _save_history(redis, sender_id, history)
+            await conversation_log.log_message(conversation_id, "customer", text)
+            await conversation_log.log_message(conversation_id, "bot", reply)
+            return reply
+
+        # 0.1. Self-service XOA DU LIEU (khach chu dong) - deterministic, KHONG
+        # qua LLM (giong luoi wants_human). 2 buoc de tranh xoa nham vi xoa la
+        # KHONG KHOI PHUC duoc. Xoa theo dung sender_id -> chac chan danh tinh
+        # (khach dang nhan tin tu chinh tai khoan cua ho). Xem data_deletion.py.
+        # Kiem is_delete_confirm TRUOC vi "xac nhan xoa du lieu" khop ca hai cum.
+        if data_deletion.is_delete_confirm(text):
+            pending = await redis.get(f"del_pending:{sender_id}")
+            if pending:
+                await redis.delete(f"del_pending:{sender_id}")
+                result = await data_deletion.process_deletion(sender_id)
+                reply = data_deletion.customer_deletion_report(result)
+                # KHONG log/luu lai sau khi xoa: log_message se ensure_conversation
+                # -> tao lai customer vua xoa. Tra thang cho kenh gui.
+                return reply
+            reply = (
+                "Dạ, để xóa dữ liệu, anh/chị vui lòng nhắn 'XÓA DỮ LIỆU' trước, "
+                "rồi làm theo hướng dẫn xác nhận ạ."
+            )
+            history = await _get_history(redis, sender_id)
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": reply})
+            await _save_history(redis, sender_id, history)
+            await conversation_log.log_message(conversation_id, "customer", text)
+            await conversation_log.log_message(conversation_id, "bot", reply)
+            return reply
+
+        if data_deletion.is_delete_request(text):
+            await redis.set(f"del_pending:{sender_id}", "1", ex=900)  # cho xac nhan 15 phut
+            reply = data_deletion.confirm_prompt()
             history = await _get_history(redis, sender_id)
             history.append({"role": "user", "content": text})
             history.append({"role": "assistant", "content": reply})

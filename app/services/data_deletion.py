@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import unicodedata
 
 import redis.asyncio as aioredis
 
@@ -87,33 +88,55 @@ async def get_status(confirmation_code: str) -> dict | None:
         return dict(row) if row else None
 
 
-async def _delete_customer_data(psid: str, confirmation_code: str) -> None:
+def _tag_count(command_tag: str) -> int:
+    """asyncpg execute() tra ve command tag kieu 'DELETE 3' / 'UPDATE 2' -> so cuoi."""
+    try:
+        return int(command_tag.split()[-1])
+    except (ValueError, IndexError, AttributeError):
+        return 0
+
+
+async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
     """Xoa/an danh toan bo du lieu cua 1 psid trong 1 transaction (Postgres) +
-    xoa cache Redis. Idempotent: khong co customer thi la no-op."""
+    xoa cache Redis. Idempotent: khong co customer thi la no-op. Tra ve summary
+    (dem da xoa gi) de bao lai cho khach khi tu xoa qua chat."""
+    summary = {
+        "customer_found": False,
+        "messages_deleted": 0,
+        "conversations_deleted": 0,
+        "escalations_deleted": 0,
+        "orders_anonymized": 0,
+        "profile_cache_cleared": False,
+    }
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             cust = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
             if cust is not None:
+                summary["customer_found"] = True
                 cid = cust["id"]
                 # Con truoc: messages + escalations -> conversations
-                await conn.execute(
+                r = await conn.execute(
                     "DELETE FROM messages WHERE conversation_id IN "
                     "(SELECT id FROM conversations WHERE customer_id = $1)",
                     cid,
                 )
-                await conn.execute(
+                summary["messages_deleted"] = _tag_count(r)
+                r = await conn.execute(
                     "DELETE FROM escalations WHERE conversation_id IN "
                     "(SELECT id FROM conversations WHERE customer_id = $1)",
                     cid,
                 )
-                await conn.execute("DELETE FROM conversations WHERE customer_id = $1", cid)
+                summary["escalations_deleted"] = _tag_count(r)
+                r = await conn.execute("DELETE FROM conversations WHERE customer_id = $1", cid)
+                summary["conversations_deleted"] = _tag_count(r)
                 # An danh don hang (giu lai cho ke toan, bo PII)
-                await conn.execute(
+                r = await conn.execute(
                     "UPDATE orders SET shipping_name = NULL, shipping_phone = NULL, "
                     "shipping_address = NULL WHERE customer_id = $1",
                     cid,
                 )
+                summary["orders_anonymized"] = _tag_count(r)
                 # An danh customer + cat lien ket PSID that
                 await conn.execute(
                     "UPDATE customers SET name = NULL, phone = NULL, address = NULL, "
@@ -125,26 +148,96 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> None:
     # Redis (ngoai transaction DB). sender_id Messenger = psid (khong prefix).
     redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
     try:
-        await redis.delete(f"chat:{psid}", f"profile:{psid}")
+        deleted = await redis.delete(f"chat:{psid}", f"profile:{psid}")
+        summary["profile_cache_cleared"] = bool(deleted)
     finally:
         await redis.aclose()
+    return summary
 
 
-async def process_deletion(psid: str) -> str:
-    """Sinh confirmation_code, chay xoa inline, ghi trang thai. Tra ve code.
+async def process_deletion(psid: str) -> dict:
+    """Sinh confirmation_code, chay xoa inline, ghi trang thai. Tra ve
+    {confirmation_code, summary} (summary=None neu loi).
 
-    Xoa chay inline (nhanh voi 1 khach) nen khi Meta hien URL trang thai cho
-    khach thi du lieu da xoa xong. Loi khi xoa -> danh dau 'failed' nhung VAN
-    tra code (Meta van can url+confirmation_code trong response)."""
+    Xoa chay inline (nhanh voi 1 khach) nen khi tra ve thi du lieu da xoa xong.
+    Loi khi xoa -> danh dau 'failed' nhung VAN tra code (callback/khach van can)."""
     confirmation_code = secrets.token_hex(8)
     await _record_request(confirmation_code, "received")
+    summary = None
     try:
-        await _delete_customer_data(psid, confirmation_code)
+        summary = await _delete_customer_data(psid, confirmation_code)
         await _record_request(confirmation_code, "completed")
-    except Exception as e:  # noqa: BLE001 - khong duoc lam vo response callback
+    except Exception as e:  # noqa: BLE001 - khong duoc lam vo response callback/chat
         print(f"[data_deletion] Loi xoa du lieu psid={psid}: {e}")
         await _record_request(confirmation_code, "failed")
-    return confirmation_code
+    return {"confirmation_code": confirmation_code, "summary": summary}
+
+
+# ---- Self-service qua chat: nhan dien keyword + bao cao cho khach ----
+# Bo dau CA HAI phia khi so khop (bai hoc tieng Viet CLAUDE.md): khach co the go
+# co dau ("XOA DU LIEU") hoac khong dau ("xoa du lieu").
+def _strip_accents(s: str) -> str:
+    s = s.lower().strip().replace("đ", "d")
+    nfd = unicodedata.normalize("NFD", s)
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+
+def is_delete_request(text: str) -> bool:
+    """Khach chu dong xin xoa du lieu (buoc 1 - chi hoi xac nhan, KHONG xoa)."""
+    return "xoa du lieu" in _strip_accents(text)
+
+
+def is_delete_confirm(text: str) -> bool:
+    """Khach xac nhan xoa (buoc 2 - moi thuc su xoa). Kiem tra TRUOC is_delete_request
+    vi 'xac nhan xoa du lieu' chua ca hai cum."""
+    return "xac nhan xoa" in _strip_accents(text)
+
+
+def confirm_prompt() -> str:
+    """Cau hoi xac nhan o buoc 1."""
+    return (
+        "Dạ, anh/chị muốn xóa toàn bộ dữ liệu cá nhân của mình tại 3S Coffee phải không ạ?\n\n"
+        "Việc này sẽ xóa: toàn bộ lịch sử trò chuyện, tên đã lưu, và thông tin cá nhân "
+        "trong đơn hàng — và KHÔNG THỂ khôi phục.\n\n"
+        "Nếu chắc chắn, anh/chị nhắn lại đúng cụm: XÁC NHẬN XÓA\n"
+        "Nếu không muốn xóa nữa, anh/chị chỉ cần bỏ qua tin nhắn này ạ."
+    )
+
+
+def customer_deletion_report(result: dict) -> str:
+    """Soan tin bao khach sau khi xoa (buoc 2), liet ke da xoa gi."""
+    code = result.get("confirmation_code", "")
+    s = result.get("summary")
+    if s is None:
+        return (
+            "Dạ, em gặp trục trặc kỹ thuật khi xóa dữ liệu. Đội ngũ 3S Coffee sẽ kiểm tra và "
+            f"xử lý yêu cầu của anh/chị ngay ạ. Mã tham chiếu: {code}."
+        )
+    if not s.get("customer_found"):
+        return (
+            "Dạ, hệ thống không tìm thấy dữ liệu cá nhân nào của anh/chị để xóa (có thể đã được "
+            f"xóa trước đó). Mã tham chiếu: {code}."
+        )
+    lines = [
+        "Dạ, em đã xóa dữ liệu của anh/chị xong ạ ✅",
+        "",
+        "Những gì đã được xóa:",
+        f"- Toàn bộ lịch sử trò chuyện ({s.get('messages_deleted', 0)} tin nhắn)",
+        "- Tên hồ sơ đã lưu và bộ nhớ tạm hội thoại",
+    ]
+    if s.get("orders_anonymized"):
+        lines.append(
+            f"- Thông tin cá nhân trong {s['orders_anonymized']} đơn hàng "
+            "(đơn được giữ lại theo quy định kế toán nhưng đã ẩn tên, SĐT, địa chỉ)"
+        )
+    lines += [
+        "",
+        f"Mã xác nhận: {code}",
+        f"Tra trạng thái: {status_url(code)}",
+        "",
+        "Dữ liệu đã xóa không thể khôi phục. Cảm ơn anh/chị đã tin tưởng 3S Coffee.",
+    ]
+    return "\n".join(lines)
 
 
 def status_url(confirmation_code: str) -> str:

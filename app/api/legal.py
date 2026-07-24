@@ -257,20 +257,22 @@ lý tự động {BRAND}. Trang này hướng dẫn cách yêu cầu.</p>
 <h2>Cách yêu cầu xóa dữ liệu</h2>
 <p>Chọn một trong hai cách:</p>
 <ol>
-  <li><strong>Qua Messenger:</strong> nhắn cụm từ <strong>"{DELETE_KEYWORD}"</strong> tới
-      trang "{PAGE_NAME}". Trợ lý sẽ chuyển yêu cầu tới nhân viên để xử lý.</li>
+  <li><strong>Qua Messenger (tự động, ngay lập tức):</strong> nhắn cụm từ
+      <strong>"{DELETE_KEYWORD}"</strong> tới trang "{PAGE_NAME}". Hệ thống sẽ hỏi bạn xác nhận;
+      khi bạn nhắn lại <strong>"XÁC NHẬN XÓA"</strong>, dữ liệu của bạn được xóa ngay và hệ thống
+      báo lại đã xóa những gì kèm mã xác nhận. Vì bạn nhắn từ chính tài khoản Messenger của mình
+      nên danh tính được xác định tự động.</li>
   <li><strong>Qua email:</strong> gửi email tới {CONTACT_EMAIL} với tiêu đề
       "Yêu cầu xóa dữ liệu", kèm tên hiển thị Messenger để chúng tôi xác định đúng hồ sơ.</li>
 </ol>
 
 <div class="note">
-Để bảo vệ bạn, chúng tôi có thể cần xác minh bạn chính là chủ hồ sơ trước khi xóa (ví dụ
-xác nhận từ chính tài khoản Messenger đã nhắn tin).
+Xóa dữ liệu là thao tác <strong>không thể khôi phục</strong>. Vì vậy có bước xác nhận trước khi xóa.
 </div>
 
 <h2>Thời gian xử lý</h2>
-<p>Yêu cầu hợp lệ sẽ được xử lý trong vòng <strong>30 ngày</strong>. Sau khi hoàn tất,
-chúng tôi sẽ thông báo cho bạn.</p>
+<p>Yêu cầu qua Messenger được xử lý <strong>tức thì</strong>. Yêu cầu qua email được xử lý trong
+vòng <strong>30 ngày</strong>. Sau khi hoàn tất, chúng tôi sẽ thông báo cho bạn.</p>
 
 <h2>Sau khi xóa</h2>
 <p>Dữ liệu đã xóa không thể khôi phục. Nếu sau này bạn tiếp tục nhắn tin, một hồ sơ mới sẽ
@@ -308,11 +310,12 @@ async def data_deletion_callback(request: Request) -> JSONResponse:
         # Chu ky sai/thieu user_id -> 400, KHONG xoa gi
         return JSONResponse({"error": "invalid signed_request"}, status_code=400)
 
-    confirmation_code = await deletion_svc.process_deletion(str(payload["user_id"]))
+    result = await deletion_svc.process_deletion(str(payload["user_id"]))
+    code = result["confirmation_code"]
     return JSONResponse(
         {
-            "url": deletion_svc.status_url(confirmation_code),
-            "confirmation_code": confirmation_code,
+            "url": deletion_svc.status_url(code),
+            "confirmation_code": code,
         }
     )
 

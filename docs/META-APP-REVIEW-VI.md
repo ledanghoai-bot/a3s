@@ -146,8 +146,14 @@ soi. Trang **Xóa dữ liệu** hướng dẫn 2 cách: nhắn "XÓA DỮ LIỆU
 
 | Lựa chọn trong dropdown | URL đặt vào Meta | Cơ chế |
 |---|---|---|
-| URL hướng dẫn xóa dữ liệu | `https://a3s.robanme.com/datadeletion` | Trang hướng dẫn; khách tự yêu cầu (nhắn "XÓA DỮ LIỆU"/email), nhân viên xử lý |
+| URL hướng dẫn xóa dữ liệu | `https://a3s.robanme.com/datadeletion` | Trang hướng dẫn; khách nhắn "XÓA DỮ LIỆU" → bot hỏi xác nhận → "XÁC NHẬN XÓA" → **tự xóa ngay + báo đã xóa gì** (self-service, không cần nhân viên); hoặc email |
 | **URL gọi lại (Callback)** — *khuyến nghị* | `https://a3s.robanme.com/datadeletion/callback` | Meta POST `signed_request` khi khách gỡ app → hệ thống **tự xác thực + xóa ngay** |
+
+**Self-service qua chat (khách tự xóa, không cần nhân viên)** — deterministic trong `orchestrator.py`
+(trước LLM): khách nhắn "XÓA DỮ LIỆU" → bot hỏi xác nhận (cờ Redis `del_pending` 15 phút) → khách nhắn
+"XÁC NHẬN XÓA" → gọi `process_deletion(sender_id)` → xóa ngay + trả tin báo **liệt kê đã xóa gì** (số
+tin nhắn, tên, số đơn ẩn danh) + mã + link tra cứu. Nhận diện keyword bỏ dấu 2 phía (bài học tiếng
+Việt). Chạy trên MỌI kênh (Messenger/Telegram). Đã test E2E: bước 1 giữ nguyên dữ liệu, bước 2 xóa sạch.
 
 **Callback (`POST /datadeletion/callback`)** — `app/services/data_deletion.py` + route trong `legal.py`:
 xác thực `signed_request` bằng `META_APP_SECRET` (HMAC-SHA256), lấy PSID, rồi trong 1 transaction:

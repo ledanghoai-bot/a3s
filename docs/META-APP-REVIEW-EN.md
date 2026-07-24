@@ -148,8 +148,16 @@ DỮ LIỆU" to the Page, or email.
 
 | Dropdown option | URL to set in Meta | Mechanism |
 |---|---|---|
-| Data Deletion Instructions URL | `https://a3s.robanme.com/datadeletion` | Instructions page; user self-requests (message "XÓA DỮ LIỆU"/email), staff processes |
+| Data Deletion Instructions URL | `https://a3s.robanme.com/datadeletion` | Instructions page; user messages "XÓA DỮ LIỆU" → bot asks to confirm → "XÁC NHẬN XÓA" → **auto-deletes + reports what was deleted** (self-service, no staff); or email |
 | **Data Deletion Callback URL** — *recommended* | `https://a3s.robanme.com/datadeletion/callback` | Meta POSTs `signed_request` on app removal → system **auto-verifies + deletes immediately** |
+
+**Self-service via chat (customer deletes their own data, no staff needed)** — deterministic in
+`orchestrator.py` (before the LLM): the customer messages "XÓA DỮ LIỆU" → the bot asks to confirm
+(Redis flag `del_pending`, 15 min) → the customer messages "XÁC NHẬN XÓA" → calls
+`process_deletion(sender_id)` → deletes immediately and returns a message **listing what was deleted**
+(message count, name, orders anonymized) + code + status link. Keyword match strips diacritics on both
+sides (Vietnamese lesson). Works on every channel (Messenger/Telegram). E2E tested: step 1 keeps the
+data, step 2 wipes it.
 
 **Callback (`POST /datadeletion/callback`)** — `app/services/data_deletion.py` + route in `legal.py`:
 verifies `signed_request` with `META_APP_SECRET` (HMAC-SHA256), extracts the PSID, then in one
