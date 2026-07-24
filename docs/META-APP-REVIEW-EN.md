@@ -126,7 +126,12 @@ registered in `app/main.py`), served on the API domain (Caddy already proxies it
 |---|---|---|
 | Privacy Policy URL | `https://a3s.robanme.com/privacy` | `GET /privacy` |
 | Terms of Service URL | `https://a3s.robanme.com/terms` | `GET /terms` |
-| User Data Deletion (Instructions URL) | `https://a3s.robanme.com/data-deletion` | `GET /data-deletion` |
+| User Data Deletion (Instructions URL) | `https://a3s.robanme.com/datadeletion` ⚠️ **no `-`** | `GET /datadeletion` (alias) + `GET /data-deletion` |
+
+> ⚠️ **Real gotcha:** Meta's "Data Deletion Instructions URL" field **rejects a path with a `-`**
+> (`/data-deletion` shows "name_placeholder should represent a valid URL" even though the URL is live
+> 200, while `/privacy` and `/terms` on the same host pass). Added an **alias `/datadeletion`** (no
+> hyphen) — Meta accepts it. Use `https://a3s.robanme.com/datadeletion` for this field.
 
 All three verified returning **200** with full Vietnamese content. The **Privacy Policy** discloses
 the real data collected (PSID, name, conversation content, and at order time: name–phone–address),

@@ -125,7 +125,12 @@ Meta **bắt buộc** các URL công khai. **Đã dựng cả 3 trang** trong re
 |---|---|---|
 | Privacy Policy URL | `https://a3s.robanme.com/privacy` | `GET /privacy` |
 | Terms of Service URL | `https://a3s.robanme.com/terms` | `GET /terms` |
-| User Data Deletion (Instructions URL) | `https://a3s.robanme.com/data-deletion` | `GET /data-deletion` |
+| User Data Deletion (Instructions URL) | `https://a3s.robanme.com/datadeletion` ⚠️ **không dấu `-`** | `GET /datadeletion` (alias) + `GET /data-deletion` |
+
+> ⚠️ **Gotcha đã gặp thật:** ô "URL hướng dẫn xóa dữ liệu" của Meta **từ chối path có dấu `-`**
+> (`/data-deletion` báo "name_placeholder should represent a valid URL" dù URL live 200, trong khi
+> `/privacy` `/terms` cùng host vẫn qua). Đã thêm **alias `/datadeletion`** (không gạch ngang) — Meta
+> chấp nhận. Dùng `https://a3s.robanme.com/datadeletion` cho ô này.
 
 Đã kiểm tra cả 3 trả **200** với nội dung tiếng Việt đầy đủ. Trang **Chính sách bảo mật** khai báo
 đúng dữ liệu thật thu thập (PSID, tên, nội dung hội thoại, và khi đặt hàng: tên–SĐT–địa chỉ), có nêu
