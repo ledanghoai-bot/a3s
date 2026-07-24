@@ -1127,6 +1127,11 @@ hardcode trong `system_prompt.md` — số ly/hũ và đơn giá ly phải là D
 - `docs/VPS-RUNBOOK-VI.md` + `-EN.md` — **(mới, #9 Bat 5)** runbook cầm-tay-chỉ-việc cho
   **staff tự vận hành không cần AI**: SSH, xem log, restart, deploy, KB ingest, backup/restore,
   DNS/HTTPS, cutover Meta, bảng xử lý sự cố, rollback
+- `docs/PHASE1-COMPLETION-REPORT-VI.md` + `-EN.md` — **(mới, 24/7)** báo cáo hoàn thành #9 +
+  tổng kết Giai đoạn I, gửi team thiết kế mở Phase 2
+- `docs/SALES-FLOW-CURRENT-STATE-VI.md` + `-EN.md` — **(mới, 24/7)** hiện trạng vận hành bán
+  hàng + khoảng trống (thiếu tool tra cứu đơn/follow-up, rủi ro bịa đơn...) cho team thiết kế
+  review/thiết kế lại quy trình
 - Các file `-VI` chính (DATABASE, DASHBOARD, TELEGRAM_BOT, BACKEND_API, NLU_LAYER,
   KB_NLU_RESOURCE_ASSESSMENT, DEPLOYMENT, VPS-RUNBOOK) có bản dịch `-EN` tương ứng.
   **Chưa có -EN:** KNOWLEDGE_BASE_V2_DESIGN, NLU_DATASET_FEEDBACK, NLU_ACCURACY_IMPROVEMENT_PROPOSAL.
