@@ -9,6 +9,7 @@ gay loi neu con set, chi la khong con tac dung).
 
 from fastapi import Depends, Header, HTTPException
 
+from app.config import settings
 from app.services import auth_service
 
 
@@ -32,10 +33,17 @@ def require_permission(permission_key: str):
 
     Backward-compat: neu RBAC CHUA provisioned (DB truoc migration 016 + seed) -> DEGRADE ve hanh vi
     require_staff_session (cho qua) de khong lam vo dashboard o moi truong 012. Khi da provisioned +
-    gan role -> enforce that: thieu quyen -> 403 (khac 401)."""
+    gan role -> enforce that: thieu quyen -> 403 (khac 401).
+
+    STRICT MODE (settings.rbac_strict=True, CA-REVIEW-M0-DEV-002 §7.6): sau production cutover, KHONG
+    degrade nua — chua provision/chua gan role -> 403 (fail-closed)."""
     async def _dep(staff: dict = Depends(require_staff_session)) -> dict:
         if not staff.get("rbac_provisioned"):
-            return staff
+            if settings.rbac_strict:
+                raise HTTPException(
+                    status_code=403,
+                    detail="RBAC strict: chua provision hoac tai khoan chua duoc gan role")
+            return staff  # dev rollout: degrade
         if permission_key in staff.get("permissions", set()):
             return staff
         raise HTTPException(status_code=403, detail=f"Thieu quyen: {permission_key}")

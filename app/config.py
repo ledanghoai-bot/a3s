@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     db_pool_max_size: int = 5
     db_command_timeout: float = 30.0
 
+    # RBAC strict mode (I-B M0.4, CA-REVIEW-M0-DEV-002 §7): MAC DINH false cho dev rollout
+    # (backward-compat degrade). Production SAU khi 016+seed ap -> dat true: require_permission
+    # KHONG degrade nua, va startup fail neu RBAC provisioned nhung catalog/mapping thieu.
+    rbac_strict: bool = False
+
     # LLM (DeepSeek)
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"

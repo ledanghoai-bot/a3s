@@ -5,7 +5,7 @@ document_type: production_audit_report
 parent: A3S-PHASE1B-IMPLEMENTATION-PLAN-001
 owner: Alpha3S
 author_role: Dev
-version: 1.0.0
+version: 1.0.1
 status: submitted_to_ca
 created_at: 2026-07-25
 language: vi-VN
@@ -97,6 +97,23 @@ phiên audit này.
    production migration.
 6. Mâu thuẫn "pre-cutover" (đã rút lại ở feasibility v0.1.1) → **thực tế production đang live** (2 đơn, 48
    msg, bot chạy) — không còn "pre-cutover".
+
+## 4.4. Pre-release actions — KẾT QUẢ (v1.0.1, CA-REVIEW-M0-DEV-002 §4.3, PO approve phiên riêng)
+
+**[Blocker 1] Tracked-file drift — RESOLVED (không phải drift code):** `git status` production chỉ có
+**untracked `.env.bak.pre-llmfix`** (backup `.env` từ phiên LLM incident fix); `git diff` **rỗng** → KHÔNG
+có tracked file bị sửa. Disposition: file backup vô hại; đề xuất chuyển vào `/srv/backups/` cho gọn. *(Con
+số "1 file dirty" ở §3 là đếm untracked này, đã làm rõ.)*
+
+**[Blocker 2] Backup/restore readiness — DONE + phát hiện gap:**
+- **Tạo backup DB mới**: `pg_dump | gzip` → `/srv/backups/alpha3s_m0pre_<UTC>.sql.gz` (~837 KB), `gzip -t` OK.
+- **Restore rehearsal**: khôi phục vào 1 container Postgres **throwaway trên VPS** → tables=18, products=1,
+  orders=2, messages=48, kb_units=364 (**khớp production**) → **backup restore được**; throwaway đã xóa.
+- **⚠️ GAP**: **KHÔNG có cron `pg_dump` ngày** (root crontab trống; `/srv/backups` trước đó chưa tồn tại)
+  — khớp cảnh báo memory `vps-production`. **Khuyến nghị bắt buộc trước migration**: thêm cron
+  `pg_dump` ngày + retention. (`.env.bak` KHÔNG phải backup DB — CA §4.3.)
+
+→ Blocker 1 sạch; Blocker 2 có backup+restore evidence, còn lại việc thêm cron ngày (ops).
 
 ## 5. Ràng buộc CA §11 — đã tuân thủ
 - [x] Read-only (transaction READ ONLY + ROLLBACK; write bị từ chối).

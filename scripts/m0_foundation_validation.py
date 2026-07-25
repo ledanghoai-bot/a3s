@@ -61,6 +61,28 @@ async def main() -> int:
             fails.append("password KHONG duoc redact trong audit")
         if after_json.get("name") != "X":
             fails.append("audit mat field khong nhay cam")
+
+        # --- Redaction NESTED + PII (CA-REVIEW-M0-DEV-002 §8) ---
+        from app.services.audit_service import _redact
+        red = json.loads(_redact({
+            "phone": "0912345678",
+            "customer": {"email": "a@b.com", "address": "123 Le Loi", "token": "sekret", "name": "Keep"},
+            "items": [{"sdt": "0900000000", "ok": 1}],
+        }))
+        if red.get("phone") != "***REDACTED***":
+            fails.append("redact: phone top-level khong an")
+        for k in ("email", "address", "token"):
+            if red["customer"].get(k) != "***REDACTED***":
+                fails.append(f"redact: {k} nested khong an")
+        if red["customer"].get("name") != "Keep":
+            fails.append("redact: mat field thuong (nested)")
+        if red["items"][0].get("sdt") != "***REDACTED***":
+            fails.append("redact: sdt trong list khong an")
+
+        # --- rbac_ready positive (DB da seed mapping) ---
+        ready, reason = await permission_service.rbac_ready(conn)
+        if not ready:
+            fails.append(f"rbac_ready=False tren DB da seed: {reason}")
     finally:
         await conn.close()
 
@@ -70,7 +92,7 @@ async def main() -> int:
             print("  -", f)
         return 1
     print("M0 FOUNDATION PASS: RBAC provisioned; admin⊇staff.manage; sales KHONG staff.manage/"
-          "inventory.adjust; audit fail-closed rollback OK; secret redaction OK")
+          "inventory.adjust; audit fail-closed rollback OK; redaction secret+PII nested OK; rbac_ready OK")
     return 0
 
 

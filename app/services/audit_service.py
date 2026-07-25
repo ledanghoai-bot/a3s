@@ -17,9 +17,15 @@ import asyncpg
 from app.config import settings
 
 _SENSITIVE_KEYS = {
+    # credential/secret
     "password", "password_hash", "password_salt", "new_password", "old_password",
-    "token", "session_token", "authorization", "secret", "app_secret",
-    "page_access_token", "otp", "card", "cvv",
+    "current_password", "token", "session_token", "authorization", "secret", "app_secret",
+    "page_access_token", "otp", "card", "cvv", "api_key", "private_key",
+    # PII (CA-REVIEW-M0-DEV-002 §8: phone/email/address + nested)
+    "phone", "phone_clean", "sdt", "so_dien_thoai", "mobile",
+    "email", "e_mail",
+    "address", "dia_chi", "diachi", "shipping_address",
+    "psid", "external_id",
 }
 
 
@@ -27,12 +33,24 @@ def _db_url() -> str:
     return settings.database_url.replace("+asyncpg", "")
 
 
+def _redact_value(v):
+    """Redact DE QUY: dict -> loc key nhay cam; list -> tung phan tu; scalar giu nguyen.
+    Xu ly payload long nhau (CA-REVIEW-M0-DEV-002 §8)."""
+    if isinstance(v, dict):
+        return {
+            k: ("***REDACTED***" if k.lower() in _SENSITIVE_KEYS else _redact_value(val))
+            for k, val in v.items()
+        }
+    if isinstance(v, (list, tuple)):
+        return [_redact_value(x) for x in v]
+    return v
+
+
 def _redact(d: dict | None) -> str | None:
-    """Tra ve JSON string da redact (hoac None). Loc key nhay cam theo allowlist nghich."""
+    """Tra ve JSON string da redact (hoac None). Loc key nhay cam (credential+PII) o MOI cap."""
     if d is None:
         return None
-    safe = {k: ("***REDACTED***" if k.lower() in _SENSITIVE_KEYS else v) for k, v in d.items()}
-    return json.dumps(safe, ensure_ascii=False, default=str)
+    return json.dumps(_redact_value(d), ensure_ascii=False, default=str)
 
 
 async def record(

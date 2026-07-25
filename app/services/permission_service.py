@@ -32,3 +32,18 @@ async def load_staff_authz(conn, staff_id: int) -> dict:
     role_key = await conn.fetchval("SELECT role_key FROM staff_users WHERE id=$1", staff_id)
     perms = await permissions_for_role(conn, role_key)
     return {"role_key": role_key, "permissions": perms, "rbac_provisioned": True}
+
+
+async def rbac_ready(conn) -> tuple[bool, str]:
+    """Startup readiness (CA-REVIEW-M0-DEV-002 §7.7): nếu RBAC ĐÃ provision (bảng+cột 016) NHƯNG
+    permissions catalog hoặc role_permissions mapping RỖNG -> chưa sẵn sàng (half-provisioned) ->
+    startup phải fail. Nếu chưa provision (dev/pre-016) -> ready=True (degrade hợp lệ)."""
+    if not await rbac_provisioned(conn):
+        return True, "RBAC chưa provision (dev/pre-016) — readiness bỏ qua"
+    n_perm = await conn.fetchval("SELECT count(*) FROM permissions")
+    n_map = await conn.fetchval("SELECT count(*) FROM role_permissions")
+    if not n_perm:
+        return False, "RBAC provisioned nhưng permissions catalog RỖNG (half-provisioned)"
+    if not n_map:
+        return False, "RBAC provisioned nhưng role_permissions mapping RỖNG (half-provisioned)"
+    return True, f"RBAC ready (permissions={n_perm}, mappings={n_map})"

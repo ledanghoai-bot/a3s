@@ -15,6 +15,21 @@ from app.security.headers import SecurityHeadersMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup readiness (I-B M0.4, CA-REVIEW-M0-DEV-002 §7.7): fail startup neu RBAC ĐÃ provisioned
+    # nhung permission catalog/mapping thieu (half-provisioned). Chua provisioned (dev) -> bo qua.
+    try:
+        from app.db_pool import get_pool
+        from app.services import permission_service
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            ready, reason = await permission_service.rbac_ready(conn)
+        if not ready:
+            raise RuntimeError(f"STARTUP FAIL — RBAC readiness: {reason}")
+        print(f"[startup] {reason}")
+    except RuntimeError:
+        raise  # readiness fail -> chan startup (fail-closed, cho production strict)
+    except Exception as e:  # noqa: BLE001 - loi ket noi DB tam thoi khong duoc chan startup
+        print(f"[startup] RBAC readiness check bo qua (loi khong phai readiness): {e}")
     # Pool tao lazy o lan query dau (sau fork). Dong sach luc shutdown (I-B M0.2).
     yield
     await close_pool()
