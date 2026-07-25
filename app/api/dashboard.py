@@ -6,7 +6,7 @@ app/api/auth_router.py cho login/logout).
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.auth import require_staff_session
+from app.api.auth import require_active_session
 from app.config import settings
 from app.services import (
     conversation_log,
@@ -20,7 +20,7 @@ from app.services import products as products_service
 from app.services.handoff import log_note, pause_bot, resume_bot
 
 router = APIRouter(
-    prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(require_staff_session)]
+    prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(require_active_session)]
 )
 
 

@@ -7,7 +7,7 @@ duoc dung o day nua (van de trong config.py/.env de tuong thich nguoc, khong
 gay loi neu con set, chi la khong con tac dung).
 """
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 
 from app.services import auth_service
 
@@ -24,4 +24,31 @@ async def require_staff_session(authorization: str | None = Header(default=None)
     staff = await auth_service.validate_session(token)
     if staff is None:
         raise HTTPException(status_code=401, detail="Token khong hop le hoac da het han, dang nhap lai")
+    return staff
+
+
+def require_permission(permission_key: str):
+    """Dependency factory server-side authorization (I-B M0.4, CA §5.8).
+
+    Backward-compat: neu RBAC CHUA provisioned (DB truoc migration 016 + seed) -> DEGRADE ve hanh vi
+    require_staff_session (cho qua) de khong lam vo dashboard o moi truong 012. Khi da provisioned +
+    gan role -> enforce that: thieu quyen -> 403 (khac 401)."""
+    async def _dep(staff: dict = Depends(require_staff_session)) -> dict:
+        if not staff.get("rbac_provisioned"):
+            return staff
+        if permission_key in staff.get("permissions", set()):
+            return staff
+        raise HTTPException(status_code=403, detail=f"Thieu quyen: {permission_key}")
+    return _dep
+
+
+async def require_active_session(staff: dict = Depends(require_staff_session)) -> dict:
+    """Chan khi tai khoan dang o trang thai bat buoc doi mat khau (I-B M0.5, CA §12.4):
+    session chi duoc goi /me, logout, change-password; business endpoint bi tu choi."""
+    if staff.get("must_change_password"):
+        raise HTTPException(
+            status_code=403,
+            detail="Yeu cau doi mat khau truoc khi dung nghiep vu",
+            headers={"X-Password-Change-Required": "1"},
+        )
     return staff

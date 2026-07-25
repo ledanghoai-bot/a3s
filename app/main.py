@@ -7,8 +7,12 @@ from app.api.dashboard import router as dashboard_router
 from app.api.legal import router as legal_router
 from app.api.webhook import router as webhook_router
 from app.config import settings
+from app.security.headers import SecurityHeadersMiddleware
 
 app = FastAPI(title="Alpha3S – 3S Coffee Sales Agent")
+
+# I-B M0.5: security headers cho API response (CA §12.2 — dashboard Next + Caddy tu set rieng)
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

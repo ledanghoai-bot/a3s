@@ -7,10 +7,12 @@ Sau khi co it nhat 1 tai khoan, cac tai khoan tiep theo tao thang qua trang
 khong can chay lai script nay.
 
 Cach dung (chay trong container api):
-    docker compose exec api python scripts/create_staff_user.py <username> <password> [ten hien thi]
+    docker compose exec api python scripts/create_staff_user.py <username> <password> [ten hien thi] [--role <role_key>]
 
-Vi du:
-    docker compose exec api python scripts/create_staff_user.py hoai "MatKhauManh123" "Anh Hoai"
+Vi du (bootstrap admin dau tien sau khi migration 016 RBAC da ap):
+    docker compose exec api python scripts/create_staff_user.py hoai "MatKhauManh123" "Anh Hoai" --role admin
+
+--role chi co tac dung khi DB da co cot staff_users.role_key (migration 016). Neu chua co, role bi bo qua.
 """
 
 import asyncio
@@ -28,16 +30,23 @@ async def main() -> None:
         print('Vi du: python scripts/create_staff_user.py hoai "MatKhauManh123" "Anh Hoai"')
         return
 
-    username = sys.argv[1]
-    password = sys.argv[2]
-    name = sys.argv[3] if len(sys.argv) > 3 else username
+    args = sys.argv[1:]
+    role_key = None
+    if "--role" in args:
+        i = args.index("--role")
+        role_key = args[i + 1] if i + 1 < len(args) else None
+        args = args[:i] + args[i + 2:]
+
+    username = args[0]
+    password = args[1]
+    name = args[2] if len(args) > 2 else username
 
     if len(password) < 6:
         print("Loi: mat khau can toi thieu 6 ky tu.")
         return
 
     try:
-        staff = await auth_service.create_staff_user(username, password, name)
+        staff = await auth_service.create_staff_user(username, password, name, role_key=role_key)
     except ValueError as e:
         print(f"Loi: {e}")
         return
