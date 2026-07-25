@@ -1,13 +1,13 @@
 ---
 id: A3S-PHASE1B-M0-DEV-REPORT-001
-title: Alpha3S I-B — Dev Report gửi CA: M0 development + rehearsal (v1.0.2)
+title: Alpha3S I-B — Dev Report gửi CA: M0 development + rehearsal (v1.0.3)
 document_type: dev_report_to_ca
 responds_to: A3S-PHASE1B-CA-REVIEW-M0-DEV-001
 reports_on: A3S-PHASE1B-IMPLEMENTATION-PLAN-001
 plan_version: 0.1.3
 owner: Alpha3S
 author_role: Dev
-version: 1.0.2
+version: 1.0.3
 status: submitted_to_ca
 created_at: 2026-07-25
 language: vi-VN
@@ -85,16 +85,42 @@ còn "100% Robusta") — rehearsal không chạm. **Production VPS không truy c
 / chưa baseline production / chưa bật RBAC production / chưa gỡ initdb. Cần: PO cấp VPS read-only (M0.0), PO
 duyệt `rbac_seed_proposed.sql` (Phụ lục A), CA release approval.
 
+## 8. MỚI (v1.0.3) — M0.2 DB pool + KB layer-3 smoke
+
+**M0.2 DB pool standardization (DONE):** chuyển **8 service** (`handoff, orders, price_overrides,
+knowledge_entries, metrics, auth_service, tools, rag`) từ `asyncpg.connect()` per-call sang pool
+(`acquire/release`, giữ nguyên cấu trúc try/finally — diff tối thiểu). Sizing config `min=1/max=5`/process
++ `command_timeout` (CA §9); pool lazy (sau fork); lifecycle `close_pool` (FastAPI lifespan + arq
+on_shutdown). **Smoke trên DB dev thật PASS**: tools/orders/metrics/staff qua pool; dev api không vỡ
+(import OK, health 200). *(Rollout đủ 8/8 service.)*
+
+**KB layer-3 smoke (đã chạy, DeepSeek):** 4 câu brand-truth/serving qua orchestrator trên dev stack (sender
+test, đã dọn net-zero). Kết quả:
+- **Brand claim OK** (KB V2 SKL-PRD-002 bảo vệ): "Robusta **và** Arabica của Việt Nam"; "tỷ lệ **chưa công
+  bố**"; **không** claim "100% Robusta". → lớp 3 brand-truth **PASS** kể cả trên dev 012.
+- **Serving claim (pre-014)**: bot khẳng định *"pha được khoảng 50 ly, ~2g/ly"* — đúng canonical issue CA
+  §3. Migration 014 (serving_size_g=NULL) chặn việc này; đã verify deterministic ở lớp 1/2 (search_products
+  không trả serving_info khi serving NULL). → post-014 sẽ hết.
+
+**⚠️ PHÁT HIỆN NGOÀI M0 (nghiêm trọng, live):** DeepSeek đã **deprecate tên model `deepseek-chat`** (config
+hiện tại) → API 400 *"supported: deepseek-v4-pro | deepseek-v4-flash"*. Không override thì **bot trả
+fallback "Đội ngũ 3S Coffee sẽ phản hồi bạn ngay" cho MỌI tin nhắn** (LLM path hỏng). Xác nhận trên dev;
+**production nhiều khả năng cũng bị** nếu dùng cùng model name. Đây **không phải hạng mục M0** (vendor/config
+incident) — cần PO/ops: chọn model thay thế (`deepseek-v4-flash` là bản thế cận nhất của tier cũ) + cập nhật
+`LLM_MODEL` trong `.env` **dev + production**. Dev đã verify `deepseek-v4-flash` chạy đúng. **Chưa sửa
+production/config** (chờ quyết định).
+
 ## 7. Đề nghị CA
-Ghi nhận M0.3/M0.4/M0.5 implemented + rehearsal PASS. Còn lại M0: DB pool standardization (8 service);
-auth session decision record (điền §9.1 trước release gate); lớp 3 KB smoke; DB-role separation (deferred).
+Ghi nhận M0.2 DB pool + M0.3/M0.4/M0.5 implemented + rehearsal/smoke PASS. Còn lại M0: auth session decision
+record (điền §9.1 trước release gate); DB-role separation (deferred). **Ngoài M0:** sự cố model DeepSeek
+(§8) cần xử lý gấp qua ops/PO.
 
 ## Ký
 ```text
-DEV REPORT — A3S-PHASE1B-M0-DEV-REPORT-001 v1.0.2
-v1.0.1: 4 P0 runner DONE. v1.0.2: M0.3 audit (fail-closed + redaction) + M0.4 RBAC/permission (no-cache,
-require_permission, staff CRUD hardened, seed proposed cho PO) + M0.5 security (throttling fail-open,
-password change/revoke, must_change_password restricted session, security headers) — backward-compatible,
-chung minh bang chay that (foundation validation PASS). Production KHONG thay doi. Commit branch phase1b-m0
-(SHA gui kem). Author role: Dev (Alpha3S). Ngay: 2026-07-25
+DEV REPORT — A3S-PHASE1B-M0-DEV-REPORT-001 v1.0.3
+v1.0.1: 4 P0 runner DONE. v1.0.2: M0.3 audit + M0.4 RBAC/permission + M0.5 security (backward-compat,
+foundation validation PASS). v1.0.3: M0.2 DB pool 8/8 service (smoke dev PASS, api khong vo) + KB layer-3
+smoke (brand-truth PASS; serving claim pre-014 confirmed) + PHAT HIEN su co LIVE: model DeepSeek
+'deepseek-chat' bi deprecate -> bot tra fallback moi tin nhan (ngoai M0, can ops/PO xu ly gap; CHUA sua).
+Production KHONG thay doi. Commit branch phase1b-m0 (SHA gui kem). Author role: Dev (Alpha3S). Ngay: 2026-07-25
 ```
