@@ -1,6 +1,12 @@
 import "./globals.css";
 import NavUser from "./components/NavUser";
 
+// BẮT BUỘC cho nonce-CSP (CA-REVIEW-M0-DEV-004 §5): ép mọi route dashboard render động per-request để
+// Next 14 gắn nonce (đọc từ CSP request header ở middleware) vào MỌI <script> (bootstrap inline RSC +
+// external chunk). Trang static-optimized KHÔNG nhận nonce/request -> 'strict-dynamic' chặn -> hydration
+// vỡ (login không hiện). Dashboard là công cụ nội bộ traffic thấp -> bỏ static optimization chấp nhận được.
+export const dynamic = "force-dynamic";
+
 export const metadata = {
   title: "3S Coffee - Dashboard",
   description: "Dashboard quan tri fanpage 3S Coffee",
