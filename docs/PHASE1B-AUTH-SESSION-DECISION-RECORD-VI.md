@@ -5,10 +5,11 @@ document_type: architecture_decision_record
 parent: A3S-PHASE1B-IMPLEMENTATION-PLAN-001
 owner: Alpha3S
 author_role: Dev
-version: 1.0.0
-status: po_accepted_pending_ca_architecture
+version: 1.0.1
+status: po_accepted_csp_condition_met_pending_ca_activation
 po_signoff: "PO approved 2026-07-25 (temporary localStorage exception, risk owner = PO)"
 created_at: 2026-07-25
+last_updated: 2026-07-25 15:07 GMT+7
 language: vi-VN
 ---
 
@@ -21,12 +22,16 @@ language: vi-VN
   (mặc định **48**), production đặt ≤48h.
 - **Revocation:** logout xóa 1 session; đổi mật khẩu / deactivate → **revoke-all-sessions**; `is_active`
   bị kiểm mỗi `validate_session`. **Refresh token: KHÔNG có** (token dùng tới hết TTL).
-- **CSP dashboard:** API có `frame-ancestors 'none'` (M0.5). Dashboard Next.js **ĐÃ thêm CSP baseline**
-  (`next.config.mjs`: default-src self, connect-src self+API, frame-ancestors/object-src none, base-uri/
-  form-action self) — thu hẹp kênh exfil + clickjacking. **HẠN CHẾ:** Next 14 chèn inline hydration script
-  nên `script-src` còn `'unsafe-inline'` → **chưa chặn hoàn toàn inline-script đọc localStorage**;
-  **nonce-based CSP (Next middleware) là điều kiện bắt buộc trước khi kích hoạt exception** (hoặc chọn
-  cookie 3.1 để né hẳn).
+- **CSP dashboard (v1.0.1 — ĐÃ NÂNG CẤP nonce-based, CA-REVIEW-M0-DEV-004 §5):** API có
+  `frame-ancestors 'none'` (M0.5). Dashboard Next.js chuyển từ CSP tĩnh (còn `unsafe-inline`) sang
+  **nonce-based CSP qua `dashboard/middleware.js`** (Next 14 App Router): `script-src 'self' 'nonce-<random>'
+  'strict-dynamic'` — **ĐÃ BỎ `'unsafe-inline'` cho `script-src`**. `next.config.mjs` bỏ header tĩnh
+  (middleware sở hữu CSP). ⇒ **inline-script do XSS chèn KHÔNG có nonce → không chạy → không đọc/exfil được
+  token trong `localStorage`** (đúng threat model §2). **Verified (evidence v1.0.2):** header CSP có nonce +
+  strict-dynamic, **không** unsafe-inline trong `script-src`; nonce **đổi mỗi request**; browser smoke —
+  dashboard render + hydrate đầy đủ, **0 CSP violation**, 0 console error. `style-src` giữ `'unsafe-inline'`
+  (inline style không execute → không exfil; style-nonce là follow-up UX, không phải điều kiện gate).
+  ⇒ **Điều kiện kích hoạt exception (nonce CSP) ĐÃ ĐẠT.**
 - **Topology:** API `a3s.robanme.com` vs dashboard `a3s-dash.robanme.com` → **khác subdomain**, XHR
   dashboard→API là **cross-origin**.
 
@@ -74,12 +79,21 @@ xứng ở M0. localStorage + CSP chặt + TTL ngắn + revoke-all là mức ch�
   **KHÔNG** coi security gate đã đóng (CA §9).
 - **Việc kèm ngay ở M0 nếu chọn 3.2:** set CSP dashboard + rút TTL (2 việc nhỏ, Dev làm khi PO chốt).
 
+## 7. Cập nhật v1.0.1 — điều kiện nonce CSP đã đạt (CA-REVIEW-M0-DEV-004 §5)
+CA §5 nêu: exception chưa activatable khi CSP còn `unsafe-inline`. Dev đã hoàn thành **lựa chọn (1)** —
+nonce/hash-based CSP loại bỏ `unsafe-inline` cho `script-src`, có **browser smoke** + **kiểm header
+production-ready** (evidence Package v1.0.2: E-CSP header assertion + per-request nonce + browser 0-violation).
+⇒ Rào chắn kỹ thuật của exception được gỡ; **còn chờ CA verify + activation approval** (không tự coi đã mở).
+TTL 48h vẫn giữ (không thay CSP). Deadline HttpOnly cookie+CSRF trước M6 **không đổi**.
+
 ## Ký
 ```text
-AUTH/SESSION ADR
+AUTH/SESSION ADR v1.0.1
 [PO SIGN-OFF] PO CHAP NHAN temporary exception localStorage cho M0 (risk owner = PO), 2026-07-25.
-  Kem dieu kien: CSP baseline (da co) + nonce follow-up truoc kich hoat day du; TTL da ha 48h;
+  Kem dieu kien: nonce CSP truoc kich hoat -> DA IMPLEMENT + VERIFY (v1.0.1); TTL da ha 48h;
   KHONG mo rong sang payment/refund; deadline HttpOnly cookie+CSRF truoc M6.
-[CHO CA] phe duyet kien truc (sau khi doc ADR nay + evidence CSP/TTL).
-Author role: Dev (Alpha3S). Ngay: 2026-07-25.
+[CONDITION MET] nonce-based CSP (dashboard/middleware.js) bo unsafe-inline script-src; browser+header smoke PASS
+  (Evidence v1.0.2, SHA 8a702d6). Rao chan ky thuat da go.
+[CHO CA] activation approval tren production (sau khi verify evidence CSP).
+Author role: Dev (Alpha3S). Ngay: 2026-07-25 15:07 GMT+7.
 ```
