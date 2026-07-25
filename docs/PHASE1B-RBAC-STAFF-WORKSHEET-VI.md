@@ -44,11 +44,13 @@ role phải nằm trong 6 role canonical đã seed (016).
 *(Ô ⚠️ "cần duyệt" / ✎ "propose" xử lý ở approval/masking layer milestone sau — xem Phụ lục A feasibility.)*
 
 ## 3. Quy trình áp (khi CA release approval + PO điền xong bảng §1)
-1. Áp migration 016 (tạo roles/permissions/role_permissions + `staff_users.role_key`).
-2. Áp `rbac_seed_proposed.sql` (đã PO duyệt → thành migration, vd `018_rbac_seed.sql`) — seed mapping.
-3. `UPDATE staff_users SET role_key='<role PO chọn>' WHERE id=<staff_id>;` cho từng staff.
-4. **Kiểm backfill fail-closed**: `SELECT count(*) FROM staff_users WHERE role_key IS NULL;` phải = 0.
-   Còn staff NULL → DỪNG, chưa bật strict.
+1. Áp migration 016 (roles/permissions/role_permissions + `staff_users.role_key`).
+2. Seed mapping = **migration `018_rbac_seed.sql`** (nội dung = ma trận PO duyệt) — **KHÔNG** chạy
+   `rbac_seed_proposed.sql` trực tiếp bằng psql (CA-REVIEW-M0-DEV-003 §5).
+3. Gán role bằng **`scripts/assign_staff_roles.py --mapping <file kiểm soát truy cập>`** (transactional,
+   idempotent, cardinality fail-closed) — KHÔNG đưa username/PII vào repo; mapping đọc từ file/secret.
+4. Script tự **kiểm backfill fail-closed**: ≥1 active admin + không active staff thiếu role → nếu vi phạm
+   ROLLBACK. Còn staff NULL → DỪNG, chưa bật strict.
 5. Bật **`RBAC_STRICT=true`** (production) → `require_permission` không degrade; startup readiness sẽ
    **fail nếu provisioned mà catalog/mapping thiếu** (đã implement, verified).
 6. (Sau) migration siết `role_key NOT NULL`.

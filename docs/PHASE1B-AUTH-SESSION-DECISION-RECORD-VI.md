@@ -16,11 +16,16 @@ language: vi-VN
 ## 1. Bối cảnh & hiện trạng (as-built)
 - Session token: `secrets.token_urlsafe(32)`, lưu bảng `staff_sessions`, gửi qua header
   `Authorization: Bearer <token>`. Dashboard lưu token trong **`localStorage`** (`dashboard/lib/api.js`).
-- **TTL hiện tại:** `SESSION_TTL_HOURS = 24*7` = **7 ngày** (`auth_service.py`).
+- **TTL:** trước 7 ngày; **ĐÃ hạ xuống 48h** (CA-REVIEW-M0-DEV-003 §8) — cấu hình `settings.session_ttl_hours`
+  (mặc định **48**), production đặt ≤48h.
 - **Revocation:** logout xóa 1 session; đổi mật khẩu / deactivate → **revoke-all-sessions**; `is_active`
   bị kiểm mỗi `validate_session`. **Refresh token: KHÔNG có** (token dùng tới hết TTL).
-- **CSP dashboard hiện tại:** API có `Content-Security-Policy: frame-ancestors 'none'` (M0.5). **Dashboard
-  Next.js CHƯA set CSP resource-level** (gap — cần Next middleware/Caddy).
+- **CSP dashboard:** API có `frame-ancestors 'none'` (M0.5). Dashboard Next.js **ĐÃ thêm CSP baseline**
+  (`next.config.mjs`: default-src self, connect-src self+API, frame-ancestors/object-src none, base-uri/
+  form-action self) — thu hẹp kênh exfil + clickjacking. **HẠN CHẾ:** Next 14 chèn inline hydration script
+  nên `script-src` còn `'unsafe-inline'` → **chưa chặn hoàn toàn inline-script đọc localStorage**;
+  **nonce-based CSP (Next middleware) là điều kiện bắt buộc trước khi kích hoạt exception** (hoặc chọn
+  cookie 3.1 để né hẳn).
 - **Topology:** API `a3s.robanme.com` vs dashboard `a3s-dash.robanme.com` → **khác subdomain**, XHR
   dashboard→API là **cross-origin**.
 

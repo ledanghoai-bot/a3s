@@ -4,161 +4,115 @@ title: Alpha3S I-B M0 — Production Migration Runbook
 document_type: production_migration_runbook
 parent: A3S-PHASE1B-IMPLEMENTATION-PLAN-001
 depends_on: A3S-PHASE1B-PROD-AUDIT-001
+gate_reference: A3S-PHASE1B-CA-REVIEW-M0-DEV-003
 owner: Alpha3S
 author_role: Dev
-version: 1.0.0
+version: 1.0.1
 status: draft_pending_ca_release_approval
 created_at: 2026-07-25
+last_updated: 2026-07-25
 language: vi-VN
 ---
 
-# Production Migration Runbook — I-B M0
+# Production Migration Runbook — I-B M0 (v1.0.1)
 
-> Quy trình cầm-tay-chỉ-việc để đưa **production (VPS 160.30.157.235)** từ schema **012+013** lên **M0**
-> (014 corrective + 015 audit + 016 rbac + 017 auth). Soạn sẵn, **CHƯA được phép chạy** — chỉ thực hiện
-> khi **§0 tất cả gate = PASS**. Căn cứ hiện trạng: `PHASE1B-PROD-AUDIT-VI.md`.
->
-> Nguyên tắc xuyên suốt: **expand-only, forward-only, có backup, mỗi bước verify, rollback rõ**. Mọi thao
-> tác production đều cần PO approve từng phiên (không tự động).
+> Đưa **production (host alias `alpha3s-vps`)** từ schema **012+013** lên M0 (014 corrective + 015 audit +
+> 016 rbac + 017 auth + 018 rbac_seed). **CHƯA được phép chạy** — chỉ khi §0 gates PASS. Gate reference:
+> CA-REVIEW-M0-DEV-003 + M0 Dev Report v1.0.5 + Evidence Package v1.0.1 (SHA `931943d…`).
+> Nguyên tắc: expand-only, forward-only, **immutable release SHA/tag** (không checkout branch/commit ad hoc
+> trên VPS), backup + restore-check BẮT BUỘC, mỗi bước verify, rollback rõ. Mọi thao tác production PO
+> approve từng phiên. **Dùng host alias, không lặp IP.**
 
-## 0. Gate tiên quyết (PHẢI đủ TẤT CẢ trước khi bắt đầu)
-- [ ] **CA release approval** cho M0 production migration (đã trình v1.0.4 + prod audit).
-- [ ] **PO khóa policy gates:** duyệt `scripts/rbac_seed_proposed.sql` (Phụ lục A ma trận role→permission);
-      chốt initial admin; export policy; **localStorage risk-acceptance** (auth decision record §9.1).
-- [ ] **Cleanup production (từ prod audit §4):** dọn **1 tracked file dirty** trên `main` VPS; **verify
-      backup/cron pg_dump ngày** hoạt động; **kiểm mô tả `3S-100G` production khớp IN-list known-bad của
-      014** (nếu là biến thể khác → bổ sung vào IN-list 014 + re-rehearsal trước).
-- [ ] **Maintenance window** thông báo (bot có thể chớp gián đoạn khi recreate container).
+## 0. Gate tiên quyết (đủ TẤT CẢ)
+- [ ] **CA release approval** (Evidence v1.0.1 verified-closed + review 003 amendments đóng).
+- [ ] **PO khóa policy** (TRƯỚC maintenance window): duyệt ma trận role→permission; **điền staff worksheet**
+      (gán role cho từng staff hiện hữu, chỉ định initial active admin); xác nhận PII masking/export;
+      **xác nhận `payment.cod_record` cho support/delivery** (quyền ghi nhận tài chính); ký **ADR
+      localStorage** (nếu chọn temporary session exception — kèm CSP + TTL≤48h đã implement).
+- [ ] **Cleanup**: `.env.bak.pre-llmfix` (untracked, benign) chuyển `/srv/backups/`; **thêm cron pg_dump
+      ngày**; kiểm mô tả `3S-100G` production khớp IN-list 014.
+- [ ] Maintenance window + **người thực thi / người quan sát / go-no-go owner / evidence location** ghi rõ.
 
-> Thiếu bất kỳ gate nào → **DỪNG**, không chạy.
-
-## 1. Pre-flight (ngay trước khi migrate)
-
-**1.1. Backup DB BẮT BUỘC** (không có backup → không migrate):
+## 1. Pre-flight
+**1.1. Backup DB + RESTORE-CHECK BẮT BUỘC** (không phải tùy chọn — CA §10.3):
 ```bash
-# trên VPS
 docker compose -f docker-compose.prod.yml exec -T db pg_dump -U alpha3s -d alpha3s \
   | gzip > /srv/backups/alpha3s_pre_m0_$(date -u +%Y%m%dT%H%M%SZ).sql.gz
-ls -lh /srv/backups/alpha3s_pre_m0_*.sql.gz   # xác nhận file có kích thước hợp lý
+# RESTORE-CHECK: khoi phuc vao container throwaway, verify row counts khop, roi xoa throwaway.
 ```
-Kiểm restore-able (thử restore vào 1 DB throwaway nếu cẩn trọng).
+**1.2.** Chạy `scripts/prod_audit.sql` (read-only) → xác nhận 012+013, anomaly còn.
+**1.3. Verify IN-list 014:** so mô tả `3S-100G` với 2 chuỗi known-bad trong `014`. **Nếu khác → DỪNG**,
+tạo **migration forward mới** sửa IN-list, **rehearsal lại**, **xin approval lại** — **KHÔNG sửa 014 đã
+rehearsal ngay trong phiên cutover** (CA §10.4).
 
-**1.2. Chụp lại hiện trạng (read-only):** chạy `scripts/prod_audit.sql` → xác nhận vẫn 012+013,
-`schema_migrations`=false, anomaly còn (baseline chưa chạy). Lưu output.
+## 2. Deploy code (backward-compat, immutable SHA)
+Code M0 feature-detect → chạy được trên 012+013 (RBAC unprovisioned + `RBAC_STRICT=false` → degrade;
+startup readiness skip hợp lệ). Deploy TRƯỚC, migrate SAU.
+- **Dùng immutable release SHA/tag** (`931943d…` hoặc tag release) qua CI/CD (merge→main→deploy) HOẶC
+  checkout đúng tag trên VPS — **không checkout branch/commit ad hoc**.
+- `docker compose -f docker-compose.prod.yml up -d --force-recreate api worker telegram_bot telegram_customer_bot dashboard`.
+- **Verify:** health 200; login OK (degrade vì chưa provision, `RBAC_STRICT=false`); bot trả lời; log sạch.
+- **Rollback bước này:** redeploy SHA cũ (`c210a84`) + recreate. DB nguyên (chưa migrate).
 
-**1.3. Verify IN-list 014:** query mô tả thật (không PII — mô tả marketing):
-```sql
-SELECT sku, description FROM products WHERE sku='3S-100G';
-```
-So với 2 chuỗi known-bad trong `migrations/014_correct_product_seed.sql`. **Nếu khớp** → OK. **Nếu khác** →
-bổ sung biến thể vào `IN(...)` của 014, chạy lại rehearsal (fresh+existing) trước khi tiếp.
-
-## 2. Deploy M0 code lên production (backward-compat — an toàn trên 012+013)
-
-Code M0 **feature-detect**: chạy được trên schema 012+013 (RBAC unprovisioned → degrade về hành vi cũ;
-audit_log chưa có → bỏ qua). Đã verify trên dev 012. → **Deploy code TRƯỚC, migrate SAU** (expand→migrate).
-
-**2.1.** Đưa branch `phase1b-m0` vào luồng deploy production. 2 cách:
-- **CI/CD (khuyến nghị, CLAUDE §8):** merge `phase1b-m0` → `main`, push → GitHub Actions tự deploy VPS.
-- **Thủ công trên VPS:** `git -C /srv/alpha3s fetch && git -C /srv/alpha3s checkout <commit phase1b-m0>`.
-
-**2.2.** Recreate service để nạp code mới (env_file/code):
+## 3. Migration qua runner (baseline-13 → up)
+`schema_migrations` chưa có + `data_deletion_requests` đã có → **baseline_through=13**.
 ```bash
-cd /srv/alpha3s
-docker compose -f docker-compose.prod.yml up -d --force-recreate api worker telegram_bot telegram_customer_bot dashboard
+docker compose -f docker-compose.prod.yml exec -T api python /srv/scripts/migrate.py baseline --manifest scripts/baseline_manifest_13.json
+docker compose -f docker-compose.prod.yml exec -T api python /srv/scripts/migrate.py up
 ```
-**2.3. Verify backward-compat (schema vẫn 012+013):**
-- `curl -s https://a3s.robanme.com/health` (hoặc qua container) = 200.
-- Đăng nhập dashboard OK (require_permission degrade vì RBAC chưa provisioned → không chặn).
-- Bot trả lời thật (LLM đã là `deepseek-v4-flash`).
-- Log không lỗi import/500.
+- baseline: `Baselined 13 … KHONG baseline (phai chay): 014,015,016,017,018` (verify data_deletion khớp).
+- up: áp **014→018** + post-validation. **014 fail-closed** nếu unknown variant → về §1.3.
+- **Verify (read-only):** `3S-100G` description approved, `serving_size_g NULL`, không "100% Robusta";
+  `schema_migrations` có 001-018; `audit_log`/`roles`/`role_permissions` tồn tại; `role_permissions` đã
+  seed (018).
 
-> **Rollback ở bước này:** redeploy commit cũ (`c210a84`) + recreate. Chưa migrate nên DB nguyên vẹn.
+## 3A. RBAC CUTOVER UNIT (kiểm soát — CA §5, tránh half-provisioned)
+> Migration 016 làm `rbac_provisioned()`=true NGAY khi table/column có. Nếu để `RBAC_STRICT=true` hoặc
+> restart giữa lúc `role_permissions`/`role_key` còn rỗng → **half-provisioned** → dashboard mất quyền /
+> startup fail. Vì vậy phần này là MỘT unit liên tục, `RBAC_STRICT` bật SAU CÙNG.
 
-## 3. Chạy migration qua runner (baseline-13 → up)
+1. **Seed mapping đã PO duyệt = migration `018_rbac_seed.sql`** (đã áp ở §3 up) — KHÔNG chạy file proposal
+   trực tiếp bằng psql.
+2. **Gán role 2 staff** bằng `scripts/assign_staff_roles.py` (transactional, idempotent, cardinality
+   fail-closed), mapping đọc từ **file kiểm soát truy cập (không PII trong repo)**:
+   ```bash
+   docker compose -f docker-compose.prod.yml exec -T api python scripts/assign_staff_roles.py --mapping /path/staff_roles.txt
+   ```
+   Script FAIL-CLOSED nếu: role không hợp lệ / staff không tồn tại / **<1 active admin** / **còn active
+   staff thiếu role** → ROLLBACK.
+3. **Verify**: `SELECT count(*) FROM staff_users WHERE is_active AND role_key IS NULL` = 0; ≥1 active admin.
+4. **CHỈ bây giờ** đặt **`RBAC_STRICT=true`** (env) → recreate api/worker → startup readiness pass (nếu
+   half → api KHÔNG start, quay lại bước 1-2).
+5. **Positive/negative permission smoke**: non-admin gọi `staff.manage` → 403; admin → OK; disable admin
+   cuối → 409.
+6. **Recovery nếu seed/assignment fail**: giữ `RBAC_STRICT=false` (chưa recreate với strict); sửa mapping;
+   chạy lại (idempotent); chỉ bật strict khi pass.
 
-Runner = `scripts/migrate.py` (đã có trên VPS sau bước 2). DB production `schema_migrations` chưa tồn tại +
-`data_deletion_requests` đã có (013 áp tay) → **baseline_through = 13** (dùng `baseline_manifest_13.json`).
+## 4. Post-migration verification
+- [ ] `prod_audit.sql` khớp target; bot smoke (không "100% Robusta"/"50 ly").
+- [ ] Dashboard: 1 thao tác gated → `audit_log` ghi đúng; **KHÔNG test throttling vào tài khoản thật**
+      (dùng tài khoản/cửa sổ test được duyệt — CA §10.6).
+- [ ] **KHÔNG "tạo đơn test rồi xóa"** trên production — dùng synthetic marker + cancel/void hợp lệ + giữ
+      audit trail (CA §10.5).
+- [ ] Log sạch 30-60 phút; ghi start/end time + evidence location.
 
-**3.1. Status (trước):**
-```bash
-docker compose -f docker-compose.prod.yml exec -T -e MIGRATE_ACTOR="prod-m0" api \
-  python /srv/scripts/migrate.py status     # 001-017 PENDING (schema_migrations vua tao)
-```
-**3.2. Baseline 001-013 (manifest-13, KHÔNG chạy, verify data_deletion tồn tại):**
-```bash
-docker compose -f docker-compose.prod.yml exec -T api \
-  python /srv/scripts/migrate.py baseline --manifest scripts/baseline_manifest_13.json
-# Ky vong: baseline 001-013; "KHONG baseline (phai chay): 014_correct_product_seed, 015..., 016..., 017..."
-```
-> Nếu manifest verify FAIL (thiếu object) → **STOP**, điều tra drift (không baseline mù).
-
-**3.3. Up (áp 014→017 + post-migration validation):**
-```bash
-docker compose -f docker-compose.prod.yml exec -T -e MIGRATE_ACTOR="prod-m0" api \
-  python /srv/scripts/migrate.py up
-# Ky vong: apply 014,015,016,017; "Post-migration validations pass"; exit 0.
-# 014 DO-block postcondition: neu mo ta la unknown-bad variant -> RAISE -> rollback 014 -> exit!=0
-#   -> quay lai §1.3 bo sung IN-list, KHONG ep chay.
-```
-**3.4. Verify sau migrate (read-only):** chạy lại `prod_audit.sql`:
-- `3S-100G`: description approved, **serving_size_g NULL**, net_weight 100, **không "100% Robusta"**.
-- `schema_migrations` có 001-017; `audit_log`, `roles`, `staff_users.role_key` tồn tại.
-
-## 4. Provision RBAC (quy trình existing-staff — CA §11.2)
-
-Production có **2 staff thật** → **KHÔNG** default `viewer`.
-**4.1.** Audit 2 staff hiện có (username, ai nên role gì — **PO quyết**):
-```sql
-SELECT id, username, name, is_active, role_key FROM staff_users ORDER BY id;
-```
-**4.2.** Áp mapping role→permission **đã PO duyệt** (`rbac_seed_proposed.sql` → thành migration `018_rbac_seed.sql`, hoặc chạy qua psql một lần có kiểm soát).
-**4.3.** Gán role cho từng staff theo PO:
-```sql
-UPDATE staff_users SET role_key='admin' WHERE username='<admin_user_PO_chot>';
--- ... cac staff khac theo PO
-```
-**4.4.** (Sau khi mọi staff có role) migration siết `role_key` NOT NULL (bước sau, không bắt buộc ngay).
-**4.5. Verify enforcement:** đăng nhập bằng 1 tài khoản non-admin → gọi endpoint gated `staff.manage` → **403**;
-đăng nhập admin → OK; thử disable admin cuối → **bị chặn (409)**.
-
-## 5. Post-migration verification (toàn diện)
-- [ ] `prod_audit.sql` khớp target state (§3.4).
-- [ ] Bot smoke: "100% Robusta?" → Robusta+Arabica; "bao nhiêu ly?" → không "50 ly"; tạo đơn test (rồi xóa).
-- [ ] Dashboard: login + 1 thao tác gated → audit_log ghi đúng (actor/action/before-after); PII không lộ.
-- [ ] Login throttling (N lần sai → 429); password change → revoke session.
-- [ ] Log production không lỗi trong 30-60 phút đầu.
-
-## 6. Rollback plan
-
-| Thời điểm hỏng | Rollback |
+## 5. Rollback
+| Thời điểm | Rollback |
 |---|---|
-| Sau deploy code (§2), trước migrate | Redeploy `c210a84` + recreate. DB nguyên vẹn (chưa migrate). |
-| Migration lỗi giữa chừng (§3.3) | Mỗi migration 1 transaction → cái lỗi tự rollback; `schema_migrations` phản ánh cái đã áp. **Forward-fix** (sửa migration mới) rồi `up` lại. 014 fail-closed → không ghi, an toàn. |
-| Phát hiện sai sau migrate | Expand-only → revert code deploy; bảng/cột mới không đọc = vô hại. **014 (data) KHÔNG rollback ngược** (không muốn khôi phục "100% Robusta") — nếu cần sửa, dùng migration forward mới. |
-| Hỏng nặng / nghi mất dữ liệu | **Restore từ backup §1.1** (`gunzip | psql`), điều tra offline. |
+| Sau §2, trước §3 | Redeploy SHA `c210a84` + recreate. DB nguyên. |
+| Migration lỗi (§3) | Mỗi migration 1 txn; forward-fix + `up` lại. 014 fail-closed không ghi. |
+| RBAC cutover fail (§3A) | Giữ `RBAC_STRICT=false`; sửa mapping/assignment; chạy lại; chưa bật strict. |
+| Sau migrate, phát hiện sai | Expand-only → revert code; **`RBAC_STRICT=false`** (env rollback) + recreate → degrade; 014-data KHÔNG rollback ngược (forward-fix). |
+| Hỏng nặng | **Restore từ backup §1.1** (đã restore-check). |
 
-**Rollback boundary rõ:** ranh giới an toàn là **sau §2 / trước §3** (chỉ code, redeploy được). Sau §3, ưu
-tiên forward-fix; backup là lưới cuối.
-
-## 7. Ràng buộc / KHÔNG được làm
-- **KHÔNG** gỡ initdb path production (CA §8.4 — chỉ sau khi runner chứng minh trên production, bước sau).
-- **KHÔNG** bỏ backup §1.1.
-- **KHÔNG** default staff = viewer; phải PO gán role.
-- **KHÔNG** chạy §2-§5 khi §0 chưa đủ gate.
-- Production audit ≠ migration approval; migration cần CA release approval (§0).
-
-## 8. Thứ tự tóm tắt (checklist 1 dòng)
-```text
-§0 gates PASS → §1 backup + audit + verify IN-list → §2 deploy code + verify backward-compat
-→ §3 baseline-13 + up(014-017) + verify → §4 provision RBAC (PO gán role 2 staff)
-→ §5 verify toàn diện → (giám sát). Hỏng: §6 rollback.
-```
+## 6. Ràng buộc
+KHÔNG gỡ initdb (CA §8.4); KHÔNG bỏ backup+restore-check; KHÔNG default staff role; KHÔNG chạy khi §0
+chưa đủ; KHÔNG sửa 014 trong cutover; production audit ≠ migration approval.
 
 ## Ký
 ```text
-PROD MIGRATION RUNBOOK — A3S-PHASE1B-PROD-MIGRATION-RUNBOOK-001 v1.0.0 (DRAFT)
-Soan san theo prod audit (012+013, baseline_through=13, 2 staff, anomaly confirmed). CHUA duoc chay -
-cho CA release approval + PO gates + cleanup (§0). Expand-only, backup bat buoc, rollback boundary sau §2.
-Author role: Dev (Alpha3S). Ngay: 2026-07-25
+PROD MIGRATION RUNBOOK v1.0.1 (DRAFT) — amendment CA-REVIEW-M0-DEV-003 §5+§10: RBAC cutover unit
+(RBAC_STRICT bat sau cung), immutable SHA/tag, backup+restore-check bat buoc, khong sua 014 trong cutover,
+khong tao don test/khong throttle tai khoan that, ghi executor/observer/go-no-go/time/evidence, host alias.
+CHUA duoc chay — cho CA release approval + PO gates. Author role: Dev (Alpha3S). Ngay: 2026-07-25.
 ```

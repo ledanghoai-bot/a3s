@@ -35,9 +35,11 @@ fail → ROLLBACK mutation.**
 telemetry: `auth.login`/`auth.login_failed`.)*
 
 ## 2. Bằng chứng test (§8)
-- **Audit fail-closed rollback:** `m0_foundation_validation.py` — mở transaction, `audit_service.record`
-  rồi RAISE → `audit_log` count KHÔNG tăng (rollback). Evidence E3 (`M0 FOUNDATION PASS: audit fail-closed
-  rollback OK`).
+- **Audit fail-closed rollback (service-primitive):** `m0_foundation_validation.py` — Evidence E3.
+- **Audit fail-closed rollback (ENDPOINT-LEVEL, CA §9):** `audit_rollback_endpoint_test.py` — force audit
+  insert fail (`CHECK(false) NOT VALID`) → **`staff.create` + `password_change` ROLLBACK mutation** (staff
+  không được tạo / mật khẩu không đổi); audit-ok path ghi `audit_log`. **Evidence E7** (Evidence Package
+  v1.0.1, SHA `931943d…`).
 - **Redaction (credential + PII + nested):** cùng script — payload lồng nhau `{phone, customer:{email,
   address, token, name}, items:[{sdt}]}` → phone/email/address/token/sdt = `***REDACTED***` ở MỌI cấp,
   field thường (`name`) giữ nguyên. Evidence E3 (`redaction secret+PII nested OK`). Allowlist nghịch:
@@ -56,8 +58,9 @@ trên `audit_log` khỏi owner **không có tác dụng** (owner bypass grant). 
 
 **TIME-BOXED EXCEPTION (xin CA duyệt):**
 - **Nội dung:** M0 giữ single-role + append-only convention; DB-role separation **hoãn**.
-- **Owner:** Dev (kỹ thuật) + PO (chấp nhận rủi ro tồn dư).
-- **Deadline:** trước **I-B Core Release M6** (cùng đợt với security hardening dashboard).
+- **Owner:** Dev (kỹ thuật) + PO (chấp nhận rủi ro tồn dư — **PO phải ký**).
+- **Deadline (CA §9 — KHÔNG kéo tới M6):** tách DB runtime/migration role **trước nhóm mutation thương
+  mại nhạy cảm tiếp theo và KHÔNG muộn hơn M2 production release**.
 - **Rủi ro tồn dư:** nếu app runtime bị chiếm quyền SQL tùy ý, có thể sửa/xóa audit. Giảm nhẹ: không có
   code path update/delete audit; audit là INSERT-only trong app; log/alert bất thường.
 - **KHÔNG tuyên bố** "DB enforced" cho tới khi tách role — chỉ tuyên bố "convention + no update/delete

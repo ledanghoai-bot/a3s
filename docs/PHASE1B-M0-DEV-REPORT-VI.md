@@ -12,7 +12,7 @@ status: submitted_to_ca
 created_at: 2026-07-25
 last_updated: 2026-07-25
 branch: phase1b-m0
-commit_sha: 29ce7a4319117d40751e57a3c0e8079d0f42c204
+commit_sha: 931943d5c1a413771fa6c6ff4c96bf890ad9389a
 evidence: A3S-PHASE1B-M0-EVIDENCE-PACKAGE-001
 language: vi-VN
 ---
@@ -21,7 +21,7 @@ language: vi-VN
 
 > Bản phát hành **thống nhất một phiên bản** (chuẩn hóa theo CA-REVIEW-M0-DEV-002 §5, thay các bản
 > 1.0.1-1.0.4 rời). Mọi kết quả dẫn tới **Evidence Package** (`A3S-PHASE1B-M0-EVIDENCE-PACKAGE-001`,
-> commit `29ce7a4319117d40751e57a3c0e8079d0f42c204`) — không dùng chữ "chạy thật" thay cho đường dẫn
+> commit `931943d5c1a413771fa6c6ff4c96bf890ad9389a`) — không dùng chữ "chạy thật" thay cho đường dẫn
 > evidence. Host production ghi bằng **alias** (`alpha3s-vps`), không IP.
 
 ## 0. Changelog (một dòng đời)
@@ -96,9 +96,10 @@ backup + window + runbook + verify IN-list + verify staff/role). Anomaly "100% R
 backup/restore chưa xác minh (`.env.bak` KHÔNG phải backup DB).
 
 ## 6. Immutable evidence (CA §6)
-`A3S-PHASE1B-M0-EVIDENCE-PACKAGE-001` — full SHA `29ce7a4319117d40751e57a3c0e8079d0f42c204`, git status
-clean tại revision test, artifact list + checksum, 6 kịch bản (E1-E6) với exact command + exit code +
-sanitized log + mapping assertion→test. *(Đây thay cho "commit SHA gửi sau" ở bản cũ.)*
+`A3S-PHASE1B-M0-EVIDENCE-PACKAGE-001 **v1.0.1**` — full SHA `931943d5c1a413771fa6c6ff4c96bf890ad9389a`
+(ghim HEAD MỚI sau khi sửa blocker CA-REVIEW-M0-DEV-003), git clean, artifact checksum, **10 kịch bản
+(E1-E10)** gồm startup readiness fail-closed (E8), endpoint audit rollback (E7), strict RBAC (E9),
+half-provisioned (E10), redaction nested (E3) — với command + exit code + log + mapping assertion→test.
 
 ## 7. Incident/config change — LLM model DeepSeek (§10 CA, phiên riêng)
 - **Bản chất:** vendor deprecate model name `deepseek-chat` (API 400 → bot trả fallback mọi tin nhắn).
@@ -127,7 +128,7 @@ record; existing-staff worksheet.
 ```text
 DEV REPORT — A3S-PHASE1B-M0-DEV-REPORT-001 v1.0.5 (thong nhat version)
 M0 development + rehearsal + M0.0 prod audit hoan tat; evidence tai commit
-29ce7a4319117d40751e57a3c0e8079d0f42c204 (Evidence Package rieng).
+931943d5c1a413771fa6c6ff4c96bf890ad9389a (Evidence Package rieng).
 Production M0 migration: KHONG chay (chua duoc duyet). 2 phien production rieng (LLM incident fix + audit
 read-only) deu PO approve — tach bach voi M0 migration. Release gate OPEN; cho CA verified-closed + PO
 gates. Author role: Dev (Alpha3S). Ngay: 2026-07-25.
