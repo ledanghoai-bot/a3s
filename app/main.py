@@ -15,21 +15,26 @@ from app.security.headers import SecurityHeadersMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup readiness (I-B M0.4, CA-REVIEW-M0-DEV-002 §7.7): fail startup neu RBAC ĐÃ provisioned
-    # nhung permission catalog/mapping thieu (half-provisioned). Chua provisioned (dev) -> bo qua.
+    # Startup readiness FAIL-CLOSED (CA-REVIEW-M0-DEV-003 §6): quyet dinh qua startup_verdict (PURE).
+    # KHONG catch-all bien loi thanh PASS. Chi skip khi CHAC CHAN pre-016 VA rbac_strict=false.
+    from app.db_pool import get_pool
+    from app.services import permission_service
+
+    provisioned = ready = ready_reason = None
+    error = None
     try:
-        from app.db_pool import get_pool
-        from app.services import permission_service
         pool = await get_pool()
         async with pool.acquire() as conn:
-            ready, reason = await permission_service.rbac_ready(conn)
-        if not ready:
-            raise RuntimeError(f"STARTUP FAIL — RBAC readiness: {reason}")
-        print(f"[startup] {reason}")
-    except RuntimeError:
-        raise  # readiness fail -> chan startup (fail-closed, cho production strict)
-    except Exception as e:  # noqa: BLE001 - loi ket noi DB tam thoi khong duoc chan startup
-        print(f"[startup] RBAC readiness check bo qua (loi khong phai readiness): {e}")
+            provisioned = await permission_service.rbac_provisioned(conn)
+            if provisioned:
+                ready, ready_reason = await permission_service.rbac_ready(conn)
+    except Exception as e:  # noqa: BLE001 - xu ly qua startup_verdict (strict -> fail)
+        error = e
+    ok, reason = permission_service.startup_verdict(
+        provisioned, ready, ready_reason, error, settings.rbac_strict)
+    if not ok:
+        raise RuntimeError(f"STARTUP FAIL — {reason}")
+    print(f"[startup] readiness: {reason}")
     # Pool tao lazy o lan query dau (sau fork). Dong sach luc shutdown (I-B M0.2).
     yield
     await close_pool()

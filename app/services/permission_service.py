@@ -47,3 +47,26 @@ async def rbac_ready(conn) -> tuple[bool, str]:
     if not n_map:
         return False, "RBAC provisioned nhưng role_permissions mapping RỖNG (half-provisioned)"
     return True, f"RBAC ready (permissions={n_perm}, mappings={n_map})"
+
+
+def startup_verdict(provisioned, ready, ready_reason, error, strict: bool) -> tuple[bool, str]:
+    """Quyết định startup readiness (PURE, testable — CA-REVIEW-M0-DEV-003 §6).
+
+    Fail-closed: KHÔNG biến lỗi không xác định thành PASS. Chỉ cho phép start-skip khi CHẮC CHẮN
+    DB là pre-016 (provisioned=False) VÀ strict=False.
+    - error != None (DB/query lỗi ngoài dự kiến): strict -> FAIL; non-strict -> tolerate (dev boot).
+    - provisioned=False: strict -> FAIL (strict mà chưa provision là sai cấu hình); non-strict -> skip.
+    - provisioned=True nhưng ready=False (half-provisioned): FAIL bất kể strict.
+    - provisioned=True, ready=True: OK.
+    """
+    if error is not None:
+        if strict:
+            return False, f"readiness check LỖI (strict, fail-closed): {error}"
+        return True, f"readiness check lỗi (non-strict dev, tolerate boot): {error}"
+    if not provisioned:
+        if strict:
+            return False, "RBAC_STRICT=true nhưng RBAC chưa provisioned (sai cấu hình)"
+        return True, "pre-016 (chưa provisioned), strict off — skip hợp lệ"
+    if not ready:
+        return False, ready_reason or "RBAC half-provisioned"
+    return True, ready_reason or "RBAC ready"

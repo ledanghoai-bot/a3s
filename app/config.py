@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # KHONG degrade nua, va startup fail neu RBAC provisioned nhung catalog/mapping thieu.
     rbac_strict: bool = False
 
+    # Session TTL (I-B M0.5, CA-REVIEW-M0-DEV-003 §8): giam tu 7 ngay -> 48h cho auth/session
+    # temporary exception (localStorage). Cau hinh duoc de production dat <=48h.
+    session_ttl_hours: int = 48
+
     # LLM (DeepSeek)
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"

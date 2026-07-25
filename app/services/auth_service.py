@@ -21,7 +21,7 @@ from app.config import settings
 from app.db_pool import acquire, release
 from app.services import permission_service
 
-SESSION_TTL_HOURS = 24 * 7  # 7 ngay
+SESSION_TTL_HOURS = 24 * 7  # legacy default; runtime dung settings.session_ttl_hours (CA-REVIEW-003 §8: <=48h)
 PBKDF2_ITERATIONS = 200_000
 
 
@@ -93,7 +93,7 @@ async def authenticate(username: str, password: str) -> dict | None:
 
 async def create_session(staff_id: int) -> str:
     token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.session_ttl_hours)
     conn = await acquire()
     try:
         await conn.execute(
