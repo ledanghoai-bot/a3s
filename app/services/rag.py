@@ -1,8 +1,6 @@
 """Truy van knowledge base (PostgreSQL + pgvector)."""
 
-import asyncpg
-
-from app.config import settings
+from app.db_pool import acquire, release
 from app.services.embedder import embed_async
 
 
@@ -11,8 +9,7 @@ async def search_knowledge(query: str, top_k: int = 4) -> list[str]:
     query_vec = await embed_async(query)
     vec_str = "[" + ",".join(str(x) for x in query_vec) + "]"
 
-    db_url = settings.database_url.replace("+asyncpg", "")
-    conn = await asyncpg.connect(db_url)
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             """
@@ -26,4 +23,4 @@ async def search_knowledge(query: str, top_k: int = 4) -> list[str]:
         )
         return [r["content"] for r in rows]
     finally:
-        await conn.close()
+        await release(conn)

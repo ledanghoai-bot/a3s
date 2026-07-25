@@ -18,6 +18,7 @@ import re
 import asyncpg
 
 from app.config import settings
+from app.db_pool import acquire, release
 from app.services import handoff, price_overrides
 
 PHONE_RE = re.compile(r"^(0|\+84)(3|5|7|8|9)\d{8}$")
@@ -75,7 +76,7 @@ async def search_products(query: str | None = None) -> dict:
     BAT BUOC goi tool nay truoc khi tra loi bat ky cau hoi nao ve gia cu the,
     mo ta san pham, khuyen mai, hoac bien the san pham (dung theo system_prompt.md).
     """
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         products = await conn.fetch(
             "SELECT id, sku, name, description, price_vnd, stock, "
@@ -124,12 +125,12 @@ async def search_products(query: str | None = None) -> dict:
             ),
         }
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def check_stock(sku: str, quantity: int) -> dict:
     """Kiem tra con du hang khong cho 1 sku + so luong cu the."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow("SELECT stock FROM products WHERE sku = $1", sku)
         if row is None:
@@ -141,7 +142,7 @@ async def check_stock(sku: str, quantity: int) -> dict:
             "available": row["stock"] >= quantity,
         }
     finally:
-        await conn.close()
+        await release(conn)
 
 
 def _unit_price_for_quantity(tiers: list[asyncpg.Record], quantity: int) -> int | None:
@@ -184,7 +185,7 @@ async def create_order(
     if not PHONE_RE.match(phone_clean):
         return {"error": f"So dien thoai '{phone}' khong hop le, can dung so VN (vd 0912345678)."}
 
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         async with conn.transaction():
             product = await conn.fetchrow(
@@ -277,7 +278,7 @@ async def create_order(
             ),
         }
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def escalate_to_human(psid: str, reason: str, last_message: str = "") -> dict:
@@ -288,7 +289,7 @@ async def escalate_to_human(psid: str, reason: str, last_message: str = "") -> d
     `last_message` KHONG nam trong tool schema expose cho LLM - orchestrator tu
     bom vao (tin nhan hien tai cua khach) de admin co ngu canh ngay trong thong bao.
     """
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
         if customer is None:
@@ -315,7 +316,7 @@ async def escalate_to_human(psid: str, reason: str, last_message: str = "") -> d
                 "UPDATE conversations SET bot_paused = TRUE WHERE id = $1", conversation_id
             )
     finally:
-        await conn.close()
+        await release(conn)
 
     # Log + notify ngoai transaction chinh - loi o day (vd Telegram down) khong
     # duoc lam rollback viec danh dau bot_paused, vi do moi la phan quan trong nhat.

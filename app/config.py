@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://alpha3s:alpha3s@db:5432/alpha3s"
     redis_url: str = "redis://redis:6379/0"
 
+    # DB connection pool (I-B M0.2, CA-REVIEW-M0-DEV §9): min/max MOI process + command timeout.
+    # Baseline min=1/max=5 moi process (2 API worker + 1 arq ~ 15 conn < default 100) - do roi chinh.
+    db_pool_min_size: int = 1
+    db_pool_max_size: int = 5
+    db_command_timeout: float = 30.0
+
     # LLM (DeepSeek)
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"

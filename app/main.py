@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,9 +9,18 @@ from app.api.dashboard import router as dashboard_router
 from app.api.legal import router as legal_router
 from app.api.webhook import router as webhook_router
 from app.config import settings
+from app.db_pool import close_pool
 from app.security.headers import SecurityHeadersMiddleware
 
-app = FastAPI(title="Alpha3S – 3S Coffee Sales Agent")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Pool tao lazy o lan query dau (sau fork). Dong sach luc shutdown (I-B M0.2).
+    yield
+    await close_pool()
+
+
+app = FastAPI(title="Alpha3S – 3S Coffee Sales Agent", lifespan=lifespan)
 
 # I-B M0.5: security headers cho API response (CA §12.2 — dashboard Next + Caddy tu set rieng)
 app.add_middleware(SecurityHeadersMiddleware)

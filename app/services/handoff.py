@@ -11,6 +11,7 @@ import asyncpg
 import httpx
 
 from app.config import settings
+from app.db_pool import acquire, release
 from app.services import conversation_log
 
 # Cac cum tu pho bien khi khach CHU DONG doi gap nguoi that. Day la luoi an toan
@@ -64,31 +65,31 @@ async def resolve_psid(identifier: str) -> str:
     tra ve nguyen identifier, coi nhu da la PSID (tuong thich nguoc).
     """
     if identifier.isdigit():
-        conn = await asyncpg.connect(_db_url())
+        conn = await acquire()
         try:
             row = await conn.fetchrow("SELECT psid FROM customers WHERE id = $1", int(identifier))
             if row:
                 return row["psid"]
         finally:
-            await conn.close()
+            await release(conn)
     return identifier
 
 
 async def get_short_code(psid: str) -> str | None:
     """Lay ma khach hang ngan (customers.id) tuong ung voi 1 psid, de hien thi
     trong thong bao Telegram thay vi PSID day du."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
         return str(row["id"]) if row else None
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def is_bot_paused(psid: str) -> bool:
     """True neu hoi thoai gan nhat cua khach dang bot_paused=TRUE (nhan vien da
     tiep quan). Khach moi/chua co conversation nao -> mac dinh False."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow(
             """
@@ -103,7 +104,7 @@ async def is_bot_paused(psid: str) -> bool:
         )
         return bool(row["bot_paused"]) if row else False
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def pause_bot(psid: str, reason: str = "Nhan vien chu dong pause tu dashboard") -> bool:
@@ -111,7 +112,7 @@ async def pause_bot(psid: str, reason: str = "Nhan vien chu dong pause tu dashbo
     dashboard (issue #8), khong qua escalate_to_human/LLM. Tao conversation moi
     neu khach chua tung co (vd nhan vien pause truoc ca khi khach nhan tin).
     Cung log vao escalations de nhat quan voi luong escalate qua tool."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
         if customer is None:
@@ -136,7 +137,7 @@ async def pause_bot(psid: str, reason: str = "Nhan vien chu dong pause tu dashbo
                 "UPDATE conversations SET bot_paused = TRUE WHERE id = $1", conversation_id
             )
     finally:
-        await conn.close()
+        await release(conn)
 
     try:
         await log_escalation(conversation_id, reason)
@@ -148,7 +149,7 @@ async def pause_bot(psid: str, reason: str = "Nhan vien chu dong pause tu dashbo
 async def resume_bot(psid: str) -> bool:
     """Bat lai bot cho hoi thoai gan nhat cua khach. Tra ve True neu tim thay
     conversation de resume, False neu khach chua tung co conversation nao."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow(
             """
@@ -166,22 +167,22 @@ async def resume_bot(psid: str) -> bool:
         await conn.execute("UPDATE conversations SET bot_paused = FALSE WHERE id = $1", row["id"])
         return True
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def get_customer_contact(psid: str) -> dict:
     """Lay ten/sdt khach da luu (neu co) de dinh kem vao thong bao admin."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow("SELECT name, phone FROM customers WHERE psid = $1", psid)
         return {"name": row["name"], "phone": row["phone"]} if row else {}
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def log_escalation(conversation_id: int, reason: str) -> None:
     """Ghi log ly do escalate vao bang escalations (de sau nay xem lai, cai thien prompt)."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         await conn.execute(
             "INSERT INTO escalations (conversation_id, reason) VALUES ($1, $2)",
@@ -189,14 +190,14 @@ async def log_escalation(conversation_id: int, reason: str) -> None:
             reason,
         )
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def list_paused_conversations() -> list[dict]:
     """Liet ke tat ca hoi thoai dang bot_paused=TRUE, kem ten/sdt khach, ma khach
     hang ngan (customer_id) va ly do escalate gan nhat - dung cho trang admin UI
     va lenh /list tren Telegram."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             """
@@ -214,7 +215,7 @@ async def list_paused_conversations() -> list[dict]:
         )
         return [dict(r) for r in rows]
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def log_note(psid: str, note: str) -> None:

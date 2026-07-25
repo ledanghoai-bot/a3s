@@ -1,22 +1,17 @@
-"""Connection pool dung chung cho asyncpg (issue #9, Bat 1).
+"""Connection pool dung chung cho asyncpg (issue #9 Bat 1; chuan hoa I-B M0.2).
 
-Truoc day, MOI ham trong tung service tu mo 1 connection moi
-(`asyncpg.connect()`) roi dong ngay sau khi dung xong - dung duoc nhung tao
-overhead handshake TCP/TLS + auth moi lan goi, ro net khi nhieu tin nhan den
-cung luc (moi lan xu ly 1 tin nhan co the mo 5-10 connection rieng le).
+Truoc day moi ham tu mo `asyncpg.connect()` roi dong ngay — overhead handshake moi lan goi.
+Module nay cung cap 1 POOL dung chung, tao LAZY o lan `await` dau tien trong event loop cua MOI
+process -> KHONG tao pool truoc fork (uvicorn --workers / arq). Sizing tu settings (min/max moi
+process + command timeout), CA-REVIEW-M0-DEV §9.
 
-Module nay cung cap 1 POOL dung chung, tao 1 lan duy nhat luc app/worker khoi
-dong, tai su dung connection giua cac lan goi. Dung `get_pool()` (async) o dau
-moi ham thay vi `asyncpg.connect()` truc tiep.
+Hai kieu dung:
+- Service moi: `async with (await get_pool()).acquire() as conn: ...`
+- Service cu dung try/finally: `conn = await acquire()` / `await release(conn)` (giu nguyen cau truc,
+  chi doi nguon connection — diff toi thieu khi chuyen 8 service).
 
-QUAN TRONG - pham vi hien tai (17/7): chi moi ap dung cho 2 module goi
-nhieu nhat moi luot chat (`conversation_log.py`, `products.py`). Cac service
-con lai (`handoff.py`, `orders.py`, `price_overrides.py`, `knowledge_entries.py`,
-`metrics.py`, `auth_service.py`, `tools.py`, `rag.py`) VAN dung
-`asyncpg.connect()` truc tiep nhu cu - se di chuyen dan trong cac Bat sau cua
-issue #9, khong lam 1 lan vi pham vi qua rong (~15 file).
+Lifecycle: `close_pool()` goi tu FastAPI lifespan (app/main.py) + arq on_shutdown (app/workers/tasks.py).
 """
-
 import asyncpg
 
 from app.config import settings
@@ -29,22 +24,31 @@ def _db_url() -> str:
 
 
 async def get_pool() -> asyncpg.Pool:
-    """Tra ve pool dung chung, tu tao neu chua co (lazy init - an toan goi
-    nhieu lan, chi tao pool 1 lan duy nhat nho check `_pool is None`)."""
+    """Tra ve pool dung chung, lazy-init 1 lan (an toan goi nhieu lan)."""
     global _pool
     if _pool is None:
         _pool = await asyncpg.create_pool(
             _db_url(),
-            min_size=2,
-            max_size=10,
+            min_size=settings.db_pool_min_size,
+            max_size=settings.db_pool_max_size,
+            command_timeout=settings.db_command_timeout,
         )
     return _pool
 
 
+async def acquire():
+    """Lay 1 connection tu pool (cho service dung try/finally). Nho `await release(conn)`."""
+    return await (await get_pool()).acquire()
+
+
+async def release(conn) -> None:
+    """Tra connection ve pool."""
+    if _pool is not None:
+        await _pool.release(conn)
+
+
 async def close_pool() -> None:
-    """Dong pool luc app/worker shutdown (goi tu FastAPI lifespan/arq
-    on_shutdown neu can dong sach - hien chua bat buoc vi container restart
-    la du don, nhung de san day cho lan tich hop sau)."""
+    """Dong pool luc app/worker shutdown."""
     global _pool
     if _pool is not None:
         await _pool.close()

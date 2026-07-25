@@ -14,6 +14,7 @@ threadpool rieng, xem app/services/embedder.py.
 import asyncpg
 
 from app.config import settings
+from app.db_pool import acquire, release
 from app.services.embedder import embed_async
 
 SOURCE_LABEL = "dashboard:faq"
@@ -28,14 +29,14 @@ def _vec_str(vec: list[float]) -> str:
 
 
 async def list_faq() -> list[dict]:
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             "SELECT id, question, answer, created_at, updated_at FROM faq_entries ORDER BY id"
         )
         return [dict(r) for r in rows]
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def create_faq(question: str, answer: str) -> dict:
@@ -44,7 +45,7 @@ async def create_faq(question: str, answer: str) -> dict:
     content = f"{question}\n{answer}"
     vec_str = _vec_str(await embed_async(content))
 
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         async with conn.transaction():
             entry_id = await conn.fetchval(
@@ -64,7 +65,7 @@ async def create_faq(question: str, answer: str) -> dict:
             )
         return {"id": entry_id, "question": question, "answer": answer}
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def update_faq(entry_id: int, question: str, answer: str) -> dict:
@@ -73,7 +74,7 @@ async def update_faq(entry_id: int, question: str, answer: str) -> dict:
     content = f"{question}\n{answer}"
     vec_str = _vec_str(await embed_async(content))
 
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         async with conn.transaction():
             result = await conn.execute(
@@ -98,15 +99,15 @@ async def update_faq(entry_id: int, question: str, answer: str) -> dict:
             )
         return {"id": entry_id, "question": question, "answer": answer}
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def delete_faq(entry_id: int) -> bool:
     """Xoa FAQ - knowledge_chunks lien quan tu xoa theo qua ON DELETE CASCADE
     (migration 008), khong can xoa tay o day."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         result = await conn.execute("DELETE FROM faq_entries WHERE id = $1", entry_id)
         return result != "DELETE 0"
     finally:
-        await conn.close()
+        await release(conn)

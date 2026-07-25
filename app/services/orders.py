@@ -10,6 +10,7 @@ import uuid
 import asyncpg
 
 from app.config import settings
+from app.db_pool import acquire, release
 
 _STAGES = ["new", "confirmed", "shipped", "done"]
 
@@ -42,7 +43,7 @@ def validate_transition(current: str, new: str) -> None:
 
 
 async def list_orders(limit: int = 200) -> list[dict]:
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             """
@@ -70,11 +71,11 @@ async def list_orders(limit: int = 200) -> list[dict]:
             result.append(d)
         return result
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def update_order_status(order_id: int, new_status: str) -> dict:
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow("SELECT status FROM orders WHERE id = $1", order_id)
         if row is None:
@@ -83,18 +84,18 @@ async def update_order_status(order_id: int, new_status: str) -> dict:
         await conn.execute("UPDATE orders SET status = $1 WHERE id = $2", new_status, order_id)
         return {"id": order_id, "status": new_status}
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def list_products_brief() -> list[dict]:
     """Danh sach san pham gon nhe (sku/ten/ton kho/gia le) - dung cho dropdown
     trong form tao don thu cong tren dashboard."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch("SELECT sku, name, stock, price_vnd FROM products ORDER BY sku")
         return [dict(r) for r in rows]
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def create_order_manual(
@@ -123,7 +124,7 @@ async def create_order_manual(
 
     psid_to_use = psid or f"manual:{uuid.uuid4().hex[:12]}"
 
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         async with conn.transaction():
             product = await conn.fetchrow(
@@ -177,4 +178,4 @@ async def create_order_manual(
             "total_vnd": total,
         }
     finally:
-        await conn.close()
+        await release(conn)

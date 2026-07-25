@@ -13,6 +13,7 @@ Dung asyncpg thuan, cung convention voi cac service khac.
 import asyncpg
 
 from app.config import settings
+from app.db_pool import acquire, release
 from app.services import conversation_log
 
 
@@ -33,7 +34,7 @@ async def create_override(psid: str, quantity: int, unit_price_vnd: int, note: s
     """
     await conversation_log.ensure_conversation(psid)
 
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
         customer_id = customer["id"]  # chac chan co roi vi ensure_conversation() da tao
@@ -50,14 +51,14 @@ async def create_override(psid: str, quantity: int, unit_price_vnd: int, note: s
         )
         return override_id
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def get_active_override(psid: str, quantity: int) -> dict | None:
     """Tim 1 phe duyet CON HIEU LUC (used=FALSE) khop dung psid + quantity.
     Neu quantity khach/bot dua ra khong khop CHINH XAC voi so luong staff da
     duyet, tra ve None (khong duoc tu suy dien/lam tron)."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow(
             """
@@ -73,7 +74,7 @@ async def get_active_override(psid: str, quantity: int) -> dict | None:
         )
         return dict(row) if row else None
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def mark_override_used(override_id: int) -> None:
@@ -81,13 +82,13 @@ async def mark_override_used(override_id: int) -> None:
     khac ngoai y muon. Cap nhat ca `status='used'` de dashboard hien dung nhan
     (khac voi 'rejected') - `used=TRUE` van la nguon that cho logic tao don
     (create_order), khong doi."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         await conn.execute(
             "UPDATE price_overrides SET used = TRUE, status = 'used' WHERE id = $1", override_id
         )
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def reject_override(override_id: int, reason: str) -> None:
@@ -96,7 +97,7 @@ async def reject_override(override_id: int, reason: str) -> None:
     nhung status/reject_reason rieng de dashboard phan biet ro 2 truong hop
     (issue #8 - nang cap UX 16/7 lan 5).
     """
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         await conn.execute(
             "UPDATE price_overrides SET used = TRUE, status = 'rejected', reject_reason = $1 WHERE id = $2",
@@ -104,7 +105,7 @@ async def reject_override(override_id: int, reason: str) -> None:
             override_id,
         )
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def get_latest_unused_override(psid: str) -> dict | None:
@@ -113,7 +114,7 @@ async def get_latest_unused_override(psid: str) -> dict | None:
     tu dien san form tao don tren dashboard (issue #8 - lay du lieu tu /approve
     thay vi staff phai go lai tay).
     """
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow(
             """
@@ -128,13 +129,13 @@ async def get_latest_unused_override(psid: str) -> dict | None:
         )
         return dict(row) if row else None
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def list_unused_overrides(psid: str) -> list[dict]:
     """Lay TAT CA phe duyet CHUA DUNG cua 1 khach, kem id de dashboard gan nut
     "Da tao don" cho tung dong rieng (issue #8 - nang cap UX 16/7)."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             """
@@ -148,12 +149,12 @@ async def list_unused_overrides(psid: str) -> list[dict]:
         )
         return [dict(r) for r in rows]
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def count_unused_overrides(psid: str) -> int:
     """So phe duyet chua dung - dung cho nhan "/a(N)" tren dashboard."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         return await conn.fetchval(
             """
@@ -165,7 +166,7 @@ async def count_unused_overrides(psid: str) -> int:
             psid,
         )
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def list_all_overrides(psid: str) -> list[dict]:
@@ -173,7 +174,7 @@ async def list_all_overrides(psid: str) -> list[dict]:
     khong loc/an - de dashboard hien lai lich su du da xu ly xong (issue #8 -
     nang cap UX 16/7 lan 5, thay vi lam bien mat khoi giao dien nhu ban truoc).
     """
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             """
@@ -188,4 +189,4 @@ async def list_all_overrides(psid: str) -> list[dict]:
         )
         return [dict(r) for r in rows]
     finally:
-        await conn.close()
+        await release(conn)

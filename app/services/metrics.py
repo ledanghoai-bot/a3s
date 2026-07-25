@@ -12,6 +12,7 @@ Dung asyncpg thuan, cung convention voi cac service khac.
 import asyncpg
 
 from app.config import settings
+from app.db_pool import acquire, release
 
 # Chuoi con duy nhat, khop dung cau fallback co dinh trong system_prompt.md
 # muc "Khi khong co thong tin": "Hien chung toi chua co thong tin xac nhan..."
@@ -28,7 +29,7 @@ async def list_messages_per_day(days: int = 14) -> list[dict]:
     """So tin nhan theo tung ngay, tach theo role (customer/bot/agent), N
     ngay gan nhat (mac dinh 14). Ngay khong co tin nhan nao se KHONG xuat
     hien trong ket qua (khong tu dien 0) - frontend tu xu ly hien thi."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             """
@@ -47,7 +48,7 @@ async def list_messages_per_day(days: int = 14) -> list[dict]:
         )
         return [dict(r) for r in rows]
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def get_conversion_rate() -> dict:
@@ -56,7 +57,7 @@ async def get_conversion_rate() -> dict:
     "co bao nhieu % khach tung chat cuoi cung co dat don chua", khong phai
     ty le theo tung ngay/tuan (qua phuc tap cho ban dau, co the mo rong sau).
     """
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         total_customers = await conn.fetchval("SELECT COUNT(*) FROM customers")
         customers_with_orders = await conn.fetchval(
@@ -69,7 +70,7 @@ async def get_conversion_rate() -> dict:
             "conversion_rate_pct": round(rate, 1),
         }
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def list_unanswered_questions(limit: int = 20) -> list[dict]:
@@ -82,7 +83,7 @@ async def list_unanswered_questions(limit: int = 20) -> list[dict]:
     NLP/fuzzy matching (qua phuc tap cho pham vi hien tai) - 2 cau hoi khac
     nhau du cung y nghia se bi dem rieng neu khac chu.
     """
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             """
@@ -123,4 +124,4 @@ async def list_unanswered_questions(limit: int = 20) -> list[dict]:
         result = sorted(grouped.values(), key=lambda x: x["count"], reverse=True)
         return result[:limit]
     finally:
-        await conn.close()
+        await release(conn)

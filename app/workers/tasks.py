@@ -102,8 +102,15 @@ async def _process_message_inner(event: dict) -> None:
     await send_text(sender_id, reply)
 
 
+async def _on_shutdown(ctx) -> None:
+    # Dong DB pool cua worker luc shutdown (I-B M0.2). Pool tao lazy trong event loop cua worker.
+    from app.db_pool import close_pool
+    await close_pool()
+
+
 class WorkerSettings:
     functions = [process_message]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20
     max_tries = 3  # issue #9 Bat 1: khai bao ro rang thay vi dua vao default cua arq
+    on_shutdown = _on_shutdown

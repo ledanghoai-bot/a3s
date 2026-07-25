@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 
 from app.config import settings
+from app.db_pool import acquire, release
 from app.services import permission_service
 
 SESSION_TTL_HOURS = 24 * 7  # 7 ngay
@@ -46,7 +47,7 @@ async def create_staff_user(
     username: str, password: str, name: str = "", role_key: str | None = None
 ) -> dict:
     password_hash, salt = _hash_password(password)
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         has_role = await _has_column(conn, "staff_users", "role_key")
         try:
@@ -67,14 +68,14 @@ async def create_staff_user(
         return {"id": staff_id, "username": username, "name": name,
                 "role_key": role_key if has_role else None}
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def authenticate(username: str, password: str) -> dict | None:
     """Tra ve thong tin staff neu dung username+password VA tai khoan dang
     active, nguoc lai tra ve None (khong phan biet 'sai username' voi 'sai
     password' trong thong bao loi - tranh lo thong tin tai khoan nao ton tai)."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow(
             "SELECT id, username, password_hash, password_salt, name, is_active "
@@ -87,13 +88,13 @@ async def authenticate(username: str, password: str) -> dict | None:
             return None
         return {"id": row["id"], "username": row["username"], "name": row["name"]}
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def create_session(staff_id: int) -> str:
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         await conn.execute(
             "INSERT INTO staff_sessions (staff_id, token, expires_at) VALUES ($1, $2, $3)",
@@ -103,7 +104,7 @@ async def create_session(staff_id: int) -> str:
         )
         return token
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def _has_column(conn, table: str, col: str) -> bool:
@@ -119,7 +120,7 @@ async def validate_session(token: str) -> dict | None:
     role_key/permissions query MOI request (khong cache — CA §6). Feature-detect: DB truoc
     migration 016/017 van chay (rbac_provisioned=False, permissions rong) -> require_permission
     degrade ve hanh vi require_staff_session (khong lam vo dashboard o moi truong 012)."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         row = await conn.fetchrow(
             """
@@ -146,35 +147,35 @@ async def validate_session(token: str) -> dict | None:
             "rbac_provisioned": authz["rbac_provisioned"], "must_change_password": must_change,
         }
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def delete_session(token: str) -> None:
     """Dung khi logout - xoa dung 1 session, khong anh huong session khac
     (vd staff dang dang nhap tren nhieu thiet bi)."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         await conn.execute("DELETE FROM staff_sessions WHERE token = $1", token)
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def list_staff_users() -> list[dict]:
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         rows = await conn.fetch(
             "SELECT id, username, name, is_active, created_at FROM staff_users ORDER BY id"
         )
         return [dict(r) for r in rows]
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def set_staff_active(staff_id: int, is_active: bool) -> None:
     """Vo hieu hoa/kich hoat lai 1 tai khoan - KHONG xoa han, giu lich su.
     Vo hieu hoa se lam tat ca session hien tai cua staff do bi tu choi ngay
     o lan goi API tiep theo (validate_session check is_active)."""
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         result = await conn.execute(
             "UPDATE staff_users SET is_active = $1 WHERE id = $2", is_active, staff_id
@@ -182,7 +183,7 @@ async def set_staff_active(staff_id: int, is_active: bool) -> None:
         if result == "UPDATE 0":
             raise LookupError(f"Khong tim thay staff id={staff_id}")
     finally:
-        await conn.close()
+        await release(conn)
 
 
 # --- RBAC / hardening helpers (I-B M0.4/M0.5) --------------------------------
@@ -206,13 +207,13 @@ async def get_staff_admin_state(conn, staff_id: int) -> dict | None:
 
 
 async def verify_current_password(staff_id: int, password: str) -> bool:
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         r = await conn.fetchrow(
             "SELECT password_hash, password_salt FROM staff_users WHERE id=$1", staff_id)
         return bool(r) and _verify_password(password, r["password_hash"], r["password_salt"])
     finally:
-        await conn.close()
+        await release(conn)
 
 
 async def change_password(
@@ -222,7 +223,7 @@ async def change_password(
     """Doi mat khau + xoa co must_change_password + REVOKE tat ca session cu + audit fail-closed.
     Tat ca trong 1 transaction (mutation + audit commit/rollback cung nhau)."""
     ph, salt = _hash_password(new_password)
-    conn = await asyncpg.connect(_db_url())
+    conn = await acquire()
     try:
         async with conn.transaction():
             if await _has_column(conn, "staff_users", "must_change_password"):
@@ -242,4 +243,4 @@ async def change_password(
                     actor_staff_id=actor_staff_id, actor_ref=actor_username,
                     entity_type="staff_user", entity_id=str(staff_id), reason=reason)
     finally:
-        await conn.close()
+        await release(conn)
