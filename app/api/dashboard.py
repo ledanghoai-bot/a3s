@@ -6,7 +6,7 @@ app/api/auth_router.py cho login/logout).
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.auth import require_active_session
+from app.api.auth import require_active_session, require_permission
 from app.config import settings
 from app.services import (
     conversation_log,
@@ -357,11 +357,14 @@ async def delete_product_endpoint(product_id: int) -> dict:
 @router.put("/products/{product_id}/tiers")
 async def replace_price_tiers_endpoint(
     product_id: int, body: dict,
-    staff: dict = Depends(require_active_session),
+    staff: dict = Depends(require_permission("price.manage")),
 ) -> dict:
     """Body: {"tiers": [{"min_qty": 5, "unit_price_vnd": 160000}, ...]}.
-    Thay TOAN BO bac gia cua san pham nay bang danh sach moi (xem
-    products.py:replace_price_tiers). `staff` -> audit fail-closed mutation gia (PO scope-change M0)."""
+    Thay TOAN BO bac gia cua san pham nay bang danh sach moi (xem products.py:replace_price_tiers).
+
+    RBAC: mutation TAI CHINH -> BAT BUOC quyen `price.manage` (CA-REVIEW-M0-CLOSURE §3 P0: chi
+    require_active_session la KHONG DU - staff khong duoc cap price.manage van sua duoc gia). `staff`
+    (actor) lay tu chinh dependency require_permission -> audit fail-closed mutation gia."""
     tiers = body.get("tiers")
     if tiers is None or not isinstance(tiers, list):
         raise HTTPException(status_code=422, detail="Thieu truong 'tiers' (danh sach) trong body")

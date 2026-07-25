@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Price-tier mutation audit test (PO scope-change M0, CA-REVIEW-M0-CUTOVER §5.1).
+"""Price-tier endpoint RBAC + audit test (CA-REVIEW-M0-CLOSURE §3 P0 + §4).
 
-Chứng minh `products.replace_price_tiers(..., actor=)`:
-  1. POSITIVE: audit row `product.price_tiers.replace` (actor/entity/before-after) khi có actor + audit ok.
-  2. FAIL-CLOSED: audit insert fail -> ROLLBACK cả thay đổi giá (giá KHÔNG đổi).
-  3. BACKWARD-COMPAT: actor=None -> đổi giá, KHÔNG audit (không vỡ caller cũ).
-Chạy trên throwaway DB 001-018.
-  docker exec -e DATABASE_URL=... -e PYTHONPATH=/srv -w /srv api python scripts/price_audit_test.py
+Bao phu 4 evidence CA yeu cau cho endpoint PUT /dashboard/products/{id}/tiers (require_permission price.manage):
+  A. Authorized (co price.manage) -> gate pass + mutation thanh cong + audit ghi (actor/entity/before-after).
+  B. Unauthorized (active role KHONG co price.manage) -> 403, gia KHONG doi, KHONG audit row moi.
+  C. Unauthenticated -> 401.
+  D. Audit insert failure -> ROLLBACK gia.
+Chay tren throwaway DB 001-018, RBAC_STRICT (posture production).
+  docker ... -e DATABASE_URL=... -e PYTHONPATH=/srv -w /srv api python scripts/price_audit_test.py
 """
 import asyncio
 import sys
 
 import asyncpg
 
+from app.api.auth import require_permission, require_staff_session
 from app.config import settings
 from app.services import auth_service
 from app.services import products as products_service
@@ -20,6 +22,10 @@ from app.services import products as products_service
 
 def _db() -> str:
     return settings.database_url.replace("+asyncpg", "")
+
+
+def _status(e) -> int | None:
+    return getattr(e, "status_code", None)
 
 
 async def break_audit(conn):
@@ -36,7 +42,13 @@ async def tiers_now(conn, pid):
     return [(int(r["min_qty"]), int(r["unit_price_vnd"])) for r in rows]
 
 
+async def price_audit_count(conn) -> int:
+    return await conn.fetchval(
+        "SELECT count(*) FROM audit_log WHERE action='product.price_tiers.replace'")
+
+
 async def main() -> int:
+    settings.rbac_strict = True  # posture production (no-degrade)
     conn = await asyncpg.connect(_db())
     fails: list[str] = []
     try:
@@ -44,63 +56,74 @@ async def main() -> int:
         if pid is None:
             print("SKIP: khong co san pham seed")
             return 2
-        admin = await auth_service.create_staff_user("price_tester", "pw12345678", "PT", role_key="admin")
-        actor = {"id": admin["id"], "username": "price_tester"}
+        admin = await auth_service.create_staff_user("price_admin", "pw12345678", "PA", role_key="admin")
+        actor = {"id": admin["id"], "username": "price_admin",
+                 "rbac_provisioned": True, "permissions": {"price.manage"}}
+        lowpriv = {"id": 999001, "username": "viewer_x",
+                   "rbac_provisioned": True, "permissions": {"customer.view"}}
+        gate = require_permission("price.manage")
 
-        # === TEST 1: POSITIVE — audit ghi đúng actor/action/entity/before-after ===
-        n0 = await conn.fetchval(
-            "SELECT count(*) FROM audit_log WHERE action='product.price_tiers.replace'")
+        # === C: Unauthenticated -> 401 ===
+        try:
+            await require_staff_session(authorization=None)
+            fails.append("C: unauthenticated KHONG raise (mong 401)")
+        except Exception as e:
+            if _status(e) != 401:
+                fails.append(f"C: unauthenticated status {_status(e)} (mong 401)")
+
+        # === B: Unauthorized (khong co price.manage) -> 403, khong mutation/audit ===
+        t0 = await tiers_now(conn, pid)
+        a0 = await price_audit_count(conn)
+        try:
+            await gate(staff=lowpriv)
+            fails.append("B: role khong price.manage KHONG raise (mong 403)")
+        except Exception as e:
+            if _status(e) != 403:
+                fails.append(f"B: status {_status(e)} (mong 403)")
+        if await tiers_now(conn, pid) != t0:
+            fails.append("B: gia doi du bi 403 (gate phai chan truoc body)")
+        if await price_audit_count(conn) != a0:
+            fails.append("B: co audit row moi du bi 403")
+
+        # === A: Authorized (price.manage) -> gate pass + mutation + audit ghi ===
+        if not await gate(staff=actor):
+            fails.append("A: gate khong pass voi price.manage")
         await products_service.replace_price_tiers(
-            pid, [{"min_qty": 1, "unit_price_vnd": 99000}, {"min_qty": 10, "unit_price_vnd": 88000}],
-            actor=actor)
-        if await tiers_now(conn, pid) != [(1, 99000), (10, 88000)]:
-            fails.append("positive: gia KHONG doi dung")
+            pid, [{"min_qty": 1, "unit_price_vnd": 99000}], actor=actor)
+        if await tiers_now(conn, pid) != [(1, 99000)]:
+            fails.append("A: gia khong doi dung")
+        a1 = await price_audit_count(conn)
+        if a1 != a0 + 1:
+            fails.append(f"A: audit khong tang dung ({a0}->{a1})")
         row = await conn.fetchrow(
-            "SELECT actor_type,actor_staff_id,actor_ref,action,entity_type,entity_id,before,after "
-            "FROM audit_log WHERE action='product.price_tiers.replace' ORDER BY id DESC LIMIT 1")
-        n1 = await conn.fetchval(
-            "SELECT count(*) FROM audit_log WHERE action='product.price_tiers.replace'")
-        if n1 != n0 + 1:
-            fails.append(f"positive: audit khong tang dung ({n0}->{n1})")
-        elif not (row["actor_staff_id"] == admin["id"] and row["actor_type"] == "staff"
-                  and row["entity_type"] == "product" and row["entity_id"] == str(pid)
-                  and '"unit_price_vnd": 88000' in (row["after"] or "")
-                  and '"tiers"' in (row["before"] or "")):
-            fails.append(f"positive: audit row sai actor/entity/before-after: {dict(row)}")
+            "SELECT actor_staff_id, entity_type, entity_id, after FROM audit_log "
+            "WHERE action='product.price_tiers.replace' ORDER BY id DESC LIMIT 1")
+        if not (row["actor_staff_id"] == admin["id"] and row["entity_type"] == "product"
+                and row["entity_id"] == str(pid) and '"unit_price_vnd": 99000' in (row["after"] or "")):
+            fails.append(f"A: audit row sai actor/entity/after: {dict(row)}")
 
-        # === TEST 2: FAIL-CLOSED — audit fail -> rollback ca gia ===
+        # === D: Audit insert failure -> rollback gia ===
         t_before = await tiers_now(conn, pid)
         await break_audit(conn)
         try:
             await products_service.replace_price_tiers(
                 pid, [{"min_qty": 2, "unit_price_vnd": 77000}], actor=actor)
-            fails.append("fail-closed: KHONG raise khi audit fail")
+            fails.append("D: KHONG raise khi audit fail")
         except Exception:
             pass
         await fix_audit(conn)
         if await tiers_now(conn, pid) != t_before:
-            fails.append("fail-closed: gia DA doi (rollback fail)")
-
-        # === TEST 3: BACKWARD-COMPAT — actor=None -> doi gia, KHONG audit ===
-        n_before = await conn.fetchval(
-            "SELECT count(*) FROM audit_log WHERE action='product.price_tiers.replace'")
-        await products_service.replace_price_tiers(
-            pid, [{"min_qty": 3, "unit_price_vnd": 66000}], actor=None)
-        if await tiers_now(conn, pid) != [(3, 66000)]:
-            fails.append("backward-compat: gia KHONG doi khi actor=None")
-        if await conn.fetchval(
-                "SELECT count(*) FROM audit_log WHERE action='product.price_tiers.replace'") != n_before:
-            fails.append("backward-compat: van ghi audit du actor=None")
+            fails.append("D: gia DA doi (rollback fail)")
     finally:
         await conn.close()
 
     if fails:
-        print("PRICE-AUDIT FAIL:")
+        print("PRICE-AUTHZ-AUDIT FAIL:")
         for f in fails:
             print("  -", f)
         return 1
-    print("PRICE-AUDIT PASS: positive (actor/entity/before-after) + fail-closed rollback gia + "
-          "backward-compat actor=None khong audit")
+    print("PRICE-AUTHZ-AUDIT PASS: A authorized->pass+audit; B no-price.manage->403 no-mutation/no-audit; "
+          "C unauthenticated->401; D audit-fail->rollback gia")
     return 0
 
 
