@@ -22,6 +22,11 @@ export function middleware(request) {
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
+  // BẮT BUỘC (Next 14 App Router): set CSP LÊN CẢ request header để Next đọc nonce từ đây và tự gắn
+  // nonce vào MỌI <script> (bootstrap inline + external chunk) + ép dynamic rendering. Nếu chỉ set trên
+  // response, production build (`next start`) render script KHÔNG có nonce -> 'strict-dynamic' chặn ->
+  // hydration vỡ -> dashboard không hiện form login (bug hotfix sau M0 cutover).
+  requestHeaders.set("Content-Security-Policy", csp);
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("Content-Security-Policy", csp);
   response.headers.set("X-Content-Type-Options", "nosniff");
