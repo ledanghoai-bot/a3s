@@ -63,8 +63,9 @@ async def main() -> int:
         if not await conn.fetchval("SELECT count(*) FROM audit_log WHERE action='staff.create'"):
             fails.append("create_staff: audit ok nhưng không ghi audit_log")
 
-        # === TEST 2: change_password ROLLBACK khi audit fail ===
+        # === TEST 2: change_password ROLLBACK (mật khẩu + SESSION REVOCATION) khi audit fail ===
         target = await auth_service.create_staff_user("u_pw", "oldpass1", "PW", role_key="sales")
+        sess = await auth_service.create_session(target["id"])  # session để kiểm revocation rollback
         await break_audit(conn)
         try:
             await auth_service.change_password(
@@ -75,6 +76,31 @@ async def main() -> int:
         await fix_audit(conn)
         if not await auth_service.verify_current_password(target["id"], "oldpass1"):
             fails.append("change_password: mật khẩu ĐÃ đổi (rollback fail)")
+        if await conn.fetchval("SELECT count(*) FROM staff_sessions WHERE token=$1", sess) != 1:
+            fails.append("change_password: session bị revoke dù audit fail (revocation rollback fail)")
+
+        # === TEST 3: staff.update (deactivate) ROLLBACK khi audit fail ===
+        s3 = await auth_service.create_staff_user("u_upd", "pass1234", "UPD", role_key="sales")
+        await break_audit(conn)
+        try:
+            await auth_router.update_staff(s3["id"], {"is_active": False}, actor=actor)
+            fails.append("staff.update(deactivate): KHÔNG raise khi audit fail")
+        except Exception:
+            pass
+        await fix_audit(conn)
+        if not await conn.fetchval("SELECT is_active FROM staff_users WHERE id=$1", s3["id"]):
+            fails.append("staff.update(deactivate): is_active ĐÃ đổi (rollback fail)")
+
+        # === TEST 4: staff.update (role change) ROLLBACK khi audit fail ===
+        await break_audit(conn)
+        try:
+            await auth_router.update_staff(s3["id"], {"role_key": "warehouse"}, actor=actor)
+            fails.append("staff.update(role): KHÔNG raise khi audit fail")
+        except Exception:
+            pass
+        await fix_audit(conn)
+        if await conn.fetchval("SELECT role_key FROM staff_users WHERE id=$1", s3["id"]) != "sales":
+            fails.append("staff.update(role): role_key ĐÃ đổi (rollback fail)")
     finally:
         await conn.close()
 
@@ -83,8 +109,8 @@ async def main() -> int:
         for f in fails:
             print("  -", f)
         return 1
-    print("AUDIT-ROLLBACK ENDPOINT PASS: staff.create + password_change ROLLBACK mutation khi audit "
-          "insert fail; audit-ok path ghi audit_log")
+    print("AUDIT-ROLLBACK ENDPOINT PASS: staff.create + password_change(+session revocation) + "
+          "staff.update(deactivate) + staff.update(role) ROLLBACK khi audit insert fail; audit-ok ghi audit_log")
     return 0
 
 
