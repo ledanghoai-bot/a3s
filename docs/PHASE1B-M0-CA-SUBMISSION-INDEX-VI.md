@@ -2,58 +2,69 @@
 id: A3S-PHASE1B-M0-CA-SUBMISSION-INDEX-001
 title: Alpha3S I-B M0 — Văn bản tổng hợp gửi CA (index + việc đã làm + vị trí file)
 document_type: submission_index
-responds_to: A3S-PHASE1B-CA-REVIEW-M0-DEV-003
+responds_to: A3S-PHASE1B-CA-REVIEW-M0-DEV-004
 owner: Alpha3S
 author_role: Dev
-version: 1.0.0
+version: 1.0.1
 status: submitted_to_ca
 created_at: 2026-07-25
+last_updated: 2026-07-25 15:07 GMT+7
 branch: phase1b-m0
-head_commit: b1a1da1b1be7bc4d3aafac202778734cbf74daa2
-evidence_commit: 931943d5c1a413771fa6c6ff4c96bf890ad9389a
+tested_code_sha: 8a702d616eab54d5def9292a40593ff1b1540b04
+submission_head: 3b45376523c05334da52429b269131315c65f568
+proposed_release_sha: 8a702d616eab54d5def9292a40593ff1b1540b04
+proposed_release_tag: ib-m0-rc1
 language: vi-VN
 ---
 
-# I-B M0 — Văn bản tổng hợp gửi CA
+# I-B M0 — Văn bản tổng hợp gửi CA (v1.0.1)
 
-> Bản index để CA **truy cập & kiểm tra read-only**. Liệt kê: (A) việc đã làm cycle này, (B) vị trí mọi
-> file, (C) mapping CA §11, (D) commit manifest, (E) cách verify.
+> Bản index để CA **truy cập & kiểm tra read-only**. Cập nhật cho vòng CA-REVIEW-M0-DEV-004: phân biệt rõ
+> **3 SHA** (CA §2), đóng 4 P0 còn lại. Liệt kê: (A) việc cycle này, (B) vị trí file, (C) mapping CA-004,
+> (D) commit manifest, (E) cách verify.
 
-## 0. Truy cập
-- **Repo:** `D:\alpha3s` (Windows dev). Remote `gitlab` (`gitlab.com/alpha3s-dev/alpha3s`) — **branch
-  `phase1b-m0` CHƯA push** (theo yêu cầu giữ local tới khi CA duyệt). CA đọc bản local/relayed.
-- **Branch:** `phase1b-m0` · **HEAD:** `b1a1da1b1be7bc4d3aafac202778734cbf74daa2`.
-- **Evidence pinned SHA (code đã rehearsal):** `931943d5c1a413771fa6c6ff4c96bf890ad9389a` (git clean).
-- **main** = `c210a84` (không đổi; branch chưa merge). **Production KHÔNG có code M0** (main).
+## 0. Truy cập & phân biệt SHA (CA-REVIEW-M0-DEV-004 §2)
+- **Repo:** `D:\alpha3s` (Windows dev). Branch `phase1b-m0` **CHƯA push / CHƯA merge** (giữ local tới khi CA
+  duyệt). **main = `c210a84`** (không đổi) → **production KHÔNG có code M0**.
+- **`tested_code_sha` = `8a702d6…`** — SHA chứa toàn bộ code+test đã rehearsal (git clean tại thời điểm test).
+- **`submission_head` = `3b45376…`** — HEAD chứa các artifact tài liệu v1.0.2 (runbook/evidence/ADR).
+  Index này nằm 1 commit trên đó.
+- **`proposed_release_sha/tag` = `8a702d6…` / `ib-m0-rc1`** — điểm freeze phát hành. Các commit tài liệu
+  sau `8a702d6` **không đổi runtime code** → release vẫn ghim `8a702d6`. **KHÔNG dùng `931943d…`** (evidence
+  v1.0.1 cũ) làm release SHA.
 
-## A. Việc đã làm (cycle CA-REVIEW-M0-DEV-003)
-1. **4 P0 runner** (review 001) — CLOSED bởi CA; evidence E1-E6→E10.
-2. **Startup readiness FAIL-CLOSED** (§6): `startup_verdict` (pure, testable) — DB/query error KHÔNG tạo
-   readiness giả; half-provisioned→fail; pre-016 skip chỉ khi non-strict. Bỏ catch-all.
-3. **Endpoint-level audit rollback** (§9): `staff.create` + `password_change` rollback mutation khi audit
-   insert fail (force `CHECK(false)`), audit-ok path ghi `audit_log`.
-4. **Versioned RBAC seed** (§5): `migration 018_rbac_seed.sql` thay chạy proposal bằng psql.
-5. **Staff assignment procedure** (§5): `assign_staff_roles.py` idempotent/transactional/cardinality
-   fail-closed, mapping từ file kiểm soát truy cập (không PII repo).
-6. **Session TTL≤48h** + **dashboard CSP baseline** (§8) (ghi rõ hạn chế Next inline-script → nonce follow-up).
-7. **Evidence Package v1.0.1** ghim SHA mới `931943d` — **E1-E10** (command+exit code+log+checksum+mapping).
-8. **Runbook v1.0.1** (§5+§10): RBAC cutover unit (RBAC_STRICT bật sau cùng), immutable SHA, backup
-   restore-check bắt buộc, không test-order/không throttle tài khoản thật, host alias.
-9. **PO đã ký 4 văn bản** (matrix/018, staff worksheet, auth ADR localStorage, audit DB-role exception→M2).
-10. **Ops:** cron `pg_dump` ngày trên VPS (PO duyệt) — deploy `/srv/pg_backup_daily.sh` + crontab
-    `30 3 * * *` (+07) + retention 14; test run OK 840K. (Gap CA §4.3 đóng.)
+## A. Việc đã làm (cycle CA-REVIEW-M0-DEV-004 — 4 P0)
+1. **P0 Runbook §4 — bỏ claim sai `RBAC_STRICT=false`:** runbook lên **v1.0.2**, **Phương án A maintenance
+   cutover** (CA ưu tiên): chặn staff traffic (stop dashboard) TRƯỚC 016 → migrate → gán role trong
+   maintenance → verify → `RBAC_STRICT=true` → recreate → smoke → **mới mở traffic**. Ghi rõ: sau 016
+   `rbac_provisioned=true` nên staff chưa role **403 bất kể strict** → `RBAC_STRICT=false` **KHÔNG** phải
+   recovery. Exact rollback = giữ maintenance + sửa/chạy lại assignment **hoặc** redeploy code cũ `c210a84`
+   (RBAC-unaware).
+2. **P0 §5 — nonce CSP loại `unsafe-inline`:** `dashboard/middleware.js` (Next 14) đặt
+   `script-src 'self' 'nonce-<random>' 'strict-dynamic'`; `next.config.mjs` bỏ CSP tĩnh. **Verified:** header
+   no-unsafe-inline + nonce **đổi mỗi request** + **browser smoke 0 CSP violation / 0 console error**, dashboard
+   render+hydrate OK. ADR → **v1.0.1** (điều kiện activation đã đạt).
+3. **P0 §6 — audit endpoint rollback đủ:** `audit_rollback_endpoint_test.py` mở rộng — thêm
+   **`staff.update(deactivate)` + `staff.update(role change)` + session revocation** (ngoài staff.create,
+   password_change). Tất cả rollback mutation/session khi audit insert fail.
+4. **P0 §7 — E9/E10 executable có exit code:** `scripts/rbac_strict_test.py` (E9, exit 0) +
+   `scripts/rbac_half_provisioned_test.py` (E10, exit 0). Không còn exit code `—`.
+5. **Evidence Package → v1.0.2** ghim `8a702d6`: E1-E10 + **E-CSP**, exit codes thật, **log manifest sha256
+   immutable** (CA §7), bảng checksum code (engine byte-identical v1.0.1).
+6. **Controlled-file operational checks (CA §8):** thêm Runbook **§8** (file tồn tại/permission 600/dry-run
+   no-PII/checksum vào evidence/archive sau cutover) + **§7 cutover ledger** (executor/observer/go-no-go/evidence).
 
 ## B. Vị trí file (repo-relative)
 
 ### Báo cáo / quyết định (`docs/`)
 | File | Nội dung | Version/Status |
 |---|---|---|
-| `docs/PHASE1B-M0-DEV-REPORT-VI.md` | Dev report tổng M0 | v1.0.5 (single version) |
-| `docs/PHASE1B-M0-EVIDENCE-PACKAGE-VI.md` | **Immutable evidence E1-E10** | **v1.0.1 @ SHA 931943d** |
+| `docs/PHASE1B-M0-EVIDENCE-PACKAGE-VI.md` | **Immutable evidence E1-E10 + E-CSP** | **v1.0.2 @ SHA 8a702d6** |
+| `docs/PHASE1B-PROD-MIGRATION-RUNBOOK-VI.md` | Runbook (Phương án A maintenance cutover) | **v1.0.2** (chưa chạy) |
+| `docs/PHASE1B-AUTH-SESSION-DECISION-RECORD-VI.md` | ADR localStorage (nonce CSP condition met) | **v1.0.1** PO accepted, chờ CA activation |
+| `docs/PHASE1B-M0-DEV-REPORT-VI.md` | Dev report tổng M0 | v1.0.5 |
 | `docs/PHASE1B-PROD-AUDIT-VI.md` | M0.0 production audit + pre-release actions | v1.0.1 |
-| `docs/PHASE1B-PROD-MIGRATION-RUNBOOK-VI.md` | Runbook production migration | v1.0.1 (chưa chạy) |
 | `docs/PHASE1B-RBAC-STAFF-WORKSHEET-VI.md` | Gán role staff | v1.0.1 **PO approved** |
-| `docs/PHASE1B-AUTH-SESSION-DECISION-RECORD-VI.md` | ADR localStorage | **PO accepted**, chờ CA kiến trúc |
 | `docs/PHASE1B-AUDIT-RELEASE-GATE-VI.md` | Audit gate + DB-role exception | **PO accepted** (deadline M2) |
 | `docs/PHASE1B-IMPLEMENTATION-PLAN-VI.md` | Plan M0-M6 | v0.1.3 |
 | `docs/PHASE1B-FEASIBILITY-REPORT-VI/-EN.md`, `...-DEV-RESPONSE-VI.md` | Feasibility | v0.1.1 |
@@ -62,66 +73,71 @@ language: vi-VN
 ### Code / scripts / migrations (đối tượng kiểm tra chính)
 | File | Vai trò |
 |---|---|
-| `scripts/migrate.py` | Runner (baseline threshold, manifest verify, validation wiring, advisory lock) |
+| `scripts/migrate.py` | Runner (baseline threshold, manifest verify, validation wiring, advisory lock) — **identical v1.0.1** |
 | `scripts/baseline_manifest.json` / `baseline_manifest_13.json` | Manifest (prod = manifest-13) |
-| `migrations/014_correct_product_seed.sql` | Corrective 014 (DO-block pre/postcondition) |
-| `migrations/015_audit_log.sql` / `016_rbac.sql` / `017_auth_hardening.sql` / `018_rbac_seed.sql` | M0 migrations |
-| `app/services/audit_service.py` | Audit fail-closed + redaction đệ quy (secret/PII/nested) |
-| `app/services/permission_service.py` | RBAC no-cache + `rbac_ready` + `startup_verdict` |
+| `migrations/014_correct_product_seed.sql` | Corrective 014 (DO-block pre/postcondition) — **identical v1.0.1** |
+| `migrations/015…018` | M0 migrations (018 = versioned RBAC seed; đổi comment/sign-off vs v1.0.1, SQL exec không đổi) |
+| `app/services/audit_service.py` | Audit fail-closed + redaction đệ quy |
+| `app/services/permission_service.py` | RBAC no-cache + `rbac_ready` + `startup_verdict` — **identical v1.0.1** |
 | `app/api/auth.py` | `require_permission` (strict mode) |
-| `app/main.py` | Lifespan startup readiness (fail-closed) |
+| `app/main.py` | Lifespan startup readiness (fail-closed) — **identical v1.0.1** |
 | `app/security/{headers,throttle}.py` | Security headers + login throttling |
-| `scripts/m0_foundation_validation.py` | E3 (audit/permission/redaction) |
-| `scripts/app_integration_validation.py` | E2 (search_products no serving_info) |
-| `scripts/audit_rollback_endpoint_test.py` | E7 (endpoint audit rollback) |
-| `scripts/startup_readiness_test.py` | E8 (startup_verdict 8 cases) |
+| **`dashboard/middleware.js`** | **MỚI — nonce-based CSP (bỏ unsafe-inline script-src)** |
+| `dashboard/next.config.mjs` | Bỏ CSP tĩnh (middleware sở hữu CSP) |
+| `scripts/m0_foundation_validation.py` | E3 |
+| `scripts/audit_rollback_endpoint_test.py` | E7 (mở rộng: staff.update + session revocation) |
+| `scripts/startup_readiness_test.py` | E8 |
+| **`scripts/rbac_strict_test.py`** | **MỚI — E9 executable (exit code)** |
+| **`scripts/rbac_half_provisioned_test.py`** | **MỚI — E10 executable (exit code)** |
 | `scripts/fresh_db_seed_validation.sql` | Post-migration seed assertions |
 | `scripts/assign_staff_roles.py` | Gán role fail-closed |
-| `scripts/rbac_seed_proposed.sql` | Đề xuất matrix (→ migration 018) |
 | `scripts/prod_audit.sql` | Production audit read-only |
-| `scripts/pg_backup_daily.sh` | Cron backup (canonical; bản VPS ở `/srv/pg_backup_daily.sh`) |
+| `scripts/pg_backup_daily.sh` | Cron backup (bản VPS `/srv/pg_backup_daily.sh`) |
 
-## C. Mapping CA §11 (review 003) → vị trí
-| # | Yêu cầu | Vị trí / trạng thái |
+## C. Mapping CA-REVIEW-M0-DEV-004 → vị trí / trạng thái
+| CA §  | Yêu cầu | Vị trí / trạng thái |
 |---|---|---|
-| 1 | Evidence Package v1.0.1 pinned SHA mới | `docs/…EVIDENCE-PACKAGE` v1.0.1 @ `931943d` |
-| 2 | Runbook v1.0.1 | `docs/…RUNBOOK` v1.0.1 |
-| 3 | Fix startup readiness fail-closed | `permission_service.startup_verdict` + `main.py`; test `startup_readiness_test.py` (E8) |
-| 4 | Versioned RBAC seed | `migrations/018_rbac_seed.sql` |
-| 5 | Staff assignment procedure | `scripts/assign_staff_roles.py` |
-| 6 | Endpoint audit rollback tests | `scripts/audit_rollback_endpoint_test.py` (E7) |
-| 7 | CSP + TTL≤48h | `dashboard/next.config.mjs` + `config.session_ttl_hours=48`; ADR ghi hạn chế nonce |
-| 8 | Audit exception deadline M2 + PO | `docs/…AUDIT-RELEASE-GATE` (PO ký, M2) |
-| 9 | PO-completed RBAC worksheet | `docs/…RBAC-STAFF-WORKSHEET` v1.0.1 (PO ký; mapping ở controlled file) |
+| §4 | Runbook bỏ claim sai `RBAC_STRICT=false`; Phương án A | `docs/…RUNBOOK` **v1.0.2** §2A/§3/§3A/§3B/§5 — **DONE** |
+| §5 | Nonce/hash CSP loại unsafe-inline + browser/header smoke | `dashboard/middleware.js`; Evidence **E-CSP**; ADR v1.0.1 — **DONE** |
+| §6 | Audit rollback staff.update/deactivate + session revocation | `scripts/audit_rollback_endpoint_test.py` (**E7**) — **DONE** |
+| §7 | E9/E10 executable + exit code + log assertion | `rbac_strict_test.py` (E9), `rbac_half_provisioned_test.py` (E10) — **DONE** |
+| §7 | Evidence v1.0.2 @ release-candidate SHA + log manifest checksum | `docs/…EVIDENCE-PACKAGE` v1.0.2 @ `8a702d6` §3 — **DONE** |
+| §8 | Controlled-file operational checks | Runbook **§8** + §7 ledger — **DONE (operator thực thi lúc cutover)** |
+| §2 | Phân biệt tested_code_sha / submission_head / release_sha | frontmatter + §0 — **DONE** |
+| §9 | Runbook: release tag, maintenance, exact rollback, CSP pre/post, cron verify, ledger | Runbook §0/§0.1/§1.4/§2A/§3B/§4/§7 — **DONE** |
 
 ## D. Commit manifest (branch `phase1b-m0`, chưa push)
 ```text
-b1a1da1  PO sign-off 4 van ban + cron pg_dump (HEAD)
-8f5315b  docs CA-003: Evidence v1.0.1 + runbook v1.0.1 + gate updates
-931943d  code CA-003: startup readiness fail-closed + TTL/CSP + 018 + assign + endpoint/verdict tests  <-- EVIDENCE SHA
-02abe1e  code CA-002: strict-RBAC + startup readiness + redaction
-edb9d84  docs CA-002: evidence v1.0.0 + report v1.0.5
-5553a1f  M0.0 production audit    | 2f53e05 prod LLM fix    | 128de40 runbook draft
-6f9ed88 / e0ab09a / ef04d61 / d1bc484 / f1ac797 / db94d2c / 29ce7a4  (M0 scaffold + pool + M0.3/4/5 + fixes)
-main = c210a84 (khong doi)
+<this index commit>  docs: submission index v1.0.1 (CA-004)                    (HEAD, sẽ là submission_head+1)
+3b45376  docs CA-004: runbook v1.0.2 + evidence v1.0.2 + ADR v1.0.1            <-- submission_head
+8a702d6  code CA-004: nonce CSP middleware + E9/E10 executable + E7 mở rộng    <-- TESTED_CODE_SHA / RELEASE
+7eb5691  docs: submission index v1.0.0 (CA-003)
+b1a1da1  PO sign-off 4 văn bản + cron pg_dump
+931943d  code CA-003 (evidence v1.0.1 SHA cũ — KHÔNG dùng làm release)
+02abe1e / edb9d84 / 5553a1f / … / 29ce7a4  (CA-002 + scaffold + audit + fixes)
+main = c210a84 (không đổi)
 ```
 
 ## E. Cách CA verify (read-only)
-1. `git checkout 931943d5c1a413771fa6c6ff4c96bf890ad9389a` → `git status` = clean → **code = code đã test**.
-2. Đối chiếu checksum artifact (Evidence §1) + đọc E1-E10 (command + exit code + assertion mapping).
-3. (Tùy chọn) chạy lại rehearsal theo lệnh trong Evidence §2 (container tạm, không đụng prod).
-4. Raw log rehearsal: scratchpad phiên Dev (access-controlled, không commit) — cung cấp khi CA yêu cầu.
-5. Production audit read-only: `scripts/prod_audit.sql` (đã chạy, kết quả `docs/…PROD-AUDIT`).
+1. `git checkout 8a702d616eab54d5def9292a40593ff1b1540b04` → `git status` = clean → **code = code đã test**.
+2. Đối chiếu bảng checksum (Evidence §1) — engine `migrate.py/014/permission_service/main.py` **identical**
+   v1.0.1; `018` chỉ đổi comment (SQL exec không đổi, E1/E4/E6 pass).
+3. Đọc E1-E10 + **E-CSP** (command + exit code + assertion). Chạy lại (tùy chọn) theo lệnh Evidence §2 —
+   container tạm, không đụng prod. Log manifest sha256 (Evidence §3) đảm bảo raw log không đổi sau sign-off.
+4. CSP: `curl -sD - http://<dashboard>/ -o /dev/null | grep -i content-security-policy` → script-src có nonce,
+   không unsafe-inline (browser smoke đã ghi trong `csp_smoke.log`).
+5. Production audit read-only: `scripts/prod_audit.sql` (kết quả `docs/…PROD-AUDIT`).
 
-## F. Chờ CA (blocker duy nhất còn lại)
-- Verify Evidence v1.0.1 → chuyển 4 P0 runner sang `CA verified closed` (đã CLOSED) + **đóng release gate**.
-- **Phê duyệt kiến trúc** Auth/session ADR (PO đã ký risk nghiệp vụ).
-- Cấp **production release approval** → Dev chạy runbook v1.0.1.
-- *(Không còn mục chờ PO hay ops — 4 văn bản PO đã ký, cron đã cài.)*
+## F. Chờ CA (blocker còn lại)
+- Verify Evidence **v1.0.2** → xác nhận 4 P0 CA-004 đóng.
+- **Activation approval** Auth/session exception (điều kiện nonce CSP đã đạt; PO đã ký risk nghiệp vụ).
+- Cấp **production release approval** → Dev chạy Runbook **v1.0.2** (Phương án A) dưới PO gates + maintenance window.
+- *(PO đã ký 4 văn bản; cron backup đã cài + verified.)*
 
 ## Ký
 ```text
-CA SUBMISSION INDEX — tong hop response CA-REVIEW-M0-DEV-003 + PO sign-off + ops cron.
-Branch phase1b-m0, HEAD b1a1da1, evidence SHA 931943d (git clean). Production KHONG thay doi (M0 migration
-chua chay). Cho CA release approval. Author role: Dev (Alpha3S). Ngay: 2026-07-25.
+CA SUBMISSION INDEX v1.0.1 — response CA-REVIEW-M0-DEV-004 (4 P0 dong: runbook Phuong an A, nonce CSP,
+audit endpoint staff.update+session, E9/E10 executable). 3 SHA: tested_code=8a702d6, submission_head=3b45376,
+release=8a702d6/ib-m0-rc1. Production KHONG thay doi (M0 migration chua chay). Cho CA release approval.
+Author role: Dev (Alpha3S). Ngay: 2026-07-25 15:07 GMT+7.
 ```
