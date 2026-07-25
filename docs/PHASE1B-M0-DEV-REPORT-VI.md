@@ -110,8 +110,12 @@ incident) — cần PO/ops: chọn model thay thế (`deepseek-v4-flash` là b�
 `LLM_MODEL` trong `.env` **dev + production**.
 **Cập nhật (v1.0.4):** Dev đã **fix DEV** — `.env` dev + `config.py` default → `deepseek-v4-flash`,
 `up -d --force-recreate` (env_file nạp lúc create, `restart` không đủ); bot dev **hoạt động lại**
-(verified: trả lời thật "Robusta và Arabica", không fallback). **PRODUCTION chưa sửa** — ops cập nhật
-`.env` production + recreate (config default không cứu vì `.env` production override).
+(verified: trả lời thật "Robusta và Arabica", không fallback).
+**Cập nhật (v1.0.5, 25/7): PRODUCTION ĐÃ SỬA** — SSH vào VPS 160.30.157.235 (`/srv/alpha3s`,
+`docker-compose.prod.yml`): backup `.env` → `.env.bak.pre-llmfix`, `sed` `LLM_MODEL=deepseek-chat`
+→ `deepseek-v4-flash`, `up -d --force-recreate api worker telegram_bot telegram_customer_bot`.
+Verified: env trong container api = `deepseek-v4-flash`, 8/8 container Up, và gọi LLM cô lập
+`MODEL_OK: deepseek-v4-flash` (không còn 400 deprecate). Production hết trả fallback.
 
 ## 9. MỚI (v1.0.4) — Auth session decision record + Layer-3 post-014
 
