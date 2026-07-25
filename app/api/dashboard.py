@@ -355,15 +355,18 @@ async def delete_product_endpoint(product_id: int) -> dict:
 
 
 @router.put("/products/{product_id}/tiers")
-async def replace_price_tiers_endpoint(product_id: int, body: dict) -> dict:
+async def replace_price_tiers_endpoint(
+    product_id: int, body: dict,
+    staff: dict = Depends(require_active_session),
+) -> dict:
     """Body: {"tiers": [{"min_qty": 5, "unit_price_vnd": 160000}, ...]}.
     Thay TOAN BO bac gia cua san pham nay bang danh sach moi (xem
-    products.py:replace_price_tiers)."""
+    products.py:replace_price_tiers). `staff` -> audit fail-closed mutation gia (PO scope-change M0)."""
     tiers = body.get("tiers")
     if tiers is None or not isinstance(tiers, list):
         raise HTTPException(status_code=422, detail="Thieu truong 'tiers' (danh sach) trong body")
     try:
-        updated = await products_service.replace_price_tiers(product_id, tiers)
+        updated = await products_service.replace_price_tiers(product_id, tiers, actor=staff)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"product_id": product_id, "price_tiers": updated}

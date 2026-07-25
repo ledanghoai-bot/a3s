@@ -19,6 +19,7 @@ duoc uu tien chuyen sang pool cung conversation_log.py.
 import asyncpg
 
 from app.db_pool import get_pool
+from app.services import audit_service
 from app.services.embedder import embed_async
 
 PRODUCT_SOURCE_LABEL = "dashboard:product"
@@ -185,15 +186,30 @@ async def delete_product(product_id: int) -> None:
             raise LookupError(f"Khong tim thay san pham id={product_id}")
 
 
-async def replace_price_tiers(product_id: int, tiers: list[dict]) -> list[dict]:
+def _tiers_snapshot(rows) -> dict:
+    """Chuẩn hoá bậc giá cho audit before/after (ép int -> JSON số sạch, không Decimal)."""
+    return {"tiers": [
+        {"min_qty": int(r["min_qty"]), "unit_price_vnd": int(r["unit_price_vnd"])} for r in rows]}
+
+
+async def replace_price_tiers(product_id: int, tiers: list[dict], actor: dict | None = None) -> list[dict]:
     """Thay TOAN BO bac gia cua 1 san pham bang danh sach moi (xoa het bac cu,
     insert lai bac moi trong 1 transaction) - don gian hon PATCH tung dong,
-    tranh loi UNIQUE(product_id, min_qty) khi doi thu tu/gia tri min_qty."""
+    tranh loi UNIQUE(product_id, min_qty) khi doi thu tu/gia tri min_qty.
+
+    `actor` (staff dict) truyen tu endpoint -> AUDIT fail-closed mutation gia (PO scope-change M0,
+    CA-REVIEW-M0-CUTOVER §5.1: gia = du lieu tai chinh nhay cam phai co dau vet). actor=None (caller cu/
+    khong co session) -> khong audit, khong lam vo hanh vi cu."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         product = await conn.fetchrow("SELECT id FROM products WHERE id = $1", product_id)
         if product is None:
             raise LookupError(f"Khong tim thay san pham id={product_id}")
+
+        # BEFORE (cho audit) - chup TRUOC khi doi
+        before_rows = await conn.fetch(
+            "SELECT min_qty, unit_price_vnd FROM price_tiers WHERE product_id = $1 ORDER BY min_qty",
+            product_id)
 
         async with conn.transaction():
             await conn.execute("DELETE FROM price_tiers WHERE product_id = $1", product_id)
@@ -204,6 +220,16 @@ async def replace_price_tiers(product_id: int, tiers: list[dict]) -> list[dict]:
                     int(t["min_qty"]),
                     int(t["unit_price_vnd"]),
                 )
+            # AUDIT fail-closed (CUNG transaction): insert audit fail -> ROLLBACK ca doi gia.
+            if actor is not None and await audit_service.audit_exists(conn):
+                after_rows = await conn.fetch(
+                    "SELECT min_qty, unit_price_vnd FROM price_tiers WHERE product_id = $1 ORDER BY min_qty",
+                    product_id)
+                await audit_service.record(
+                    conn, "staff", "product.price_tiers.replace",
+                    actor_staff_id=actor.get("id"), actor_ref=actor.get("username"),
+                    entity_type="product", entity_id=str(product_id),
+                    before=_tiers_snapshot(before_rows), after=_tiers_snapshot(after_rows))
 
         rows = await conn.fetch(
             "SELECT id, min_qty, unit_price_vnd FROM price_tiers WHERE product_id = $1 ORDER BY min_qty",

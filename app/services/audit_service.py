@@ -53,6 +53,12 @@ def _redact(d: dict | None) -> str | None:
     return json.dumps(_redact_value(d), ensure_ascii=False, default=str)
 
 
+async def audit_exists(conn) -> bool:
+    """audit_log ĐÃ provision chưa (>= migration 015). Group A dùng để fail-closed CÓ ĐIỀU KIỆN:
+    pre-015 DB không có bảng -> skip audit hợp lệ (backward-compat), KHÔNG làm vỡ mutation."""
+    return bool(await conn.fetchval("SELECT to_regclass('public.audit_log') IS NOT NULL"))
+
+
 async def record(
     conn,
     actor_type: str,
