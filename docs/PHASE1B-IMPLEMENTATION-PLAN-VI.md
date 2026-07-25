@@ -307,7 +307,22 @@ thao tác → audit nhóm A. M0 không có UI sửa matrix (seed migration PO-ap
 Không defer tới M6. M0 design spike, chốt 1 trong 2 **trước release gate** (ô trống chấp nhận trong design):
 Preferred (HttpOnly+Secure+SameSite+CSRF+session rotation) / Temporary exception (localStorage chỉ khi có
 risk acceptance PO/CA + CSP test + deadline cụ thể).
-> **Quyết định (điền trước release gate):** ______ · Risk owner: ______ · Deadline nếu exception: ______
+**Spike (25/7):** API (`a3s.robanme.com`) và dashboard (`a3s-dash.robanme.com`) là **hai subdomain khác
+nhau** → XHR dashboard→API là cross-origin. HttpOnly cookie khi đó cần `SameSite=None; Secure` + **CSRF
+token** (cookie tự gửi kèm → phải chống CSRF) — không phải drop-in, là một mảng việc thật (đổi login set
+cookie, `apiFetch` `credentials:'include'`, `require_staff_session` đọc cookie, thêm CSRF middleware).
+localStorage hiện tại: token đọc được bởi JS → rủi ro nếu dashboard có XSS.
+
+> **QUYẾT ĐỊNH (Dev đề xuất, CHỜ PO/CA chấp nhận rủi ro — CA §12.1):**
+> **Temporary exception cho M0** — giữ bearer token ở `localStorage`, KÈM: (a) CSP chặt cho dashboard
+> (script-src 'self', không inline script); (b) API đã có security headers (M0.5); (c) cân nhắc rút ngắn
+> session TTL (hiện 7 ngày) nếu PO muốn.
+> · **Risk owner:** PO/CA (phải ký chấp nhận rủi ro localStorage).
+> · **Deadline (bắt buộc, không vô hạn):** migrate sang **HttpOnly cookie + CSRF trước I-B Core Release
+>   M6** (khi dashboard chạm payment/COD — mục tiêu giá trị cao hơn, đáng đầu tư CSRF machinery).
+> · **Lý do:** M0 foundation dashboard chưa chạm tiền; cookie+CSRF cross-subdomain là công lớn, không
+>   cân xứng ở M0; localStorage + CSP + deadline là mức hợp lý. *(Nếu PO/CA muốn làm cookie ngay ở M0,
+>   Dev triển khai — đây chỉ là đề xuất.)*
 
 ### 9.2. Security headers
 Caddy/reverse proxy + Next.js middleware (dashboard) + FastAPI (API). Test trên cả `a3s.robanme.com` +

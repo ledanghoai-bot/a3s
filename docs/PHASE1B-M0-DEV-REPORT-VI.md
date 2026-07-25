@@ -1,13 +1,13 @@
 ---
 id: A3S-PHASE1B-M0-DEV-REPORT-001
-title: Alpha3S I-B — Dev Report gửi CA: M0 development + rehearsal (v1.0.3)
+title: Alpha3S I-B — Dev Report gửi CA: M0 development + rehearsal (v1.0.4)
 document_type: dev_report_to_ca
 responds_to: A3S-PHASE1B-CA-REVIEW-M0-DEV-001
 reports_on: A3S-PHASE1B-IMPLEMENTATION-PLAN-001
 plan_version: 0.1.3
 owner: Alpha3S
 author_role: Dev
-version: 1.0.3
+version: 1.0.4
 status: submitted_to_ca
 created_at: 2026-07-25
 language: vi-VN
@@ -107,20 +107,36 @@ hiện tại) → API 400 *"supported: deepseek-v4-pro | deepseek-v4-flash"*. Kh
 fallback "Đội ngũ 3S Coffee sẽ phản hồi bạn ngay" cho MỌI tin nhắn** (LLM path hỏng). Xác nhận trên dev;
 **production nhiều khả năng cũng bị** nếu dùng cùng model name. Đây **không phải hạng mục M0** (vendor/config
 incident) — cần PO/ops: chọn model thay thế (`deepseek-v4-flash` là bản thế cận nhất của tier cũ) + cập nhật
-`LLM_MODEL` trong `.env` **dev + production**. Dev đã verify `deepseek-v4-flash` chạy đúng. **Chưa sửa
-production/config** (chờ quyết định).
+`LLM_MODEL` trong `.env` **dev + production**.
+**Cập nhật (v1.0.4):** Dev đã **fix DEV** — `.env` dev + `config.py` default → `deepseek-v4-flash`,
+`up -d --force-recreate` (env_file nạp lúc create, `restart` không đủ); bot dev **hoạt động lại**
+(verified: trả lời thật "Robusta và Arabica", không fallback). **PRODUCTION chưa sửa** — ops cập nhật
+`.env` production + recreate (config default không cứu vì `.env` production override).
+
+## 9. MỚI (v1.0.4) — Auth session decision record + Layer-3 post-014
+
+**Auth session decision record (ĐÃ ĐIỀN — CA §7.3):** plan §9.1. Spike: API và dashboard khác subdomain →
+HttpOnly cookie cần `SameSite=None; Secure` + CSRF (không drop-in). **Dev đề xuất: Temporary exception cho
+M0** (localStorage + CSP chặt dashboard + cân nhắc rút TTL) với **deadline bắt buộc: migrate HttpOnly
+cookie + CSRF trước M6** (khi dashboard chạm payment). **Risk owner: PO/CA phải ký chấp nhận** (CA §12.1).
+*(Nếu PO/CA muốn cookie ngay M0, Dev làm.)*
+
+**Layer-3 post-014 (serving) — CONFIRMED:** chạy câu "pha 1 hũ bao nhiêu ly?" qua orchestrator trên
+throwaway **đã áp 014** (serving_size_g=NULL) + `deepseek-v4-flash`. Kết quả: bot **KHÔNG** khẳng định
+"50 ly" / "2g/ly" (trả lời thật, không fallback). So với pre-014 (dev, serving=2) bot nói "~50 ly" → **014
+đóng loop serving end-to-end**. (Throwaway đã hủy; không đụng dev DB.)
 
 ## 7. Đề nghị CA
-Ghi nhận M0.2 DB pool + M0.3/M0.4/M0.5 implemented + rehearsal/smoke PASS. Còn lại M0: auth session decision
-record (điền §9.1 trước release gate); DB-role separation (deferred). **Ngoài M0:** sự cố model DeepSeek
-(§8) cần xử lý gấp qua ops/PO.
+Ghi nhận M0.2 DB pool + M0.3/M0.4/M0.5 + auth decision record (đã điền) + layer-3 post-014 confirmed.
+**Còn lại M0:** DB-role separation cho audit (deferred, defense-in-depth). **Ngoài M0:** sự cố model
+DeepSeek — DEV đã fix, **production cần ops cập nhật `.env`** (§8).
 
 ## Ký
 ```text
-DEV REPORT — A3S-PHASE1B-M0-DEV-REPORT-001 v1.0.3
-v1.0.1: 4 P0 runner DONE. v1.0.2: M0.3 audit + M0.4 RBAC/permission + M0.5 security (backward-compat,
-foundation validation PASS). v1.0.3: M0.2 DB pool 8/8 service (smoke dev PASS, api khong vo) + KB layer-3
-smoke (brand-truth PASS; serving claim pre-014 confirmed) + PHAT HIEN su co LIVE: model DeepSeek
-'deepseek-chat' bi deprecate -> bot tra fallback moi tin nhan (ngoai M0, can ops/PO xu ly gap; CHUA sua).
-Production KHONG thay doi. Commit branch phase1b-m0 (SHA gui kem). Author role: Dev (Alpha3S). Ngay: 2026-07-25
+DEV REPORT — A3S-PHASE1B-M0-DEV-REPORT-001 v1.0.4
+v1.0.1: 4 P0 runner. v1.0.2: M0.3/4/5 audit/RBAC/security. v1.0.3: M0.2 pool 8/8 + KB layer-3 + phat hien
+su co model DeepSeek. v1.0.4: auth session decision record DA DIEN (temporary exception + deadline M6, cho
+PO/CA accept) + layer-3 post-014 serving CONFIRMED (bot khong con "50 ly") + FIX model DEV (deepseek-v4-flash,
+recreate, bot dev hoat dong lai) — PRODUCTION cho ops cap nhat .env. Production KHONG thay doi (chi dev).
+Commit branch phase1b-m0. Author role: Dev (Alpha3S). Ngay: 2026-07-25
 ```
