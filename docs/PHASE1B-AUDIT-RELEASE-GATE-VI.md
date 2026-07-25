@@ -6,7 +6,8 @@ parent: A3S-PHASE1B-IMPLEMENTATION-PLAN-001
 owner: Alpha3S
 author_role: Dev
 version: 1.0.0
-status: submitted_to_ca
+status: po_accepted_pending_ca
+po_signoff: "PO accepted DB-role time-boxed exception 2026-07-25 (deadline before M2)"
 created_at: 2026-07-25
 language: vi-VN
 ---
@@ -72,7 +73,10 @@ trên `audit_log` khỏi owner **không có tác dụng** (owner bypass grant). 
 
 ## Ký
 ```text
-AUDIT RELEASE-GATE — group-A liet ke; fail-closed rollback + redaction (secret+PII+nested) DA TEST (E3);
-DB-enforcement = TIME-BOXED EXCEPTION (owner Dev+PO, deadline M6), KHONG tuyen bo DB-enforced o M0.
+AUDIT RELEASE-GATE — group-A liet ke; fail-closed rollback service (E3) + ENDPOINT-LEVEL (E7,
+staff.create+password_change) + redaction secret/PII/nested (E3) DA TEST @ SHA 931943d.
+[PO SIGN-OFF] PO CHAP NHAN time-boxed exception single-role/append-only-convention cho M0 (risk owner
+= PO), 2026-07-25. Dieu kien: khong endpoint UPDATE/DELETE audit; tach DB runtime/migration role TRUOC
+nhom mutation thuong mai nhay cam tiep + KHONG muon hon M2 production release. KHONG tuyen bo DB-enforced o M0.
 Author role: Dev (Alpha3S). Ngay: 2026-07-25.
 ```

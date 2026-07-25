@@ -6,7 +6,8 @@ parent: A3S-PHASE1B-IMPLEMENTATION-PLAN-001
 owner: Alpha3S
 author_role: Dev
 version: 1.0.0
-status: pending_po_ca_acceptance
+status: po_accepted_pending_ca_architecture
+po_signoff: "PO approved 2026-07-25 (temporary localStorage exception, risk owner = PO)"
 created_at: 2026-07-25
 language: vi-VN
 ---
@@ -75,6 +76,10 @@ xứng ở M0. localStorage + CSP chặt + TTL ngắn + revoke-all là mức ch�
 
 ## Ký
 ```text
-AUTH/SESSION ADR — chờ PO (risk owner) + CA (kiến trúc) ký. De xuat: temporary exception localStorage
-+ CSP + TTL ngan, deadline HttpOnly cookie+CSRF truoc M6. Author role: Dev (Alpha3S). Ngay: 2026-07-25.
+AUTH/SESSION ADR
+[PO SIGN-OFF] PO CHAP NHAN temporary exception localStorage cho M0 (risk owner = PO), 2026-07-25.
+  Kem dieu kien: CSP baseline (da co) + nonce follow-up truoc kich hoat day du; TTL da ha 48h;
+  KHONG mo rong sang payment/refund; deadline HttpOnly cookie+CSRF truoc M6.
+[CHO CA] phe duyet kien truc (sau khi doc ADR nay + evidence CSP/TTL).
+Author role: Dev (Alpha3S). Ngay: 2026-07-25.
 ```

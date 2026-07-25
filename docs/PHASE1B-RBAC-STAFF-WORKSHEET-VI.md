@@ -5,8 +5,9 @@ document_type: rbac_assignment_worksheet
 parent: A3S-PHASE1B-IMPLEMENTATION-PLAN-001
 owner: Alpha3S
 author_role: Dev
-version: 1.0.0
-status: pending_po
+version: 1.0.1
+status: po_approved
+po_signoff: "PO approved matrix + staff assignment (controlled file) + initial admin + PII policy 2026-07-25"
 created_at: 2026-07-25
 language: vi-VN
 ---
@@ -63,6 +64,14 @@ role phải nằm trong 6 role canonical đã seed (016).
 
 ## Ký
 ```text
-RBAC STAFF WORKSHEET — chờ PO điền §1 + duyệt rbac_seed_proposed.sql. KHONG default viewer/chung.
-Backfill fail neu con staff khong role. Strict mode sau cutover (khong degrade). Author: Dev (Alpha3S).
+RBAC STAFF WORKSHEET
+[PO SIGN-OFF 2026-07-25] PO DA DUYET:
+  - Ma tran role->permission (migration 018_rbac_seed) — GOM xac nhan payment.cod_record cho
+    support/delivery (quyen ghi nhan tai chinh).
+  - Gan role cho 2 staff hien huu: LUU o CONTROLLED FILE (staff_roles.txt, ngoai repo — CA §7.2 no-PII),
+    dung boi scripts/assign_staff_roles.py luc cutover.
+  - Initial active admin: da chi dinh (trong controlled file).
+  - PII masking/export policy: xac nhan (export admin-only, mask SDT/dia chi/payment evidence).
+Backfill fail-closed neu con active staff thieu role. RBAC_STRICT bat SAU CUNG (khong degrade sau cutover).
+Author: Dev (Alpha3S). Ngay: 2026-07-25.
 ```

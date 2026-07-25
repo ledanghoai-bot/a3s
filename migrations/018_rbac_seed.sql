@@ -1,9 +1,8 @@
 -- Migration 018: seed role_permissions mapping (I-B M0.4, CA-REVIEW-M0-DEV-003 §5).
 -- VERSIONED seed — thay cho chay scripts/rbac_seed_proposed.sql truc tiep bang psql (CA cam).
--- NOI DUNG = ma tran role->permission PO DA DUYET. Hien tai = de xuat least-privilege (Phu luc A);
--- PO phai duyet/sua truoc khi chay tren production (worksheet PHASE1B-RBAC-STAFF-WORKSHEET).
+-- NOI DUNG = ma tran role->permission. [PO DUYET 2026-07-25] (gom payment.cod_record cho support/delivery).
 -- Idempotent (ON CONFLICT DO NOTHING) -> chay lai an toan. transactional: true
--- KHONG chay tren production truoc khi: PO duyet ma tran + CA release approval (xem runbook §3A).
+-- KHONG chay tren production truoc khi: CA release approval (xem runbook §3A). PO da duyet ma tran.
 
 -- admin: TAT CA permission
 INSERT INTO role_permissions (role_key, permission_key)
