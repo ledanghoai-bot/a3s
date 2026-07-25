@@ -1,0 +1,112 @@
+---
+id: A3S-PHASE1B-M0-CUTOVER-RESULT-REPORT-001
+title: Alpha3S I-B M0 — Cutover Result Report (production)
+document_type: cutover_result_report
+responds_to: A3S-PHASE1B-CA-M0-RELEASE-DECISION-001
+owner: Alpha3S
+author_role: Dev
+version: 1.0.0
+status: cutover_complete_submitted_to_ca
+release_sha: 8a702d616eab54d5def9292a40593ff1b1540b04
+release_tag: ib-m0-rc1
+created_at: 2026-07-25 15:49 GMT+7
+language: vi-VN
+---
+
+# M0 — Cutover Result Report (CA-M0-RELEASE-DECISION §9)
+
+> **KẾT QUẢ: M0 PRODUCTION CUTOVER THÀNH CÔNG.** Toàn bộ migration 014–018 áp + validation pass, RBAC strict
+> active, nonce CSP verify trên dashboard host, anomaly dữ liệu đã sửa. Không rollback, không forward-fix.
+> Báo cáo **DUY NHẤT** theo CA §9 (không mở thêm chuỗi review). **Không PII** (staff theo id + role).
+
+## 1. Release đã deploy
+- **Release SHA:** `8a702d616eab54d5def9292a40593ff1b1540b04` · **Tag:** `ib-m0-rc1` (checkout detached trên VPS).
+- **Deploy:** `git fetch origin --tags` → `git checkout tags/ib-m0-rc1` (HEAD == full SHA, verified) →
+  `docker compose -f docker-compose.prod.yml up -d --build api worker telegram_bot telegram_customer_bot dashboard`.
+- **CI auto-deploy KHÔNG kích hoạt** (chỉ push `main` mới trigger; ta push branch+tag). PO duyệt phiên đầy đủ.
+
+## 2. Thời gian (VPS wall-clock ≈ GMT+7)
+| Mốc | Giá trị |
+|---|---|
+| Backup pre-cutover | `20260725T153703Z` (VPS clock) |
+| Maintenance ON (dashboard stop) | `15:43:48` |
+| Maintenance OFF (dashboard start) | `15:47:11` |
+| **Maintenance window** | **≈ 3 phút 23 giây** |
+> Đồng hồ VPS set theo GMT+7 (nhãn `Z` của VPS là wall-clock GMT+7); duration chính xác không phụ thuộc nhãn TZ.
+
+## 3. Backup / restore evidence (§1.1)
+- **Backup:** `/srv/backups/alpha3s_pre_m0cutover_20260725T153703Z.sql.gz` (857.500 bytes).
+  **sha256:** `e7f36b547b81f07d430d24cbd4e675816359ce0d5aefa1fcf9fddd8c4813879c`.
+- **Restore-check:** khôi phục vào container throwaway → **counts khớp production** (products=1, orders=2,
+  staff_users=2, customers=2) + `3S-100G` md5 khớp → throwaway đã xóa. **PASS.**
+- Cron backup ngày: healthy (bản gần nhất trong 24h, cron `30 3 * * *`).
+
+## 4. Migration exit codes (§3)
+| Bước | Lệnh | Exit | Kết quả |
+|---|---|---|---|
+| Baseline-13 | `migrate.py baseline --manifest baseline_manifest_13.json` | **0** | `Baselined 13 … KHONG baseline (phai chay): 014,015,016,017,018` |
+| Up 014-018 | `migrate.py up` | **0** | `Applied 5 migration(s)`; `Post-migration validations pass (1 file)` |
+- Từng migration transactional. `schema_migrations` = **18 rows** (001–018). Không migration nào rollback.
+
+## 5. Data anomaly — đã sửa (014, §3 verify)
+| Chỉ số | Trước | Sau |
+|---|---|---|
+| `3S-100G` description | "100% Robusta" (md5 `d352bd9f…`, khớp `v_bad1` IN-list) | approved (md5 `91d892ba…`) |
+| `serving_size_g` | 2 | **NULL** |
+| `net_weight_g` | 100 | 100 (giữ) |
+| Toàn bảng: còn "100% Robusta" | 1 | **0** |
+| Toàn bảng: còn `serving_size_g=2` | 1 | **0** |
+> §1.3 gate pre-cutover: production description md5 = `d352bd9f…` = **đúng `v_bad1`** trong IN-list 014 →
+> 014 match & correct, postcondition pass (không unknown-bad variant).
+
+## 6. RBAC assignment verdict (§3A — KHÔNG PII)
+- Seed = migration `018_rbac_seed.sql`: **6 roles, 21 permissions, 35 role_permission mappings**.
+- Controlled mapping file: `/root/staff_roles.txt` perm `600 root`, **sha256 `e8d0ae12e57fe36414516013bc6bbcb4b1654ebe485bd0e241a6a0e581765aca`**, 2 dòng mapping (copy vào container lúc chạy, đã xóa copy; bản gốc access-controlled).
+- `assign_staff_roles.py` exit **0**: `gán role 2 staff; active_admin=2; active_staff_thiếu_role=0`.
+- **Verify cardinality:** `active_staff_without_role = 0`; `active_admins = 2`. (2 active staff → role `admin`, theo PO chốt.)
+- `admin` role: **21/21 permissions** (gồm `staff.manage`, `payment.cod_record`).
+
+## 7. Strict RBAC + startup readiness (§3A.4-5)
+- Đặt `RBAC_STRICT=true` (.env) **sau khi** assignment pass → `up -d --force-recreate api worker`.
+- **Startup readiness:** `[startup] readiness: RBAC ready (permissions=21, mappings=35)` → api boot OK (không
+  half-provisioned, không degrade). **health = 200.**
+- **Endpoint gate active:** probe **unauthenticated** `/dashboard/auth/staff`, `/dashboard/orders`,
+  `/dashboard/products` → **401** (require_staff_session). Negative-permission enforcement chứng minh bằng
+  E9/E10 rehearsal tại đúng SHA. **Authenticated admin-OK smoke:** để PO đăng nhập xác nhận (Dev không giữ credential).
+
+## 8. CSP smoke (§1.4 pre + §4 post, errata §6.1 — DASHBOARD HOST)
+- `GET https://a3s-dash.robanme.com/` (pre-release và post-release) →
+  `script-src 'self' 'nonce-<random>' 'strict-dynamic'` — **KHÔNG `unsafe-inline`**; nonce present;
+  `frame-ancestors 'none'`, `object-src 'none'`, `x-content-type-options: nosniff`, `x-frame-options: DENY`,
+  `referrer-policy: no-referrer`. **PASS** cả hai lần.
+
+## 9. Health / dashboard / bot / audit
+- **Containers:** 8/8 Up (api, worker, dashboard, db, redis, caddy, telegram_bot, telegram_customer_bot).
+- **Dashboard:** reopen sau maintenance, HTTP 200, Ready.
+- **audit_log:** bảng tồn tại (015). Bản ghi audit thực tế sẽ xuất hiện khi có thao tác gated đầu tiên (PO login).
+- **Bot data:** serving NULL → tools `_serving_info` trả None → bot không suy "≈50 ly"; LLM_MODEL=`deepseek-v4-flash` (OK).
+
+## 10. Anomaly / lưu ý (không phải lỗi migration)
+1. **Admin telegram bot `409 Conflict` getUpdates:** do **máy dev vẫn chạy `alpha3s-telegram_bot-1`** (2h) poll
+   cùng token với VPS → dual-poller. **Tồn tại trước cutover, không phải hồi quy migration.** Khuyến nghị:
+   dừng bot trên máy dev để VPS sở hữu kênh sạch.
+2. **VPS đang ở detached HEAD** tại tag `ib-m0-rc1`. Production chạy đúng release code. **Follow-up (governance):**
+   để bền vững qua reboot/CI, cân nhắc merge `phase1b-m0` → `main` trong một phiên có kiểm soát (sẽ re-deploy
+   cùng code qua CI). Chưa làm trong phiên này (tránh auto-deploy ngoài kế hoạch).
+3. **Controlled mapping file** giữ tại `/root/staff_roles.txt` (600) cho an toàn idempotent; xóa/archive theo
+   retention policy của PO sau khi ổn định.
+
+## 11. Rollback/forward-fix
+- **Không có.** Mọi gate pass tuyến tính; không migration nào rollback; không cần forward-fix.
+- Backup §3 + restore-check sẵn sàng nếu về sau cần (expand-only; data 014 forward-fix nếu cần, không revert ngược).
+
+## Ký
+```text
+CUTOVER RESULT REPORT v1.0.0 — M0 PRODUCTION CUTOVER THANH CONG.
+Release 8a702d6 / tag ib-m0-rc1. Baseline exit 0 + up(014-018) exit 0 + validation pass; schema_migrations=18.
+Anomaly 3S-100G sua (serving NULL, khong con 100% Robusta). RBAC: 6 roles/21 perms/35 maps; 2 active staff->admin;
+active_without_role=0; RBAC_STRICT=true; readiness RBAC ready; health 200; endpoint gate 401 unauth.
+Nonce CSP verify tren a3s-dash.robanme.com (pre+post), khong unsafe-inline. Maintenance window ~3m23s.
+Khong rollback/forward-fix. Luu y: admin-bot 409 (dev dual-poller, tien-ton); VPS detached HEAD tai tag.
+Author role: Dev (Alpha3S). Ngay: 2026-07-25 15:49 GMT+7.
+```
