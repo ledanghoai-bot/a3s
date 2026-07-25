@@ -116,16 +116,49 @@ render. (Bản dev smoke `next dev` luôn dynamic nên không lộ lỗi này.)
 `script-src 'self' 'nonce-…' 'strict-dynamic'` (no unsafe-inline). Chỉ rebuild `dashboard` (api/worker/bot
 code không đổi).
 
-**SHA delta (CA §2):** release đang chạy production đổi từ `8a702d6` (rc1) → **`d2ece24` (rc3)**. Delta =
-**chỉ 2 file dashboard** (`middleware.js`, `app/layout.js`); **migration/RBAC/audit code byte-identical**.
-Tag mới: `ib-m0-rc3`. Đề nghị CA ghi nhận delta (dashboard-only hydration hotfix, không đụng migration).
+## 13. Durability — merge → main + CI + trạng thái production cuối
+Sau khi fix login, đưa production về **branch `main`** (thay vì detached HEAD tại tag) để bền vững qua
+reboot/CI (trước đó `main = c210a84` pre-M0 → mọi `reset --hard origin/main` sẽ revert production về pre-M0).
+
+**Fast-forward `main` → M0 code.** Phát sinh + đã xử lý:
+- **CI lint (ruff):** M0 pool-standardization để sót **5 `asyncpg` import không dùng** + 1 import chưa sort
+  → `ruff --fix` (import-only, không đổi logic) → **rc4 `ib-m0-rc4`**.
+- **CI test (pytest):** `pytest -v` (không path) collect nhầm `scripts/*_test.py` (evidence script chạy tay,
+  `from app` ImportError) → thêm **`pytest.ini` `testpaths = tests`** → **rc5 `ib-m0-rc5`**. Sau fix:
+  ruff clean + **pytest 42 passed** → **CI lint+test XANH**.
+- **CI deploy step FAIL — `ssh: connect … port 22: Connection timed out`:** GitHub-hosted runner bị **VPS
+  firewall chặn SSH** (hạ tầng tiền-tồn; auto-deploy chưa từng có đường tới VPS). Deploy job chạy SAU
+  lint-test nên **production KHÔNG bị đụng khi CI đỏ**. → **Deploy TAY** (đường sanctioned):
+  `git checkout -B main origin/main && bash scripts/deploy.sh`.
+
+**Verify sau deploy main:** VPS `/srv/alpha3s` **branch `main` @ `fb2a46b`**; api health **200**; readiness
+`RBAC ready (permissions=21, mappings=35)`; `RBAC_STRICT=true`; dashboard **12/12 script có nonce**, CSP
+`script-src 'self' 'nonce-…' 'strict-dynamic'` (no unsafe-inline), **form login render OK**; `schema_migrations=18`,
+`robusta=0`, 2 admin. **remote `main = fb2a46b`** (bền vững).
+
+**SHA delta tổng (CA §2):** `8a702d6` (rc1, approved) → `d2ece24` (rc3, dashboard hydration fix) → **`fb2a46b`
+(rc5, ruff import cleanup + pytest.ini config)**. Delta từ rc1 = **dashboard hydration (2 file) + import/config
+cho CI**; **migration/RBAC/audit runtime code byte-identical với rc1 đã CA duyệt**. Tags `ib-m0-rc1..rc5` đã push.
+
+**Follow-up (không chặn vận hành):**
+- **CI auto-deploy hỏng** — VPS firewall chặn SSH từ GitHub runner; cần allow IP runner HOẶC self-hosted
+  runner trên VPS. Tới khi sửa: deploy làm tay.
+- **Authenticated admin-OK smoke:** PO đăng nhập dashboard (đã vào được sau fix login) làm 1 thao tác gated
+  → xác nhận `audit_log` ghi đúng (bước §4 Dev không tự làm — không giữ credential staff).
 
 ## Ký
 ```text
-CUTOVER RESULT REPORT v1.0.0 (+addendum §12) — M0 PRODUCTION CUTOVER THANH CONG.
+CUTOVER RESULT REPORT v1.0.0 (+addendum §12/§13) — M0 PRODUCTION CUTOVER THANH CONG.
+Trang thai cuoi: VPS branch main @ fb2a46b; health 200; RBAC ready + RBAC_STRICT=true; dashboard nonce CSP
+12/12 script (no unsafe-inline) + login render OK; schema_migrations=18, robusta=0, 2 admin. remote main=fb2a46b (ben vung).
+SHA delta rc1 8a702d6 -> rc3 d2ece24 (login hydration fix) -> rc5 fb2a46b (ruff cleanup + pytest.ini); migration/RBAC runtime byte-identical rc1.
+CI lint+test xanh; CI deploy step ssh-timeout (VPS firewall chan GitHub runner) -> deploy tay. Khong rollback/forward-fix migration.
+Author role: Dev (Alpha3S). Ngay cap nhat: 2026-07-25 (GMT+7).
+
+--- (§12 post-cutover dashboard hotfix) ---
 Post-cutover: dashboard nonce-CSP hydration hotfix (rc1 8a702d6 -> rc3 d2ece24, chi 2 file dashboard) ->
 login render OK, 0 CSP violation, van giu no-unsafe-inline. Migration/RBAC khong doi.
---- (nguyen ban) ---
+--- (nguyen ban cutover) ---
 CUTOVER RESULT REPORT v1.0.0 — M0 PRODUCTION CUTOVER THANH CONG.
 Release 8a702d6 / tag ib-m0-rc1. Baseline exit 0 + up(014-018) exit 0 + validation pass; schema_migrations=18.
 Anomaly 3S-100G sua (serving NULL, khong con 100% Robusta). RBAC: 6 roles/21 perms/35 maps; 2 active staff->admin;
