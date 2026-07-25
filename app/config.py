@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # LLM (DeepSeek)
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "deepseek-v4-flash"  # deepseek-chat bi DeepSeek deprecate (25/7) -> v4-flash
 
     # Embedding local
     embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
