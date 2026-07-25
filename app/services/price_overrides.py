@@ -10,7 +10,6 @@ quantity - LLM khong the tu "cap phep" cho chinh no.
 Dung asyncpg thuan, cung convention voi cac service khac.
 """
 
-import asyncpg
 
 from app.config import settings
 from app.db_pool import acquire, release

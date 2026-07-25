@@ -7,7 +7,6 @@ Dung asyncpg thuan, cung convention voi rag.py/tools.py.
 
 import re
 
-import asyncpg
 import httpx
 
 from app.config import settings

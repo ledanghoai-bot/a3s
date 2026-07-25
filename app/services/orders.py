@@ -7,8 +7,6 @@ Dung asyncpg thuan, cung convention voi cac service khac.
 import json
 import uuid
 
-import asyncpg
-
 from app.config import settings
 from app.db_pool import acquire, release
 

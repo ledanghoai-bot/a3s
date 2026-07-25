@@ -11,8 +11,8 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.auth import require_permission, require_staff_session
-from app.services import audit_service, auth_service, permission_service
 from app.security import throttle
+from app.services import audit_service, auth_service, permission_service
 
 router = APIRouter(prefix="/dashboard/auth", tags=["auth"])
 

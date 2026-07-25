@@ -11,7 +11,6 @@ dung `embed_async()` (khong phai `embed()` truc tiep) - da offload sang
 threadpool rieng, xem app/services/embedder.py.
 """
 
-import asyncpg
 
 from app.config import settings
 from app.db_pool import acquire, release

@@ -9,7 +9,6 @@ lieu san co trong messages/conversations/orders, KHONG them bang moi.
 Dung asyncpg thuan, cung convention voi cac service khac.
 """
 
-import asyncpg
 
 from app.config import settings
 from app.db_pool import acquire, release
