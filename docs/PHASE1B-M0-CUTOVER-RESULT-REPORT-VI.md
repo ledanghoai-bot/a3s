@@ -100,8 +100,32 @@ language: vi-VN
 - **Không có.** Mọi gate pass tuyến tính; không migration nào rollback; không cần forward-fix.
 - Backup §3 + restore-check sẵn sàng nếu về sau cần (expand-only; data 014 forward-fix nếu cần, không revert ngược).
 
+## 12. Addendum — post-cutover dashboard CSP hydration hotfix (SHA delta, CA §2)
+Sau cutover, PO đăng nhập nhưng **dashboard không hiện form login**. Root cause: dưới production build
+(`next start`), trang `/` **static-optimized** → Next KHÔNG gắn nonce vào `<script>` (12/12 script thiếu
+nonce) → `'strict-dynamic'` chặn mọi script → React không hydrate → form login (client component) không
+render. (Bản dev smoke `next dev` luôn dynamic nên không lộ lỗi này.)
+
+**Fix (giữ nguyên security posture — nonce + strict-dynamic, KHÔNG unsafe-inline):**
+1. `dashboard/middleware.js`: set CSP **lên cả request header** để Next đọc nonce (rc2, `0859f68`).
+2. `dashboard/app/layout.js`: `export const dynamic = "force-dynamic"` → ép mọi route render động
+   per-request → Next gắn nonce vào **12/12 script** (rc3, `d2ece24`).
+
+**Verify sau fix:** script tags 12/12 có `nonce=` khớp CSP header; **browser smoke production** — form login
+(Tên đăng nhập / Mật khẩu / Đăng nhập) render đầy đủ, **0 CSP violation, 0 console error**; CSP vẫn
+`script-src 'self' 'nonce-…' 'strict-dynamic'` (no unsafe-inline). Chỉ rebuild `dashboard` (api/worker/bot
+code không đổi).
+
+**SHA delta (CA §2):** release đang chạy production đổi từ `8a702d6` (rc1) → **`d2ece24` (rc3)**. Delta =
+**chỉ 2 file dashboard** (`middleware.js`, `app/layout.js`); **migration/RBAC/audit code byte-identical**.
+Tag mới: `ib-m0-rc3`. Đề nghị CA ghi nhận delta (dashboard-only hydration hotfix, không đụng migration).
+
 ## Ký
 ```text
+CUTOVER RESULT REPORT v1.0.0 (+addendum §12) — M0 PRODUCTION CUTOVER THANH CONG.
+Post-cutover: dashboard nonce-CSP hydration hotfix (rc1 8a702d6 -> rc3 d2ece24, chi 2 file dashboard) ->
+login render OK, 0 CSP violation, van giu no-unsafe-inline. Migration/RBAC khong doi.
+--- (nguyen ban) ---
 CUTOVER RESULT REPORT v1.0.0 — M0 PRODUCTION CUTOVER THANH CONG.
 Release 8a702d6 / tag ib-m0-rc1. Baseline exit 0 + up(014-018) exit 0 + validation pass; schema_migrations=18.
 Anomaly 3S-100G sua (serving NULL, khong con 100% Robusta). RBAC: 6 roles/21 perms/35 maps; 2 active staff->admin;
