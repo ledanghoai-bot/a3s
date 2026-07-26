@@ -70,5 +70,10 @@ class Settings(BaseSettings):
     # quantize model (PA2-5d) hoac VPS du RAM.
     enable_semantic_router: bool = False
 
+    # I-B M1 (Slice 4): reliable order command bus. MAC DINH TAT — canary bat sau qua production
+    # gate rieng (CA release decision). Khi TAT: 3 duong tao don giu nguyen legacy (khong doi hanh vi).
+    # Khi BAT: route qua command service (effective-once + atomic outbox + deterministic receipt).
+    m1_reliable_order_command: bool = False
+
 
 settings = Settings()

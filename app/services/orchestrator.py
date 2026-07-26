@@ -79,11 +79,13 @@ async def _save_history(redis, sender_id: str, history: list[dict]) -> None:
     await redis.set(_redis_key(sender_id), json.dumps(trimmed, ensure_ascii=False), ex=86400)
 
 
-async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str) -> dict:
+async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str,
+                        command_ctx: dict | None = None) -> dict:
     """Dispatch 1 tool call toi ham that trong app/services/tools.py.
 
     psid (sender_id) va last_message duoc bom o day, KHONG lay tu args model
     tra ve - tranh model tu bia/nham lan sender_id hoac tin nhan goc cua khach.
+    command_ctx (I-B M1): boi canh idempotency/actor cho create_order (chi khi flag bat).
     """
     try:
         if name == "search_products":
@@ -91,7 +93,7 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
         if name == "check_stock":
             return await tools.check_stock(**args)
         if name == "create_order":
-            return await tools.create_order(psid=sender_id, **args)
+            return await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
         if name == "escalate_to_human":
             return await tools.escalate_to_human(psid=sender_id, last_message=last_message, **args)
         return {"error": f"Tool khong ton tai: {name}"}
@@ -292,6 +294,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
 
         reply = ""
         created_order_ids: list = []  # order_id create_order tra ve THAT trong luot nay
+        order_receipts: list = []  # I-B M1: receipt committed tu command path (neu flag bat)
         for _ in range(MAX_TOOL_ITERATIONS):
             response = await client.chat.completions.create(
                 model=settings.llm_model,
@@ -332,7 +335,25 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                result = await _execute_tool(tc.function.name, args, sender_id, text)
+                # I-B M1 (Slice 4): boi canh command cho create_order — stable idempotency key
+                # theo tool_call_id (luong AI don-luong; webhook redelivery da duoc Redis mid-dedup
+                # chan o worker). Chi anh huong khi settings.m1_reliable_order_command BAT.
+                cmd_ctx = None
+                if tc.function.name == "create_order":
+                    from app.services.command import idempotency as _idem
+                    cmd_ctx = {
+                        "channel": channel,
+                        "actor_type": "customer",
+                        "actor_id": sender_id,
+                        "conversation_id": conversation_id,
+                        "causation_id": tc.id,
+                        "idempotency_key": _idem.ai_stable_key(
+                            channel=channel, provider_message_id=sender_id, tool_call_id=tc.id,
+                            command_type="order.create", version=1,
+                        ),
+                    }
+                result = await _execute_tool(tc.function.name, args, sender_id, text,
+                                             command_ctx=cmd_ctx)
                 if (
                     tc.function.name == "create_order"
                     and isinstance(result, dict)
@@ -340,6 +361,8 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
                     and not result.get("error")
                 ):
                     created_order_ids.append(result["order_id"])
+                    if result.get("receipt"):  # I-B M1: receipt deterministic tu command path
+                        order_receipts.append(result["receipt"])
                 turn_messages.append(
                     {
                         "role": "tool",
@@ -362,6 +385,18 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
             .replace("##", "")
             .replace("`", "")
         )
+
+        # I-B M1 (Slice 6): bom dong xac nhan DETERMINISTIC tu committed receipt (order#/tong khong
+        # de LLM viet lai) + shadow evaluate (buoc rollout marker->structured guard §10.4). Chi khi
+        # flag BAT — flag TAT giu nguyen hanh vi legacy ben duoi (marker guard van chay).
+        if settings.m1_reliable_order_command:
+            from app.services.command import reply_guard
+            if order_receipts:
+                reply = reply_guard.append_receipt_lines(reply, order_receipts)
+            shadow = reply_guard.shadow_evaluate(_reply_claims_order_created(reply), created_order_ids)
+            if not shadow["consistent"]:
+                print(f"[orchestrator][M1-shadow] CLAIM-KHONG-RECEIPT sender={sender_id} "
+                      f"reply={reply[:120]!r}")
 
         # GUARD CHONG BIA DON (lop code, khong chi dua vao prompt): neu model bao
         # KHACH rang don da duoc tao ("ma don #...", "dat hang thanh cong"...) nhung

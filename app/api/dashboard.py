@@ -4,7 +4,7 @@ app/api/auth_router.py cho login/logout).
 """
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
 from app.api.auth import require_active_session, require_permission
 from app.config import settings
@@ -17,6 +17,8 @@ from app.services import (
 )
 from app.services import orders as orders_service
 from app.services import products as products_service
+from app.services.command import errors as cmd_errors
+from app.services.command import order_gateway, recovery
 from app.services.handoff import log_note, pause_bot, resume_bot
 
 router = APIRouter(
@@ -205,16 +207,31 @@ async def get_order_draft(psid: str) -> dict:
 
 
 @router.post("/conversations/{psid}/create_order")
-async def create_order_via_bot(psid: str, body: dict) -> dict:
+async def create_order_via_bot(
+    psid: str, body: dict, response: Response,
+    staff: dict = Depends(require_active_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
     """'Goi bot tao don' - goi THANG dung ham create_order ma AI tool dang
     dung (app/services/tools.py), nen van kiem tra day du price_overrides,
     bac gia chuan, gioi han MAX_AUTO_QUANTITY - chi khac la staff bam tu
     dashboard thay vi cho LLM tu quyet dinh goi luc nao.
-    """
+
+    I-B M1 (Slice 7): khi flag BAT -> route qua command service (staff actor + Idempotency-Key
+    header), tra receipt + status code 201/200/202/409/422. Flag TAT -> legacy (200 + raise 400)."""
     required = ["customer_name", "phone", "address", "sku", "quantity"]
     missing = [f for f in required if not body.get(f)]
     if missing:
         raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
+    if settings.m1_reliable_order_command:
+        status, out, retry_after = await order_gateway.create_order_http(
+            actor_id=staff["id"], idempotency_key=idempotency_key,
+            customer_name=body["customer_name"], phone=body["phone"], address=body["address"],
+            sku=body["sku"], quantity=int(body["quantity"]), psid=psid)
+        response.status_code = status
+        if retry_after:
+            response.headers["Retry-After"] = str(int(retry_after))
+        return out
     result = await tools.create_order(
         psid=psid,
         customer_name=body["customer_name"],
@@ -229,14 +246,28 @@ async def create_order_via_bot(psid: str, body: dict) -> dict:
 
 
 @router.post("/conversations/{psid}/create_order_manual")
-async def create_order_manual_for_conversation(psid: str, body: dict) -> dict:
+async def create_order_manual_for_conversation(
+    psid: str, body: dict, response: Response,
+    staff: dict = Depends(require_active_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
     """'NV tao don' gan voi 1 hoi thoai co san - bo qua toan bo validate bac
     gia/gioi han so luong cua create_order (AI tool), staff tu nhap don gia
-    va tu chiu trach nhiem."""
+    va tu chiu trach nhiem. I-B M1 (Slice 7): flag BAT -> command service (staff-priced)."""
     required = ["customer_name", "phone", "address", "sku", "quantity", "unit_price_vnd"]
     missing = [f for f in required if not body.get(f)]
     if missing:
         raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
+    if settings.m1_reliable_order_command:
+        status, out, retry_after = await order_gateway.create_order_http(
+            actor_id=staff["id"], idempotency_key=idempotency_key,
+            customer_name=body["customer_name"], phone=body["phone"], address=body["address"],
+            sku=body["sku"], quantity=int(body["quantity"]),
+            unit_price_vnd=int(body["unit_price_vnd"]), psid=psid)
+        response.status_code = status
+        if retry_after:
+            response.headers["Retry-After"] = str(int(retry_after))
+        return out
     result = await orders_service.create_order_manual(
         customer_name=body["customer_name"],
         phone=body["phone"],
@@ -252,14 +283,28 @@ async def create_order_manual_for_conversation(psid: str, body: dict) -> dict:
 
 
 @router.post("/orders/manual")
-async def create_order_manual_standalone(body: dict) -> dict:
+async def create_order_manual_standalone(
+    body: dict, response: Response,
+    staff: dict = Depends(require_active_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
     """Khu vuc tao don HOAN TOAN DOC LAP, khong gan voi hoi thoai Messenger nao
     (vd don qua dien thoai/tai quay) - issue #8. Tu sinh psid gia 'manual:...'.
-    """
+    I-B M1 (Slice 7): flag BAT -> command service (staff-priced, Idempotency-Key header)."""
     required = ["customer_name", "phone", "address", "sku", "quantity", "unit_price_vnd"]
     missing = [f for f in required if not body.get(f)]
     if missing:
         raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
+    if settings.m1_reliable_order_command:
+        status, out, retry_after = await order_gateway.create_order_http(
+            actor_id=staff["id"], idempotency_key=idempotency_key,
+            customer_name=body["customer_name"], phone=body["phone"], address=body["address"],
+            sku=body["sku"], quantity=int(body["quantity"]),
+            unit_price_vnd=int(body["unit_price_vnd"]), psid=None)
+        response.status_code = status
+        if retry_after:
+            response.headers["Retry-After"] = str(int(retry_after))
+        return out
     result = await orders_service.create_order_manual(
         customer_name=body["customer_name"],
         phone=body["phone"],
@@ -272,6 +317,88 @@ async def create_order_manual_standalone(body: dict) -> dict:
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+@router.get("/commands/{command_id}/receipt")
+async def get_command_receipt_endpoint(
+    command_id: str, staff: dict = Depends(require_permission("commands.view")),
+) -> dict:
+    """I-B M1: tra receipt deterministic tu committed state. RBAC commands.view (§11.1).
+    Receipt da redact (khong PII day du) nen an toan cho staff xem."""
+    from app.services.command import order_service
+    try:
+        rec = await order_service.get_command_receipt(command_id, actor_context=staff)
+    except cmd_errors.CommandError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message) from e
+    return rec.to_dict()
+
+
+# --- I-B M1 (Slice 8): command/outbox operations + operator recovery (RBAC + audit fail-closed) ---
+
+@router.get("/commands")
+async def list_commands_endpoint(
+    limit: int = 100, status: str | None = None, type: str | None = None,
+    staff: dict = Depends(require_permission("commands.view")),
+) -> list[dict]:
+    return await recovery.list_commands(limit=limit, status=status, command_type=type)
+
+
+@router.get("/outbox")
+async def list_outbox_endpoint(
+    limit: int = 100, status: str | None = None, destination: str | None = None,
+    staff: dict = Depends(require_permission("outbox.view")),
+) -> list[dict]:
+    return await recovery.list_outbox(limit=limit, status=status, destination=destination)
+
+
+@router.get("/outbox/{outbox_id}")
+async def outbox_detail_endpoint(
+    outbox_id: str, staff: dict = Depends(require_permission("outbox.view")),
+) -> dict:
+    try:
+        return await recovery.outbox_detail(outbox_id)
+    except cmd_errors.CommandError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message) from e
+
+
+@router.post("/outbox/{outbox_id}/retry")
+async def outbox_retry_endpoint(
+    outbox_id: str, body: dict, staff: dict = Depends(require_permission("outbox.retry")),
+) -> dict:
+    try:
+        return await recovery.retry_outbox(outbox_id, staff, body.get("reason"))
+    except cmd_errors.CommandError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message) from e
+
+
+@router.post("/outbox/{outbox_id}/cancel")
+async def outbox_cancel_endpoint(
+    outbox_id: str, body: dict, staff: dict = Depends(require_permission("outbox.cancel")),
+) -> dict:
+    try:
+        return await recovery.cancel_outbox(outbox_id, staff, body.get("reason"))
+    except cmd_errors.CommandError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message) from e
+
+
+@router.post("/outbox/{outbox_id}/replay")
+async def outbox_replay_endpoint(
+    outbox_id: str, body: dict, staff: dict = Depends(require_permission("outbox.replay")),
+) -> dict:
+    try:
+        return await recovery.replay_outbox(outbox_id, staff, body.get("reason"))
+    except cmd_errors.CommandError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message) from e
+
+
+@router.get("/ops/metrics")
+async def ops_metrics_endpoint(
+    staff: dict = Depends(require_permission("commands.view")),
+) -> dict:
+    """I-B M1 (Slice 10): snapshot metrics command/outbox + alert dang fire (§12.1/§12.2)."""
+    from app.services.command import observability
+    m = await observability.command_bus_metrics()
+    return {"metrics": m, "alerts": observability.evaluate_alerts(m)}
 
 
 @router.patch("/orders/{order_id}/status")

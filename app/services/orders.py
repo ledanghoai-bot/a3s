@@ -104,6 +104,7 @@ async def create_order_manual(
     quantity: int,
     unit_price_vnd: int,
     psid: str | None = None,
+    command_ctx: dict | None = None,
 ) -> dict:
     """Staff tu tao don qua dashboard, BO QUA toan bo validate bac gia/gioi han
     so luong ma create_order (AI tool) ap dung - dung cho don dam phan dac biet
@@ -114,7 +115,24 @@ async def create_order_manual(
     vuc "tao don ben ngoai khung chat"), tu sinh 1 psid gia dang
     'manual:<uuid ngan>' de thoa man rang buoc customers.psid UNIQUE NOT NULL -
     prefix 'manual:' danh dau ro day KHONG phai PSID Facebook that.
+
+    I-B M1 (Slice 4): khi flag BAT va co command_ctx (actor staff + idempotency_key), route qua
+    command service (staff-priced). Mac dinh TAT / command_ctx=None -> legacy (backward-compat).
     """
+    if settings.m1_reliable_order_command and command_ctx is not None:
+        from app.services.command import order_gateway
+        ch = command_ctx.get("channel", "dashboard")
+        if order_gateway.can_route(ch):
+            return await order_gateway.create_order_command(
+                channel=ch,
+                actor_type=command_ctx.get("actor_type", "staff"),
+                actor_id=command_ctx["actor_id"],
+                idempotency_key=command_ctx["idempotency_key"],
+                customer_name=customer_name, phone=phone, address=address,
+                sku=sku, quantity=quantity, unit_price_vnd=unit_price_vnd, psid=psid,
+                conversation_id=command_ctx.get("conversation_id"),
+            )
+
     if quantity <= 0:
         return {"error": "So luong phai lon hon 0."}
     if unit_price_vnd <= 0:
