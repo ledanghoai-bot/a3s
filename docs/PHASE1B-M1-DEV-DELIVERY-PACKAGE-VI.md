@@ -20,8 +20,7 @@ language: vi-VN
 ```text
 Immutable base SHA : 4ce5f3ab2b95846cbc5a3dd5b21528a891b36314  (tag ib-m0-rc7, migrations 001–018)
 Dev branch         : feat/phase1b-m1-reliable-command  (off ib-m0-rc7, KHÔNG commit main)
-Implementation SHA : 59d4b2ac696155d086201ffa5504ce3bc1600d48  (code+tests+migrations+runbook)
-Delivery-package SHA: (commit kế tiếp, docs-only)
+Implementation SHA : 0bc4eb756dc1cbb3d5759e28e184dfb543d355fb  (sau hardening §7b; initial 59d4b2a)
 Baseline proof     : origin/main == 4ce5f3ab (0/0), tag ib-m0-rc7 -> 4ce5f3ab (annotated),
                      migrations 001–018 present, RBAC_STRICT enforce present, plan v0.1.3 @baseline.
 ```
@@ -82,15 +81,18 @@ __init__), `dashboard/app/ops/page.js`, `docs/PHASE1B-M1-RUNBOOK-VI.md`, `script
 Chạy trong container `alpha3s-api-1` (Python 3.12, pytest 9.1.1), DB throwaway `m1_itest` migrate 001–020.
 
 ```text
-# Unit (pytest -q)                                         -> 79 passed, exit 0
-# ruff check app/ + 6 evidence scripts                     -> All checks passed, exit 0
-# Evidence scripts (mỗi cái fresh migrated DB):
-command_order_service_test  exit 0  (T1 atomicity+redaction … T7 20-conc=1 order … T8 10/10)
+# Unit (pytest -q)                                         -> 80 passed, exit 0
+# ruff check app/ + 8 evidence scripts                     -> All checks passed, exit 0
+# Evidence scripts (mỗi cái fresh migrated DB) — 8/8 PASS:
+command_order_service_test  exit 0  (T1 atomicity+redaction … T7 20-conc=1 order … T8 10/10;
+                                     T9 new-customer race=2 orders/1 customer; T10 override single-use no double-spend)
 command_gateway_test        exit 0  (ON/AI route+receipt+dup … OFF legacy no command row)
 command_outbox_worker_test  exit 0  (delivered / retry->dead-letter / 400 terminal / timeout->unknown / reclaim)
 command_http_test           exit 0  (400/201/200/202+Retry-After/409/422 stock+phone/receipt 200+404)
 command_recovery_rbac_test  exit 0  (RBAC map / gate / retry-cancel-replay+audit+guards+reason / audit fail-closed)
 command_observability_test  exit 0  (5 metrics + 4 alerts P1/P2 + log_event)
+command_crash_recovery_test exit 0  (§13.1: fail-before-commit rollback / retry-after-commit / worker-crash reclaim)
+command_ops_api_test        exit 0  (/ops e2e: commands/outbox/detail+attempts/metrics + retry 200/audit + reason 422)
 validate_command_bus.sql    exit 0
 ```
 
@@ -137,6 +139,26 @@ Existing DB: build to 018 (019/020 held out) -> Applied 18; apply 019+020 -> App
    trước khi merge (đã để nguyên, Directive §4 incident tách khỏi M1).
 7. **AI stable key** dùng tool_call_id + sender_id (không phải Messenger `mid`) — webhook redelivery đã
    được Redis `dedup:mid` chặn ở worker; đủ cho scope M1.
+
+## 7b. Post-submission self-review & hardening
+
+Trong lúc chờ CA, đã chạy **adversarial self-review** (agent độc lập) trên `app/services/command/*`
+và **sửa 3 bug thật** + bổ sung 2 nhóm evidence. Implementation SHA cập nhật (xem §0).
+
+| # | Sev | Bug | Fix | Regression |
+|---|---|---|---|---|
+| F1 | HIGH | `execute_order_create` bắt MỌI `UniqueViolationError` → race khách MỚI (customers.psid, 2 đơn khác idempotency key) bị misroute thành "duplicate" → đơn hợp lệ KHÔNG được tạo (HTTP trả 202 với command_id đã rollback → lookup 404) | Customer upsert `ON CONFLICT (psid) DO UPDATE` (loại race) + outer except gate theo `constraint_name='command_executions_idem_key'` (chỉ idempotency conflict mới là duplicate) | `command_order_service_test` T9 |
+| F2 | MEDIUM (tài chính) | Price override single-use bị **double-spend**: 2 đơn khác SKU cùng psid+qty (product `FOR UPDATE` chỉ khóa cùng SKU) cùng consume 1 override | Consume ATOMIC có điều kiện `UPDATE … WHERE used=FALSE RETURNING id`; loser fallback giá thường | `command_order_service_test` T10 |
+| F3 | LOW/MED | `reply_guard`: `'#12' in reply` khớp nhầm `'#123'` → bỏ sót dòng xác nhận (lớp bug substring-biên CLAUDE.md) | Match token boundary regex `(?<!\d)#12(?!\d)` | `test_command_reply_guard` |
+
+**Findings accept-by-design (documented, không đổi code):**
+- F4 (LOW): audit thất bại trên đường **conflict** → surface raw error thay vì 409 (vẫn fail-closed, KHÔNG có mutation để undo; conflict không bị nuốt).
+- F5 (LOW): audit fail-**open** CHỈ khi bảng `audit_log` vắng mặt — KHÔNG xảy ra ở M1 (schema ≥015 luôn có `audit_log`); ở M1 mọi order mutation luôn audited fail-closed.
+- F6 (INFO): override scoped theo psid+qty (không theo product) — theo thiết kế phê duyệt; F2 đã đóng blast-radius double-spend.
+
+**Evidence bổ sung:** `scripts/command_crash_recovery_test.py` (§13.1 crash matrix) + `scripts/command_ops_api_test.py`
+(Ops `/ops` e2e qua RBAC thật). Ops UI **visual screenshot** bị chặn bởi dev DB `alpha3s` drift (thiếu bảng
+RBAC migration 016, provisioned ngoài runner) — ngoài scope M1; coverage bằng ops_api_test + `next build`.
 
 ## 8. Governance
 
