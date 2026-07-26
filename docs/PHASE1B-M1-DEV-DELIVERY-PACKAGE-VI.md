@@ -1,0 +1,144 @@
+---
+id: A3S-PHASE1B-M1-DEV-DELIVERY-PACKAGE
+title: Alpha3S Phase I-B M1 — Dev Initial Delivery Package (Submission 1 of 3)
+milestone: M1
+milestone_name: Reliable Command and Receipt
+governing_spec: A3S-PHASE1B-M1-SPEC-001 v1.0.0
+governing_directive: A3S-PHASE1B-M1-DEV-DIRECTIVE-001 v1.0.0
+status: dev_complete_pending_ca_review
+production_change: NONE (flag M1_RELIABLE_ORDER_COMMAND = OFF)
+language: vi-VN
+---
+
+# M1 Initial Delivery Package — Submission 1
+
+> Development/staging complete ≠ production authorization (Directive §8). Không thay đổi production,
+> không chạy migration production, không bật flag production. Chờ CA Consolidated Review.
+
+## 0. SHA & baseline (AC-M1-11)
+
+```text
+Immutable base SHA : 4ce5f3ab2b95846cbc5a3dd5b21528a891b36314  (tag ib-m0-rc7, migrations 001–018)
+Dev branch         : feat/phase1b-m1-reliable-command  (off ib-m0-rc7, KHÔNG commit main)
+Implementation SHA : 59d4b2ac696155d086201ffa5504ce3bc1600d48  (code+tests+migrations+runbook)
+Delivery-package SHA: (commit kế tiếp, docs-only)
+Baseline proof     : origin/main == 4ce5f3ab (0/0), tag ib-m0-rc7 -> 4ce5f3ab (annotated),
+                     migrations 001–018 present, RBAC_STRICT enforce present, plan v0.1.3 @baseline.
+```
+
+## 1. Changed files & migration manifest
+
+**Migrations mới (expand-only, forward):**
+
+| File | sha256 |
+|---|---|
+| migrations/019_command_bus.sql | `11097820164b819513173df569484331c09ab9b261843e3044c213e6efd26813` |
+| migrations/020_command_rbac.sql | `bb68b5d64bf2a1af7c20b1e2753ab0e4f8dcabba077694aad599e38f3405c2e0` |
+
+**Modified (flag-gated, legacy fallback nguyên vẹn khi flag OFF):**
+`app/config.py` (flag), `app/services/tools.py` (AI create_order route), `app/services/orchestrator.py`
+(command_ctx + deterministic reply + shadow), `app/services/orders.py` (manual route),
+`app/api/dashboard.py` (3 create endpoints + receipt lookup + 6 ops endpoints + metrics),
+`app/workers/tasks.py` (arq cron outbox drain), `dashboard/app/layout.js` (nav).
+
+**New:** `app/services/command/` (hashing, errors, redaction, retry, receipt, registry, idempotency,
+envelope, repository, order_service, order_gateway, outbox_worker, recovery, observability, reply_guard,
+__init__), `dashboard/app/ops/page.js`, `docs/PHASE1B-M1-RUNBOOK-VI.md`, `scripts/validate_command_bus.sql`,
+`scripts/command_*_test.py` (6), `tests/test_command_contract.py`, `tests/test_command_reply_guard.py`.
+
+## 2. Contract (API / tool / receipt)
+
+- **Command envelope** (§6.1): server-generated command_id/correlation_id; actor/customer/conversation
+  injected từ trusted context (KHÔNG tin LLM); canonical-JSON sha256 request_hash; stored payload allowlist
+  (masked phone, KHÔNG address raw).
+- **Idempotency** (§6.2): API/dashboard header `Idempotency-Key` (16–128); AI stable key =
+  sha256(channel|provider_message_id|tool_call_id|type|version); scope = `order.create:<channel>:<actor>`.
+- **HTTP status**: 201 first / 200 duplicate / 202 in_progress (+Retry-After) / 409 conflict /
+  422 validation+business reject / 400 missing-or-invalid key. Body có `receipt` + legacy fields (canary).
+- **Receipt** (§6.4): dựng từ `command_executions.result_payload`, KHÔNG qua LLM. Customer template v1:
+  `Đơn #123 đã được ghi nhận: 1 × 3S-100G, tổng 170.000đ.`
+- **Recovery** (§9.3): `GET /dashboard/{commands,outbox,outbox/{id}}`, `POST /dashboard/outbox/{id}/{retry,cancel,replay}`
+  (RBAC + reason + audit), `GET /dashboard/ops/metrics`.
+
+## 3. Test matrix → AC (AC-M1-01…12)
+
+| AC | Nội dung | Evidence |
+|---|---|---|
+| 01 | Mọi caller dùng envelope + idempotency | `test_command_contract` (envelope/idem), `command_gateway_test`, `command_http_test` (400 no-key) |
+| 02 | Mutation/result/outbox atomic | `command_order_service_test` T1 (order+command+outbox+audit đồng thời) |
+| 03 | Duplicate cùng payload → receipt cũ | `command_order_service_test` T2; `command_http_test` 200 dup |
+| 04 | Duplicate khác payload → conflict, no side-effect | `command_order_service_test` T3+T8; `command_http_test` 409 |
+| 05 | Concurrency → đúng 1 mutation | `command_order_service_test` T7 (20 concurrent=1 order, no oversell) + T8 (10/10) |
+| 06 | Worker lease/retry/dead-letter/recovery | `command_outbox_worker_test` (5); `command_recovery_rbac_test` A |
+| 07 | Deterministic receipt = committed truth | `test_command_contract` (receipt), `test_command_reply_guard`, `command_order_service_test` T1 |
+| 08 | RBAC/audit fail-closed/PII redaction | `command_recovery_rbac_test` R/G/A/F; `test_command_contract` (redaction); T1 redaction |
+| 09 | Metrics/log/alerts/runbook | `command_observability_test`; `docs/PHASE1B-M1-RUNBOOK-VI.md` |
+| 10 | Rollout compat + marker guard evidence gate | `command_gateway_test` (flag on/off legacy); `test_command_reply_guard` (shadow) |
+| 11 | Immutable baseline/migration evidence | §0 baseline proof; §4 rehearsal |
+| 12 | Production smoke + 24h stability | **DEFERRED tới CA release gate** (dev complete ≠ production; cần canary + 24h) |
+
+## 4. Verification (exact, exit codes)
+
+Chạy trong container `alpha3s-api-1` (Python 3.12, pytest 9.1.1), DB throwaway `m1_itest` migrate 001–020.
+
+```text
+# Unit (pytest -q)                                         -> 79 passed, exit 0
+# ruff check app/ + 6 evidence scripts                     -> All checks passed, exit 0
+# Evidence scripts (mỗi cái fresh migrated DB):
+command_order_service_test  exit 0  (T1 atomicity+redaction … T7 20-conc=1 order … T8 10/10)
+command_gateway_test        exit 0  (ON/AI route+receipt+dup … OFF legacy no command row)
+command_outbox_worker_test  exit 0  (delivered / retry->dead-letter / 400 terminal / timeout->unknown / reclaim)
+command_http_test           exit 0  (400/201/200/202+Retry-After/409/422 stock+phone/receipt 200+404)
+command_recovery_rbac_test  exit 0  (RBAC map / gate / retry-cancel-replay+audit+guards+reason / audit fail-closed)
+command_observability_test  exit 0  (5 metrics + 4 alerts P1/P2 + log_event)
+validate_command_bus.sql    exit 0
+```
+
+**Migration rehearsal (§13.2, AC-M1-11):**
+```text
+Fresh DB   : migrate up -> Applied 20 migration(s), validation pass, exit 0
+Existing DB: build to 018 (019/020 held out) -> Applied 18; apply 019+020 -> Applied 2; status re-run no drift
+```
+
+**Live smoke (api trên M1 code):** `/health` 200; `/dashboard/ops/metrics`, `/outbox`, `/commands/{id}/receipt`
+đều 401 (route tồn tại + auth-gated); worker cron `deliver_outbox_job` chạy mỗi 10s (no-op, flag OFF).
+
+## 5. Atomicity / concurrency / crash evidence
+
+- **Atomic** (T1): 1 transaction → order + command(succeeded) + outbox + audit cùng tồn tại; PII chỉ
+  `phone_masked` trong request_payload, KHÔNG address raw.
+- **Effective-once** (T7): 20 request đồng thời cùng key → **đúng 1 order**, stock −1, 1 command, 1 outbox.
+- **Conflict** (T3/T8): cùng key khác payload → 409, 0 side-effect; T8 mixed 10 success/10 conflict.
+- **Crash/failure matrix** (outbox worker): provider 5xx→retry→dead-letter tại max; 4xx terminal ngay;
+  timeout→unknown (không failed vội); worker crash→lease reclaim→deliver.
+- **Audit fail-closed**: break audit_log → order mutation & recovery rollback (không mutation không audit).
+
+## 6. Rollout / flags / rollback (§10.2, §13.3)
+
+- Flag `M1_RELIABLE_ORDER_COMMAND` (default **OFF**). OFF = 3 đường tạo đơn giữ legacy byte-identical.
+- Deploy order: expand migration (019/020) → app đọc/ghi schema mới với flag OFF → start outbox worker
+  (cron đã có, no-op) → canary staff/manual → canary AI → quan sát 24h → enforce idempotency → marker
+  guard structured. Rollback ứng dụng = tắt flag (schema expand tương thích); event đã tạo phải drain,
+  không dừng worker vô thời hạn; KHÔNG rollback migration đã apply (forward-fix).
+- Marker guard (§10.4): template chạy + marker quan sát (bước 1); shadow metric mọi claim có receipt
+  (bước 2, `reply_guard.shadow_evaluate` + log `[cmd] command.idempotency_conflict`/succeeded); structured
+  guard giữ fallback marker 1 release (bước 3) — thực thi ở canary.
+
+## 7. Known limitations / residual risks / scope self-review
+
+1. **AC-M1-12 chưa đạt trong dev delivery** — cần production canary staff + customer-channel + 24h stability
+   (Directive §8). Đây là gate CA release, không thuộc dev complete.
+2. **Dashboard HTTP endpoints** đã route qua command service (Slice 7) nhưng chỉ active khi flag ON.
+3. **`command_duplicate_total` metric** chưa track (loser không persist row riêng) — có thể thêm counter sau.
+4. **Ops UI e2e (login + seeded data)** verify bằng `next build` + route live; visual e2e để canary/staging.
+5. **DB-role tách (runtime vs migration-owner)** vẫn là backlog M0 → đóng trước/không muộn hơn M2 (không
+   suy yếu RBAC strict trong M1).
+6. **Hotfix `tg-customer-dedup` (fa81ff2)** trên base pre-M0 — ngoài scope M1, cần rebase lên ib-m0-rc7
+   trước khi merge (đã để nguyên, Directive §4 incident tách khỏi M1).
+7. **AI stable key** dùng tool_call_id + sender_id (không phải Messenger `mid`) — webhook redelivery đã
+   được Redis `dedup:mid` chặn ở worker; đủ cho scope M1.
+
+## 8. Governance
+
+Submission 1 of maximum 3 (Directive §8). Chờ CA Consolidated Review. Production cần: CA chấp nhận package,
+không P0/P1, migration/backup/forward-fix đạt, immutable SHA/tag, và CA release decision riêng.
