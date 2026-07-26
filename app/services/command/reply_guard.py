@@ -8,7 +8,16 @@ Thuan tuy -> unit-testable, khong DB/LLM.
 """
 from __future__ import annotations
 
+import re
+
 from app.services.command.receipt import order_confirmation_line
+
+
+def _display_in_reply(disp: str, reply: str) -> bool:
+    """disp='#12' chỉ tính là 'đã có' khi xuất hiện như 1 token (không phải tiền tố của số dài hơn):
+    tránh '#12' khớp nhầm '#123'/'#120' -> bỏ sót dòng xác nhận (bài học substring biên CLAUDE.md).
+    FINDING 3 (adversarial self-review)."""
+    return re.search(r"(?<!\d)" + re.escape(disp) + r"(?!\d)", reply) is not None
 
 
 def append_receipt_lines(reply: str, receipt_dicts: list[dict] | None) -> str:
@@ -20,7 +29,7 @@ def append_receipt_lines(reply: str, receipt_dicts: list[dict] | None) -> str:
         resource = rd.get("resource") or {}
         result = rd.get("result") or {}
         disp = resource.get("display_id")
-        if not disp or disp in reply:
+        if not disp or _display_in_reply(disp, reply):
             continue
         lines.append(order_confirmation_line(
             disp, result.get("quantity"), result.get("sku"), result.get("total_vnd")))

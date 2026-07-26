@@ -40,6 +40,16 @@ def test_append_multiple_orders():
     assert "#123" in out and "#124" in out
 
 
+def test_append_order_id_boundary_not_prefix():
+    # FINDING 3: order #12 KHÔNG bị bỏ sót chỉ vì reply chứa số dài hơn '#123'
+    r12 = {"outcome": "succeeded", "resource": {"display_id": "#12"},
+           "result": {"sku": "3S-100G", "quantity": 1, "total_vnd": 170000}}
+    out = reply_guard.append_receipt_lines("Đơn #123 của khách khác đã xong.", [r12])
+    assert "Đơn #12 đã được ghi nhận" in out          # #12 vẫn được bơm (không nhầm #123)
+    out2 = reply_guard.append_receipt_lines("Đã tạo #12 cho anh.", [r12])
+    assert "#12 đã được ghi nhận" not in out2          # #12 xuất hiện đúng token -> bỏ qua
+
+
 def test_shadow_evaluate():
     assert reply_guard.shadow_evaluate(False, [])["consistent"] is True      # khong claim -> ok
     assert reply_guard.shadow_evaluate(True, [123])["consistent"] is True    # claim + receipt -> ok

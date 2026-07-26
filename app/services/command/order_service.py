@@ -68,8 +68,13 @@ async def execute_order_create(env: CommandEnvelope) -> receipt_mod.CommandRecei
                 await repo.insert_command(conn, env.as_insert_params(status="processing"))
                 receipt = await _run_winner(conn, env)
             return receipt  # da commit
-        except asyncpg.UniqueViolationError:
-            return await _resolve_duplicate(conn, env)
+        except asyncpg.UniqueViolationError as e:
+            # CHỈ idempotency-key conflict mới là "duplicate command". Unique khác (vd customers.psid
+            # — dù đã ON CONFLICT phòng thủ, hoặc constraint M2-M6 tương lai) KHÔNG được coi là duplicate
+            # -> raise (không nuốt, không misroute). FINDING 1 (adversarial self-review).
+            if getattr(e, "constraint_name", None) == "command_executions_idem_key":
+                return await _resolve_duplicate(conn, env)
+            raise
     finally:
         await release(conn)
 
@@ -106,18 +111,27 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
                              f"con {product['stock']}, can {qty}")
 
     # --- Pricing: staff-priced (manual) vs system-priced (AI/bot) ---
-    override = None
     if "unit_price_vnd" in p:
         unit_price = p["unit_price_vnd"]
     else:
         psid = p.get("psid")
+        override_price = None  # != None nghĩa là ĐÃ consume được override (single-use)
         if psid:
-            override = await conn.fetchrow(_OVERRIDE_SQL, psid, qty)
-        if qty > MAX_AUTO_QUANTITY and override is None:
+            override_row = await conn.fetchrow(_OVERRIDE_SQL, psid, qty)
+            if override_row is not None:
+                # Consume ATOMIC single-use: chỉ thắng nếu vẫn used=FALSE. Chặn double-spend khi 2 đơn
+                # khác SKU cùng psid+qty (SELECT products FOR UPDATE chỉ khóa cùng SKU). FINDING 2.
+                # Trong cùng transaction -> nếu đơn reject sau đó, consume cũng rollback.
+                consumed_id = await conn.fetchval(
+                    "UPDATE price_overrides SET used=TRUE, status='used' "
+                    "WHERE id=$1 AND used=FALSE RETURNING id", override_row["id"])
+                if consumed_id is not None:
+                    override_price = override_row["unit_price_vnd"]
+        if qty > MAX_AUTO_QUANTITY and override_price is None:
             return await _reject(conn, env, errors.QUANTITY_EXCEEDS_AUTO_LIMIT,
                                  f"qty {qty} > {MAX_AUTO_QUANTITY} khong co override")
-        if override is not None:
-            unit_price = override["unit_price_vnd"]
+        if override_price is not None:
+            unit_price = override_price
         else:
             tiers = await conn.fetch(
                 "SELECT min_qty, unit_price_vnd FROM price_tiers WHERE product_id = $1",
@@ -127,21 +141,17 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
 
     total = unit_price * qty
 
-    # --- Customer upsert (psid hoac manual:<uuid> — winner sinh, loser khong chay) ---
+    # --- Customer upsert ATOMIC (psid hoac manual:<uuid>) ---
+    # ON CONFLICT (psid) DO UPDATE: 2 đơn đồng thời của khách MỚI (khác idempotency key) không còn
+    # đâm nhau ở customers.psid UNIQUE -> cả hai tạo đơn đúng. FINDING 1 (adversarial self-review).
     customer_psid = p.get("psid") or f"manual:{uuid.uuid4().hex[:12]}"
     name, phone, address = p["customer_name"], p["phone"], p["address"]
-    row = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", customer_psid)
-    if row is None:
-        customer_id = await conn.fetchval(
-            "INSERT INTO customers (psid, name, phone, address) VALUES ($1,$2,$3,$4) RETURNING id",
-            customer_psid, name, phone, address,
-        )
-    else:
-        customer_id = row["id"]
-        await conn.execute(
-            "UPDATE customers SET name=$1, phone=$2, address=$3 WHERE id=$4",
-            name, phone, address, customer_id,
-        )
+    customer_id = await conn.fetchval(
+        "INSERT INTO customers (psid, name, phone, address) VALUES ($1,$2,$3,$4) "
+        "ON CONFLICT (psid) DO UPDATE SET name=EXCLUDED.name, phone=EXCLUDED.phone, "
+        "address=EXCLUDED.address RETURNING id",
+        customer_psid, name, phone, address,
+    )
 
     # --- Order + items + stock ---
     order_id = await conn.fetchval(
@@ -154,10 +164,7 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         order_id, product["id"], qty, unit_price,
     )
     await conn.execute("UPDATE products SET stock = stock - $1 WHERE id = $2", qty, product["id"])
-    if override is not None:
-        await conn.execute(
-            "UPDATE price_overrides SET used = TRUE, status = 'used' WHERE id = $1", override["id"]
-        )
+    # (override đã consume atomic ở bước pricing — FINDING 2)
 
     # --- Persist deterministic result (committed truth) ---
     result_payload = {

@@ -194,6 +194,65 @@ async def main() -> int:  # noqa: C901
         other = [r for r in res if isinstance(r, Exception) and r not in conflicts]
         if other:
             fails.append(f"T8: exception la: {other[:2]}")
+
+        # === T9 (FINDING 1) khách MỚI, 2 đơn khác idempotency-key đồng thời -> CẢ HAI tạo đơn ===
+        # (không misroute customers.psid UNIQUE thành 'duplicate'); đúng 1 customer.
+        await reset(conn)
+
+        def race_env(key):
+            return build_order_create_envelope(
+                raw_payload=dict(BASE, psid="psid-brandnew-xyz"),
+                actor=Actor("customer", "psid-brandnew-xyz"), channel="messenger",
+                idempotency_key=key)
+
+        rr = await asyncio.gather(
+            order_service.execute_order_create(race_env("KEY-RACE-A-00001")),
+            order_service.execute_order_create(race_env("KEY-RACE-B-00001")),
+            return_exceptions=True)
+        exc9 = [r for r in rr if isinstance(r, Exception)]
+        oks9 = [r for r in rr if not isinstance(r, Exception)]
+        if exc9:
+            fails.append(f"T9: có exception (misroute new-customer race?): {exc9[:2]}")
+        if len(oks9) != 2 or not all(r.outcome == "succeeded" and not r.duplicate for r in oks9):
+            fails.append(f"T9: không phải cả 2 succeeded non-duplicate: {[r.to_dict() for r in oks9]}")
+        if await orders_count(conn) != 2:
+            fails.append(f"T9: tạo {await orders_count(conn)} order (mong 2)")
+        ncust = await conn.fetchval("SELECT count(*) FROM customers WHERE psid='psid-brandnew-xyz'")
+        if ncust != 1:
+            fails.append(f"T9: {ncust} customer cho psid (mong 1)")
+
+        # === T10 (FINDING 2) override single-use KHÔNG double-spend qua 2 SKU đồng thời ===
+        await reset(conn)
+        await conn.execute("INSERT INTO products (sku,name,description,price_vnd,stock) "
+                           "VALUES ('3S-TEST2','Test2','t',200000,1000) "
+                           "ON CONFLICT (sku) DO UPDATE SET stock=1000")
+        cid_ovr = await conn.fetchval(
+            "INSERT INTO customers (psid,name,phone,address) "
+            "VALUES ('psid-ovr','O','0912345678','x') "
+            "ON CONFLICT (psid) DO UPDATE SET name='O' RETURNING id")
+        await conn.execute("DELETE FROM price_overrides WHERE customer_id=$1", cid_ovr)
+        await conn.execute("INSERT INTO price_overrides (customer_id,quantity,unit_price_vnd,note) "
+                           "VALUES ($1,3,50000,'test')", cid_ovr)
+
+        def ovr_env(key, sku):
+            return build_order_create_envelope(
+                raw_payload={**BASE, "sku": sku, "quantity": 3, "psid": "psid-ovr"},
+                actor=Actor("customer", "psid-ovr"), channel="messenger", idempotency_key=key)
+
+        ro = await asyncio.gather(
+            order_service.execute_order_create(ovr_env("KEY-OVR-A-00001", "3S-100G")),
+            order_service.execute_order_create(ovr_env("KEY-OVR-B-00001", "3S-TEST2")),
+            return_exceptions=True)
+        oks10 = [r for r in ro if not isinstance(r, Exception)]
+        if len(oks10) != 2:
+            fails.append(f"T10: không phải 2 đơn thành công: {ro}")
+        used_n = await conn.fetchval(
+            "SELECT count(*) FROM price_overrides WHERE customer_id=$1 AND used=TRUE", cid_ovr)
+        if used_n != 1:
+            fails.append(f"T10: override used={used_n} (mong 1 — single-use, không double-spend)")
+        ovr_priced = [r for r in oks10 if r.result and r.result["unit_price_vnd"] == 50000]
+        if len(ovr_priced) != 1:
+            fails.append(f"T10: {len(ovr_priced)} đơn dùng giá override (mong đúng 1)")
     finally:
         await conn.close()
 
@@ -204,7 +263,8 @@ async def main() -> int:  # noqa: C901
         return 1
     print("COMMAND-ORDER-SERVICE PASS: T1 atomicity+redaction; T2 dup same-payload; T3 409 conflict; "
           "T4 insufficient_stock; T5 product_not_found; T6 qty-limit; T7 20-conc=1 order no-oversell; "
-          "T8 mixed-key 10 success/10 conflict no-oversell")
+          "T8 mixed-key 10 success/10 conflict no-oversell; T9 new-customer race=2 orders/1 customer "
+          "(FINDING 1); T10 override single-use no double-spend (FINDING 2)")
     return 0
 
 
