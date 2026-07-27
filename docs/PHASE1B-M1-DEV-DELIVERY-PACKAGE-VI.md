@@ -139,8 +139,9 @@ Existing DB: build to 018 (019/020 held out) -> Applied 18; apply 019+020 -> App
    suy yếu RBAC strict trong M1).
 6. **Hotfix `tg-customer-dedup` (fa81ff2)** trên base pre-M0 — ngoài scope M1, cần rebase lên ib-m0-rc7
    trước khi merge (đã để nguyên, Directive §4 incident tách khỏi M1).
-7. **AI stable key** dùng tool_call_id + sender_id (không phải Messenger `mid`) — webhook redelivery đã
-   được Redis `dedup:mid` chặn ở worker; đủ cho scope M1.
+7. **AI idempotency key** (ĐÃ ĐÓNG CR-04/CR-04R — không còn là limitation): neo vào channel +
+   **provider message ID thật** (Messenger `mid` / Telegram `message_id`) + business identity đã chuẩn
+   hoá; KHÔNG dùng `tool_call_id` → ổn định qua re-execution (xem §11). Giữ nguyên đây để đối chiếu.
 
 ## 7b. Post-submission self-review & hardening
 
@@ -155,7 +156,9 @@ và **sửa 3 bug thật** + bổ sung 2 nhóm evidence. Implementation SHA cậ
 
 **Findings accept-by-design (documented, không đổi code):**
 - F4 (LOW): audit thất bại trên đường **conflict** → surface raw error thay vì 409 (vẫn fail-closed, KHÔNG có mutation để undo; conflict không bị nuốt).
-- F5 (LOW): audit fail-**open** CHỈ khi bảng `audit_log` vắng mặt — KHÔNG xảy ra ở M1 (schema ≥015 luôn có `audit_log`); ở M1 mọi order mutation luôn audited fail-closed.
+- F5 (ĐÃ ĐÓNG ở CR-05): mô tả cũ là audit fail-**open** khi bảng `audit_log` vắng mặt. Submission 2
+  (CR-05) đã BỎ guard `audit_exists` trong order_service → order mutation LUÔN gọi audit; thiếu/hỏng
+  `audit_log` → `record()` raise → transaction rollback (fail-closed hoàn toàn). Không còn fail-open.
 - F6 (INFO): override scoped theo psid+qty (không theo product) — theo thiết kế phê duyệt; F2 đã đóng blast-radius double-spend.
 
 **Evidence bổ sung:** `scripts/command_crash_recovery_test.py` (§13.1 crash matrix) + `scripts/command_ops_api_test.py`
@@ -225,7 +228,7 @@ CI: `.github/workflows/deploy.yml` nay chạy `lint-test` (ruff + pytest, ubuntu
 
 ## 11. Submission 3 — Remediation CA Review 2 (final)
 
-Base `4ce5f3ab`. Remediation implementation SHA: `46e1169f9f6fae70eca06ef21eec62ae3ebfe70f`. Timestamp: `2026-07-27 18:30+07:00`.
+Base `4ce5f3ab`. Remediation implementation SHA: `46e1169f9f6fae70eca06ef21eec62ae3ebfe70f` (commit 2026-07-27 17:27+07:00). Package correction: `2026-07-27 17:40+07:00`.
 Submission cuối theo governance (3/3). Nhánh dev, flag OFF, KHÔNG production.
 
 | CR | Đã sửa | Evidence |
@@ -240,3 +243,15 @@ migration rehearsal fresh `001→020`. CI `lint-test` pass trên PR head Submiss
 **CR-04R closed:** cùng provider message, hai lần orchestration (tool-call ID khác) → cùng idempotency key
 → đúng một order; provider message khác → key khác → order mới. **CR-08 closed:** không có success
 claim/order detail do LLM sinh tới khách; chỉ một authoritative confirmation (durable receipt).
+
+## 12. Package-only correction (trước release gate)
+
+Theo CA Consolidated Review 3 (DEVELOPMENT_ACCEPTED — RELEASE_GATE_PENDING), mục "Documentation
+correction": đây là hiệu chỉnh **package-only**, KHÔNG phải Submission 4, KHÔNG đổi implementation.
+
+- §7 #7: sửa mô tả cũ "tool_call_id + sender_id" → đã đóng CR-04/CR-04R (neo provider message id + business identity).
+- §7b F5: sửa mô tả "audit fail-open khi thiếu bảng" → CR-05 đã chuyển audit sang bắt buộc/fail-closed.
+- §11 timestamp: `18:30` (sau thời điểm CA review 17:35, bất hợp lý) → commit thực 17:27, correction 17:40 (+07).
+
+Implementation SHA giữ nguyên `46e1169f9f6fae70eca06ef21eec62ae3ebfe70f`. `git diff 46e1169..<package-head>
+-- '*.py'` RỖNG (chỉ thay tài liệu). Package-only head SHA: `17105ec2fd3660e2daf09f7c1fb4565e747cb3a7`.
