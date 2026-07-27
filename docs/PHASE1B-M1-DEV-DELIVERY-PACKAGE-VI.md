@@ -1,16 +1,16 @@
 ---
 id: A3S-PHASE1B-M1-DEV-DELIVERY-PACKAGE
-title: Alpha3S Phase I-B M1 — Dev Initial Delivery Package (Submission 1 of 3)
+title: Alpha3S Phase I-B M1 — Dev Delivery Package (Submission 3 of 3, final)
 milestone: M1
 milestone_name: Reliable Command and Receipt
 governing_spec: A3S-PHASE1B-M1-SPEC-001 v1.0.0
 governing_directive: A3S-PHASE1B-M1-DEV-DIRECTIVE-001 v1.0.0
-status: remediation_submission_2_pending_ca_review
+status: remediation_submission_3_pending_ca_review
 production_change: NONE (flag M1_RELIABLE_ORDER_COMMAND = OFF)
 language: vi-VN
 ---
 
-# M1 Initial Delivery Package — Submission 1
+# M1 Delivery Package — Submission 3 (of 3, final)
 
 > Development/staging complete ≠ production authorization (Directive §8). Không thay đổi production,
 > không chạy migration production, không bật flag production. Chờ CA Consolidated Review.
@@ -20,7 +20,7 @@ language: vi-VN
 ```text
 Immutable base SHA : 4ce5f3ab2b95846cbc5a3dd5b21528a891b36314  (tag ib-m0-rc7, migrations 001–018)
 Dev branch         : feat/phase1b-m1-reliable-command  (off ib-m0-rc7, KHÔNG commit main)
-Implementation SHA : d74d5c57583d99b6790a366a7f03e0de8d2df1e7  (Sub2 CA-remediation; hardening 0bc4eb7; initial 59d4b2a)
+Implementation SHA : 46e1169f9f6fae70eca06ef21eec62ae3ebfe70f  (Sub3 CA-remediation final; Sub2 d74d5c5; hardening 0bc4eb7; initial 59d4b2a)
 Baseline proof     : origin/main == 4ce5f3ab (0/0), tag ib-m0-rc7 -> 4ce5f3ab (annotated),
                      migrations 001–018 present, RBAC_STRICT enforce present, plan v0.1.3 @baseline.
 ```
@@ -162,9 +162,9 @@ RBAC migration 016, provisioned ngoài runner) — ngoài scope M1; coverage b�
 
 ## 8. Governance
 
-**Submission 2 of maximum 3** (Directive §8) — remediation cho CA Consolidated Review 1
-(`PHASE1B-M1-CA-CONSOLIDATED-REVIEW-SUBMISSION-1-VI.md`, CHANGES_REQUIRED). Production cần: CA chấp nhận
-package, không P0/P1, migration/backup/forward-fix đạt, immutable SHA/tag, và CA release decision riêng.
+**Submission 3 of maximum 3 (final)** (Directive §8) — remediation cho CA Consolidated Review 1 & 2
+(`...REVIEW-SUBMISSION-1-VI.md`, `...REVIEW-SUBMISSION-2-VI.md`, cả hai CHANGES_REQUIRED). Production cần:
+CA chấp nhận package, không P0/P1, migration/backup/forward-fix đạt, immutable SHA/tag, CA release decision riêng.
 
 ## 9. Submission 2 — Remediation CA Review 1
 
@@ -195,16 +195,18 @@ docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@db:5432/m1_itest -e PYT
 # unit + lint
 docker exec -e PYTHONPATH=/srv -w /srv alpha3s-api-1 python -m pytest -q      # 81 passed, exit 0
 docker exec -w /srv alpha3s-api-1 ruff check app/                             # All checks passed, exit 0
-# 9 evidence scripts (mỗi cái fresh DB) — tất cả exit 0:
-scripts/command_order_service_test.py    # T1..T10 (+ new-customer race, override single-use)
-scripts/command_gateway_test.py
-scripts/command_outbox_worker_test.py
-scripts/command_http_test.py
-scripts/command_recovery_rbac_test.py    # + CR-01/CR-02/CR-06
-scripts/command_observability_test.py
-scripts/command_crash_recovery_test.py   # §13.1
-scripts/command_ops_api_test.py          # /ops e2e
-scripts/command_ca_remediation_test.py   # CR-01/CR-02/CR-03/CR-05
+# 9 evidence scripts — EXACT invocation cho từng cái (sau reset+migrate ở trên), tất cả exit 0:
+docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@db:5432/m1_itest -e PYTHONPATH=/srv -w /srv \
+  alpha3s-api-1 python scripts/<NAME>.py     # với <NAME> ∈:
+#   command_order_service_test    (T1..T10: atomicity/dup/409/stock/qty/20-conc/mixed/new-customer race/override single-use)
+#   command_gateway_test          (AI derive-key route / manual staff / ctx=None legacy / flag OFF legacy)
+#   command_outbox_worker_test    (delivered / retry->dead-letter / terminal / timeout->unknown / reclaim)
+#   command_http_test             (400 / 201 / 200 / 202+Retry-After / 409 / 422 / receipt 200+404)
+#   command_recovery_rbac_test    (RBAC map+gate / CR-01 / CR-02 cancel-delivering / CR-06 replay negatives / audit fail-closed)
+#   command_observability_test    (5 metrics + 4 alerts P1/P2 + log_event)
+#   command_crash_recovery_test   (§13.1: fail-before-commit / retry-after-commit / worker-crash reclaim)
+#   command_ops_api_test          (/ops e2e qua RBAC thật)
+#   command_ca_remediation_test   (CR-01 / CR-02 CAS / CR-03 durable receipt / CR-04R / CR-05 audit fail-closed)
 ```
 
 Migration rehearsal (remediation): fresh `001→020` Applied 20, validation pass, exit 0; existing-DB
@@ -218,3 +220,21 @@ migrations/020_command_rbac.sql bb68b5d64bf2a1af7c20b1e2753ab0e4f8dcabba077694aa
 
 CI: `.github/workflows/deploy.yml` nay chạy `lint-test` (ruff + pytest, ubuntu-latest) trên `pull_request`
 → status check tại PR #1; job `deploy` gate `github.event_name=='push' && ref==main` → KHÔNG deploy khi PR.
+
+## 11. Submission 3 — Remediation CA Review 2 (final)
+
+Base `4ce5f3ab`. Remediation implementation SHA: `46e1169f9f6fae70eca06ef21eec62ae3ebfe70f`. Timestamp: `2026-07-27 18:30+07:00`.
+Submission cuối theo governance (3/3). Nhánh dev, flag OFF, KHÔNG production.
+
+| CR | Đã sửa | Evidence |
+|---|---|---|
+| CR-04R blocker | `ai_stable_key` **bỏ tool_call_id**; gateway derive key = `sha256(channel + provider_message_id + type + version + business_identity)` (business_identity = request_hash của nội dung đơn đã chuẩn hoá). Cùng inbound message + cùng đơn → **cùng key** (effective-once qua re-execution dù LLM sinh tool-call mới); đơn khác nội dung → key khác (nhiều đơn/1 message vẫn phân biệt). | unit `test_ai_stable_key_no_tool_call_id_stable_across_reexecution`; `ca_remediation` CR-04R (cùng provider msg → 1 order+duplicate; msg khác → order mới) |
+| CR-08 blocker | Order đã commit → reply tức thì **TRUNG TÍNH** (`reply_guard.finalize_customer_reply`), KHÔNG mang mã đơn/tổng tiền do LLM sinh; durable receipt (outbox, CR-03) là confirmation **duy nhất & đúng committed data**. | unit `test_finalize_customer_reply_neutral_when_order_created` (LLM ghi sai #999/5.000.000đ → khách nhận câu trung tính); receipt khớp committed |
+| Metadata | title/frontmatter/heading + PR title → Submission 3; §10 exact per-script invocation; SHA/timestamp chuẩn `YYYY-MM-DD HH:mm+07:00` | doc này + PR body |
+
+Verification (Submission 3, remediation SHA): **81 unit + 9 integration evidence scripts PASS**, ruff clean,
+migration rehearsal fresh `001→020`. CI `lint-test` pass trên PR head Submission 3 (xem PR #1 checks).
+
+**CR-04R closed:** cùng provider message, hai lần orchestration (tool-call ID khác) → cùng idempotency key
+→ đúng một order; provider message khác → key khác → order mới. **CR-08 closed:** không có success
+claim/order detail do LLM sinh tới khách; chỉ một authoritative confirmation (durable receipt).
