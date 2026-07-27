@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.services.command import repository as cmd_repo
+from app.services.command.retry import MAX_ATTEMPTS
 from app.services.inventory import repository as inv_repo
 from app.services.inventory import service as inv_service
 from app.services.order import transitions
@@ -27,7 +29,7 @@ class TransitionResult:
 
 async def _lock_order(conn, order_id: int):
     return await conn.fetchrow(
-        "SELECT id, status, inventory_status, inventory_location_id "
+        "SELECT id, status, inventory_status, inventory_location_id, customer_id, origin_channel "
         "FROM orders WHERE id=$1 FOR UPDATE",
         order_id,
     )
@@ -98,7 +100,40 @@ async def apply_transition(
         actor_type=actor_type, actor_id=actor_id, correlation_id=correlation_id, command_id=command_id,
         reason=reason, idempotency_key=f"{prefix}:event:{order_id}:{action}",
     )
+    # --- customer notification deterministic (AC-M2-15, CA M2-S1-F06) ---
+    await _notify_customer(conn, order, spec.to_status, command_id)
     return TransitionResult(order_id, from_status, spec.to_status, spec.inventory_effect, affected)
+
+
+# Template deterministic từ committed status (KHÔNG LLM, không bịa quantity/tiền).
+_CUSTOMER_NOTIFY = {
+    "confirmed": "Đơn #{id} của bạn đã được xác nhận.",
+    "fulfilled": "Đơn #{id} của bạn đã được giao.",
+    "cancelled": "Đơn #{id} của bạn đã được huỷ.",
+    "cancelled_by_exception": "Đơn #{id} của bạn đã được huỷ.",
+    "completed": "Đơn #{id} của bạn đã hoàn tất. Cảm ơn bạn!",
+}
+
+
+async def _notify_customer(conn, order, to_status: str, command_id) -> None:
+    """Emit customer outbox notification (durable: retry/dead-letter/dedupe M1) cho kênh khách.
+    Dedupe theo (order, to_status) -> giao đúng-một-lần. Chỉ khi có command_id (đi từ command)."""
+    if command_id is None:
+        return
+    ch = order["origin_channel"]
+    if ch not in ("messenger", "telegram_customer"):
+        return
+    tmpl = _CUSTOMER_NOTIFY.get(to_status)
+    if tmpl is None or order["customer_id"] is None:
+        return
+    psid = await conn.fetchval("SELECT psid FROM customers WHERE id=$1", order["customer_id"])
+    if not psid:
+        return
+    await cmd_repo.insert_outbox(
+        conn, command_id=command_id, event_type="order.status.customer", event_version=1,
+        destination=ch, dedupe_key=f"order_status:{order['id']}:{to_status}",
+        payload={"customer_ref": psid, "order_id": order["id"], "text": tmpl.format(id=order["id"])},
+        max_attempts=MAX_ATTEMPTS)
 
 
 async def reserve_on_create(

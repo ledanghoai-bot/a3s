@@ -170,8 +170,8 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     # --- Order + items + stock ---
     order_id = await conn.fetchval(
         "INSERT INTO orders (customer_id, status, total_vnd, shipping_name, shipping_phone, "
-        "shipping_address) VALUES ($1,'new',$2,$3,$4,$5) RETURNING id",
-        customer_id, total, name, phone, address,
+        "shipping_address, origin_channel) VALUES ($1,'new',$2,$3,$4,$5,$6) RETURNING id",
+        customer_id, total, name, phone, address, env.channel,
     )
     order_item_id = await conn.fetchval(
         "INSERT INTO order_items (order_id, product_id, quantity, unit_price_vnd) VALUES ($1,$2,$3,$4) "
