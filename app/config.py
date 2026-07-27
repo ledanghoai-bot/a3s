@@ -75,5 +75,13 @@ class Settings(BaseSettings):
     # Khi BAT: route qua command service (effective-once + atomic outbox + deterministic receipt).
     m1_reliable_order_command: bool = False
 
+    # I-B M2 (Order and Inventory Correctness). MAC DINH TAT — canary/rollout theo phase (§15.6).
+    # m2_inventory_ledger: dual-write ledger/reservation/balance (order.create reserve atomic; shadow).
+    # m2_order_transitions: shared transition service + matrix guard cho lifecycle command.
+    # m2_balance_authority: balance thanh nguon quyet dinh availability/reserve (Phase C) — bat SAU cung.
+    m2_inventory_ledger: bool = False
+    m2_order_transitions: bool = False
+    m2_balance_authority: bool = False
+
 
 settings = Settings()

@@ -15,6 +15,7 @@ import uuid
 
 import asyncpg
 
+from app.config import settings
 from app.db_pool import acquire, release
 from app.services import audit_service
 from app.services.command import errors
@@ -23,6 +24,8 @@ from app.services.command import repository as repo
 from app.services.command.envelope import CommandEnvelope
 from app.services.command.observability import log_event
 from app.services.command.retry import MAX_ATTEMPTS
+from app.services.inventory.errors import InventoryError
+from app.services.order import transition_service as order_txn
 from app.services.tools import MAX_AUTO_QUANTITY, _unit_price_for_quantity
 
 OUTBOX_DEST_TELEGRAM_ADMIN = "telegram_admin"
@@ -159,12 +162,28 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         "shipping_address) VALUES ($1,'new',$2,$3,$4,$5) RETURNING id",
         customer_id, total, name, phone, address,
     )
-    await conn.execute(
-        "INSERT INTO order_items (order_id, product_id, quantity, unit_price_vnd) VALUES ($1,$2,$3,$4)",
+    order_item_id = await conn.fetchval(
+        "INSERT INTO order_items (order_id, product_id, quantity, unit_price_vnd) VALUES ($1,$2,$3,$4) "
+        "RETURNING id",
         order_id, product["id"], qty, unit_price,
     )
     await conn.execute("UPDATE products SET stock = stock - $1 WHERE id = $2", qty, product["id"])
     # (override đã consume atomic ở bước pricing — FINDING 2)
+
+    # --- M2: reserve ATOMIC trong cùng transaction khi flag inventory ledger bật (Spec §7.2, §10.1) ---
+    # Compatibility (§15.6): legacy stock đã trừ ở trên (authority); reserve mirror vào ledger/balance
+    # (available == products.stock giữ nguyên). Fail-closed: reserve lỗi -> raise -> rollback đơn.
+    if settings.m2_inventory_ledger:
+        atype2, aref2, _ = _audit_actor(env)
+        try:
+            await order_txn.reserve_on_create(
+                conn, order_id=order_id, order_item_id=order_item_id, product_id=product["id"],
+                quantity=qty, actor_type=atype2, actor_id=aref2 or "system",
+                correlation_id=env.correlation_id, command_id=env.command_id,
+            )
+        except InventoryError as ie:
+            # Bất nhất ledger↔legacy (vd chưa backfill balance) -> rollback toàn bộ create (no partial).
+            raise errors.CommandError(errors.INSUFFICIENT_STOCK, ie.message, http_status=422) from ie
 
     # --- Persist deterministic result (committed truth) ---
     result_payload = {
