@@ -274,10 +274,11 @@ async def _do_reservation_expire(conn, env):
     p = env.payload
     rid = uuid.UUID(p["reservation_id"])
     r = await conn.fetchrow(
-        "SELECT r.*, o.status AS order_status FROM inventory_reservations r "
-        "JOIN orders o ON o.id=r.order_id WHERE r.id=$1 FOR UPDATE", rid)
-    # idempotent no-op: đã terminal / order không còn 'new' / chưa tới hạn -> succeeded noop
-    if r is None or r["status"] != "active" or r["order_status"] != "new" or r["expires_at"] is None:
+        "SELECT r.*, o.status AS order_status, (r.expires_at <= now()) AS due "
+        "FROM inventory_reservations r JOIN orders o ON o.id=r.order_id WHERE r.id=$1 FOR UPDATE", rid)
+    # idempotent no-op: đã terminal / order không còn 'new' / chưa tới hạn (vd đã extend sau claim).
+    if (r is None or r["status"] != "active" or r["order_status"] != "new"
+            or r["expires_at"] is None or not r["due"]):
         result = {"reservation_id": str(rid), "outcome": "noop"}
         return result, {"type": "reservation", "id": str(rid)}, "reservation.expire", result
     # release (expired) + restore legacy stock + cancel order
