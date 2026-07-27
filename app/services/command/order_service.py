@@ -24,6 +24,7 @@ from app.services.command import repository as repo
 from app.services.command.envelope import CommandEnvelope
 from app.services.command.observability import log_event
 from app.services.command.retry import MAX_ATTEMPTS
+from app.services.inventory import repository as inv_repo
 from app.services.inventory.errors import InventoryError
 from app.services.order import transition_service as order_txn
 from app.services.tools import MAX_AUTO_QUANTITY, _unit_price_for_quantity
@@ -109,9 +110,19 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     )
     if product is None:
         return await _reject(conn, env, errors.PRODUCT_NOT_FOUND, f"sku khong ton tai: {sku}")
-    if product["stock"] < qty:
+    # --- Availability authority (AC-M2-13, CA M2-S1-F05) ---
+    # Phase A/B: legacy products.stock là authority. Phase C (m2_balance_authority ON): đọc
+    # availability TỪ balance (default location); products.stock chỉ còn mirror. Chống split-brain:
+    # dùng ĐÚNG một nguồn cho accept decision. Reserve dưới FOR UPDATE mới là guard cuối (no oversell).
+    if settings.m2_inventory_ledger and settings.m2_balance_authority:
+        loc_auth = await inv_repo.resolve_default_location(conn)
+        bal_auth = await inv_repo.get_balance(conn, loc_auth, product["id"])
+        available = (bal_auth["on_hand"] - bal_auth["reserved"]) if bal_auth else 0
+    else:
+        available = product["stock"]
+    if available < qty:
         return await _reject(conn, env, errors.INSUFFICIENT_STOCK,
-                             f"con {product['stock']}, can {qty}")
+                             f"con {available}, can {qty}")
 
     # --- Pricing: staff-priced (manual) vs system-priced (AI/bot) ---
     if "unit_price_vnd" in p:
