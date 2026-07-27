@@ -12,6 +12,7 @@ import httpx
 from app.config import settings
 from app.db_pool import acquire, release
 from app.services import conversation_log
+from app.services.safe_log import safe_exc
 
 # Cac cum tu pho bien khi khach CHU DONG doi gap nguoi that. Day la luoi an toan
 # thu 2, khong phu thuoc hoan toan vao viec LLM co goi escalate_to_human dung luc
@@ -141,7 +142,7 @@ async def pause_bot(psid: str, reason: str = "Nhan vien chu dong pause tu dashbo
     try:
         await log_escalation(conversation_id, reason)
     except Exception as e:
-        print(f"[handoff] Ghi log pause thu cong that bai: {e}")
+        print(f"[handoff] Ghi log pause thu cong that bai: {safe_exc(e)}")
     return True
 
 
@@ -275,7 +276,7 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
             resp.raise_for_status()
     except Exception as e:
         # Loi gui thong bao KHONG duoc lam sap luong tra loi khach - chi log.
-        print(f"[handoff] Gui Telegram that bai: {e}")
+        print(f"[handoff] Gui Telegram that bai: {safe_exc(e)}")
 
 
 def _fmt_vnd(n: object) -> str:
@@ -314,4 +315,4 @@ async def notify_admin_new_order(order: dict) -> None:
             )
             resp.raise_for_status()
     except Exception as e:
-        print(f"[handoff] Gui Telegram don moi that bai: {e}")
+        print(f"[handoff] Gui Telegram don moi that bai: {safe_exc(e)}")

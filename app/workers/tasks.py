@@ -15,6 +15,7 @@ from app.services.command import outbox_worker
 from app.services.handoff import is_bot_paused
 from app.services.messenger import send_text
 from app.services.orchestrator import handle_message
+from app.services.safe_log import safe_exc
 
 DEDUP_TTL_SECONDS = 24 * 60 * 60  # 24h - du lon hon cua so retry cua Meta
 DEAD_LETTER_KEY = "dead_letter:messages"
@@ -50,7 +51,11 @@ async def process_message(ctx: dict, event: dict) -> None:
                 DEAD_LETTER_KEY,
                 json.dumps({"event": event, "job_try": job_try}, ensure_ascii=False),
             )
-            print(f"[worker] DEAD-LETTER sau {job_try} lan thu that bai, event: {event}")
+            # M3-S4: dead-letter la Personal Data Zone (raw event giu de replay) -> TTL 7 ngay
+            # (RET-07) + KHONG print raw event ra stdout (chi refs).
+            await redis.expire(DEAD_LETTER_KEY, 7 * 24 * 3600)
+            mid = ((event.get("message") or {}).get("mid") if isinstance(event, dict) else None)
+            print(f"[worker] DEAD-LETTER sau {job_try} lan thu that bai, mid={mid}")
         raise
 
 
@@ -115,7 +120,7 @@ async def deliver_outbox_job(ctx) -> None:
         if stats["claimed"] or stats["reclaimed"] or stats["dead"]:
             print(f"[outbox] drain {stats}")
     except Exception as e:  # noqa: BLE001 - drain loi khong duoc lam sap worker
-        print(f"[outbox] drain loi (bo qua vong nay): {e}")
+        print(f"[outbox] drain loi (bo qua vong nay): {safe_exc(e)}")
 
 
 async def expire_reservations_job(ctx) -> None:
@@ -127,7 +132,7 @@ async def expire_reservations_job(ctx) -> None:
         if stats.get("claimed"):
             print(f"[expiry] sweep {stats}")
     except Exception as e:  # noqa: BLE001 - sweep loi khong duoc lam sap worker
-        print(f"[expiry] sweep loi (bo qua vong nay): {e}")
+        print(f"[expiry] sweep loi (bo qua vong nay): {safe_exc(e)}")
 
 
 async def _on_shutdown(ctx) -> None:

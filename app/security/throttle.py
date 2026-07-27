@@ -7,6 +7,7 @@
 import redis.asyncio as aioredis
 
 from app.config import settings
+from app.services.safe_log import mask_ref, safe_exc
 
 _WINDOW = 900          # 15 phut
 _MAX_PER_USER = 5
@@ -31,12 +32,12 @@ async def is_locked(username_norm: str, ip: str) -> bool:
             g = int(await r.get("lg:g") or 0)
             locked = u >= _MAX_PER_USER or i >= _MAX_PER_IP or g >= _MAX_GLOBAL
             if locked:
-                print(f"[security] login throttled user={username_norm} ip={ip} (u={u} i={i} g={g})")
+                print(f"[security] login throttled user={mask_ref(username_norm)} ip={mask_ref(ip)} (u={u} i={i} g={g})")
             return locked
         finally:
             await r.aclose()
     except Exception as e:  # noqa: BLE001 - FAIL-OPEN (CA §9.3)
-        print(f"[security] throttle Redis loi -> FAIL-OPEN: {e}")
+        print(f"[security] throttle Redis loi -> FAIL-OPEN: {safe_exc(e)}")
         return False
 
 
@@ -52,7 +53,7 @@ async def record_failure(username_norm: str, ip: str) -> None:
         finally:
             await r.aclose()
     except Exception as e:  # noqa: BLE001
-        print(f"[security] throttle record loi (bo qua): {e}")
+        print(f"[security] throttle record loi (bo qua): {safe_exc(e)}")
 
 
 async def reset_user(username_norm: str) -> None:

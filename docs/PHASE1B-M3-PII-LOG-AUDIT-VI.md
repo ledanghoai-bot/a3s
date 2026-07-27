@@ -36,7 +36,23 @@ bật mặc định (ghi full path).
 - `api/webhook.py` — không log gì tại điểm vào raw chat.
 - `orchestrator.py:154-156` — không log/lưu sau khi xóa dữ liệu (tránh tái tạo khách vừa xóa).
 
-## 3. Hướng xử lý S4 (dự kiến, chốt khi làm slice)
+## 2b. KẾT QUẢ S4 (2026-07-28 00:44+07:00) — đã sửa
+
+| Gap | Xử lý |
+|---|---|
+| #1 dead-letter | KHÔNG print raw event (chỉ mid); Redis dead-letter TTL 7 ngày (RET-07) — payload giữ để replay trong Personal Data Zone |
+| #2 token qua exception | `app/services/safe_log.py` — `safe_exc()` redact bot token/access_token/Bearer/SĐT/email (kể cả URL-encoded), áp vào TOÀN BỘ ~30 điểm `print(...{e})` trong app/ |
+| #3 reply content | orchestrator chỉ log `reply_len`, không nội dung |
+| #4 framework | chọn phương án nhẹ: `safe_exc` + `log_event` ENFORCE `redact_generic` (không tin call site) + fallback không in repr thô; framework đầy đủ = backlog |
+| #5 log_event | enforced (observability.py) |
+| #7 exception trần | toàn bộ qua `safe_exc`; throttle mask username/IP; data_deletion mask psid |
+| Guard | `scripts/m3_pii_log_test.py`: unit redaction (raw/encoded/Unicode/httpx) + log_event enforce + **static guard** quét app/ chặn pattern tái xuất. ALL PASS EXIT=0 |
+
+**Known limitation (khai báo cho CA):** #6 PSID trong URL path → uvicorn access log (hạ tầng): đổi
+route là breaking API dashboard — đề xuất xử lý ở release (tắt/định dạng lại access log) hoặc
+milestone sau; nêu trong Delivery Package như open release input.
+
+## 3. Hướng xử lý S4 (dự kiến ban đầu — giữ làm lịch sử)
 
 1. Đưa logging framework tối thiểu (structured, level, filter) hoặc chuẩn hóa qua `log_event` + bắt buộc
    `redact_generic` trong `log_event`.

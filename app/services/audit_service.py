@@ -15,6 +15,7 @@ import json
 import asyncpg
 
 from app.config import settings
+from app.services.safe_log import safe_exc
 
 _SENSITIVE_KEYS = {
     # credential/secret
@@ -93,4 +94,4 @@ async def record_best_effort(actor_type: str, action: str, **kwargs) -> None:
         finally:
             await conn.close()
     except Exception as e:  # noqa: BLE001 - telemetry khong duoc lam vo flow chinh
-        print(f"[audit] best-effort record loi (bo qua): {e}")
+        print(f"[audit] best-effort record loi (bo qua): {safe_exc(e)}")

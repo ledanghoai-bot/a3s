@@ -10,6 +10,7 @@ import json
 import httpx
 
 from app.config import settings
+from app.services.safe_log import mask_ref, safe_exc
 
 GRAPH_URL = "https://graph.facebook.com/v19.0"
 CACHE_TTL = 7 * 86400  # 7 ngay
@@ -43,7 +44,8 @@ async def get_user_profile(redis, psid: str) -> dict:
                 "last_name": data.get("last_name", ""),
             }
     except Exception as e:
-        print(f"[messenger_profile] Khong lay duoc profile {psid}: {e}")
+        # M3-S4: str(HTTPStatusError) chua full URL kem access_token -> safe_exc bat buoc.
+        print(f"[messenger_profile] Khong lay duoc profile {mask_ref(psid)}: {safe_exc(e)}")
         profile = {}
 
     # 3. Cache (ke ca rong, TTL ngan hon de retry sau)

@@ -25,6 +25,7 @@ import json
 import redis.asyncio as aioredis
 
 from app.config import settings
+from app.services.safe_log import safe_exc
 
 _TTL_SECONDS = 86400  # giong TTL lich su chat trong orchestrator.py (24h)
 
@@ -55,7 +56,7 @@ async def get_conversation_state(sender_id: str) -> dict | None:
         finally:
             await redis.aclose()
     except Exception as e:
-        print(f"[context_state] Khong doc duoc state (bo qua): {e}")
+        print(f"[context_state] Khong doc duoc state (bo qua): {safe_exc(e)}")
         return None
 
 
@@ -70,7 +71,7 @@ async def save_conversation_state(sender_id: str, intent: str, domains: list[str
         finally:
             await redis.aclose()
     except Exception as e:
-        print(f"[context_state] Khong luu duoc state (bo qua): {e}")
+        print(f"[context_state] Khong luu duoc state (bo qua): {safe_exc(e)}")
 
 
 def looks_like_continuation(message: str) -> bool:

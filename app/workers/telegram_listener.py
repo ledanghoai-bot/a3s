@@ -41,6 +41,7 @@ from app.services.handoff import (
     resolve_psid,
     resume_bot,
 )
+from app.services.safe_log import safe_exc
 
 API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 30  # giay cho long-polling moi request getUpdates
@@ -58,7 +59,7 @@ async def _send(client: httpx.AsyncClient, text: str, reply_markup: dict | None 
     try:
         await client.post(url, json=payload, timeout=10.0)
     except Exception as e:
-        print(f"[telegram_listener] Gui tin nhan that bai: {e}")
+        print(f"[telegram_listener] Gui tin nhan that bai: {safe_exc(e)}")
 
 
 async def _answer_callback(client: httpx.AsyncClient, callback_query_id: str, text: str) -> None:
@@ -70,7 +71,7 @@ async def _answer_callback(client: httpx.AsyncClient, callback_query_id: str, te
             url, json={"callback_query_id": callback_query_id, "text": text}, timeout=10.0
         )
     except Exception as e:
-        print(f"[telegram_listener] answerCallbackQuery that bai: {e}")
+        print(f"[telegram_listener] answerCallbackQuery that bai: {safe_exc(e)}")
 
 
 async def _do_resume(client: httpx.AsyncClient, psid: str, note: str | None = None) -> str:
@@ -237,7 +238,7 @@ async def _poll_loop() -> None:
         try:
             await client.post(f"{API_BASE}/bot{settings.telegram_bot_token}/deleteWebhook")
         except Exception as e:
-            print(f"[telegram_listener] deleteWebhook loi (bo qua): {e}")
+            print(f"[telegram_listener] deleteWebhook loi (bo qua): {safe_exc(e)}")
 
         await _send(client, "🤖 Telegram resume bot đã kết nối. Gõ /help để xem lệnh.")
         print("[telegram_listener] Da ket noi, bat dau long-polling...")
@@ -285,10 +286,10 @@ async def _poll_loop() -> None:
                     await _handle_command(client, text)
 
             except httpx.HTTPError as e:
-                print(f"[telegram_listener] Loi goi Telegram API: {e}, thu lai sau 5s")
+                print(f"[telegram_listener] Loi goi Telegram API: {safe_exc(e)}, thu lai sau 5s")
                 await asyncio.sleep(5)
             except Exception as e:
-                print(f"[telegram_listener] Loi khong xac dinh: {e}, thu lai sau 5s")
+                print(f"[telegram_listener] Loi khong xac dinh: {safe_exc(e)}, thu lai sau 5s")
                 await asyncio.sleep(5)
 
 

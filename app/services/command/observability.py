@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 from app.db_pool import acquire, release
+from app.services.command.redaction import redact_generic
 
 # §12.2 thresholds
 OLDEST_PENDING_P1_SECONDS = 15 * 60
@@ -18,11 +19,13 @@ CREDENTIAL_ERROR_CLASSES = ("http_401", "http_403")
 
 
 def log_event(event: str, **fields) -> None:
-    """Structured log 1 dong (JSON). Chi id/metadata — KHONG raw PII (§12.1)."""
+    """Structured log 1 dong (JSON). Chi id/metadata — KHONG raw PII (§12.1).
+    M3-S4: enforce redact_generic tai day (khong tin call site tu giac); fallback khong in repr tho."""
     try:
-        print("[cmd] " + json.dumps({"event": event, **fields}, ensure_ascii=False, default=str))
+        safe_fields = redact_generic(dict(fields)) or {}
+        print("[cmd] " + json.dumps({"event": event, **safe_fields}, ensure_ascii=False, default=str))
     except Exception:  # noqa: BLE001 - log khong duoc lam vo flow
-        print(f"[cmd] {event} {fields}")
+        print(f"[cmd] {event} <fields-unserializable keys={sorted(fields.keys())}>")
 
 
 async def command_bus_metrics(conn=None) -> dict:

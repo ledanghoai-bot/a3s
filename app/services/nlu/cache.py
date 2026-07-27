@@ -32,6 +32,7 @@ import json
 import redis.asyncio as aioredis
 
 from app.config import settings
+from app.services.safe_log import safe_exc
 
 _TTL_SECONDS = 3600  # 1h
 
@@ -51,7 +52,7 @@ async def get_cached_decision(normalized_message: str) -> dict | None:
         finally:
             await redis.aclose()
     except Exception as e:
-        print(f"[nlu_cache] Khong doc duoc cache (bo qua): {e}")
+        print(f"[nlu_cache] Khong doc duoc cache (bo qua): {safe_exc(e)}")
         return None
 
 
@@ -68,4 +69,4 @@ async def set_cached_decision(normalized_message: str, decision_dict: dict) -> N
         finally:
             await redis.aclose()
     except Exception as e:
-        print(f"[nlu_cache] Khong ghi duoc cache (bo qua): {e}")
+        print(f"[nlu_cache] Khong ghi duoc cache (bo qua): {safe_exc(e)}")
