@@ -50,8 +50,9 @@ __init__), `dashboard/app/ops/page.js`, `docs/PHASE1B-M1-RUNBOOK-VI.md`, `script
 - **Command envelope** (§6.1): server-generated command_id/correlation_id; actor/customer/conversation
   injected từ trusted context (KHÔNG tin LLM); canonical-JSON sha256 request_hash; stored payload allowlist
   (masked phone, KHÔNG address raw).
-- **Idempotency** (§6.2): API/dashboard header `Idempotency-Key` (16–128); AI stable key =
-  sha256(channel|provider_message_id|tool_call_id|type|version); scope = `order.create:<channel>:<actor>`.
+- **Idempotency** (§6.2): API/dashboard header `Idempotency-Key` (16–128); AI stable key (CR-04R) =
+  `sha256(channel|provider_message_id|command_type|version|business_identity)` — **KHÔNG** tool_call_id,
+  ổn định qua re-execution; scope = `order.create:<channel>:<actor>`.
 - **HTTP status**: 201 first / 200 duplicate / 202 in_progress (+Retry-After) / 409 conflict /
   422 validation+business reject / 400 missing-or-invalid key. Body có `receipt` + legacy fields (canary).
 - **Receipt** (§6.4): dựng từ `command_executions.result_payload`, KHÔNG qua LLM. Customer template v1:
@@ -81,9 +82,9 @@ __init__), `dashboard/app/ops/page.js`, `docs/PHASE1B-M1-RUNBOOK-VI.md`, `script
 Chạy trong container `alpha3s-api-1` (Python 3.12, pytest 9.1.1), DB throwaway `m1_itest` migrate 001–020.
 
 ```text
-# Unit (pytest -q)                                         -> 80 passed, exit 0
-# ruff check app/ + 8 evidence scripts                     -> All checks passed, exit 0
-# Evidence scripts (mỗi cái fresh migrated DB) — 8/8 PASS:
+# Unit (pytest -q)                                         -> 81 passed, exit 0
+# ruff check app/ + 9 evidence scripts                     -> All checks passed, exit 0
+# Evidence scripts (mỗi cái fresh migrated DB) — 9/9 PASS:
 command_order_service_test  exit 0  (T1 atomicity+redaction … T7 20-conc=1 order … T8 10/10;
                                      T9 new-customer race=2 orders/1 customer; T10 override single-use no double-spend)
 command_gateway_test        exit 0  (ON/AI route+receipt+dup … OFF legacy no command row)
@@ -93,6 +94,7 @@ command_recovery_rbac_test  exit 0  (RBAC map / gate / retry-cancel-replay+audit
 command_observability_test  exit 0  (5 metrics + 4 alerts P1/P2 + log_event)
 command_crash_recovery_test exit 0  (§13.1: fail-before-commit rollback / retry-after-commit / worker-crash reclaim)
 command_ops_api_test        exit 0  (/ops e2e: commands/outbox/detail+attempts/metrics + retry 200/audit + reason 422)
+command_ca_remediation_test exit 0  (CR-01 / CR-02 CAS / CR-03 durable receipt / CR-04R / CR-05 audit fail-closed)
 validate_command_bus.sql    exit 0
 ```
 
