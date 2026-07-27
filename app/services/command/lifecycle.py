@@ -13,6 +13,7 @@ from typing import Any
 
 import asyncpg
 
+from app.config import settings
 from app.db_pool import acquire, release
 from app.services import audit_service
 from app.services.command import errors, registry
@@ -21,6 +22,7 @@ from app.services.command import repository as repo
 from app.services.command.envelope import ACTOR_TYPES, CHANNELS, Actor, CommandEnvelope
 from app.services.command.idempotency import build_scope
 from app.services.command.observability import log_event
+from app.services.inventory import backorder as inv_backorder
 from app.services.inventory import repository as inv_repo
 from app.services.inventory import service as inv_service
 from app.services.inventory.errors import InventoryError
@@ -328,9 +330,19 @@ async def _do_adjust_request(conn, env):
             correlation_id=env.correlation_id, reason=p["reason"], reference_id=str(req_id),
             command_id=env.command_id)
         await conn.execute("UPDATE inventory_adjustment_requests SET applied_at=now() WHERE id=$1", req_id)
+        await _maybe_drain_backorders(conn, env, loc, pid, qd)
     result = {"request_id": str(req_id), "is_large": is_large, "status": status,
               "threshold": threshold, "quantity_delta": qd}
     return result, {"type": "adjustment", "id": str(req_id)}, "inventory.adjust.request", result
+
+
+async def _maybe_drain_backorders(conn, env, location_id, product_id, quantity_delta):
+    """Sau topup (Δ>0) + flag backorder bật -> auto-reserve backorder FIFO (PO change)."""
+    if quantity_delta <= 0 or not settings.m2_backorder_escalation:
+        return
+    await inv_backorder.drain_backorders(
+        conn, location_id=location_id, product_id=product_id, actor_type=env.actor.type,
+        actor_id=env.actor.id, command_id=env.command_id, correlation_id=env.correlation_id)
 
 
 async def _do_adjust_decision(conn, env, *, approve: bool):
@@ -364,6 +376,7 @@ async def _do_adjust_decision(conn, env, *, approve: bool):
             quantity_delta=req["quantity_delta"], idem_prefix=f"cmd:{env.command_id}",
             actor_type="staff", actor_id=str(staff_id), correlation_id=env.correlation_id,
             reason=req["reason"], reference_id=str(req_id), command_id=env.command_id)
+        await _maybe_drain_backorders(conn, env, req["location_id"], req["product_id"], req["quantity_delta"])
         await conn.execute(
             "UPDATE inventory_adjustment_requests SET status='applied', approved_by_staff_id=$2, "
             "decided_at=now(), applied_at=now(), decision_command_id=$3 WHERE id=$1",

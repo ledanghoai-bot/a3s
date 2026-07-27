@@ -63,6 +63,9 @@ class SendResult:
 # --------------------------------------------------------------------------
 
 def _telegram_admin_text(p: dict) -> str:
+    # M2 escalation/notification: payload tự mang text deterministic (dựng tại emit, không LLM).
+    if p.get("admin_text"):
+        return p["admin_text"]
     return (
         "\U0001F6D2 3S Coffee - DON HANG MOI (M1)\n"
         f"Ma don: #{p.get('order_id')}\n"
