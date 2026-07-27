@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     m2_inventory_ledger: bool = False
     m2_order_transitions: bool = False
     m2_balance_authority: bool = False
+    # m3_delivered_lifecycle: mở transition delivered/retry/cancel-sau-delivery-failed (M3-S1).
+    # OFF (default) = matrix M2 nguyên trạng; missing config -> False (fail-safe).
+    m3_delivered_lifecycle: bool = False
 
 
 settings = Settings()

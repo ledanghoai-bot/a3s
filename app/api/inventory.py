@@ -29,6 +29,9 @@ _ACTIONS: dict[str, tuple[str, str]] = {
     "mark_delivery_failed": (registry.ORDER_MARK_DELIVERY_FAILED, "order.delivery.manage"),
     "request_return": (registry.ORDER_REQUEST_RETURN, "order.return.manage"),
     "return_inspect": (registry.INVENTORY_RETURN_INSPECT, "order.return.manage"),
+    # M3-S1 (flag m3_delivered_lifecycle gate ở transition engine; HTTP giữ defense-in-depth RBAC)
+    "mark_delivered": (registry.ORDER_MARK_DELIVERED, "order.delivery.manage"),
+    "retry_delivery": (registry.ORDER_RETRY_DELIVERY, "order.delivery.manage"),
 }
 
 
@@ -78,14 +81,15 @@ async def order_transition(
     if action not in _ACTIONS:
         raise HTTPException(422, f"action khong hop le: {action}")
     command_type, perm = _ACTIONS[action]
-    # cancel khi processing -> can quyen ngoai le
+    # cancel khi processing/delivery_failed -> can quyen ngoai le (M3-S1 them delivery_failed;
+    # matrix (delivery_failed,cancel) cung doi order.cancel.exception tai command boundary F02)
     if action == "cancel":
         conn = await acquire()
         try:
             st = await conn.fetchval("SELECT status FROM orders WHERE id=$1", order_id)
         finally:
             await release(conn)
-        if st == "processing":
+        if st in ("processing", "delivery_failed"):
             perm = "order.cancel.exception"
     _check_perm(staff, perm)
     env = lifecycle.build_lifecycle_envelope(

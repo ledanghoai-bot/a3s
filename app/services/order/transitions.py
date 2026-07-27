@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# --- order_status (§7.1) ---
+# --- order_status (§7.1; M3-S1 thêm 'delivered') ---
 ORDER_STATUSES = {
-    "new", "confirmed", "processing", "ready_for_fulfillment", "fulfilled",
+    "new", "confirmed", "processing", "ready_for_fulfillment", "fulfilled", "delivered",
     "delivery_failed", "return_requested", "return_inspection", "completed",
     "cancelled", "cancelled_by_exception",
 }
@@ -67,6 +67,31 @@ _MATRIX: dict[tuple[str, str], TransitionSpec] = {
         TransitionSpec("return_inspection", "order.return.manage", EFFECT_RETURN_INSPECT, "return_inspection"),
     ("return_inspection", "complete"):
         TransitionSpec("completed", "order.complete", EFFECT_NONE, None),
+    # --- M3-S1 (spec M3 §7.2). Legacy 'shipped' ≙ M2 'fulfilled' (Slice0 mapping) nên
+    # "shipped -> delivered|delivery_failed" của spec = fulfilled -> delivered|delivery_failed,
+    # "delivery_failed -> shipped(retry)" = delivery_failed -> fulfilled. Gate flag m3_delivered_lifecycle
+    # nằm ở transition_service (module này pure). ---
+    ("fulfilled", "mark_delivered"):
+        TransitionSpec("delivered", "order.delivery.manage", EFFECT_NONE, None),
+    ("delivered", "complete"):
+        TransitionSpec("completed", "order.complete", EFFECT_NONE, None),
+    ("delivered", "request_return"):
+        TransitionSpec("return_requested", "order.return.manage", EFFECT_NONE, None),
+    ("delivery_failed", "retry_delivery"):
+        TransitionSpec("fulfilled", "order.delivery.manage", EFFECT_NONE, None),
+    # Huỷ sau giao thất bại: reservation đã CONSUME tại fulfill -> KHÔNG release (EFFECT_NONE);
+    # hàng vật lý quay về kho xử lý qua return_inspect hoặc adjustment SoD, không auto-cộng stock.
+    ("delivery_failed", "cancel"):
+        TransitionSpec("cancelled", "order.cancel.exception", EFFECT_NONE, None),
+}
+
+# Cặp transition thuộc M3 — chỉ hợp lệ khi flag m3_delivered_lifecycle bật (check ở service layer).
+M3_PAIRS: set[tuple[str, str]] = {
+    ("fulfilled", "mark_delivered"),
+    ("delivered", "complete"),
+    ("delivered", "request_return"),
+    ("delivery_failed", "retry_delivery"),
+    ("delivery_failed", "cancel"),
 }
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.config import settings
 from app.services.command import repository as cmd_repo
 from app.services.command.retry import MAX_ATTEMPTS
 from app.services.inventory import repository as inv_repo
@@ -51,6 +52,9 @@ async def apply_transition(
     if order is None:
         raise transitions.IllegalTransition("<missing>", action)
     from_status = order["status"]
+    # M3-S1 gate: transition delivered-lifecycle chỉ mở khi flag bật; OFF = hành vi M2 nguyên trạng.
+    if (from_status, action) in transitions.M3_PAIRS and not settings.m3_delivered_lifecycle:
+        raise transitions.IllegalTransition(from_status, action)
     spec = transitions.resolve(from_status, action)  # raise IllegalTransition nếu không hợp lệ
     prefix = idem_prefix or f"cmd:{command_id}"
     inv_before = order["inventory_status"]
@@ -86,9 +90,12 @@ async def apply_transition(
         )
 
     # --- update order (business + inventory summary cùng transaction §7.4) ---
+    # M3-S1: delivered_at chỉ set khi commit sang delivered; COALESCE -> retry/correction không overwrite.
     inv_after = spec.inventory_status_after or inv_before
     await conn.execute(
-        "UPDATE orders SET status=$2, inventory_status=$3, status_updated_at=now() WHERE id=$1",
+        "UPDATE orders SET status=$2, inventory_status=$3, status_updated_at=now(), "
+        "delivered_at = CASE WHEN $2='delivered' THEN COALESCE(delivered_at, now()) "
+        "ELSE delivered_at END WHERE id=$1",
         order_id, spec.to_status, inv_after,
     )
 
@@ -108,6 +115,9 @@ async def apply_transition(
 _CUSTOMER_NOTIFY = {
     "confirmed": "Đơn #{id} của bạn đã được xác nhận.",
     "fulfilled": "Đơn #{id} của bạn đã được giao.",
+    # M3-S1: transactional notify khi giao thành công (P03; sensor COMM-04). Chỉ phát khi flag
+    # m3_delivered_lifecycle bật (transition không xảy ra khi OFF). Text 'fulfilled' giữ nguyên M2.
+    "delivered": "Đơn #{id} của bạn đã giao thành công. Cảm ơn bạn!",
     "cancelled": "Đơn #{id} của bạn đã được huỷ.",
     "cancelled_by_exception": "Đơn #{id} của bạn đã được huỷ.",
     "completed": "Đơn #{id} của bạn đã hoàn tất. Cảm ơn bạn!",

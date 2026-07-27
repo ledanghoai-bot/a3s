@@ -30,6 +30,9 @@ ORDER_CANCEL = "order.cancel"
 ORDER_MARK_DELIVERY_FAILED = "order.mark_delivery_failed"
 ORDER_REQUEST_RETURN = "order.request_return"
 ORDER_COMPLETE = "order.complete"
+# M3-S1 (spec M3 §7.2) — delivered lifecycle
+ORDER_MARK_DELIVERED = "order.mark_delivered"
+ORDER_RETRY_DELIVERY = "order.retry_delivery"
 INVENTORY_RETURN_INSPECT = "inventory.return_inspect"
 RESERVATION_EXTEND = "inventory.reservation.extend"
 RESERVATION_EXPIRE = "inventory.reservation.expire"
@@ -48,6 +51,9 @@ TRANSITION_ACTION: dict[str, str] = {
     ORDER_REQUEST_RETURN: "request_return",
     ORDER_COMPLETE: "complete",
     INVENTORY_RETURN_INSPECT: "return_inspect",
+    # M3-S1
+    ORDER_MARK_DELIVERED: "mark_delivered",
+    ORDER_RETRY_DELIVERY: "retry_delivery",
 }
 
 _M2_TYPES = [
@@ -56,9 +62,14 @@ _M2_TYPES = [
     RESERVATION_EXTEND, RESERVATION_EXPIRE, ADJUST_REQUEST, ADJUST_APPROVE, ADJUST_REJECT,
 ]
 
+_M3_TYPES = [
+    ORDER_MARK_DELIVERED, ORDER_RETRY_DELIVERY,
+]
+
 REGISTRY: set[tuple[str, int]] = {
     (ORDER_CREATE, ORDER_CREATE_VERSION),
     *((t, 1) for t in _M2_TYPES),
+    *((t, 1) for t in _M3_TYPES),
 }
 
 
