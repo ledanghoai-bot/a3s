@@ -13,6 +13,7 @@ from typing import Any
 
 import asyncpg
 
+from app.config import settings
 from app.db_pool import acquire, release
 from app.services import audit_service
 from app.services.command import errors, registry
@@ -327,10 +328,22 @@ async def _do_adjust_request(conn, env):
             idem_prefix=f"cmd:{env.command_id}", actor_type="staff", actor_id=str(staff_id),
             correlation_id=env.correlation_id, reason=p["reason"], reference_id=str(req_id),
             command_id=env.command_id)
+        await _compat_stock_dualwrite(conn, loc, pid, qd)
         await conn.execute("UPDATE inventory_adjustment_requests SET applied_at=now() WHERE id=$1", req_id)
     result = {"request_id": str(req_id), "is_large": is_large, "status": status,
               "threshold": threshold, "quantity_delta": qd}
     return result, {"type": "adjustment", "id": str(req_id)}, "inventory.adjust.request", result
+
+
+async def _compat_stock_dualwrite(conn, location_id, product_id, quantity_delta):
+    """CA M2-S1-F02: trong compatibility window (legacy stock còn authority), adjustment phải dual-write
+    products.stock để giữ `products.stock == available` (§17.1, default location). Balance-authority ON
+    -> stock chỉ là mirror, KHÔNG dual-write ngược."""
+    if settings.m2_balance_authority:
+        return
+    default_loc = await conn.fetchval("SELECT id FROM inventory_locations WHERE is_default AND is_active")
+    if default_loc == location_id:
+        await conn.execute("UPDATE products SET stock = stock + $1 WHERE id = $2", quantity_delta, product_id)
 
 
 async def _do_adjust_decision(conn, env, *, approve: bool):
@@ -364,6 +377,7 @@ async def _do_adjust_decision(conn, env, *, approve: bool):
             quantity_delta=req["quantity_delta"], idem_prefix=f"cmd:{env.command_id}",
             actor_type="staff", actor_id=str(staff_id), correlation_id=env.correlation_id,
             reason=req["reason"], reference_id=str(req_id), command_id=env.command_id)
+        await _compat_stock_dualwrite(conn, req["location_id"], req["product_id"], req["quantity_delta"])
         await conn.execute(
             "UPDATE inventory_adjustment_requests SET status='applied', approved_by_staff_id=$2, "
             "decided_at=now(), applied_at=now(), decision_command_id=$3 WHERE id=$1",
