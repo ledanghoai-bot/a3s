@@ -163,11 +163,6 @@ async def main():  # noqa: C901
             r2 = await c.post(f"/dashboard/inventory/adjustments/{req_id}/approve",
                               headers={"Idempotency-Key": "s6-apr2"})
             check(r2.status_code == 403, f"approve by non-unit-head -> 403 ({r2.status_code} {r2.text[:120]})")
-            # escalation queue (PO change): endpoint 200 + có key + pending adjustment đếm được
-            r = await c.get("/dashboard/inventory/escalations")
-            j = r.json()
-            check(r.status_code == 200 and "backorders_waiting_topup" in j and j["adjustments_pending_approval"] >= 1,
-                  f"escalations queue 200 (pending_adj={j.get('adjustments_pending_approval')})")
         app.dependency_overrides.clear()
     finally:
         await conn.close()

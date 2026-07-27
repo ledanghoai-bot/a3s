@@ -82,8 +82,6 @@ def build_order_create_receipt(
             "unit_price_vnd": result_payload.get("unit_price_vnd"),
             "total_vnd": result_payload.get("total_vnd"),
         }
-        if "backordered" in result_payload:  # M2 PO-change: đơn giữ do thiếu hàng (chờ topup)
-            result["backordered"] = result_payload["backordered"]
     return CommandReceipt(
         receipt_id=f"cmd_{command_id}",
         command_id=command_id,

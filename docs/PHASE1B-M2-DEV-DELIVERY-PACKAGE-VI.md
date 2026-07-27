@@ -126,11 +126,6 @@ ops set `alpha3s_app` LOGIN+password + đổi `DATABASE_URL` tại release (khô
 4. **DB-role cutover** đổi `DATABASE_URL` sang `alpha3s_app` — thời điểm ops thực hiện (cần downtime ngắn?).
 5. Production snapshot đã chạy **read-only, PO-approved** (Directive §10 production-access) — ghi nhận là
    ngoại lệ có phê duyệt.
-6. **PO CHANGE — Backorder / never-drop-order** (mới, PO chỉ đạo sau Submission 1): thiếu hàng KHÔNG bỏ
-   đơn → giữ backorder + escalate inventory topup + auto-reserve FIFO. **Lệch CA spec §10.1 có chủ đích**,
-   gated flag `M2_BACKORDER_ESCALATION` (default OFF → hành vi M2 đã duyệt giữ nguyên). Chi tiết + evidence:
-   `docs/PHASE1B-M2-PO-CHANGE-BACKORDER-VI.md`. **Cần CA chấp nhận** như PO change trong M2 hay tách riêng.
-   Migrations giờ 001..**026**; thêm `scripts/m2_backorder_test.py` (PASS).
 
 ## 8. Submission Index
 | File | Loại | Trong SHA |

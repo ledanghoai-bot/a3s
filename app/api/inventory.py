@@ -143,26 +143,6 @@ async def inventory_movements(
     return [dict(r) | {"created_at": r["created_at"].isoformat()} for r in rows]
 
 
-@router.get("/inventory/escalations")
-async def inventory_escalations(staff: dict = Depends(require_permission("inventory.view"))) -> dict:
-    """Hàng đợi 'cần xử lý' (PO change): backorder chờ topup + điều chỉnh chờ duyệt."""
-    conn = await acquire()
-    try:
-        backorders = await conn.fetch(
-            "SELECT b.id, b.order_id, p.sku, b.quantity, b.location_id, b.created_at "
-            "FROM inventory_backorders b JOIN products p ON p.id=b.product_id "
-            "WHERE b.status='active' ORDER BY b.created_at LIMIT 200")
-        pending_adj = await conn.fetchval(
-            "SELECT count(*) FROM inventory_adjustment_requests WHERE status='pending'")
-    finally:
-        await release(conn)
-    return {
-        "backorders_waiting_topup": [
-            dict(b) | {"id": str(b["id"]), "created_at": b["created_at"].isoformat()} for b in backorders],
-        "adjustments_pending_approval": pending_adj,
-    }
-
-
 @router.get("/inventory/reconciliation")
 async def inventory_reconciliation(staff: dict = Depends(require_permission("inventory.reconcile"))) -> dict:
     conn = await acquire()

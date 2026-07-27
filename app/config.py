@@ -83,9 +83,5 @@ class Settings(BaseSettings):
     m2_order_transitions: bool = False
     m2_balance_authority: bool = False
 
-    # PO change (deviates CA spec §10.1): thieu hang KHONG bo don -> giu backorder + escalate inventory
-    # topup; topup auto-reserve FIFO. Mac dinh TAT (hanh vi M2 da duyet = reject giu nguyen khi tat).
-    m2_backorder_escalation: bool = False
-
 
 settings = Settings()

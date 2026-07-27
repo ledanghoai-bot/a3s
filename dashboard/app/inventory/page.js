@@ -21,7 +21,6 @@ export default function InventoryPage() {
   const [balances, setBalances] = useState([]);
   const [recon, setRecon] = useState(null);
   const [adjustments, setAdjustments] = useState([]);
-  const [escalations, setEscalations] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [msg, setMsg] = useState(null);
@@ -40,7 +39,6 @@ export default function InventoryPage() {
       if (tab === "balances") setBalances(await apiFetch("/dashboard/inventory/balances"));
       else if (tab === "reconciliation") setRecon(await apiFetch("/dashboard/inventory/reconciliation"));
       else if (tab === "adjustments") setAdjustments(await apiFetch("/dashboard/inventory/adjustments?status=pending"));
-      else if (tab === "escalations") setEscalations(await apiFetch("/dashboard/inventory/escalations"));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -72,11 +70,10 @@ export default function InventoryPage() {
     <div style={{ padding: 24 }}>
       <h1>Kho / Tồn</h1>
       <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
-        {["balances", "reconciliation", "adjustments", "escalations"].map((t) => (
+        {["balances", "reconciliation", "adjustments"].map((t) => (
           <button key={t} onClick={() => setTab(t)}
             style={{ fontWeight: tab === t ? 700 : 400 }}>
-            {t === "balances" ? "Số dư tồn" : t === "reconciliation" ? "Đối soát"
-              : t === "adjustments" ? "Điều chỉnh chờ duyệt" : "Cần xử lý (escalation)"}
+            {t === "balances" ? "Số dư tồn" : t === "reconciliation" ? "Đối soát" : "Điều chỉnh chờ duyệt"}
           </button>
         ))}
         <button onClick={load} disabled={loading}>↻ Tải lại</button>
@@ -109,25 +106,6 @@ export default function InventoryPage() {
           {!recon.ok && (
             <ul>{recon.mismatches.map((m, i) => <li key={i} style={{ color: "crimson" }}>{m}</li>)}</ul>
           )}
-        </div>
-      )}
-
-      {tab === "escalations" && escalations && (
-        <div>
-          <p><b>{escalations.adjustments_pending_approval}</b> điều chỉnh chờ duyệt
-            {" "}(xem tab "Điều chỉnh chờ duyệt").</p>
-          <h3>Backorder chờ topup (đơn đã giữ, thiếu hàng)</h3>
-          <table border="1" cellPadding="6" style={{ borderCollapse: "collapse" }}>
-            <thead><tr><th>Đơn</th><th>SKU</th><th>SL</th><th>Location</th><th>Từ lúc</th></tr></thead>
-            <tbody>
-              {escalations.backorders_waiting_topup.map((b) => (
-                <tr key={b.id}><td>#{b.order_id}</td><td>{b.sku}</td><td>{b.quantity}</td>
-                  <td>{b.location_id}</td><td>{new Date(b.created_at).toLocaleString("vi-VN")}</td></tr>
-              ))}
-              {!escalations.backorders_waiting_topup.length &&
-                <tr><td colSpan="5">Không có backorder chờ topup. 🎉</td></tr>}
-            </tbody>
-          </table>
         </div>
       )}
 
