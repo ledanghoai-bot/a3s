@@ -135,6 +135,24 @@ async def expire_reservations_job(ctx) -> None:
         print(f"[expiry] sweep loi (bo qua vong nay): {safe_exc(e)}")
 
 
+async def retention_job(ctx) -> None:
+    """I-B M3 (Slice 6): retention executor chạy tường minh qua cron (KHÔNG giấu trong startup —
+    Directive §6). Flag m3_retention_executor TẮT -> no-op (run_all_approved trả skipped).
+    Chỉ apply policy status='approved'; audit vào retention_run_log (không PII)."""
+    try:
+        from app.db_pool import acquire, release
+        from app.services import retention
+        conn = await acquire()
+        try:
+            out = await retention.run_all_approved(conn, dry_run=False, actor="cron")
+        finally:
+            await release(conn)
+        if out and out != [{"skipped": "flag_off"}]:
+            print(f"[retention] run {out}")
+    except Exception as e:  # noqa: BLE001 - retention loi khong duoc lam sap worker
+        print(f"[retention] job loi (bo qua vong nay): {safe_exc(e)}")
+
+
 async def _on_shutdown(ctx) -> None:
     # Dong DB pool cua worker luc shutdown (I-B M0.2). Pool tao lazy trong event loop cua worker.
     from app.db_pool import close_pool
@@ -148,6 +166,8 @@ class WorkerSettings:
         cron(deliver_outbox_job, second={0, 10, 20, 30, 40, 50}, run_at_startup=False),
         # I-B M2: sweep reservation het han moi 60s (dau moi phut). Flag M2 TAT -> no-op.
         cron(expire_reservations_job, second={0}, run_at_startup=False),
+        # I-B M3-S6: retention executor 03:15 hang ngay. Flag m3_retention_executor TAT -> no-op.
+        cron(retention_job, hour={3}, minute={15}, run_at_startup=False),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20

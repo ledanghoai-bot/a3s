@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # m3_outbound_dispatcher: customer notify đi qua dispatcher (consent check + approved template)
     # thay vì payload text trực tiếp (M3-S5). OFF = đường M2 nguyên trạng. Dedupe key giữ nguyên.
     m3_outbound_dispatcher: bool = False
+    # m3_retention_executor: cho phép retention job APPLY policy approved (M3-S6).
+    # OFF = job no-op (dry-run thủ công vẫn chạy được qua script).
+    m3_retention_executor: bool = False
 
 
 settings = Settings()
