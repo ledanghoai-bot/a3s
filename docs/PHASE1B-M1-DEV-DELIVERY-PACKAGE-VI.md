@@ -5,7 +5,7 @@ milestone: M1
 milestone_name: Reliable Command and Receipt
 governing_spec: A3S-PHASE1B-M1-SPEC-001 v1.0.0
 governing_directive: A3S-PHASE1B-M1-DEV-DIRECTIVE-001 v1.0.0
-status: dev_complete_pending_ca_review
+status: remediation_submission_2_pending_ca_review
 production_change: NONE (flag M1_RELIABLE_ORDER_COMMAND = OFF)
 language: vi-VN
 ---
@@ -20,7 +20,7 @@ language: vi-VN
 ```text
 Immutable base SHA : 4ce5f3ab2b95846cbc5a3dd5b21528a891b36314  (tag ib-m0-rc7, migrations 001–018)
 Dev branch         : feat/phase1b-m1-reliable-command  (off ib-m0-rc7, KHÔNG commit main)
-Implementation SHA : 0bc4eb756dc1cbb3d5759e28e184dfb543d355fb  (sau hardening §7b; initial 59d4b2a)
+Implementation SHA : d74d5c57583d99b6790a366a7f03e0de8d2df1e7  (Sub2 CA-remediation; hardening 0bc4eb7; initial 59d4b2a)
 Baseline proof     : origin/main == 4ce5f3ab (0/0), tag ib-m0-rc7 -> 4ce5f3ab (annotated),
                      migrations 001–018 present, RBAC_STRICT enforce present, plan v0.1.3 @baseline.
 ```
@@ -162,5 +162,59 @@ RBAC migration 016, provisioned ngoài runner) — ngoài scope M1; coverage b�
 
 ## 8. Governance
 
-Submission 1 of maximum 3 (Directive §8). Chờ CA Consolidated Review. Production cần: CA chấp nhận package,
-không P0/P1, migration/backup/forward-fix đạt, immutable SHA/tag, và CA release decision riêng.
+**Submission 2 of maximum 3** (Directive §8) — remediation cho CA Consolidated Review 1
+(`PHASE1B-M1-CA-CONSOLIDATED-REVIEW-SUBMISSION-1-VI.md`, CHANGES_REQUIRED). Production cần: CA chấp nhận
+package, không P0/P1, migration/backup/forward-fix đạt, immutable SHA/tag, và CA release decision riêng.
+
+## 9. Submission 2 — Remediation CA Review 1
+
+Base SHA `4ce5f3ab`. Remediation implementation SHA: `d74d5c57583d99b6790a366a7f03e0de8d2df1e7`. Timestamp: `2026-07-27 09:56+07:00`.
+Tất cả trên nhánh dev, flag OFF, KHÔNG production.
+
+| CR | Loại | Đã sửa | Evidence |
+|---|---|---|---|
+| CR-01 | blocker | `retry_outbox` giữ `attempt_count` đơn điệu, cấp budget `max_attempts+=8` (không reset 0) → hết trùng `attempt_no` | `command_ca_remediation_test` CR-01 (attempt_no [1,2,3]→delivered); `recovery_rbac_test` A |
+| CR-02 | blocker | cancel cấm `delivering` (409) + worker compare-and-set `WHERE status='delivering' AND lease_owner=WORKER_ID` | `ca_remediation` CR-02; `recovery_rbac_test` cancel-delivering→409 |
+| CR-03 | blocker | customer receipt qua **durable outbox** (messenger/telegram_customer, dedupe `order_receipt:{id}`); reply tức thì bỏ append (outbox là deliverer duy nhất) | `ca_remediation` CR-03 (commit ok + send fail → retry → delivered) |
+| CR-04 | blocker | luồn **provider message id** (Messenger `mid` / Telegram `message_id`) → causation + `ai_stable_key`; sửa channel `telegram`→`telegram_customer` | unit `test_ai_stable_key_anchored_to_provider_message_id` |
+| CR-05 | remediation | bỏ `audit_exists` guard → audit **bắt buộc** fail-closed | `ca_remediation` CR-05 (audit hỏng → mutation rollback) |
+| CR-06 | remediation | replay: source `dead_lettered/cancelled` + `confirm_business_effect` bắt buộc + audit reason/source/confirm | `recovery_rbac_test` CR-06 (no-confirm→422, pending→409) |
+| CR-07 | evidence | PR body + SHA đồng bộ; CI `deploy.yml` thêm `pull_request` trigger (status check, không deploy); appendix §10 | §10 + `.github/workflows/deploy.yml` |
+
+## 10. Evidence appendix (reproducible)
+
+Environment: `docker compose` — `alpha3s-api-1` Python 3.12.13, pytest 9.1.1, ruff; throwaway DB `m1_itest`
+migrate 001–020. Mỗi evidence script chạy trên **fresh migrated DB**.
+
+```text
+# reset + migrate (Applied 20, validation pass, exit 0)
+docker exec alpha3s-db-1 psql -U alpha3s -d postgres -c "DROP DATABASE IF EXISTS m1_itest;"
+docker exec alpha3s-db-1 psql -U alpha3s -d postgres -c "CREATE DATABASE m1_itest;"
+docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@db:5432/m1_itest -e PYTHONPATH=/srv -w /srv \
+  alpha3s-api-1 python scripts/migrate.py up
+# unit + lint
+docker exec -e PYTHONPATH=/srv -w /srv alpha3s-api-1 python -m pytest -q      # 81 passed, exit 0
+docker exec -w /srv alpha3s-api-1 ruff check app/                             # All checks passed, exit 0
+# 9 evidence scripts (mỗi cái fresh DB) — tất cả exit 0:
+scripts/command_order_service_test.py    # T1..T10 (+ new-customer race, override single-use)
+scripts/command_gateway_test.py
+scripts/command_outbox_worker_test.py
+scripts/command_http_test.py
+scripts/command_recovery_rbac_test.py    # + CR-01/CR-02/CR-06
+scripts/command_observability_test.py
+scripts/command_crash_recovery_test.py   # §13.1
+scripts/command_ops_api_test.py          # /ops e2e
+scripts/command_ca_remediation_test.py   # CR-01/CR-02/CR-03/CR-05
+```
+
+Migration rehearsal (remediation): fresh `001→020` Applied 20, validation pass, exit 0; existing-DB
+`018→019/020` (migration 019/020 **không đổi** ở remediation — checksum giữ nguyên).
+
+Checksums (sha256):
+```text
+migrations/019_command_bus.sql  11097820164b819513173df569484331c09ab9b261843e3044c213e6efd26813
+migrations/020_command_rbac.sql bb68b5d64bf2a1af7c20b1e2753ab0e4f8dcabba077694aad599e38f3405c2e0
+```
+
+CI: `.github/workflows/deploy.yml` nay chạy `lint-test` (ruff + pytest, ubuntu-latest) trên `pull_request`
+→ status check tại PR #1; job `deploy` gate `github.event_name=='push' && ref==main` → KHÔNG deploy khi PR.
