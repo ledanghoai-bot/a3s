@@ -90,3 +90,20 @@ docker exec -e DATABASE_URL=...m2s4_itest -e PYTHONPATH=/srv -w /srv alpha3s-api
 docker exec -e DATABASE_URL=...m2s5_itest -e PYTHONPATH=/srv -w /srv alpha3s-api-1 python scripts/m2_lifecycle_test.py
 docker exec -e DATABASE_URL=...m2s6_itest -e PYTHONPATH=/srv -w /srv alpha3s-api-1 python scripts/m2_worker_api_test.py
 ```
+
+## 9. Cập nhật Submission 2 (remediation CA F02/F03/F05/F06)
+
+- **Mutation RBAC (F03):** quyền write riêng `order.complete` / `order.delivery.manage` / `order.return.manage`
+  (migration 026) — KHÔNG cấp `viewer`. complete/mark_delivery_failed/request_return/return_inspect KHÔNG
+  còn dùng `order.transition.view`. Gán role: admin(full), sales(complete/delivery/return), support(complete/
+  return), delivery(delivery), warehouse(return).
+- **Adjustment dual-write (F02):** small + large-approve điều chỉnh `balance.on_hand` thì cũng UPDATE
+  `products.stock` (default location, khi `m2_balance_authority` OFF) → giữ `products.stock == available`.
+  Non-default location KHÔNG dual-write. Sau mỗi adjustment nên chạy reconciliation → phải `ok`.
+- **Balance-authority read path (F05):** `m2_balance_authority` ON → `order.create` đọc availability TỪ
+  balance (default location) thay `products.stock` (Phase C); OFF → legacy authority. Reserve FOR UPDATE là
+  guard cuối (không oversell). Bật flag này CUỐI CÙNG sau khi dual-write assertion xanh.
+- **Customer notify (F06):** `orders.origin_channel` (migration 027) lưu kênh tại create; transition
+  confirmed/fulfilled/cancelled/completed phát customer outbox deterministic đúng kênh (messenger/
+  telegram_customer), dedupe `order_status:{id}:{status}`, retry/dead-letter M1. Đơn dashboard không phát.
+- **Backorder:** đã TÁCH khỏi M2 (CA F01) — sẽ là change/milestone riêng.
