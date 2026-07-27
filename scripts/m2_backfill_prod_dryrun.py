@@ -46,8 +46,10 @@ async def main():
 
         # --- mirror production snapshot exactly (1 product, 2 new orders) ---
         # migration 001 da seed 1 product; ep no ve dung production: sku=3S-100G stock=998
-        await conn.execute("DELETE FROM order_items"); await conn.execute("DELETE FROM orders")
-        await conn.execute("DELETE FROM price_tiers"); await conn.execute("DELETE FROM products")
+        await conn.execute("DELETE FROM order_items")
+        await conn.execute("DELETE FROM orders")
+        await conn.execute("DELETE FROM price_tiers")
+        await conn.execute("DELETE FROM products")
         await conn.execute("INSERT INTO products (id,sku,name,price_vnd,stock) VALUES (1,'3S-100G','3S 100g',170000,998)")
         await conn.execute("INSERT INTO orders (id,status) VALUES (1,'new'),(2,'new')")
         await conn.execute("INSERT INTO order_items (order_id,product_id,quantity,unit_price_vnd) "
