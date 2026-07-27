@@ -15,7 +15,7 @@ import asyncpg
 
 from app.config import settings
 from app.db_pool import acquire, release
-from app.services import audit_service
+from app.services import audit_service, permission_service
 from app.services.command import errors, registry
 from app.services.command import receipt as receipt_mod
 from app.services.command import repository as repo
@@ -207,6 +207,27 @@ def _actor(env) -> tuple[str, str, int | None]:
     return env.actor.type, env.actor.id, None
 
 
+async def _enforce(conn, env, perm: str) -> None:
+    """CA M2-S2-F02: authorization fail-closed tại SHARED command boundary (không chỉ HTTP).
+    system actor (worker nội bộ tin cậy) bypass; staff phải có `perm`; role khác -> 403. Degrade như
+    require_permission khi RBAC chưa provision (trừ strict). Gọi TRƯỚC mọi mutation trong _do_*."""
+    if env.actor.type == "system":
+        return
+    if env.actor.type != "staff":
+        raise LifecycleReject("forbidden", "Chỉ staff/system được thực hiện lifecycle command.", 403)
+    try:
+        sid = int(env.actor.id)
+    except ValueError as e:
+        raise LifecycleReject("forbidden", "actor.id staff không hợp lệ.", 403) from e
+    authz = await permission_service.load_staff_authz(conn, sid)
+    if not authz["rbac_provisioned"]:
+        if settings.rbac_strict:
+            raise LifecycleReject("rbac_strict", "RBAC chưa provision/gán role.", 403)
+        return
+    if perm not in authz["permissions"]:
+        raise LifecycleReject("forbidden", f"Thiếu quyền: {perm}", 403)
+
+
 def _staff_id(env) -> int:
     if env.actor.type != "staff":
         raise LifecycleReject("staff_required", "Thao tác này yêu cầu staff actor.", 403)
@@ -245,6 +266,16 @@ async def _do_transition(conn, env):
         if row is None:
             raise transitions.IllegalTransition("<missing>", "cancel")
         action = "cancel_by_exception" if row["status"] == "processing" else "cancel"
+    # RBAC tại command boundary (F02): quyền của action từ transition matrix (nguồn chung).
+    from app.services.order import transitions as _tr
+    cur = await conn.fetchval("SELECT status FROM orders WHERE id=$1", order_id)
+    if cur is not None:
+        try:
+            _perm = _tr.resolve(cur, action).permission
+        except _tr.IllegalTransition:
+            _perm = None  # transition không hợp lệ -> apply_transition sẽ raise 409 (không phải quyền)
+        if _perm:
+            await _enforce(conn, env, _perm)
     res = await order_txn.apply_transition(
         conn, order_id=order_id, action=action, actor_type=env.actor.type, actor_id=env.actor.id,
         correlation_id=env.correlation_id, command_id=env.command_id, reason=p.get("reason"))
@@ -254,6 +285,7 @@ async def _do_transition(conn, env):
 
 
 async def _do_reservation_extend(conn, env):
+    await _enforce(conn, env, "inventory.reservation.extend")
     p = env.payload
     rid = uuid.UUID(p["reservation_id"])
     r = await conn.fetchrow("SELECT * FROM inventory_reservations WHERE id=$1 FOR UPDATE", rid)
@@ -272,6 +304,7 @@ async def _do_reservation_extend(conn, env):
 
 
 async def _do_reservation_expire(conn, env):
+    await _enforce(conn, env, "inventory.reservation.extend")  # system worker bypass; staff cần quyền
     p = env.payload
     rid = uuid.UUID(p["reservation_id"])
     r = await conn.fetchrow(
@@ -287,8 +320,7 @@ async def _do_reservation_expire(conn, env):
         conn, r, terminal_status="expired", idem_prefix=f"cmd:{env.command_id}",
         actor_type="system", actor_id="expiry-worker", correlation_id=env.correlation_id,
         command_id=env.command_id)
-    await conn.execute("UPDATE products SET stock = stock + $1 WHERE id = $2",
-                       r["quantity_remaining"], r["product_id"])
+    await inv_repo.materialize_stock_mirror(conn, r["location_id"], r["product_id"])
     await conn.execute(
         "UPDATE orders SET status='cancelled', inventory_status='released', status_updated_at=now() "
         "WHERE id=$1", r["order_id"])
@@ -304,6 +336,7 @@ async def _do_reservation_expire(conn, env):
 
 
 async def _do_adjust_request(conn, env):
+    await _enforce(conn, env, "inventory.adjust")
     staff_id = _staff_id(env)
     p = env.payload
     loc, pid, qd = p["location_id"], p["product_id"], p["quantity_delta"]
@@ -336,17 +369,14 @@ async def _do_adjust_request(conn, env):
 
 
 async def _compat_stock_dualwrite(conn, location_id, product_id, quantity_delta):
-    """CA M2-S1-F02: trong compatibility window (legacy stock còn authority), adjustment phải dual-write
-    products.stock để giữ `products.stock == available` (§17.1, default location). Balance-authority ON
-    -> stock chỉ là mirror, KHÔNG dual-write ngược."""
-    if settings.m2_balance_authority:
-        return
-    default_loc = await conn.fetchval("SELECT id FROM inventory_locations WHERE is_default AND is_active")
-    if default_loc == location_id:
-        await conn.execute("UPDATE products SET stock = stock + $1 WHERE id = $2", quantity_delta, product_id)
+    """CA M2-S2-F01: sau adjustment (đổi balance.on_hand), materialize products.stock := available cho
+    default location — NHẤT QUÁN mọi phase (không còn gate m2_balance_authority, không delta stale).
+    Giữ `products.stock == available` (§17.1). Non-default location: no-op."""
+    await inv_repo.materialize_stock_mirror(conn, location_id, product_id)
 
 
 async def _do_adjust_decision(conn, env, *, approve: bool):
+    await _enforce(conn, env, "inventory.adjust.approve")
     staff_id = _staff_id(env)
     p = env.payload
     req_id = uuid.UUID(p["request_id"])

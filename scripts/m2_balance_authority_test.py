@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""M2 CA M2-S1-F05 evidence — balance-authority read path (AC-M2-13), chống split-brain.
+"""M2 CA M2-S1-F05 + M2-S2-F01 evidence — balance-authority read + Phase C stock MIRROR contract.
 
   docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@db:5432/m2ba_itest -e PYTHONPATH=/srv \
     -w /srv alpha3s-api-1 python scripts/m2_balance_authority_test.py
 
-Chung minh order.create accept-decision doc TU dung nguon theo flag:
-  - m2_balance_authority OFF (Phase A/B): authority = legacy products.stock.
-      * stock=0 & balance available>0 -> REJECT (legacy authority).
-  - m2_balance_authority ON (Phase C): authority = balance.available.
-      * stock=0 (mirror) & balance available>0 -> ACCEPT (balance authority) + reserve.
-      * balance available=0 & stock>0 -> REJECT (balance authority) — khong oversell tu legacy stale.
-  - Gate: chi doi hanh vi khi flag ON; OFF giu nguyen. Reserve duoi FOR UPDATE la guard cuoi.
+Contract Phase C mirror (S2-F01): products.stock := balance.available (materialize, KHÔNG delta stale)
+sau MỌI inventory write. Assert sau mỗi op: authority đúng, invariant balance đúng, stock==available
+(mirror), reconcile OK, stock KHÔNG âm — cả hai hướng split-brain.
 """
 import asyncio
 import importlib.util
@@ -30,6 +26,7 @@ from app.services.command.envelope import (  # noqa: E402
     Actor,
     build_order_create_envelope,
 )
+from app.services.inventory import reconcile as recon  # noqa: E402
 
 bf_spec = importlib.util.spec_from_file_location("m2_backfill", ROOT / "scripts" / "m2_backfill.py")
 bf = importlib.util.module_from_spec(bf_spec)
@@ -65,6 +62,12 @@ def cenv(key, qty):
                                        channel="dashboard", idempotency_key=key)
 
 
+async def snap(conn, pid, loc):
+    s = await conn.fetchval("SELECT stock FROM products WHERE id=$1", pid)
+    r = await conn.fetchrow("SELECT on_hand, reserved, on_hand-reserved AS avail FROM inventory_balances WHERE location_id=$1 AND product_id=$2", loc, pid)
+    return s, r["on_hand"], r["reserved"], r["avail"]
+
+
 async def main():  # noqa: C901
     dbname = _db().rsplit("/", 1)[-1]
     if "test" not in dbname:
@@ -90,29 +93,48 @@ async def main():  # noqa: C901
         pid = await conn.fetchval("SELECT id FROM products WHERE sku='3S-100G'")
         loc = await conn.fetchval("SELECT id FROM inventory_locations WHERE is_default")
 
-        # Tạo split-brain có kiểm soát: legacy stock=0 nhưng balance available=100
-        await conn.execute("UPDATE products SET stock=0 WHERE id=$1", pid)
+        async def assert_mirror(label):
+            s, oh, rv, av = await snap(conn, pid, loc)
+            rep = await recon.reconcile_inventory(conn, check_stock_compat=True)
+            check(s == av and s >= 0 and rv <= oh and rep.ok,
+                  f"{label}: stock={s}==avail={av}, stock>=0, reserved<=on_hand, reconcile={rep.ok} "
+                  f"(mismatch={rep.mismatches})")
 
-        print("[1] flag OFF (legacy authority): stock=0 -> REJECT dù balance có hàng")
+        print("[0] baseline mirror")
+        await assert_mirror("baseline")
+
+        print("[1] flag ON: create reserve -> mirror stock:=available (no stale delta)")
+        settings.m2_balance_authority = True
+        r = await order_service.execute_order_create(cenv("BA-C1", 5))
+        check(r.outcome == "succeeded", f"create accept theo balance ({r.outcome})")
+        await assert_mirror("after create (reserved 5)")  # stock 100->95
+
+        print("[2] STALE stock (legacy writer) + flag ON -> balance authority accept, mirror HEAL, no negative")
+        await conn.execute("UPDATE products SET stock=0 WHERE id=$1", pid)  # stale: stock=0 nhưng available=95
+        r = await order_service.execute_order_create(cenv("BA-C2", 3))
+        check(r.outcome == "succeeded", f"accept theo balance dù stock stale=0 ({r.outcome})")
+        s, oh, rv, av = await snap(conn, pid, loc)
+        check(s == av and s == 92 and s >= 0, f"mirror HEAL stale: stock={s}==avail={av}==92, no negative")
+        await assert_mirror("after stale+create")
+
+        print("[3] flag OFF (legacy authority): stale stock=0 -> reject dù balance có hàng")
         settings.m2_balance_authority = False
-        r = await order_service.execute_order_create(cenv("BA-OFF", 5))
+        await conn.execute("UPDATE products SET stock=0 WHERE id=$1", pid)  # available vẫn 92
+        r = await order_service.execute_order_create(cenv("BA-C3", 1))
         check(r.outcome == "rejected" and r.error_code == errors.INSUFFICIENT_STOCK,
               f"OFF -> reject theo legacy stock=0 ({r.outcome}/{r.error_code})")
+        # khôi phục mirror để tiếp (materialize tay như một op)
+        await conn.execute("UPDATE products p SET stock=b.on_hand-b.reserved FROM inventory_balances b WHERE b.location_id=$1 AND b.product_id=$2 AND p.id=$2", loc, pid)
 
-        print("[2] flag ON (balance authority): stock=0 (mirror) nhưng balance available=100 -> ACCEPT")
+        print("[4] flag ON: balance available=0 (reserved=on_hand) -> reject, stock=0, no negative")
         settings.m2_balance_authority = True
-        r = await order_service.execute_order_create(cenv("BA-ON", 5))
-        check(r.outcome == "succeeded", f"ON -> accept theo balance available ({r.outcome} {r.error_code})")
-        bal = await conn.fetchrow("SELECT on_hand, reserved FROM inventory_balances WHERE location_id=$1 AND product_id=$2", loc, pid)
-        check(bal["reserved"] == 5, f"đã reserve 5 trên balance ({dict(bal)})")
-
-        print("[3] flag ON: balance available=0 nhưng legacy stock cao -> REJECT (không oversell từ stale)")
-        # đẩy reserved = on_hand -> available 0; set legacy stock cao (stale)
         await conn.execute("UPDATE inventory_balances SET reserved=on_hand WHERE location_id=$1 AND product_id=$2", loc, pid)
-        await conn.execute("UPDATE products SET stock=999 WHERE id=$1", pid)
-        r = await order_service.execute_order_create(cenv("BA-ON-EMPTY", 1))
+        await conn.execute("UPDATE products p SET stock=b.on_hand-b.reserved FROM inventory_balances b WHERE b.location_id=$1 AND b.product_id=$2 AND p.id=$2", loc, pid)
+        r = await order_service.execute_order_create(cenv("BA-C4", 1))
         check(r.outcome == "rejected" and r.error_code == errors.INSUFFICIENT_STOCK,
-              f"ON + balance available=0 -> reject dù legacy stock=999 ({r.outcome}/{r.error_code})")
+              f"ON + available=0 -> reject ({r.outcome}/{r.error_code})")
+        s, _, _, av = await snap(conn, pid, loc)
+        check(s == 0 and av == 0 and s >= 0, f"stock=0=available, no negative ({s}/{av})")
     finally:
         await conn.close()
 
@@ -120,7 +142,7 @@ async def main():  # noqa: C901
     if _fail:
         print(f"RESULT: FAIL ({len(_fail)}) -> " + "; ".join(_fail))
         sys.exit(1)
-    print("RESULT: PASS — balance-authority read path (AC-M2-13): authority switch theo flag, chong split-brain")
+    print("RESULT: PASS — balance-authority (F05) + Phase C mirror contract (F01): stock==available, no negative, reconcile OK")
 
 
 if __name__ == "__main__":

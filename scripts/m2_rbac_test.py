@@ -26,7 +26,7 @@ from app.api.auth import require_staff_session  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services import auth_service  # noqa: E402
-from app.services.command import order_service  # noqa: E402
+from app.services.command import lifecycle, order_service, registry  # noqa: E402
 from app.services.command.envelope import (  # noqa: E402
     Actor,
     build_order_create_envelope,
@@ -127,6 +127,35 @@ async def main():  # noqa: C901
                              headers={"Idempotency-Key": "rbac-pos-complete"})
             check(r.status_code != 403, f"admin complete -> not 403 (perm ok, state 409) (got {r.status_code})")
         app.dependency_overrides.clear()
+
+        print("[3] DIRECT command-boundary (F02): viewer gọi execute_lifecycle trực tiếp -> forbidden, no mutation")
+        # order MỚI để transition hợp lệ (chỉ quyền chặn, không phải state)
+        od = (await order_service.execute_order_create(build_order_create_envelope(
+            raw_payload=dict(customer_name="A", phone="0912345678", address="12 Le Loi", sku="3S-100G",
+                             quantity=1, unit_price_vnd=150000),
+            actor=Actor("staff", str(STAFF["id"])), channel="dashboard", idempotency_key="RBAC-OD"))).resource["id"]
+        viewer = await auth_service.create_staff_user("rbac_viewer", "pw12345678", "IT", role_key="viewer")
+        # viewer gọi thẳng command service (bypass HTTP) -> _enforce chặn fail-closed
+        for ct, key in [(registry.ORDER_CONFIRM, "DIRECT-CONF"), (registry.ADJUST_REQUEST, "DIRECT-ADJ")]:
+            pl = {"order_id": od} if ct == registry.ORDER_CONFIRM else \
+                 {"location_id": 1, "product_id": 1, "quantity_delta": 3, "reason": "x"}
+            env = lifecycle.build_lifecycle_envelope(command_type=ct, payload=pl,
+                actor=Actor("staff", str(viewer["id"])), channel="dashboard", idempotency_key=key)
+            r = await lifecycle.execute_lifecycle(env)
+            check(r.outcome == "rejected" and r.error_code == "forbidden",
+                  f"viewer direct {ct} -> forbidden ({r.outcome}/{r.error_code})")
+        # KHÔNG mutation: order od chưa confirmed, không order_event confirm, không adjustment row
+        ost = await conn.fetchval("SELECT status FROM orders WHERE id=$1", od)
+        nev = await conn.fetchval("SELECT count(*) FROM order_events WHERE order_id=$1 AND event_type='order.confirm'", od)
+        nadj = await conn.fetchval("SELECT count(*) FROM inventory_adjustment_requests")
+        check(ost == "new" and nev == 0 and nadj == 0,
+              f"no mutation sau direct-call forbidden (status={ost} confirm_events={nev} adj={nadj})")
+        # positive: admin gọi trực tiếp -> KHÔNG forbidden
+        adm = await auth_service.create_staff_user("rbac_adm2", "pw12345678", "IT", role_key="admin")
+        env = lifecycle.build_lifecycle_envelope(command_type=registry.ORDER_CONFIRM, payload={"order_id": od},
+            actor=Actor("staff", str(adm["id"])), channel="dashboard", idempotency_key="DIRECT-CONF-OK")
+        r = await lifecycle.execute_lifecycle(env)
+        check(r.outcome == "succeeded", f"admin direct confirm -> succeeded ({r.outcome}/{r.error_code})")
     finally:
         await conn.close()
 

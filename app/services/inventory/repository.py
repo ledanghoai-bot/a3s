@@ -72,6 +72,20 @@ async def lock_reservations_for_order(conn, order_id: int) -> list:
     )
 
 
+async def materialize_stock_mirror(conn, location_id: int, product_id: int) -> None:
+    """Phase mirror contract (CA M2-S2-F01): `products.stock := balance.available` cho DEFAULT location.
+    MATERIALIZE từ giá trị authoritative (không delta trên giá trị stale) -> stock LUÔN == available,
+    KHÔNG bao giờ âm (available = on_hand - reserved >= 0 do invariant). Áp dụng nhất quán cho MỌI
+    inventory write path (create/cancel/expire/fulfill/adjustment). Non-default location: no-op
+    (compat assertion §17.1 chỉ cho default location)."""
+    await conn.execute(
+        "UPDATE products p SET stock = b.on_hand - b.reserved "
+        "FROM inventory_balances b, inventory_locations l "
+        "WHERE b.location_id = $1 AND b.product_id = $2 AND p.id = $2 "
+        "  AND l.id = b.location_id AND l.is_default AND l.is_active",
+        location_id, product_id)
+
+
 async def get_balance(conn, location_id: int, product_id: int):
     return await conn.fetchrow(
         "SELECT on_hand, reserved, on_hand-reserved AS available, version "

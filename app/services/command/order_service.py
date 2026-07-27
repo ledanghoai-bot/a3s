@@ -178,23 +178,25 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         "RETURNING id",
         order_id, product["id"], qty, unit_price,
     )
-    await conn.execute("UPDATE products SET stock = stock - $1 WHERE id = $2", qty, product["id"])
     # (override đã consume atomic ở bước pricing — FINDING 2)
 
-    # --- M2: reserve ATOMIC trong cùng transaction khi flag inventory ledger bật (Spec §7.2, §10.1) ---
-    # Compatibility (§15.6): legacy stock đã trừ ở trên (authority); reserve mirror vào ledger/balance
-    # (available == products.stock giữ nguyên). Fail-closed: reserve lỗi -> raise -> rollback đơn.
+    # --- M2: reserve ATOMIC khi flag ledger bật; products.stock là MIRROR của balance (CA M2-S2-F01) ---
+    # Ledger ON: reserve trên balance rồi materialize stock := available (KHÔNG delta trên giá trị stale
+    #   -> Phase C an toàn, không stock âm). Ledger OFF: legacy stock -= qty (hành vi M1).
     if settings.m2_inventory_ledger:
         atype2, aref2, _ = _audit_actor(env)
         try:
-            await order_txn.reserve_on_create(
+            loc_reserve = await order_txn.reserve_on_create(
                 conn, order_id=order_id, order_item_id=order_item_id, product_id=product["id"],
                 quantity=qty, actor_type=atype2, actor_id=aref2 or "system",
                 correlation_id=env.correlation_id, command_id=env.command_id,
             )
         except InventoryError as ie:
-            # Bất nhất ledger↔legacy (vd chưa backfill balance) -> rollback toàn bộ create (no partial).
+            # Bất nhất ledger↔balance (vd chưa backfill) -> rollback toàn bộ create (no partial).
             raise errors.CommandError(errors.INSUFFICIENT_STOCK, ie.message, http_status=422) from ie
+        await inv_repo.materialize_stock_mirror(conn, loc_reserve, product["id"])
+    else:
+        await conn.execute("UPDATE products SET stock = stock - $1 WHERE id = $2", qty, product["id"])
 
     # --- Persist deterministic result (committed truth) ---
     result_payload = {

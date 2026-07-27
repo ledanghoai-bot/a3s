@@ -140,11 +140,14 @@ async def main():
         check(rc2["ok"], "reconcile still OK after re-apply")
 
         print("[5] abort-on-anomaly")
+        # migration 028 CHECK stock>=0 chặn set -5 -> tạm drop để mô phỏng legacy data pre-028
+        await conn.execute("ALTER TABLE products DROP CONSTRAINT products_stock_nonneg")
         await conn.execute("UPDATE products SET stock=-5 WHERE id=$1", b)
         au_neg = await bf.audit(conn)
         check(not au_neg["ok"] and any("negative_stock" in x for x in au_neg["anomalies"]),
               f"negative stock -> abort (anomalies={au_neg['anomalies']})")
         await conn.execute("UPDATE products SET stock=0 WHERE id=$1", b)
+        await conn.execute("ALTER TABLE products ADD CONSTRAINT products_stock_nonneg CHECK (stock >= 0)")
 
         await conn.execute("ALTER TABLE orders DROP CONSTRAINT orders_status_check")
         await conn.execute("INSERT INTO orders (status) VALUES ('mystery')")

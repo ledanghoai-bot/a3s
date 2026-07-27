@@ -67,16 +67,15 @@ async def apply_transition(
                     conn, r, terminal_status="released", idem_prefix=prefix,
                     actor_type=actor_type, actor_id=actor_id, correlation_id=correlation_id,
                     command_id=command_id)
-                # Compatibility dual-write (§15.6): release trả available -> legacy products.stock cũng
-                # phải +qty để giữ products.stock==available. Cũng SỬA bug legacy cancel-no-restore
-                # (Slice0 finding): dưới flag M2, cancel/release KHÔI PHỤC tồn.
-                await conn.execute(
-                    "UPDATE products SET stock = stock + $1 WHERE id = $2", qty, r["product_id"])
-            else:  # EFFECT_CONSUME (fulfillment): on_hand-=qty & reserved-=qty -> available giữ nguyên;
-                # legacy stock đã trừ lúc create nên KHÔNG đổi -> vẫn khớp available.
+                # Mirror contract (CA M2-S2-F01): release trả available -> materialize stock := available
+                # (KHÔNG delta stale). Cũng sửa bug legacy cancel-no-restore (Slice0 finding).
+                await inv_repo.materialize_stock_mirror(conn, r["location_id"], r["product_id"])
+            else:  # EFFECT_CONSUME (fulfillment): on_hand-=qty & reserved-=qty -> available giữ nguyên.
                 await inv_service.fulfill_reservation(
                     conn, r, idem_prefix=prefix, actor_type=actor_type, actor_id=actor_id,
                     correlation_id=correlation_id, command_id=command_id)
+                # Mirror contract: materialize (available không đổi -> no-op nhưng giữ nhất quán mọi path).
+                await inv_repo.materialize_stock_mirror(conn, r["location_id"], r["product_id"])
 
     # confirm: giữ reservation nhưng bỏ expiry (§11.3) — new -> confirmed set expires_at=NULL
     if action == "confirm":
