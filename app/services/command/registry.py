@@ -21,8 +21,44 @@ ORDER_CREATE_VERSION = 1
 # Khop tools.PHONE_RE (M0) — giu nhat quan dinh dang SDT VN.
 PHONE_RE = re.compile(r"^(0|\+84)(3|5|7|8|9)\d{8}$")
 
+# --- I-B M2 lifecycle command types (§8.1) ---
+ORDER_CONFIRM = "order.confirm"
+ORDER_START_PROCESSING = "order.start_processing"
+ORDER_READY = "order.ready_for_fulfillment"
+ORDER_FULFILL = "order.fulfill"
+ORDER_CANCEL = "order.cancel"
+ORDER_MARK_DELIVERY_FAILED = "order.mark_delivery_failed"
+ORDER_REQUEST_RETURN = "order.request_return"
+ORDER_COMPLETE = "order.complete"
+INVENTORY_RETURN_INSPECT = "inventory.return_inspect"
+RESERVATION_EXTEND = "inventory.reservation.extend"
+RESERVATION_EXPIRE = "inventory.reservation.expire"
+ADJUST_REQUEST = "inventory.adjust.request"
+ADJUST_APPROVE = "inventory.adjust.approve"
+ADJUST_REJECT = "inventory.adjust.reject"
+
+# command_type -> transition action (lifecycle order). 'cancel' resolve động theo from_status.
+TRANSITION_ACTION: dict[str, str] = {
+    ORDER_CONFIRM: "confirm",
+    ORDER_START_PROCESSING: "start_processing",
+    ORDER_READY: "ready_for_fulfillment",
+    ORDER_FULFILL: "fulfill",
+    ORDER_CANCEL: "cancel",
+    ORDER_MARK_DELIVERY_FAILED: "mark_delivery_failed",
+    ORDER_REQUEST_RETURN: "request_return",
+    ORDER_COMPLETE: "complete",
+    INVENTORY_RETURN_INSPECT: "return_inspect",
+}
+
+_M2_TYPES = [
+    ORDER_CONFIRM, ORDER_START_PROCESSING, ORDER_READY, ORDER_FULFILL, ORDER_CANCEL,
+    ORDER_MARK_DELIVERY_FAILED, ORDER_REQUEST_RETURN, ORDER_COMPLETE, INVENTORY_RETURN_INSPECT,
+    RESERVATION_EXTEND, RESERVATION_EXPIRE, ADJUST_REQUEST, ADJUST_APPROVE, ADJUST_REJECT,
+]
+
 REGISTRY: set[tuple[str, int]] = {
     (ORDER_CREATE, ORDER_CREATE_VERSION),
+    *((t, 1) for t in _M2_TYPES),
 }
 
 
