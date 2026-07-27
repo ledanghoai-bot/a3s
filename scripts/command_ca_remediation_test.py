@@ -16,7 +16,7 @@ import asyncpg
 
 from app.config import settings
 from app.services import auth_service
-from app.services.command import order_service, outbox_worker, recovery
+from app.services.command import order_gateway, order_service, outbox_worker, recovery
 from app.services.command.envelope import Actor, build_order_create_envelope
 from app.services.command.outbox_worker import WORKER_ID, SendResult
 
@@ -133,6 +133,22 @@ async def main() -> int:  # noqa: C901
             if st2 != "delivered":
                 fails.append(f"CR-03: sau retry ok -> mong delivered, được {st2}")
 
+        # === CR-04R: AI idempotency ổn định — cùng provider message + cùng nội dung -> ĐÚNG 1 order
+        #     (không phụ thuộc tool_call_id); provider message khác -> order mới ===
+        def gw(pmid):
+            return order_gateway.create_order_command(
+                channel="messenger", actor_type="customer", actor_id="psid-r", idempotency_key=None,
+                provider_message_id=pmid, customer_name=C["customer_name"], phone=C["phone"],
+                address=C["address"], sku="3S-100G", quantity=1, psid="psid-r")
+
+        r_a = await gw("mid-R1")
+        r_b = await gw("mid-R1")   # "re-execution" cùng inbound message -> gateway derive CÙNG key
+        if not (r_a.get("order_id") and r_b.get("order_id") == r_a.get("order_id") and r_b.get("duplicate")):
+            fails.append(f"CR-04R: cùng message không idempotent: a={r_a.get('order_id')} b={r_b}")
+        r_c = await gw("mid-R2")   # provider message khác -> key khác -> order mới
+        if not (r_c.get("order_id") and r_c.get("order_id") != r_a.get("order_id") and not r_c.get("duplicate")):
+            fails.append(f"CR-04R: message khác phải tạo order mới: c={r_c}")
+
         # === CR-05: audit fail-closed — audit_log hỏng -> order mutation rollback ===
         n_before = await conn.fetchval("SELECT count(*) FROM orders")
         await conn.execute("ALTER TABLE audit_log ADD CONSTRAINT _ff5 CHECK (false) NOT VALID")
@@ -159,6 +175,7 @@ async def main() -> int:  # noqa: C901
         return 1
     print("CA-REMEDIATION PASS: CR-01 manual retry attempt_no liên tục [1,2,3] delivered; "
           "CR-02 worker CAS không đè lease khác; CR-03 customer receipt durable (messenger) fail->retry->delivered; "
+          "CR-04R idempotency ổn định (cùng message=1 order, message khác=order mới); "
           "CR-05 audit fail-closed rollback.")
     return 0
 

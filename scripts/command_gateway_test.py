@@ -18,7 +18,6 @@ import asyncpg
 
 from app.config import settings
 from app.services import auth_service, orders, tools
-from app.services.command import idempotency
 
 C = {"customer_name": "Le Thi B", "phone": "0987654321", "address": "5 Tran Hung Dao, HN"}
 
@@ -49,21 +48,21 @@ async def main() -> int:  # noqa: C901
         st = await auth_service.create_staff_user("gw_staff", "pw12345678", "GW", role_key="admin")
         staff_id = str(st["id"])
 
-        # === FLAG ON: AI path routes -> command + receipt ===
+        # === FLAG ON: AI path routes -> command + receipt (CR-04R: gateway derive key từ provider
+        # message id + business identity; command_ctx KHÔNG precompute key, KHÔNG dùng tool_call_id) ===
         settings.m1_reliable_order_command = True
-        ai_key = idempotency.ai_stable_key(channel="messenger", provider_message_id="psid-gw",
-                                           tool_call_id="tc-gw-1", command_type="order.create", version=1)
         ctx_ai = {"channel": "messenger", "actor_type": "customer", "actor_id": "psid-gw",
-                  "conversation_id": None, "causation_id": "tc-gw-1", "idempotency_key": ai_key}
+                  "conversation_id": None, "causation_id": "mid-gw-1", "provider_message_id": "mid-gw-1"}
         r = await tools.create_order(psid="psid-gw", sku="3S-100G", quantity=1, command_ctx=ctx_ai, **C)
         if "error" in r or "receipt" not in r or not r.get("order_id"):
             fails.append(f"ON/AI: khong route qua command: {r}")
         if r.get("duplicate") is not False:
             fails.append(f"ON/AI: lan dau phai duplicate=False: {r.get('duplicate')}")
-        if await cmd_count(conn, ai_key) != 1:
-            fails.append("ON/AI: khong co command_executions row")
+        if await conn.fetchval("SELECT count(*) FROM command_executions WHERE idempotency_scope=$1",
+                               "order.create:messenger:psid-gw") != 1:
+            fails.append("ON/AI: khong co command_executions row (scope)")
 
-        # duplicate same ctx -> duplicate True, khong order moi
+        # duplicate: cùng provider message id + cùng nội dung -> duplicate True, khong order moi
         n0 = await orders_count(conn)
         r2 = await tools.create_order(psid="psid-gw", sku="3S-100G", quantity=1, command_ctx=ctx_ai, **C)
         if not (r2.get("duplicate") and r2.get("order_id") == r.get("order_id")):

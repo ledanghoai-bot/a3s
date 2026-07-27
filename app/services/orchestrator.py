@@ -342,9 +342,9 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 # chan o worker). Chi anh huong khi settings.m1_reliable_order_command BAT.
                 cmd_ctx = None
                 if tc.function.name == "create_order":
-                    from app.services.command import idempotency as _idem
-                    # CR-04: neo causation + idempotency key vào PROVIDER MESSAGE ID thật (mid
-                    # Messenger / message_id Telegram); fallback sender_id nếu kênh chưa truyền.
+                    # CR-04R: KHÔNG precompute idempotency key ở đây (không dùng tool_call_id — LLM
+                    # sinh lại sẽ khác). Chỉ truyền PROVIDER MESSAGE ID thật (mid/message_id) + context;
+                    # gateway derive key ỔN ĐỊNH từ channel + provider msg id + danh tính nghiệp vụ.
                     pmid = provider_message_id or sender_id
                     cmd_ctx = {
                         "channel": channel,
@@ -352,10 +352,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                         "actor_id": sender_id,
                         "conversation_id": conversation_id,
                         "causation_id": pmid,
-                        "idempotency_key": _idem.ai_stable_key(
-                            channel=channel, provider_message_id=pmid, tool_call_id=tc.id,
-                            command_type="order.create", version=1,
-                        ),
+                        "provider_message_id": pmid,
                     }
                 result = await _execute_tool(tc.function.name, args, sender_id, text,
                                              command_ctx=cmd_ctx)
@@ -394,13 +391,13 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # flag BAT — flag TAT giu nguyen hanh vi legacy ben duoi (marker guard van chay).
         if settings.m1_reliable_order_command:
             from app.services.command import reply_guard
-            # CR-03: KHÔNG bơm dòng receipt vào reply tức thì — customer receipt được giao DURABLE qua
-            # outbox (tránh gửi trùng; bền hơn gửi trực tiếp). Reply tức thì chỉ là câu hội thoại LLM.
-            # order_receipts vẫn thu để shadow-evaluate chống bịa đơn.
             shadow = reply_guard.shadow_evaluate(_reply_claims_order_created(reply), created_order_ids)
             if not shadow["consistent"]:
                 print(f"[orchestrator][M1-shadow] CLAIM-KHONG-RECEIPT sender={sender_id} "
                       f"reply={reply[:120]!r}")
+            # CR-08: order đã commit -> reply tức thì TRUNG TÍNH (không để LLM nói sai mã đơn/tổng tiền);
+            # xác nhận CHÍNH THỨC (đúng committed data) đi qua durable receipt (outbox, CR-03).
+            reply = reply_guard.finalize_customer_reply(reply, bool(created_order_ids))
 
         # GUARD CHONG BIA DON (lop code, khong chi dua vao prompt): neu model bao
         # KHACH rang don da duoc tao ("ma don #...", "dat hang thanh cong"...) nhung

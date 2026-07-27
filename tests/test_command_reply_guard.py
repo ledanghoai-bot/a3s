@@ -50,6 +50,18 @@ def test_append_order_id_boundary_not_prefix():
     assert "#12 đã được ghi nhận" not in out2          # #12 xuất hiện đúng token -> bỏ qua
 
 
+def test_finalize_customer_reply_neutral_when_order_created():
+    # CR-08: order đã commit -> reply tức thì TRUNG TÍNH; nội dung LLM bịa (mã đơn/tổng tiền sai)
+    # KHÔNG tới khách. Xác nhận chính thức đi qua durable receipt.
+    fabricated = "Đơn #999 đã tạo thành công, tổng 5.000.000đ cho anh nhé!"
+    out = reply_guard.finalize_customer_reply(fabricated, order_created=True)
+    assert out == reply_guard.NEUTRAL_ORDER_REPLY
+    assert "#999" not in out and "5.000.000" not in out
+    # chưa tạo đơn -> giữ nguyên reply LLM
+    kept = reply_guard.finalize_customer_reply("Dạ anh cần thêm thông tin gì ạ?", order_created=False)
+    assert kept == "Dạ anh cần thêm thông tin gì ạ?"
+
+
 def test_shadow_evaluate():
     assert reply_guard.shadow_evaluate(False, [])["consistent"] is True      # khong claim -> ok
     assert reply_guard.shadow_evaluate(True, [123])["consistent"] is True    # claim + receipt -> ok

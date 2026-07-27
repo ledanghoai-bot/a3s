@@ -24,10 +24,15 @@ def validate_api_key(key: str | None) -> str:
     return key
 
 
-def ai_stable_key(*, channel: str, provider_message_id: str, tool_call_id: str,
-                  command_type: str, version: int) -> str:
-    """Stable key cho AI chat — cung tin nhan + cung tool call -> cung key (retry an toan)."""
-    return sha256_hex(f"{channel}|{provider_message_id}|{tool_call_id}|{command_type}|{version}")
+def ai_stable_key(*, channel: str, provider_message_id: str, command_type: str, version: int,
+                  business_key: str) -> str:
+    """Stable key cho AI (CR-04R): KHÔNG phụ thuộc tool_call_id (LLM sinh lại -> khác nhau).
+    Neo vào provider message id THẬT + danh tính nghiệp vụ đã chuẩn hoá (business_key = request_hash
+    của nội dung đơn). Hệ quả:
+    - cùng inbound message + cùng nội dung đơn -> CÙNG key (effective-once qua retry/re-execution);
+    - đơn khác nội dung trong cùng message -> key khác (nhiều đơn/1 message vẫn phân biệt được);
+    - message khác -> key khác."""
+    return sha256_hex(f"{channel}|{provider_message_id}|{command_type}|{version}|{business_key}")
 
 
 def build_scope(command_type: str, channel: str, subject: str) -> str:

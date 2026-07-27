@@ -133,28 +133,19 @@ def test_validate_api_key():
     assert idempotency.validate_api_key("ABCdef0123456789._:-") == "ABCdef0123456789._:-"
 
 
-def test_ai_stable_key_deterministic():
-    k1 = idempotency.ai_stable_key(channel="messenger", provider_message_id="mid1",
-                                   tool_call_id="tc1", command_type="order.create", version=1)
-    k2 = idempotency.ai_stable_key(channel="messenger", provider_message_id="mid1",
-                                   tool_call_id="tc1", command_type="order.create", version=1)
-    k3 = idempotency.ai_stable_key(channel="messenger", provider_message_id="mid2",
-                                   tool_call_id="tc1", command_type="order.create", version=1)
-    assert k1 == k2 and k1 != k3 and len(k1) == 64
-
-
-def test_ai_stable_key_anchored_to_provider_message_id():
-    # CR-04: key neo vào provider message id (mid). Cùng mid+tool_call -> cùng key (replay cùng
-    # inbound message / worker retry idempotent); mid khác -> key khác; tool_call khác -> key khác.
-    base = dict(channel="messenger", tool_call_id="tc1", command_type="order.create", version=1)
+def test_ai_stable_key_no_tool_call_id_stable_across_reexecution():
+    # CR-04R: key KHÔNG phụ thuộc tool_call_id. Neo channel+provider_message_id+type/version+business_key
+    # (danh tính nghiệp vụ). Cùng inbound message + cùng nội dung đơn -> CÙNG key dù LLM sinh tool_call
+    # khác khi re-execution (effective-once); message khác / nội dung khác -> key khác.
+    base = dict(channel="messenger", command_type="order.create", version=1, business_key="bhash-1")
     k1 = idempotency.ai_stable_key(provider_message_id="mid-abc", **base)
     k1b = idempotency.ai_stable_key(provider_message_id="mid-abc", **base)
-    k_othermid = idempotency.ai_stable_key(provider_message_id="mid-xyz", **base)
-    k_othertc = idempotency.ai_stable_key(provider_message_id="mid-abc", channel="messenger",
-                                          tool_call_id="tc2", command_type="order.create", version=1)
-    assert k1 == k1b            # replay cùng message + cùng tool_call -> cùng key
-    assert k1 != k_othermid     # message (mid) khác -> key khác
-    assert k1 != k_othertc      # tool_call khác (đơn thứ 2 trong cùng message) -> key khác
+    k_mid2 = idempotency.ai_stable_key(provider_message_id="mid-xyz", **base)
+    k_biz2 = idempotency.ai_stable_key(provider_message_id="mid-abc", channel="messenger",
+                                       command_type="order.create", version=1, business_key="bhash-2")
+    assert k1 == k1b and len(k1) == 64   # deterministic; re-execution cùng message+đơn -> cùng key
+    assert k1 != k_mid2                   # provider message khác -> key khác
+    assert k1 != k_biz2                   # nội dung đơn khác (đơn khác trong cùng message) -> key khác
 
 
 # ---------------- retry classifier + backoff (§9.2, §8.2) ----------------

@@ -8,7 +8,7 @@ Import order_service (asyncpg) — caller import LAZY trong ham de tranh vong im
 """
 from __future__ import annotations
 
-from app.services.command import errors, idempotency, order_service
+from app.services.command import errors, idempotency, order_service, registry
 from app.services.command import receipt as receipt_mod
 from app.services.command.envelope import CHANNELS, Actor, build_order_create_envelope
 
@@ -19,14 +19,18 @@ def can_route(channel: str) -> bool:
 
 
 async def create_order_command(
-    *, channel: str, actor_type: str, actor_id, idempotency_key: str,
+    *, channel: str, actor_type: str, actor_id, idempotency_key: str | None = None,
     customer_name: str, phone: str, address: str, sku: str, quantity: int,
     unit_price_vnd: int | None = None, psid: str | None = None,
     conversation_id: int | None = None, correlation_id: str | None = None,
-    causation_id: str | None = None,
+    causation_id: str | None = None, provider_message_id: str | None = None,
 ) -> dict:
     """Build envelope + execute_order_create + adapt ve legacy dict. Loi validate/conflict ->
-    {"error":..., "error_code":...} (khong raise ra caller — giu contract legacy)."""
+    {"error":..., "error_code":...} (khong raise ra caller — giu contract legacy).
+
+    CR-04R: neu idempotency_key None (luong AI) -> DERIVE key on-dinh tu channel + provider_message_id
+    + danh tinh nghiep vu (request_hash cua noi dung don), KHONG dung tool_call_id. Dashboard/manual
+    truyen key that (header/UUID) -> dung nguyen."""
     raw: dict = {
         "customer_name": customer_name, "phone": phone, "address": address,
         "sku": sku, "quantity": quantity,
@@ -36,6 +40,17 @@ async def create_order_command(
     if psid:
         raw["psid"] = psid
     try:
+        if idempotency_key is None:
+            if not provider_message_id:
+                raise errors.key_required()
+            normalized = registry.validate_order_create_payload(raw)
+            business_key = registry.compute_request_hash(
+                registry.ORDER_CREATE, registry.ORDER_CREATE_VERSION,
+                registry.order_create_hash_input(normalized))
+            idempotency_key = idempotency.ai_stable_key(
+                channel=channel, provider_message_id=provider_message_id,
+                command_type=registry.ORDER_CREATE, version=registry.ORDER_CREATE_VERSION,
+                business_key=business_key)
         env = build_order_create_envelope(
             raw_payload=raw, actor=Actor(actor_type, str(actor_id)), channel=channel,
             idempotency_key=idempotency_key, conversation_id=conversation_id,

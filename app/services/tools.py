@@ -180,7 +180,8 @@ async def create_order(
                 channel=command_ctx["channel"],
                 actor_type=command_ctx.get("actor_type", "customer"),
                 actor_id=command_ctx.get("actor_id", psid),
-                idempotency_key=command_ctx["idempotency_key"],
+                idempotency_key=command_ctx.get("idempotency_key"),  # None (AI) -> gateway derive (CR-04R)
+                provider_message_id=command_ctx.get("provider_message_id"),
                 customer_name=customer_name, phone=phone, address=address,
                 sku=sku, quantity=quantity, psid=psid,
                 conversation_id=command_ctx.get("conversation_id"),

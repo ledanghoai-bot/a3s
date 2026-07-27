@@ -38,6 +38,20 @@ def append_receipt_lines(reply: str, receipt_dicts: list[dict] | None) -> str:
     return (reply.rstrip() + "\n\n" + "\n".join(lines)).strip()
 
 
+NEUTRAL_ORDER_REPLY = (
+    "Dạ em đã ghi nhận yêu cầu đặt hàng của anh/chị. Xác nhận đơn (mã đơn, tổng tiền) "
+    "sẽ được gửi tới anh/chị ngay sau ít phút ạ."
+)
+
+
+def finalize_customer_reply(llm_reply: str, order_created: bool) -> str:
+    """CR-08: khi order ĐÃ commit, KHÔNG gửi nguyên văn reply LLM cho khách (LLM có thể nói sai mã
+    đơn / số lượng / tổng tiền trước khi durable receipt tới). Trả câu TRUNG TÍNH, không khẳng định
+    business effect; xác nhận CHÍNH THỨC (đúng committed data) đi qua durable receipt (outbox).
+    Chưa tạo đơn -> giữ reply LLM (marker anti-fabrication guard riêng vẫn chặn claim bịa)."""
+    return NEUTRAL_ORDER_REPLY if order_created else llm_reply
+
+
 def shadow_evaluate(reply_claims_order: bool, order_ids) -> dict:
     """Doi chieu shadow: neu reply 'claim da tao don' thi PHAI co receipt/order id backing.
     consistent=False => nghi bia (marker guard hien huu van chan; day la tin hieu evidence gate)."""
