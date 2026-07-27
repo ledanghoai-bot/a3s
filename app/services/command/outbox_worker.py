@@ -21,6 +21,11 @@ from app.config import settings
 from app.db_pool import acquire, release
 from app.services.command import retry as R
 from app.services.command.receipt import format_vnd
+from app.services.messenger import GRAPH_URL
+
+OUTBOX_DEST_TELEGRAM_ADMIN = "telegram_admin"
+OUTBOX_DEST_MESSENGER = "messenger"
+OUTBOX_DEST_TELEGRAM_CUSTOMER = "telegram_customer"
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 LEASE_SECONDS = 60
@@ -96,6 +101,74 @@ async def telegram_send(destination: str, payload: dict) -> SendResult:
     return SendResult(ok=False, http_status=resp.status_code, error_class=f"http_{resp.status_code}")
 
 
+def _timeout():
+    return httpx.Timeout(R.TOTAL_TIMEOUT, connect=R.CONNECT_TIMEOUT)
+
+
+def _from_resp(resp, pmid_key: str | None) -> SendResult:
+    if 200 <= resp.status_code < 300:
+        pmid = None
+        if pmid_key:
+            try:
+                pmid = str(resp.json().get(pmid_key))
+            except Exception:  # noqa: BLE001
+                pmid = None
+        return SendResult(ok=True, http_status=resp.status_code, provider_message_id=pmid)
+    return SendResult(ok=False, http_status=resp.status_code, error_class=f"http_{resp.status_code}")
+
+
+async def _messenger_send(payload: dict) -> SendResult:
+    """CR-03: customer receipt qua Messenger Send API (durable)."""
+    if not settings.page_access_token:
+        return SendResult(ok=False, http_status=403, error_class="not_configured")
+    try:
+        async with httpx.AsyncClient(timeout=_timeout()) as client:
+            resp = await client.post(
+                GRAPH_URL, params={"access_token": settings.page_access_token},
+                json={"recipient": {"id": payload.get("customer_ref")},
+                      "messaging_type": "RESPONSE", "message": {"text": payload.get("text", "")}})
+    except httpx.TimeoutException:
+        return SendResult(ok=False, is_timeout=True, error_class="timeout")
+    except httpx.HTTPError as e:  # noqa: BLE001
+        return SendResult(ok=False, error_class=type(e).__name__)
+    return _from_resp(resp, "message_id")
+
+
+async def _telegram_customer_send(payload: dict) -> SendResult:
+    """CR-03: customer receipt qua bot Telegram khách (durable)."""
+    if not settings.telegram_customer_bot_token:
+        return SendResult(ok=False, http_status=403, error_class="not_configured")
+    ref = str(payload.get("customer_ref") or "")
+    chat_id = ref[3:] if ref.startswith("tg:") else ref
+    url = f"https://api.telegram.org/bot{settings.telegram_customer_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=_timeout()) as client:
+            resp = await client.post(url, json={"chat_id": chat_id, "text": payload.get("text", "")})
+    except httpx.TimeoutException:
+        return SendResult(ok=False, is_timeout=True, error_class="timeout")
+    except httpx.HTTPError as e:  # noqa: BLE001
+        return SendResult(ok=False, error_class=type(e).__name__)
+    if 200 <= resp.status_code < 300:
+        pmid = None
+        try:
+            pmid = str(resp.json().get("result", {}).get("message_id"))
+        except Exception:  # noqa: BLE001
+            pmid = None
+        return SendResult(ok=True, http_status=resp.status_code, provider_message_id=pmid)
+    return SendResult(ok=False, http_status=resp.status_code, error_class=f"http_{resp.status_code}")
+
+
+async def deliver(destination: str, payload: dict) -> SendResult:
+    """Dispatch theo destination -> sender phù hợp (telegram_admin / messenger / telegram_customer)."""
+    if destination == OUTBOX_DEST_TELEGRAM_ADMIN:
+        return await telegram_send(destination, payload)
+    if destination == OUTBOX_DEST_MESSENGER:
+        return await _messenger_send(payload)
+    if destination == OUTBOX_DEST_TELEGRAM_CUSTOMER:
+        return await _telegram_customer_send(payload)
+    return SendResult(ok=False, http_status=400, error_class="unknown_destination")
+
+
 # --------------------------------------------------------------------------
 # Core drain
 # --------------------------------------------------------------------------
@@ -162,11 +235,14 @@ async def _send_and_record(conn, ev, send_fn) -> str:
         sr.provider_message_id, sr.error_class, dur_ms, corr, dur_ms,
     )
 
+    # CR-02: compare-and-set — chỉ ghi trạng thái cuối khi event VẪN 'delivering' và VẪN thuộc lease
+    # của worker này. Nếu event đã bị cancel/reclaim trong lúc gửi -> UPDATE 0 dòng, KHÔNG đè.
     if decision == "delivered":
         await conn.execute(
             "UPDATE outbox_events SET status='delivered', delivered_at=now(), "
-            "provider_message_id=$2, lease_owner=NULL, lease_expires_at=NULL WHERE id=$1",
-            ev["id"], sr.provider_message_id,
+            "provider_message_id=$2, lease_owner=NULL, lease_expires_at=NULL "
+            "WHERE id=$1 AND status='delivering' AND lease_owner=$3",
+            ev["id"], sr.provider_message_id, WORKER_ID,
         )
         return "delivered"
     if decision == "retry":
@@ -174,22 +250,24 @@ async def _send_and_record(conn, ev, send_fn) -> str:
         await conn.execute(
             "UPDATE outbox_events SET status='retry_scheduled', "
             "available_at=now() + ($2 * interval '1 second'), last_error_code=$3, "
-            "lease_owner=NULL, lease_expires_at=NULL WHERE id=$1",
-            ev["id"], backoff, sr.error_class,
+            "lease_owner=NULL, lease_expires_at=NULL "
+            "WHERE id=$1 AND status='delivering' AND lease_owner=$4",
+            ev["id"], backoff, sr.error_class, WORKER_ID,
         )
         return "retried"
     # terminal -> dead-letter (§9.2)
     await conn.execute(
         "UPDATE outbox_events SET status='dead_lettered', dead_lettered_at=now(), "
-        "last_error_code=$2, lease_owner=NULL, lease_expires_at=NULL WHERE id=$1",
-        ev["id"], sr.error_class,
+        "last_error_code=$2, lease_owner=NULL, lease_expires_at=NULL "
+        "WHERE id=$1 AND status='delivering' AND lease_owner=$3",
+        ev["id"], sr.error_class, WORKER_ID,
     )
     return "dead"
 
 
 async def run_once(send_fn=None) -> dict:
     """Mot vong drain: reclaim stale -> claim batch -> send+record tung event. Tra stats."""
-    send_fn = send_fn or telegram_send
+    send_fn = send_fn or deliver
     conn = await acquire()
     stats = {"reclaimed": 0, "delivered": 0, "retried": 0, "dead": 0, "claimed": 0}
     try:

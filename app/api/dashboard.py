@@ -386,7 +386,9 @@ async def outbox_replay_endpoint(
     outbox_id: str, body: dict, staff: dict = Depends(require_permission("outbox.replay")),
 ) -> dict:
     try:
-        return await recovery.replay_outbox(outbox_id, staff, body.get("reason"))
+        return await recovery.replay_outbox(
+            outbox_id, staff, body.get("reason"),
+            confirm_business_effect=bool(body.get("confirm_business_effect")))
     except cmd_errors.CommandError as e:
         raise HTTPException(status_code=e.http_status, detail=e.message) from e
 

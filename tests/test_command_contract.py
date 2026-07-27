@@ -143,6 +143,20 @@ def test_ai_stable_key_deterministic():
     assert k1 == k2 and k1 != k3 and len(k1) == 64
 
 
+def test_ai_stable_key_anchored_to_provider_message_id():
+    # CR-04: key neo vào provider message id (mid). Cùng mid+tool_call -> cùng key (replay cùng
+    # inbound message / worker retry idempotent); mid khác -> key khác; tool_call khác -> key khác.
+    base = dict(channel="messenger", tool_call_id="tc1", command_type="order.create", version=1)
+    k1 = idempotency.ai_stable_key(provider_message_id="mid-abc", **base)
+    k1b = idempotency.ai_stable_key(provider_message_id="mid-abc", **base)
+    k_othermid = idempotency.ai_stable_key(provider_message_id="mid-xyz", **base)
+    k_othertc = idempotency.ai_stable_key(provider_message_id="mid-abc", channel="messenger",
+                                          tool_call_id="tc2", command_type="order.create", version=1)
+    assert k1 == k1b            # replay cùng message + cùng tool_call -> cùng key
+    assert k1 != k_othermid     # message (mid) khác -> key khác
+    assert k1 != k_othertc      # tool_call khác (đơn thứ 2 trong cùng message) -> key khác
+
+
 # ---------------- retry classifier + backoff (§9.2, §8.2) ----------------
 
 @pytest.mark.parametrize("status,outcome,cred", [

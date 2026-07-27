@@ -105,7 +105,10 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
         return {"error": f"Loi he thong khi chay tool '{name}', vui long thu lai."}
 
 
-async def handle_message(sender_id: str, text: str, channel: str = "messenger") -> str:
+async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+                         provider_message_id: str | None = None) -> str:
+    # provider_message_id (CR-04): mid Messenger / message_id Telegram — neo causation + idempotency
+    # key cho command (order.create). None -> fallback sender_id.
     # channel: kenh goi toi (tuong minh, do caller truyen) - quyet dinh muc do
     # bat buoc khai bao "tro ly tu dong". Mac dinh "messenger" (kenh chinh).
     # Ket noi Redis
@@ -294,7 +297,6 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
 
         reply = ""
         created_order_ids: list = []  # order_id create_order tra ve THAT trong luot nay
-        order_receipts: list = []  # I-B M1: receipt committed tu command path (neu flag bat)
         for _ in range(MAX_TOOL_ITERATIONS):
             response = await client.chat.completions.create(
                 model=settings.llm_model,
@@ -341,14 +343,17 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
                 cmd_ctx = None
                 if tc.function.name == "create_order":
                     from app.services.command import idempotency as _idem
+                    # CR-04: neo causation + idempotency key vào PROVIDER MESSAGE ID thật (mid
+                    # Messenger / message_id Telegram); fallback sender_id nếu kênh chưa truyền.
+                    pmid = provider_message_id or sender_id
                     cmd_ctx = {
                         "channel": channel,
                         "actor_type": "customer",
                         "actor_id": sender_id,
                         "conversation_id": conversation_id,
-                        "causation_id": tc.id,
+                        "causation_id": pmid,
                         "idempotency_key": _idem.ai_stable_key(
-                            channel=channel, provider_message_id=sender_id, tool_call_id=tc.id,
+                            channel=channel, provider_message_id=pmid, tool_call_id=tc.id,
                             command_type="order.create", version=1,
                         ),
                     }
@@ -361,8 +366,6 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
                     and not result.get("error")
                 ):
                     created_order_ids.append(result["order_id"])
-                    if result.get("receipt"):  # I-B M1: receipt deterministic tu command path
-                        order_receipts.append(result["receipt"])
                 turn_messages.append(
                     {
                         "role": "tool",
@@ -391,8 +394,9 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger") 
         # flag BAT — flag TAT giu nguyen hanh vi legacy ben duoi (marker guard van chay).
         if settings.m1_reliable_order_command:
             from app.services.command import reply_guard
-            if order_receipts:
-                reply = reply_guard.append_receipt_lines(reply, order_receipts)
+            # CR-03: KHÔNG bơm dòng receipt vào reply tức thì — customer receipt được giao DURABLE qua
+            # outbox (tránh gửi trùng; bền hơn gửi trực tiếp). Reply tức thì chỉ là câu hội thoại LLM.
+            # order_receipts vẫn thu để shadow-evaluate chống bịa đơn.
             shadow = reply_guard.shadow_evaluate(_reply_claims_order_created(reply), created_order_ids)
             if not shadow["consistent"]:
                 print(f"[orchestrator][M1-shadow] CLAIM-KHONG-RECEIPT sender={sender_id} "

@@ -11,6 +11,8 @@ name: CI/CD
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]   # CR-07: PR chạy lint+test -> status check (KHÔNG deploy)
 
 jobs:
   lint-test:
@@ -32,7 +34,7 @@ jobs:
   deploy:
     needs: lint-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'  # CR-07: chỉ deploy khi push main, KHÔNG khi PR
     steps:
       - name: Deploy len VPS qua SSH
         env:

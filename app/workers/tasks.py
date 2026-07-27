@@ -100,7 +100,9 @@ async def _process_message_inner(event: dict) -> None:
         print(f"[worker] Bot dang paused cho {sender_id}, chi log, khong tra loi (nhan vien dang xu ly).")
         return
 
-    reply = await handle_message(sender_id, text, channel="messenger")
+    # CR-04: truyền provider message id (Messenger mid) thật vào command idempotency/causation.
+    reply = await handle_message(sender_id, text, channel="messenger",
+                                 provider_message_id=message.get("mid"))
     await send_text(sender_id, reply)
 
 

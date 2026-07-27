@@ -102,14 +102,27 @@ async def main() -> int:  # noqa: C901
         await order_service.execute_order_create(env)
         cid = await conn.fetchval("SELECT id FROM command_executions LIMIT 1")
 
-        # A: retry dead-letter -> retry_scheduled + reset + audit
+        # A: retry dead-letter -> retry_scheduled + audit. CR-01: attempt_count KHÔNG reset (đơn điệu),
+        # cấp budget bằng max_attempts += fresh (tránh trùng attempt_no).
         e_dl = await ins_event(conn, cid, "dl1", "dead_lettered")
+        await conn.execute("UPDATE outbox_events SET attempt_count=8, max_attempts=8 WHERE id=$1", e_dl)
         await recovery.retry_outbox(str(e_dl), actor, "thu lai sau su co Telegram")
-        r = await conn.fetchrow("SELECT status, attempt_count FROM outbox_events WHERE id=$1", e_dl)
-        if not (r["status"] == "retry_scheduled" and r["attempt_count"] == 0):
-            fails.append(f"A: retry sai: {dict(r)}")
+        r = await conn.fetchrow(
+            "SELECT status, attempt_count, max_attempts FROM outbox_events WHERE id=$1", e_dl)
+        if not (r["status"] == "retry_scheduled" and r["attempt_count"] == 8 and r["max_attempts"] == 16):
+            fails.append(f"A/CR-01: retry sai (attempt_count giữ 8, max_attempts->16): {dict(r)}")
         if await audit_n(conn, "outbox.retry") != 1:
             fails.append("A: khong audit outbox.retry")
+
+        # CR-02: cancel khi 'delivering' -> 409 (không cho đè worker đang gửi)
+        e_delv = await ins_event(conn, cid, "delv", "pending")
+        await conn.execute("UPDATE outbox_events SET status='delivering' WHERE id=$1", e_delv)
+        try:
+            await recovery.cancel_outbox(str(e_delv), actor, "x")
+            fails.append("CR-02: cancel delivering KHÔNG raise 409")
+        except errors.CommandError as e:
+            if e.http_status != 409:
+                fails.append(f"CR-02: cancel delivering sai code {e.http_status}")
 
         # guard: retry non-dead -> 409
         e_pg = await ins_event(conn, cid, "pg1", "pending")
@@ -135,9 +148,10 @@ async def main() -> int:  # noqa: C901
             if e.http_status != 409:
                 fails.append(f"A: cancel delivered sai code {e.http_status}")
 
-        # replay -> new event + audit
+        # replay -> new event + audit (CR-06: cần confirm_business_effect + source dead_lettered/cancelled)
         e_dl2 = await ins_event(conn, cid, "dl2", "dead_lettered")
-        res = await recovery.replay_outbox(str(e_dl2), actor, "gui lai cho admin")
+        res = await recovery.replay_outbox(str(e_dl2), actor, "gui lai cho admin",
+                                           confirm_business_effect=True)
         new_id = res["new_outbox_id"]
         newrow = await conn.fetchrow("SELECT status, dedupe_key FROM outbox_events WHERE id=$1", new_id)
         if not (newrow and newrow["status"] == "pending" and ":replay:" in newrow["dedupe_key"]):
@@ -153,6 +167,22 @@ async def main() -> int:  # noqa: C901
         except errors.CommandError as e:
             if e.code != "reason_required" or e.http_status != 422:
                 fails.append(f"A: reason sai {e.code}/{e.http_status}")
+
+        # CR-06: replay không confirm -> 422; replay từ trạng thái không hợp lệ (pending) -> 409
+        e_dl6 = await ins_event(conn, cid, "dl6", "dead_lettered")
+        try:
+            await recovery.replay_outbox(str(e_dl6), actor, "x", confirm_business_effect=False)
+            fails.append("CR-06: replay không confirm KHÔNG raise")
+        except errors.CommandError as e:
+            if e.code != "reconcile_confirmation_required" or e.http_status != 422:
+                fails.append(f"CR-06: replay no-confirm sai {e.code}/{e.http_status}")
+        e_pend = await ins_event(conn, cid, "pend6", "pending")
+        try:
+            await recovery.replay_outbox(str(e_pend), actor, "x", confirm_business_effect=True)
+            fails.append("CR-06: replay từ pending KHÔNG raise 409")
+        except errors.CommandError as e:
+            if e.http_status != 409:
+                fails.append(f"CR-06: replay pending sai {e.http_status}")
 
         # F: audit fail-closed -> retry raise + event GIU dead_lettered
         e_dl4 = await ins_event(conn, cid, "dl4", "dead_lettered")

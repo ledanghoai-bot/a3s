@@ -188,16 +188,29 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         max_attempts=MAX_ATTEMPTS,
     )
 
-    # --- Audit fail-closed (cung transaction) ---
-    if await audit_service.audit_exists(conn):
-        atype, aref, asid = _audit_actor(env)
-        await audit_service.record(
-            conn, atype, "order.create", actor_ref=aref, actor_staff_id=asid,
-            entity_type="order", entity_id=str(order_id),
-            after={"order_id": order_id, "sku": sku, "quantity": qty,
-                   "unit_price_vnd": unit_price, "total_vnd": total, "status": "new"},
-            correlation_id=env.correlation_id,
+    # --- CR-03: customer receipt DURABLE qua outbox (chỉ kênh khách có chat) ---
+    # Receipt deterministic tới khách đi qua outbox (retry/dead-letter/reconcile) thay vì gửi trực
+    # tiếp — nếu send lỗi sau commit vẫn không mất. dedupe order_receipt:{id} -> giao đúng-một-lần.
+    if env.channel in ("messenger", "telegram_customer"):
+        await repo.insert_outbox(
+            conn, command_id=env.command_id, event_type="order.receipt.customer", event_version=1,
+            destination=env.channel, dedupe_key=f"order_receipt:{order_id}",
+            payload={"customer_ref": env.actor.id, "order_id": order_id,
+                     "text": receipt_mod.order_confirmation_line(f"#{order_id}", qty, sku, total)},
+            max_attempts=MAX_ATTEMPTS,
         )
+
+    # --- Audit fail-closed BẮT BUỘC (CR-05) ---
+    # M1 schema (>=015) luôn có audit_log; KHÔNG guard audit_exists nữa -> nếu thiếu/hỏng audit thì
+    # record() raise -> transaction rollback (không commit business mutation mà không có audit).
+    atype, aref, asid = _audit_actor(env)
+    await audit_service.record(
+        conn, atype, "order.create", actor_ref=aref, actor_staff_id=asid,
+        entity_type="order", entity_id=str(order_id),
+        after={"order_id": order_id, "sku": sku, "quantity": qty,
+               "unit_price_vnd": unit_price, "total_vnd": total, "status": "new"},
+        correlation_id=env.correlation_id,
+    )
 
     log_event("order.create.succeeded", command_id=env.command_id, correlation_id=env.correlation_id,
               causation_id=env.causation_id, channel=env.channel, resource_id=order_id)
@@ -236,16 +249,15 @@ async def _resolve_duplicate(conn, env: CommandEnvelope) -> receipt_mod.CommandR
             outcome=receipt_mod.IN_PROGRESS, result_payload=None, committed_at=None, duplicate=True,
         )
     if existing["request_hash"] != env.request_hash:
-        # §6.2 cung key + khac hash -> 409, audit fail-closed, KHONG mutation.
+        # §6.2 cung key + khac hash -> 409, audit fail-closed BẮT BUỘC (CR-05), KHONG mutation.
         async with conn.transaction():
-            if await audit_service.audit_exists(conn):
-                atype, aref, asid = _audit_actor(env)
-                await audit_service.record(
-                    conn, atype, "command.idempotency_conflict", actor_ref=aref, actor_staff_id=asid,
-                    entity_type="command", entity_id=str(existing["id"]),
-                    reason="idempotency-key reuse voi payload khac",
-                    correlation_id=env.correlation_id,
-                )
+            atype, aref, asid = _audit_actor(env)
+            await audit_service.record(
+                conn, atype, "command.idempotency_conflict", actor_ref=aref, actor_staff_id=asid,
+                entity_type="command", entity_id=str(existing["id"]),
+                reason="idempotency-key reuse voi payload khac",
+                correlation_id=env.correlation_id,
+            )
         log_event("command.idempotency_conflict", command_id=env.command_id,
                   correlation_id=env.correlation_id, existing_command_id=str(existing["id"]))
         raise errors.idempotency_conflict()
