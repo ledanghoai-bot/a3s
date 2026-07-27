@@ -331,6 +331,11 @@ async def _do_adjust_request(conn, env):
             command_id=env.command_id)
         await conn.execute("UPDATE inventory_adjustment_requests SET applied_at=now() WHERE id=$1", req_id)
         await _maybe_drain_backorders(conn, env, loc, pid, qd)
+    elif settings.m2_backorder_escalation:
+        # large pending -> ping Unit Head xin duyệt (PO #2 "xin phép thực hiện")
+        await inv_backorder.emit_approval_request(
+            conn, request_id=req_id, location_id=loc, product_id=pid, quantity_delta=qd,
+            command_id=env.command_id)
     result = {"request_id": str(req_id), "is_large": is_large, "status": status,
               "threshold": threshold, "quantity_delta": qd}
     return result, {"type": "adjustment", "id": str(req_id)}, "inventory.adjust.request", result

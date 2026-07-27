@@ -28,6 +28,20 @@ async def _emit_admin(conn, *, command_id, event_type: str, dedupe_key: str, adm
         destination=_DEST_ADMIN, dedupe_key=dedupe_key, payload=payload, max_attempts=MAX_ATTEMPTS)
 
 
+async def emit_approval_request(
+    conn, *, request_id, location_id: int, product_id: int, quantity_delta: int, command_id,
+) -> None:
+    """Ping Unit Head: điều chỉnh lớn đang chờ duyệt (xin phép thực hiện — PO #2)."""
+    await _emit_admin(
+        conn, command_id=command_id, event_type="inventory.adjust.approval_request",
+        dedupe_key=f"adjust_approval:{request_id}",
+        admin_text=(
+            "🔔 3S Coffee — CAN DUYET DIEU CHINH TON (lon)\n"
+            f"Request {str(request_id)[:8]}: SP {product_id} @loc {location_id}, delta {quantity_delta:+d}.\n"
+            "Can UNIT HEAD cua location duyet. Xem: dashboard -> Kho -> Dieu chinh cho duyet."),
+        extra={"request_id": str(request_id), "product_id": product_id, "quantity_delta": quantity_delta})
+
+
 async def capture_backorder(
     conn, *, order_id: int, order_item_id: int, product_id: int, location_id: int, quantity: int,
     sku: str, actor_type: str, actor_id: str, command_id, correlation_id,

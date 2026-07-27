@@ -136,6 +136,8 @@ async def main():  # noqa: C901
         rq = await lifecycle.execute_lifecycle(aenv(registry.ADJUST_REQUEST, "BO-ADJ", STAFF_ID,
             location_id=loc, product_id=pid, quantity_delta=20, reason="topup"))
         adj_id = rq.result["request_id"]
+        ping = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE dedupe_key=$1", f"adjust_approval:{adj_id}")
+        check(ping == 1, f"approval-request ping outbox cho adjustment lớn ({ping})")
         ap = await lifecycle.execute_lifecycle(aenv(registry.ADJUST_APPROVE, "BO-APR", head["id"], request_id=adj_id))
         check(ap.outcome == "succeeded", f"topup approve applied ({ap.outcome})")
         b1 = await conn.fetchval("SELECT status FROM inventory_backorders WHERE order_id=$1", oid)
