@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # m3_delivered_lifecycle: mở transition delivered/retry/cancel-sau-delivery-failed (M3-S1).
     # OFF (default) = matrix M2 nguyên trạng; missing config -> False (fail-safe).
     m3_delivered_lifecycle: bool = False
+    # m3_utm_attribution: ghi UTM (đã validate) xuống orders khi order.create có utm (M3-S2).
+    # OFF = không ghi (cột NULL) — validate vẫn deterministic ở registry.
+    m3_utm_attribution: bool = False
 
 
 settings = Settings()

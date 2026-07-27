@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.services import attribution
 from app.services.command import errors
 from app.services.command.hashing import canonical_hash
 from app.services.command.redaction import mask_phone
@@ -126,6 +127,15 @@ def validate_order_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     psid = payload.get("psid")
     if psid:
         normalized["psid"] = str(psid)
+    # Optional (M3-S2): UTM attribution — validate deterministic (mapping v1, no-PII); request cu
+    # khong gui utm -> normalized khong doi (backward compat). Store xuong orders khi flag M3 bat
+    # (order_service). KHONG vao request_hash (attribution metadata, khong phai business intent).
+    try:
+        utm = attribution.sanitize_utm(payload.get("utm"))
+    except attribution.UTMValidationError as e:
+        raise errors.CommandError(errors.INVALID_ENVELOPE, str(e)) from e
+    if utm:
+        normalized["utm"] = utm
     return normalized
 
 

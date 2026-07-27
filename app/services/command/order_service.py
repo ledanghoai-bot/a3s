@@ -168,10 +168,15 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     )
 
     # --- Order + items + stock ---
+    # M3-S2: UTM chi ghi khi flag bat (OFF = hanh vi cu, cot NULL); gia tri da validate o registry.
+    utm = (p.get("utm") or {}) if settings.m3_utm_attribution else {}
     order_id = await conn.fetchval(
         "INSERT INTO orders (customer_id, status, total_vnd, shipping_name, shipping_phone, "
-        "shipping_address, origin_channel) VALUES ($1,'new',$2,$3,$4,$5,$6) RETURNING id",
+        "shipping_address, origin_channel, utm_source, utm_medium, utm_campaign, utm_content, utm_term) "
+        "VALUES ($1,'new',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id",
         customer_id, total, name, phone, address, env.channel,
+        utm.get("utm_source"), utm.get("utm_medium"), utm.get("utm_campaign"),
+        utm.get("utm_content"), utm.get("utm_term"),
     )
     order_item_id = await conn.fetchval(
         "INSERT INTO order_items (order_id, product_id, quantity, unit_price_vnd) VALUES ($1,$2,$3,$4) "
