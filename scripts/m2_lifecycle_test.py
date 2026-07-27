@@ -182,8 +182,11 @@ async def main():  # noqa: C901
             location_id=loc, product_id=pid, quantity_delta=40, reason="big recount"))
         adj_id = r_large.result["request_id"]
         check(r_large.result["is_large"] and r_large.result["status"] == "pending", f"large adjust pending ({r_large.result})")
-        # approve by requester -> SoD
-        r_sod = await lifecycle.execute_lifecycle(aenv(registry.ADJUST_APPROVE, "S5-APR-SOD", req["id"], request_id=adj_id))
+        # SoD: người có quyền approve (head) tự duyệt request của CHÍNH MÌNH -> SoD (perm pass, SoD chặn)
+        r_hreq = await lifecycle.execute_lifecycle(aenv(registry.ADJUST_REQUEST, "S5-ADJ-HEADREQ", head["id"],
+            location_id=loc, product_id=pid, quantity_delta=30, reason="head self"))
+        r_sod = await lifecycle.execute_lifecycle(aenv(registry.ADJUST_APPROVE, "S5-APR-SOD", head["id"],
+            request_id=r_hreq.result["request_id"]))
         check(r_sod.outcome == "rejected" and r_sod.error_code == "separation_of_duties", f"SoD reject ({r_sod.error_code})")
         # approve by non-unit-head (admin STAFF_ID not mapped) -> not_unit_head
         r_nuh = await lifecycle.execute_lifecycle(aenv(registry.ADJUST_APPROVE, "S5-APR-NUH", STAFF_ID, request_id=adj_id))
