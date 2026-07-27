@@ -138,6 +138,17 @@ async def _notify_customer(conn, order, to_status: str, command_id) -> None:
     psid = await conn.fetchval("SELECT psid FROM customers WHERE id=$1", order["customer_id"])
     if not psid:
         return
+    if settings.m3_outbound_dispatcher:
+        # M3-S5: qua dispatcher — consent check + approved template lúc GỬI. Cùng dedupe_key ->
+        # dedupe/at-least-once M1 giữ nguyên (AC-M3-06); template seed 032 = đúng text M2.
+        from app.services.command import dispatcher
+        await dispatcher.enqueue_outbound(
+            conn, command_id=command_id, customer_id=order["customer_id"], customer_ref=psid,
+            destination=ch, purpose_code="P03_TRANSACTIONAL",
+            template_key=f"order_status_{to_status}", template_version=1,
+            params={"id": order["id"]},
+            dedupe_key=f"order_status:{order['id']}:{to_status}", max_attempts=MAX_ATTEMPTS)
+        return
     await cmd_repo.insert_outbox(
         conn, command_id=command_id, event_type="order.status.customer", event_version=1,
         destination=ch, dedupe_key=f"order_status:{order['id']}:{to_status}",

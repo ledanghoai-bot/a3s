@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     # m3_utm_attribution: ghi UTM (đã validate) xuống orders khi order.create có utm (M3-S2).
     # OFF = không ghi (cột NULL) — validate vẫn deterministic ở registry.
     m3_utm_attribution: bool = False
+    # m3_outbound_dispatcher: customer notify đi qua dispatcher (consent check + approved template)
+    # thay vì payload text trực tiếp (M3-S5). OFF = đường M2 nguyên trạng. Dedupe key giữ nguyên.
+    m3_outbound_dispatcher: bool = False
 
 
 settings = Settings()

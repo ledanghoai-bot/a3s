@@ -159,7 +159,11 @@ async def _telegram_customer_send(payload: dict) -> SendResult:
 
 
 async def deliver(destination: str, payload: dict) -> SendResult:
-    """Dispatch theo destination -> sender phù hợp (telegram_admin / messenger / telegram_customer)."""
+    """Dispatch theo destination -> sender phù hợp (telegram_admin / messenger / telegram_customer).
+    M3-S5: payload dạng dispatcher (marker 'outbound.message') -> đi qua permission/template trước."""
+    if payload.get("dispatch") == "outbound.message":
+        from app.services.command import dispatcher  # lazy: tránh vòng import
+        return await dispatcher.deliver_outbound(destination, payload)
     if destination == OUTBOX_DEST_TELEGRAM_ADMIN:
         return await telegram_send(destination, payload)
     if destination == OUTBOX_DEST_MESSENGER:
