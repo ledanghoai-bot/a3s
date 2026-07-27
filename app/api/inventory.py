@@ -24,10 +24,11 @@ _ACTIONS: dict[str, tuple[str, str]] = {
     "ready_for_fulfillment": (registry.ORDER_READY, "order.fulfillment.prepare"),
     "fulfill": (registry.ORDER_FULFILL, "order.fulfill"),
     "cancel": (registry.ORDER_CANCEL, "order.cancel"),
-    "complete": (registry.ORDER_COMPLETE, "order.transition.view"),
-    "mark_delivery_failed": (registry.ORDER_MARK_DELIVERY_FAILED, "order.transition.view"),
-    "request_return": (registry.ORDER_REQUEST_RETURN, "order.transition.view"),
-    "return_inspect": (registry.INVENTORY_RETURN_INSPECT, "order.fulfillment.prepare"),
+    # CA M2-S1-F03: quyền WRITE riêng cho từng mutation (KHÔNG dùng order.transition.view).
+    "complete": (registry.ORDER_COMPLETE, "order.complete"),
+    "mark_delivery_failed": (registry.ORDER_MARK_DELIVERY_FAILED, "order.delivery.manage"),
+    "request_return": (registry.ORDER_REQUEST_RETURN, "order.return.manage"),
+    "return_inspect": (registry.INVENTORY_RETURN_INSPECT, "order.return.manage"),
 }
 
 

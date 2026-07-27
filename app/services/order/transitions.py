@@ -54,18 +54,19 @@ _MATRIX: dict[tuple[str, str], TransitionSpec] = {
         TransitionSpec("cancelled_by_exception", "order.cancel.exception", EFFECT_RELEASE, "released"),
     ("ready_for_fulfillment", "fulfill"):
         TransitionSpec("fulfilled", "order.fulfill", EFFECT_CONSUME, "fulfilled"),
+    # CA M2-S1-F03: mutation dùng quyền WRITE riêng, KHÔNG dùng order.transition.view (read-only).
     ("fulfilled", "complete"):
-        TransitionSpec("completed", "order.transition.view", EFFECT_NONE, None),
+        TransitionSpec("completed", "order.complete", EFFECT_NONE, None),
     ("fulfilled", "mark_delivery_failed"):
-        TransitionSpec("delivery_failed", "order.transition.view", EFFECT_NONE, None),
+        TransitionSpec("delivery_failed", "order.delivery.manage", EFFECT_NONE, None),
     ("fulfilled", "request_return"):
-        TransitionSpec("return_requested", "order.transition.view", EFFECT_NONE, None),
+        TransitionSpec("return_requested", "order.return.manage", EFFECT_NONE, None),
     ("delivery_failed", "return_inspect"):
-        TransitionSpec("return_inspection", "order.fulfillment.prepare", EFFECT_RETURN_INSPECT, "return_inspection"),
+        TransitionSpec("return_inspection", "order.return.manage", EFFECT_RETURN_INSPECT, "return_inspection"),
     ("return_requested", "return_inspect"):
-        TransitionSpec("return_inspection", "order.fulfillment.prepare", EFFECT_RETURN_INSPECT, "return_inspection"),
+        TransitionSpec("return_inspection", "order.return.manage", EFFECT_RETURN_INSPECT, "return_inspection"),
     ("return_inspection", "complete"):
-        TransitionSpec("completed", "order.transition.view", EFFECT_NONE, None),
+        TransitionSpec("completed", "order.complete", EFFECT_NONE, None),
 }
 
 
