@@ -95,5 +95,16 @@ class Settings(BaseSettings):
     # OFF = job no-op (dry-run thủ công vẫn chạy được qua script).
     m3_retention_executor: bool = False
 
+    # I-B M4 (Trusted PII Path, A3S-PHASE1B-M4-SPEC-001 + DEV-DIRECTIVE-001 v1.1.0 §8).
+    # m4_pii_shadow: detector PII cuc bo (regex/rule thuan, KHONG model, KHONG vendor call)
+    # chay SONG SONG de do recall/precision — CHI quan sat, khong doi response/tool flow;
+    # loi detector bi nuot trong shadow_scan (app/services/pii/shadow.py), KHONG BAO GIO
+    # lam vo flow tra loi chinh. MAC DINH TAT; config missing => TAT (pydantic default).
+    m4_pii_shadow: bool = False
+    # m4_trusted_pii_path: PLACEHOLDER theo Directive §8 — KHONG co active code path trong
+    # M4-S0..S3 development. Enforcement (masked orchestration) chi sau gate M4-G1 +
+    # directive rieng. MAC DINH TAT.
+    m4_trusted_pii_path: bool = False
+
 
 settings = Settings()

@@ -23,6 +23,7 @@ from app.config import settings
 from app.services import conversation_log, data_deletion, handoff, products, tools
 from app.services.messenger_profile import get_user_profile
 from app.services.nlu_hint import get_nlu_hint
+from app.services.pii import shadow as pii_shadow
 from app.services.rag import search_knowledge
 from app.services.safe_log import safe_exc
 
@@ -119,6 +120,13 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # -1. Dam bao co conversation trong Postgres cho dashboard (issue #8) -
         # doc lai duoc lich su lau dai, khac voi Redis chi giu 24h.
         conversation_id = await conversation_log.ensure_conversation(sender_id)
+
+        # -0.5. I-B M4-S0 shadow: quet PII cuc bo (regex thuan, khong model/vendor)
+        # de do recall/precision cho gate M4-G1. CHI quan sat — khong doi response/
+        # tool flow, khong cham vendor path; loi detector bi nuot trong shadow_scan
+        # (khong bao gio vo flow tra loi). Flag MAC DINH TAT (Directive §8).
+        if settings.m4_pii_shadow:
+            pii_shadow.shadow_scan(text)
 
         # 0. Luoi an toan deterministic: khach CHU DONG doi gap nguoi that ->
         # escalate ngay, KHONG di qua LLM (khong phu thuoc LLM co nho goi tool
