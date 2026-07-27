@@ -13,6 +13,7 @@ nhu mot DB that, roi apply 021..RC (record schema_migrations). Kiem tra:
 """
 import asyncio
 import hashlib
+import importlib.util
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,12 @@ import asyncpg
 
 ROOT = Path(__file__).resolve().parents[1]
 MIG = ROOT / "migrations"
+sys.path.insert(0, str(ROOT))
+from app.services.inventory import reconcile as recon  # noqa: E402
+
+_bf_spec = importlib.util.spec_from_file_location("m2_backfill", ROOT / "scripts" / "m2_backfill.py")
+bf = importlib.util.module_from_spec(_bf_spec)
+_bf_spec.loader.exec_module(bf)
 ADMIN = "postgresql://alpha3s:alpha3s@db:5432/postgres"
 TEST_DB = "m2exist_itest"
 URL = "postgresql://alpha3s:alpha3s@db:5432/" + TEST_DB
@@ -123,6 +130,39 @@ async def main():  # noqa: C901
         role_ok = await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname='alpha3s_app'")
         perm_ok = await conn.fetchval("SELECT 1 FROM permissions WHERE key='order.complete'")
         check(role_ok and perm_ok, "024 runtime role + 026 mutation perms hiện diện")
+
+        print("[4] runtime objects: roles/grants, indexes, constraints, checksums")
+        # 024 runtime role grants (least-privilege): CO SELECT, KHONG UPDATE ledger
+        g_sel = await conn.fetchval("SELECT has_table_privilege('alpha3s_app','public.orders','SELECT')")
+        g_upd_led = await conn.fetchval("SELECT has_table_privilege('alpha3s_app','public.inventory_movements','UPDATE')")
+        check(g_sel and not g_upd_led, f"grants: app SELECT orders={g_sel}, NOT UPDATE ledger={g_upd_led}")
+        for idx in ["inventory_reservations_one_active_idx", "inventory_movements_no_update",
+                    "order_events_no_update", "inventory_balances_reserved_le_onhand", "products_stock_nonneg"]:
+            ok = await conn.fetchval(
+                "SELECT (EXISTS(SELECT 1 FROM pg_indexes WHERE indexname=$1) "
+                "OR EXISTS(SELECT 1 FROM pg_constraint WHERE conname=$1) "
+                "OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgname=$1))", idx)
+            check(ok, f"object present: {idx}")
+        n_mig = await conn.fetchval("SELECT count(*) FROM schema_migrations")
+        n_ck = await conn.fetchval("SELECT count(DISTINCT checksum) FROM schema_migrations")
+        check(n_mig == n_ck, f"migration checksums recorded, distinct ({n_mig} rows, {n_ck} checksums)")
+
+        print("[5] backfill + reconcile trên existing data (post-migration)")
+        au = await bf.audit(conn)
+        check(au["ok"], f"audit existing data OK (anomalies={au['anomalies']})")
+        plan = await bf.build_plan(conn)
+        async with conn.transaction():
+            await bf.apply(conn, plan, "00000000-0000-0000-0000-0000000000ea")
+        rep = await recon.reconcile_inventory(conn, check_stock_compat=True)
+        check(rep.ok, f"reconcile post-backfill OK (mismatches={rep.mismatches})")
+        # invariant row: reserved<=on_hand mọi balance
+        bad = await conn.fetchval("SELECT count(*) FROM inventory_balances WHERE reserved>on_hand OR on_hand<0 OR reserved<0")
+        check(bad == 0, f"balance invariants hold ({bad} vi phạm)")
+
+        print("[caveat] Production hiện ở M0 (~018); M1 (019-020) CHƯA deploy production -> KHÔNG tồn tại")
+        print("         'M1 production DB' thật. Rehearsal dùng M1 schema (001-020) + representative data;")
+        print("         production data thật đã audit riêng qua read-only snapshot (Slice0/2, PII-free).")
+        print("         Full production dump vẫn cần gate production-access riêng.")
 
         dur = round((time.monotonic() - t0), 2) if t0 else "n/a"
         print(f"[duration] {dur}s")

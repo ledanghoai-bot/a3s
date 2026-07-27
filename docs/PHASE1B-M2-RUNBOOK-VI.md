@@ -22,7 +22,8 @@ Rollout phases (§15.6): **A** schema+backfill (legacy authority) → **B** dual
 
 ## 2. Cutover checklist (§15, §18)
 
-1. Migrations 021–025 applied (schema expand + DB-role + order status). Postcondition mỗi migration fail-closed.
+1. Migrations **021–028** applied (021 inventory core · 022 order events · 023 adjustment RBAC · 024 DB-role
+   · 025 order status · 026 mutation RBAC · 027 origin_channel · 028 stock>=0). Postcondition mỗi migration fail-closed.
 2. **Backfill**: `python scripts/m2_backfill.py audit` (exit 0) → `plan` (review checksum) → `apply --report R.json`.
    - Abort nếu unknown status / negative stock / orphan (§15.4). KHÔNG copy mù stock.
 3. `python scripts/m2_backfill.py reconcile` → `ok: true` (§17.1: ledger=balance=reservation, stock=available).
@@ -54,6 +55,8 @@ Rollout phases (§15.6): **A** schema+backfill (legacy authority) → **B** dual
 | `<command>.rejected` `{error_code}` | business reject | `illegal_order_transition`/`adjustment_stale` tăng đột biến → xem UI/ops |
 | reconciliation `mismatches` | `GET /dashboard/inventory/reconciliation` != ok | **P1** — dừng rollout (Phase B assert) |
 | order.create reserve `insufficient_stock` sau khi legacy pass | bất nhất ledger↔legacy | **P1** — kiểm backfill/balance |
+| `products.stock < 0` (CHECK 028 chặn; nếu thấy attempt) | drift/stale write | **P1** — mirror contract §9 phải giữ stock=available>=0 |
+| reconciliation `products.stock != available` | mirror không chạy ở một write path | **P1** — dừng rollout, kiểm §9 mirror |
 
 Kiểm tra nhanh: `GET /dashboard/inventory/reconciliation` (cần `inventory.reconcile`). `ok:false` → P1.
 
@@ -91,19 +94,33 @@ docker exec -e DATABASE_URL=...m2s5_itest -e PYTHONPATH=/srv -w /srv alpha3s-api
 docker exec -e DATABASE_URL=...m2s6_itest -e PYTHONPATH=/srv -w /srv alpha3s-api-1 python scripts/m2_worker_api_test.py
 ```
 
-## 9. Cập nhật Submission 2 (remediation CA F02/F03/F05/F06)
+## 9. Contract quan trọng (remediation CA Submission 1 + 2)
 
-- **Mutation RBAC (F03):** quyền write riêng `order.complete` / `order.delivery.manage` / `order.return.manage`
-  (migration 026) — KHÔNG cấp `viewer`. complete/mark_delivery_failed/request_return/return_inspect KHÔNG
-  còn dùng `order.transition.view`. Gán role: admin(full), sales(complete/delivery/return), support(complete/
-  return), delivery(delivery), warehouse(return).
-- **Adjustment dual-write (F02):** small + large-approve điều chỉnh `balance.on_hand` thì cũng UPDATE
-  `products.stock` (default location, khi `m2_balance_authority` OFF) → giữ `products.stock == available`.
-  Non-default location KHÔNG dual-write. Sau mỗi adjustment nên chạy reconciliation → phải `ok`.
-- **Balance-authority read path (F05):** `m2_balance_authority` ON → `order.create` đọc availability TỪ
-  balance (default location) thay `products.stock` (Phase C); OFF → legacy authority. Reserve FOR UPDATE là
-  guard cuối (không oversell). Bật flag này CUỐI CÙNG sau khi dual-write assertion xanh.
-- **Customer notify (F06):** `orders.origin_channel` (migration 027) lưu kênh tại create; transition
-  confirmed/fulfilled/cancelled/completed phát customer outbox deterministic đúng kênh (messenger/
-  telegram_customer), dedupe `order_status:{id}:{status}`, retry/dead-letter M1. Đơn dashboard không phát.
-- **Backorder:** đã TÁCH khỏi M2 (CA F01) — sẽ là change/milestone riêng.
+### 9.1 Phase C stock MIRROR contract (S2-F01) — nguồn tồn hợp nhất
+`products.stock` là **MIRROR** của `balance.available` (default location). MỌI inventory write
+(create/cancel/expire/fulfill/adjustment) gọi `inv_repo.materialize_stock_mirror()` để **materialize**
+`stock := on_hand - reserved` — **KHÔNG** delta trên giá trị stale. Hệ quả:
+- `products.stock == available` LUÔN đúng (default location) ở mọi phase.
+- `stock` không bao giờ âm (available ≥ 0 do invariant + CHECK 028 `products_stock_nonneg`).
+- Split-brain (legacy writer sửa stock lệch) tự **heal** ở op kế tiếp.
+- Reconciliation sau MỖI op phải `ok`; `stock != available` → **P1**, kiểm write path bỏ mirror.
+
+### 9.2 Authority read (S1-F05): `m2_balance_authority` ON → `order.create` đọc availability TỪ balance
+(Phase C); OFF → legacy `products.stock`. Reserve `FOR UPDATE` là guard cuối (no oversell). Bật CUỐI CÙNG.
+
+### 9.3 RBAC tại SHARED command boundary (S2-F02): `execute_lifecycle()` enforce quyền fail-closed
+(`_enforce`, permission từ transition matrix/registry; `system` actor bypass). HTTP `_check_perm` giữ làm
+defense-in-depth. Caller nội bộ gọi thẳng command service KHÔNG bypass được authorization.
+
+### 9.4 Mutation permission (S1-F03): quyền write riêng `order.complete`/`order.delivery.manage`/
+`order.return.manage` (migration 026) — KHÔNG cấp `viewer`. Không dùng `order.transition.view` cho mutation.
+
+### 9.5 Customer notify (S1-F06): `orders.origin_channel` (migration 027); transition confirmed/fulfilled/
+cancelled/completed phát customer outbox deterministic đúng kênh, dedupe `order_status:{id}:{status}`,
+retry/dead-letter M1. Đơn `dashboard` không phát.
+
+### 9.6 Backorder: đã TÁCH khỏi M2 (S1-F01) — change/milestone riêng.
+
+Evidence remediation (thêm vào §8): `m2_rbac_test.py` (F03+F02 direct-call), `m2_adjustment_compat_test.py`
+(F02), `m2_balance_authority_test.py` (F05+F01 mirror), `m2_customer_notify_test.py` (F06),
+`m2_existing_apply_rehearsal.py` (F07/S2-F05).
