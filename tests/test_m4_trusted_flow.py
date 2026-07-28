@@ -210,6 +210,61 @@ def test_cross_conversation_khong_dung_slot_conv_khac(monkeypatch):
     assert executor.calls == []
 
 
+def test_history_current_placeholder_khong_va_cham(monkeypatch):
+    """CA F-M4-S3-02: history co phone A, current co phone B — MOT namespace ->
+    echo placeholder history phai rehydrate ra A (khong bi B ghi de)."""
+    hist = [{"role": "user", "content": "số cũ của mình là 0356789012"}]
+    ph_hist = make_placeholder("phone", 1, "conv-1")  # history mask truoc -> n=1
+    ph_cur = make_placeholder("phone", 2, "conv-1")  # current tiep namespace -> n=2
+    out_echo_hist = {"intent": "smalltalk", "missing_slot_types": [],
+                     "response_candidate": f"Số cũ là {ph_hist} đúng không ạ", "context": {}}
+    outcome, model, _, _ = _run("đổi qua số mới 0912345678 nhé", out_echo_hist,
+                                history=hist, monkeypatch=monkeypatch)
+    assert outcome.kind == "reply"
+    assert "0356789012" in outcome.reply  # PHAI la value cua history
+    assert "0912345678" not in outcome.reply
+    # model thay ca 2 placeholder khac nhau, khong trung so
+    sent = " ".join(m["content"] for call in model.calls for m in call)
+    assert ph_hist in sent and ph_cur in sent
+
+    out_echo_cur = {"intent": "smalltalk", "missing_slot_types": [],
+                    "response_candidate": f"Đã ghi nhận số mới {ph_cur} ạ", "context": {}}
+    outcome2, _, _, _ = _run("đổi qua số mới 0912345678 nhé", out_echo_cur,
+                             history=hist, monkeypatch=monkeypatch)
+    assert outcome2.kind == "reply" and "0912345678" in outcome2.reply
+    assert "0356789012" not in outcome2.reply
+
+
+def test_history_d2_bi_redact_truoc_vendor(monkeypatch):
+    """CA F-M4-S3-03: history co D2 health (khong slot so de mask), current D0 ->
+    model duoc goi nhung payload KHONG chua noi dung D2, turn bi thay marker."""
+    hist = [
+        {"role": "user", "content": "mình bị tiểu đường với huyết áp cao lắm"},
+        {"role": "assistant", "content": "Dạ em ghi nhận ạ"},
+    ]
+    out = {"intent": "smalltalk", "missing_slot_types": [],
+           "response_candidate": "Dạ shop mở tới 21h ạ", "context": {}}
+    outcome, model, _, _ = _run("shop mở cửa tới mấy giờ", out,
+                                history=hist, monkeypatch=monkeypatch)
+    assert outcome.kind == "reply"
+    assert len(model.calls) == 1  # D2 o history KHONG chan turn D0 hien tai
+    sent = " ".join(m["content"] for call in model.calls for m in call)
+    assert "tiểu đường" not in sent and "huyết áp" not in sent
+    assert "[TURN_REDACTED_D2]" in sent
+    assert "Dạ em ghi nhận ạ" in sent  # turn sach giu nguyen
+
+
+def test_sku_smuggle_qua_flow_bi_escalate(monkeypatch):
+    """CA F-M4-S2-04 o tang flow: model tra sku = phone -> schema_violation,
+    command executor KHONG chay."""
+    bad = {"intent": "order.create", "missing_slot_types": [],
+           "response_candidate": "",
+           "context": {"items": [{"sku": "0912345678", "qty": 1}]}}
+    outcome, _, executor, _ = _run(ORDER_TEXT, bad, monkeypatch=monkeypatch)
+    assert outcome.kind == "escalate" and outcome.escalate_reason == "schema_violation"
+    assert executor.calls == []
+
+
 def test_orchestrator_khong_noi_trusted_flow():
     """Directive §8: m4_trusted_pii_path KHONG co active code path — orchestrator
     khong duoc import trusted_flow hay tham chieu flag nay."""

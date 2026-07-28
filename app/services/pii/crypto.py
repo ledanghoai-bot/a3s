@@ -25,9 +25,14 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app.config import settings
 from app.services.pii.normalize import fold, nfc
 
-_VERSION = b"v1"
+# v2 (CA F-M4-S1-01): AAD chuyen sang canonical LENGTH-PREFIX encoding — v1 dung
+# delimiter "|" co the collision khi ref chua "|" ("a|b","c") vs ("a","b|c").
+# Blob version nam o byte dau de forward-compatible; KHONG co du lieu v1 nao ton
+# tai (dev-only, bang trong) nen v1 khong can duong doc lai — blob v1 bi tu choi.
+_VERSION = b"v2"
 _NONCE_LEN = 12
 _KEY_LEN = 32
+_MAX_REF_LEN = 128
 
 
 class SlotCryptoError(Exception):
@@ -54,8 +59,31 @@ def _load_key(b64_value: str, name: str) -> bytes:
     return key
 
 
+def _validate_ref(value: str, name: str) -> bytes:
+    """Constraint cho ref (CA F-M4-S1-01 correction 4): non-empty, <=128 byte
+    UTF-8, khong ky tu NUL/control. Sai -> SlotCryptoError (fail closed)."""
+    if not isinstance(value, str) or not value:
+        raise SlotCryptoError(f"{name} rong hoac sai kieu")
+    raw = value.encode("utf-8")
+    if len(raw) > _MAX_REF_LEN:
+        raise SlotCryptoError(f"{name} vuot {_MAX_REF_LEN} byte")
+    if any(b < 0x20 for b in raw):
+        raise SlotCryptoError(f"{name} chua ky tu control")
+    return raw
+
+
 def _aad(customer_ref: str, conversation_ref: str, slot_type: str) -> bytes:
-    return f"{customer_ref}|{conversation_ref}|{slot_type}".encode()
+    """Canonical unambiguous AAD (v2): domain-tag + length-prefix tung field —
+    khong ton tai 2 bo (customer, conversation, slot_type) khac nhau cho ra cung
+    byte AAD (delimiter collision cua v1 da bi loai)."""
+    parts = (_validate_ref(customer_ref, "customer_ref"),
+             _validate_ref(conversation_ref, "conversation_ref"),
+             _validate_ref(slot_type, "slot_type"))
+    out = [b"a3s-m4-slot-aad-v2"]
+    for p in parts:
+        out.append(len(p).to_bytes(4, "big"))
+        out.append(p)
+    return b"".join(out)
 
 
 def encrypt_slot_value(plaintext: str, *, customer_ref: str,

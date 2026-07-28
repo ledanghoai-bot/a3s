@@ -78,6 +78,40 @@ class TestEncryptDecrypt:
             assert "0912345678" not in str(e)
 
 
+class TestAADCanonical:
+    """CA F-M4-S1-01: AAD v2 length-prefix — khong con delimiter collision."""
+
+    def test_delimiter_collision_bi_chan(self):
+        # v1 cu: ("a|b","c") va ("a","b|c") cho cung AAD "a|b|c|phone".
+        # v2: length-prefix -> 2 context nay PHAI khac AAD, decrypt cheo fail.
+        blob = encrypt_slot_value("0912345678", customer_ref="a|b",
+                                  conversation_ref="c", slot_type="phone")
+        with pytest.raises(SlotBindingError):
+            decrypt_slot_value(blob, customer_ref="a",
+                               conversation_ref="b|c", slot_type="phone")
+
+    def test_collision_chieu_nguoc_lai(self):
+        blob = encrypt_slot_value("0912345678", customer_ref="a",
+                                  conversation_ref="b|c", slot_type="phone")
+        with pytest.raises(SlotBindingError):
+            decrypt_slot_value(blob, customer_ref="a|b",
+                               conversation_ref="c", slot_type="phone")
+
+    @pytest.mark.parametrize("bad_ref", ["", "x" * 129, "abc\x00def", "a\nb"])
+    def test_ref_validation_fail_closed(self, bad_ref):
+        from app.services.pii.crypto import SlotCryptoError
+        with pytest.raises(SlotCryptoError):
+            encrypt_slot_value("0912345678", customer_ref=bad_ref,
+                               conversation_ref="conv-1", slot_type="phone")
+
+    def test_blob_version_v1_bi_tu_choi(self):
+        # blob v1 gia lap (khong co du lieu v1 that — dev-only, bang trong)
+        from app.services.pii.crypto import SlotCryptoError
+        fake_v1 = b"v1" + b"\x00" * 40
+        with pytest.raises(SlotCryptoError):
+            decrypt_slot_value(fake_v1, **_CTX)
+
+
 class TestFingerprint:
     def test_dinh_dang_32_hex_va_khong_lo_so(self):
         fp = fingerprint("0912345678", "phone")

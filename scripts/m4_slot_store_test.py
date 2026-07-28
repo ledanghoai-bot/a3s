@@ -72,7 +72,7 @@ async def main() -> int:
         with redirect_stdout(log_buf):
             stored = await slot_store.store_slot(
                 conn, **ctx_a, value=PHONE, confidence="high", data_class="D1",
-                purpose_code="P02", source_message_ref="mid-syn-001")
+                purpose_code="P02_COMMERCE", source_message_ref="mid-syn-001")
             got = await slot_store.resolve_slot(conn, **ctx_a)
         check(stored.deduped is False and got == PHONE, "store -> resolve dung gia tri")
 
@@ -102,12 +102,12 @@ async def main() -> int:
         print("== [4] Replay/idempotency ==")
         with redirect_stdout(log_buf):
             s1 = await slot_store.store_slot(conn, **ctx_a, value=PHONE,
-                                             confidence="high", data_class="D1", purpose_code="P02")
+                                             confidence="high", data_class="D1", purpose_code="P02_COMMERCE")
             s2 = await slot_store.store_slot(conn, **ctx_a, value="0912 345 678",
-                                             confidence="high", data_class="D1", purpose_code="P02")
+                                             confidence="high", data_class="D1", purpose_code="P02_COMMERCE")
             s3 = await slot_store.store_slot(
                 conn, customer_ref="cust-A", conversation_ref="conv-2", slot_type="phone",
-                value=PHONE, confidence="high", data_class="D1", purpose_code="P02")
+                value=PHONE, confidence="high", data_class="D1", purpose_code="P02_COMMERCE")
         n_rows = await conn.fetchval("SELECT count(*) FROM pii_slots")
         check(s2.deduped and s1.slot_id == s2.slot_id,
               "replay cung gia tri (khac dinh dang) cung context -> dedupe cung slot")
@@ -122,7 +122,7 @@ async def main() -> int:
             async with pool.acquire() as c:
                 return await slot_store.store_slot(c, **ctx_a, value=PHONE,
                                                    confidence="high", data_class="D1",
-                                                   purpose_code="P02")
+                                                   purpose_code="P02_COMMERCE")
         with redirect_stdout(log_buf):
             results = await asyncio.gather(*[_store() for _ in range(5)])
         await pool.close()
@@ -134,7 +134,7 @@ async def main() -> int:
         await conn.execute("DELETE FROM pii_slots")
         with redirect_stdout(log_buf):
             await slot_store.store_slot(conn, **ctx_a, value=PHONE, confidence="high",
-                                        data_class="D1", purpose_code="P02")
+                                        data_class="D1", purpose_code="P02_COMMERCE")
         # het han: khong duoc UPDATE (bat bien) -> mo phong bang doi dong ho la
         # khong the; migration-owner duoc phep chinh truc tiep trong REHEARSAL
         # giu CHECK expires_at > captured_at: lui ca hai moc ve qua khu
@@ -154,7 +154,7 @@ async def main() -> int:
         print("== [7] Min confidence ==")
         with redirect_stdout(log_buf):
             await slot_store.store_slot(conn, **ctx_a, value=PHONE, confidence="low",
-                                        data_class="D1", purpose_code="P02")
+                                        data_class="D1", purpose_code="P02_COMMERCE")
             low_ok = await slot_store.resolve_slot(conn, **ctx_a, min_confidence="high")
             low_any = await slot_store.resolve_slot(conn, **ctx_a, min_confidence="low")
         check(low_ok is None and low_any == PHONE, "min_confidence=high loc slot low")
@@ -163,10 +163,10 @@ async def main() -> int:
         await conn.execute("DELETE FROM pii_slots")
         with redirect_stdout(log_buf):
             await slot_store.store_slot(conn, **ctx_a, value=PHONE, confidence="high",
-                                        data_class="D1", purpose_code="P02")
+                                        data_class="D1", purpose_code="P02_COMMERCE")
             await slot_store.store_slot(
                 conn, customer_ref="cust-A", conversation_ref="conv-1", slot_type="name",
-                value=NAME, confidence="medium", data_class="D1", purpose_code="P02")
+                value=NAME, confidence="medium", data_class="D1", purpose_code="P02_COMMERCE")
         rows = await conn.fetch("SELECT * FROM pii_slots")
         dump = repr([dict(r) for r in rows])
         blob_concat = b"".join(bytes(r["encrypted_value"]) for r in rows)
@@ -191,7 +191,7 @@ async def main() -> int:
                     "INSERT INTO pii_slots (customer_ref,conversation_ref,slot_type,"
                     "encrypted_value,normalized_fingerprint,detector_version,confidence,"
                     "expires_at,data_class,purpose_code) VALUES ('x','y','phone',"
-                    "'\\x00'::bytea, repeat('0',32),'v','high',now()+interval '1h','D1','P02')")
+                    "'\\x00'::bytea, repeat('0',32),'v','high',now()+interval '1h','D1','P02_COMMERCE')")
             except asyncpg.InsufficientPrivilegeError:
                 denied_insert = True
         finally:

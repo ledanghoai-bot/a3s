@@ -126,3 +126,28 @@ class TestSemanticSchema:
     def test_khong_phai_dict(self):
         with pytest.raises(SchemaViolation):
             validate_semantic_output("intent: order.create")
+
+    # CA F-M4-S2-04: model smuggle PII qua field sku -> phai bi chan
+    @pytest.mark.parametrize("sku", [
+        "0912345678",  # phone thuan so
+        "079123456789",  # CCCD 12 so
+        "0071000123456",  # STK
+        "3s-500g",  # sai grammar (lowercase)
+        "SO 12 DUONG",  # co khoang trang
+        "X",  # qua ngan (<2)
+        "0912-345-678",  # phone co gach van la day so
+    ])
+    def test_sku_smuggle_pii_bi_chan(self, sku):
+        with pytest.raises(SchemaViolation) as e:
+            validate_semantic_output(_valid_output(context={"items": [{"sku": sku, "qty": 1}]}))
+        assert "sku_invalid" in e.value.reasons or "items_invalid" in e.value.reasons
+
+    def test_sku_placeholder_bi_chan(self):
+        with pytest.raises(SchemaViolation):
+            validate_semantic_output(_valid_output(
+                context={"items": [{"sku": "[PII_PHONE_1]", "qty": 1}]}))
+
+    @pytest.mark.parametrize("sku", ["3S-500G", "3S-100G", "A3S-COMBO-2"])
+    def test_sku_hop_le_qua_duoc(self, sku):
+        sem = validate_semantic_output(_valid_output(context={"items": [{"sku": sku, "qty": 1}]}))
+        assert sem.items[0]["sku"] == sku

@@ -160,7 +160,22 @@ async def main() -> int:
                          "response_candidate": "goi [PII_PHONE_99] ngay", "context": {}})
         check(d1.kind == d2.kind == d3.kind == "escalate",
               "tool_args PII / chon ref / placeholder mangle -> deu escalate")
+        # CA F-M4-S2-04: smuggle phone qua sku
+        d5 = await turn("cust-A", "conv-1", ORDER_TEXT,
+                        {"intent": "order.create", "missing_slot_types": [],
+                         "response_candidate": "",
+                         "context": {"items": [{"sku": PHONE, "qty": 1}]}})
+        check(d5.kind == "escalate", "sku = phone (smuggle) -> escalate")
         check(executor.calls == [], "command executor KHONG chay trong moi ca pha rao")
+        # CA F-M4-S3-03: history D2 (khong slot so) + current D0 -> model van goi
+        # nhung payload PHAI sach D2
+        before_d2h = len(model.received)
+        d6 = await turn("cust-A", "conv-1", "shop mở cửa tới mấy giờ", dict(SMALL_OUT),
+                        history=[{"role": "user", "content": "mình bị tiểu đường nặng"}])
+        d6_sent = " ".join(m["content"] for m in model.received[before_d2h])
+        check(d6.kind == "reply" and "tiểu đường" not in d6_sent
+              and "[TURN_REDACTED_D2]" in d6_sent,
+              "history D2 bi redact truoc vendor (marker thay noi dung)")
 
         print("== [E] Cross-conversation binding ==")
         e1 = await turn("cust-B", "conv-KHAC", "chốt 2 gói như cũ nhé", dict(ORDER_OUT))

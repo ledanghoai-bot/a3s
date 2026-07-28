@@ -25,14 +25,19 @@ from app.services.pii.detector import detect
 from app.services.pii.normalize import nfc
 
 _PLACEHOLDER_RE = re.compile(
-    r"\[PII_(PHONE|NAME|ADDRESS|NATIONAL_ID|BANK_ACCOUNT)_(\d{1,3})(_[0-9a-f]{8})?\]")
+    r"\[PII_(PHONE|NAME|ADDRESS|NATIONAL_ID|BANK_ACCOUNT)_(\d{1,3})(_[a-f][0-9a-f]{7})?\]")
 
 
 def _tag(conversation_ref: str, slot: str, n: int) -> str:
-    """Integrity tag 8 hex — dung khoa fingerprint (fail-closed neu thieu khoa)."""
+    """Integrity tag 8 ky tu — dung khoa fingerprint (fail-closed neu thieu khoa).
+
+    Ky tu dau LUON la chu cai (a-f, suy deterministic tu hex dau): tag toan chu
+    so co the tao digit-run va bi chinh detector nhan nham la phone/STK khi
+    placeholder dung canh cue ("STK [PII_...]") — loai bo ca lop loi nay tu goc."""
     key = _load_key(settings.m4_slot_fp_key_b64, "m4_slot_fp_key_b64")
-    return hmac_mod.new(key, f"ph|{conversation_ref}|{slot}|{n}".encode(),
-                        hashlib.sha256).hexdigest()[:8]
+    h = hmac_mod.new(key, f"ph|{conversation_ref}|{slot}|{n}".encode(),
+                     hashlib.sha256).hexdigest()
+    return "abcdef"[int(h[0], 16) % 6] + h[1:8]
 
 
 def make_placeholder(slot: str, n: int, conversation_ref: str | None = None) -> str:
@@ -73,10 +78,15 @@ def mask_text(text: str, counters: dict[str, int] | None = None, *,
 
 
 def mask_history(history: list[dict], *, conversation_ref: str | None = None,
+                 counters: dict[str, int] | None = None,
                  ) -> tuple[list[dict], dict[str, tuple[str, str]]]:
     """Mask moi turn {role, content}; tra (history da mask, mapping gop).
-    Counter placeholder chia se toan phien de khong trung so giua cac turn."""
-    counters: dict[str, int] = {}
+
+    `counters` la namespace danh so placeholder — CA F-M4-S3-02: caller mask ca
+    history LAN current message PHAI truyen CUNG mot dict counters de placeholder
+    khong bao gio trung nhau trong cung payload (khong co key collision khi gop
+    mapping -> khong the rehydrate nham provenance)."""
+    counters = counters if counters is not None else {}
     merged: dict[str, tuple[str, str]] = {}
     masked: list[dict] = []
     for turn in history:

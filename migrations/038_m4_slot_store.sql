@@ -39,12 +39,13 @@ CREATE TABLE IF NOT EXISTS pii_slots (
   captured_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   expires_at             TIMESTAMPTZ NOT NULL,
   data_class             TEXT NOT NULL CHECK (data_class IN ('D1','D2')),
-  purpose_code           TEXT NOT NULL CHECK (purpose_code ~ '^P[0-9]{2}$'),
+  -- canonical identifier theo docs/PROCESSING-PURPOSE-REGISTRY.md (M3): P02_COMMERCE...
+  purpose_code           TEXT NOT NULL CHECK (purpose_code ~ '^P[0-9]{2}_[A-Z][A-Z_]{1,40}$'),
   CONSTRAINT pii_slots_expiry_after_capture CHECK (expires_at > captured_at)
 );
 
 COMMENT ON TABLE pii_slots IS
-  'M4 Trusted Slot Store — data_class: D1/D2 theo row; PII chi o encrypted_value (AES-GCM, AAD binding context); retention: expires_at + purge app-layer';
+  'M4 Trusted Slot Store — data_class: D1/D2 theo row; purpose_code: canonical registry id (vd P02_COMMERCE); PII chi o encrypted_value (AES-GCM v2 length-prefix AAD binding context); retention: expires_at + purge app-layer';
 COMMENT ON COLUMN pii_slots.encrypted_value IS
   'AES-256-GCM: v1||nonce(12)||ct+tag. AAD=customer_ref|conversation_ref|slot_type -> doi context la KHONG giai ma duoc';
 COMMENT ON COLUMN pii_slots.normalized_fingerprint IS

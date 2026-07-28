@@ -18,10 +18,27 @@ Bat bien enforce tai day (spec §5):
 - Response candidate KHONG duoc chua PII tho (detector quet) — chi placeholder.
 """
 
+import re
 from dataclasses import dataclass, field
 
 from app.services.pii.detector import detect
 from app.services.pii.masking import find_placeholders
+
+# CA F-M4-S2-04: SKU phai theo grammar domain — uppercase alnum + '-', 2-20 ky
+# tu, BAT BUOC >=1 chu cai => day so thuan (phone/CCCD/STK) khong bao gio qua.
+# Khong phan loai du lieu theo TEN key: moi string leaf duoc phep vao command
+# context deu bi quet them detector + placeholder (xem _leaf_is_clean).
+_SKU_RE = re.compile(r"^(?=.*[A-Z])[A-Z0-9][A-Z0-9-]{1,19}$")
+
+
+def _leaf_is_clean(value: str) -> bool:
+    """String leaf di vao command context: khong PII (detector), khong placeholder,
+    khong day >=7 chu so lien (phong day so la khong theo dinh dang detector biet)."""
+    if find_placeholders(value) or re.search(r"\[PII_[^\]]*\]", value):
+        return False
+    if re.search(r"\d{7,}", re.sub(r"[ .\-()]", "", value)):
+        return False
+    return not detect(value).spans
 
 ALLOWED_INTENTS = {"order.create", "order.status", "product.question", "smalltalk", "other"}
 # Slot ma model duoc phep BAO THIEU (allowlist §9 "missing slot types"):
@@ -128,6 +145,10 @@ def validate_semantic_output(raw) -> SemanticResult:
                         or isinstance(it.get("qty"), bool)
                         or not (0 < it["qty"] <= 1000)):
                     reasons.append("items_invalid")
+                    break
+                # F-M4-S2-04: grammar + PII-scan tren string leaf vao command args
+                if not _SKU_RE.fullmatch(it["sku"]) or not _leaf_is_clean(it["sku"]):
+                    reasons.append("sku_invalid")
                     break
                 items.append({"sku": it["sku"], "qty": it["qty"]})
 

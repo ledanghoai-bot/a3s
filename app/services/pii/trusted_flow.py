@@ -46,6 +46,8 @@ _FORM_REPLY = ("Dạ để chắc chắn thông tin giao hàng chính xác, anh/
                "form ngắn này nhé: {form_ref}")
 _ESCALATE_REPLY = ("Dạ, em đã chuyển yêu cầu này cho nhân viên hỗ trợ rồi ạ, "
                    "sẽ có người liên hệ anh/chị ngay nhé.")
+# Marker thay the noi dung history turn D2 truoc khi gui vendor (F-M4-S3-03).
+_D2_TURN_MARKER = "[TURN_REDACTED_D2]"
 
 ModelCall = Callable[[list[dict]], Awaitable[dict]]
 CommandExecutor = Callable[[dict], Awaitable[dict]]
@@ -87,6 +89,23 @@ async def process_turn(conn, *, customer_ref: str, conversation_ref: str, text: 
         return TurnOutcome(kind="escalate", reply=_ESCALATE_REPLY,
                            escalate_reason="d2_high_risk")
 
+    # 2b. CA F-M4-S3-03: sweep risk TUNG history turn truoc vendor call. Policy
+    # fail-closed da chon (minimize theo contract): turn D2 bi THAY TOAN BO noi
+    # dung bang marker trung tinh — khong bao gio den vendor, hoi thoai van tiep
+    # tuc (D2 cu khong chan vinh vien conversation). Telemetry CHI reason/count.
+    redacted_d2 = 0
+    safe_history: list[dict] = []
+    for turn in history:
+        if detect(str(turn.get("content", ""))).risk_class == RiskClass.D2:
+            redacted_d2 += 1
+            safe_history.append({"role": turn.get("role", "user"),
+                                 "content": _D2_TURN_MARKER})
+        else:
+            safe_history.append(turn)
+    if redacted_d2:
+        _log("m4_flow_history_d2_redacted", count=redacted_d2)
+    history = safe_history
+
     # 3. Luu slot D1 (phone/name/address) vao store — binding (customer, conversation).
     stored = 0
     storable = {SlotType.PHONE.value, SlotType.NAME.value, SlotType.ADDRESS.value}
@@ -96,14 +115,23 @@ async def process_turn(conn, *, customer_ref: str, conversation_ref: str, text: 
         await slot_store.store_slot(
             conn, customer_ref=customer_ref, conversation_ref=conversation_ref,
             slot_type=span.slot_type.value, value=text[span.start:span.end],
-            confidence=span.confidence.value, data_class="D1", purpose_code="P02",
+            confidence=span.confidence.value, data_class="D1",
+            purpose_code="P02_COMMERCE",  # canonical id theo Purpose Registry M3
             source_message_ref=source_message_ref)
         stored += 1
 
     # 4. Mask current + history (assistant turns cung mask — receipt cu co PII
     # khach). S3: placeholder LUON kem integrity tag bind conversation nay.
-    masked_hist, hist_map = mask_history(history, conversation_ref=conversation_ref)
-    cur = mask_text(text, conversation_ref=conversation_ref)
+    # CA F-M4-S3-02: MOT namespace counters duy nhat cho history + current ->
+    # placeholder khong bao gio trung; guard collision fail-closed phong thu sau.
+    counters: dict[str, int] = {}
+    masked_hist, hist_map = mask_history(history, conversation_ref=conversation_ref,
+                                         counters=counters)
+    cur = mask_text(text, counters, conversation_ref=conversation_ref)
+    if set(hist_map) & set(cur.mapping):
+        _log("m4_flow_placeholder_collision", count=len(set(hist_map) & set(cur.mapping)))
+        return TurnOutcome(kind="escalate", reply=_ESCALATE_REPLY,
+                           escalate_reason="placeholder_collision", stored_slots=stored)
     mapping = {**hist_map, **cur.mapping}
     masked_messages = masked_hist + [{"role": "user", "content": cur.masked_text}]
 
