@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     # M4-S0..S3 development. Enforcement (masked orchestration) chi sau gate M4-G1 +
     # directive rieng. MAC DINH TAT.
     m4_trusted_pii_path: bool = False
+    # M4-S1 Trusted Slot Store (bang pii_slots, migration provisional 040):
+    # - m4_slot_key_b64: khoa AES-256-GCM (base64 32 byte) ma hoa gia tri slot o TANG APP,
+    #   AAD bind customer|conversation|slot_type. RONG = slot store KHONG hoat dong
+    #   (fail closed — khong bao gio luu plaintext thay the).
+    # - m4_slot_fp_key_b64: khoa HMAC fingerprint dedupe (base64 32 byte) — TACH khoi khoa
+    #   ma hoa; fingerprint khong phai public identifier.
+    # - m4_slot_ttl_hours: retention ngan mac dinh 24h (spec §8 "short retention").
+    # Sinh khoa dev/test: python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"
+    m4_slot_key_b64: str = ""
+    m4_slot_fp_key_b64: str = ""
+    m4_slot_ttl_hours: int = 24
 
 
 settings = Settings()
