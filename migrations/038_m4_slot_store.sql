@@ -1,7 +1,8 @@
--- Migration 040: Trusted Slot Store `pii_slots` (I-B M4-S1 — A3S-PHASE1B-M4-SPEC-001 §8).
--- ⚠️ SO 040 LA PROVISIONAL (Directive §3/§11): M3 dang giu 029-033; lay 040 de tranh va cham
---   khi 2 workstream chua merge. BAT BUOC renumber theo migration head thuc te + chay lai
---   checksum/migration/regression evidence tai integration re-baseline TRUOC merge review.
+-- Migration 038: Trusted Slot Store `pii_slots` (I-B M4-S1 — A3S-PHASE1B-M4-SPEC-001 §8).
+-- Lich su so: provisional 040 trong development (M3 chua merge, dang giu 029+);
+--   RENUMBER 040 -> 038 tai integration re-baseline (Directive §11) sau khi M2+M3 merge
+--   main @ dc839ca (head thuc te = 037_retention_policy_immutability). Evidence migration/
+--   regression duoc CHAY LAI toan bo voi so moi — xem docs/PHASE1B-M4-REBASELINE-VI.md.
 -- Thiet ke:
 --   - EXPAND-only: bang moi, khong dung/sua/xoa object nao co san (§12 spec).
 --   - encrypted_value: AES-256-GCM MA HOA O TANG APP (app/services/pii/crypto.py) voi AAD =
