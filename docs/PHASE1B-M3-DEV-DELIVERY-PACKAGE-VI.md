@@ -232,6 +232,29 @@ Migrations M3 giờ = **029-036**. Test cập nhật theo seed mới: `m3_retent
 refusal dùng draft riêng v90), `m3_existing_apply_rehearsal` (36/36, 7 template approved),
 `m3_dispatcher_test` (7 approved). Đề nghị CA phát hành **M3 merge/release gate** (review delta này cùng gate).
 
+## 13. Gate R1 Correction Package (A3S-PHASE1B-M3-CA-MERGE-RELEASE-GATE-REVIEW-R1 §3)
+
+```yaml
+new_implementation_head: 6d7cdcb45880ed9acd4902d9bf8cfcf611cfd40e
+delta_from: 290116b0d2164abdc4374cbcbfab218af1a782e8
+delta_files: [migrations/035 (precondition exact tuple), migrations/036 (postcondition exact tuple),
+              migrations/037_retention_policy_immutability.sql (MỚI),
+              scripts/m3_contract_validation.sql (exact contract), scripts/m3_gate_r1_corrections_test.py (MỚI),
+              scripts/m3_existing_apply_rehearsal.py (37/37 + trigger)]
+ci: run 30348108140 success @ 6d7cdcb
+flags_m3: XÁC NHẬN vẫn default OFF; KHÔNG merge/deploy
+```
+
+| Finding | Fix | Negative drift evidence (m3_gate_r1_corrections_test — 18/18 PASS) |
+|---|---|---|
+| F-M3-GATE-R1-01 | 035 **precondition EXACT TUPLE** (raw_chat/delete/730/hold=true; deletion_requests/delete/730/hold=true) — drift → RAISE, KHÔNG approve; validation kiểm exact approved contract; migration **037** trigger `retention_policies_guard`: approved semantics (category/action/period/hold) bất biến tại DB, lifecycle draft→approved→retired một chiều, cấm DELETE approved/retired, thay đổi = version mới | Drift period 999 / action anonymize / category sai trên existing draft → 035 RAISE + policy vẫn draft; tamper approved ngoài luồng (disable trigger) → validation RAISE; UPDATE period/action/un-approve/DELETE approved → trigger reject; lifecycle hợp lệ PASS |
+| F-M3-GATE-R1-02 | 036 **postcondition EXACT TUPLE** (key, version, purpose_code, body, status) — ON CONFLICT không còn nuốt drift; v1 exact body check; validation kiểm cùng exact tuple + seed v1 content md5 | Existing row v2 body sai / purpose sai → 036 RAISE fail-closed; tamper v2 ngoài luồng → validation RAISE |
+
+Evidence tại head 6d7cdcb (16:43→16:47+07:00): fresh 001..**037** + existing-apply 028→**037** (rehearsal
+37/37 checksum + 2 trigger) + full suite **21/21 EXIT=0** + pytest 81 + ruff + CI success. Migrations M3 =
+**029-037**. Ghi nhận yêu cầu tách 2 quyền của gate: (1) merge + deploy schema/code flags OFF; (2)
+`m3_retention_executor` chỉ bật sau production dry-run + PO duyệt report (đúng Decision #1).
+
 ## Self-check checklist (CA-GOVERNANCE-001 §4)
 
 - [x] MỘT package hợp nhất, không status report rời
