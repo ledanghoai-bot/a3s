@@ -44,8 +44,10 @@ language: vi-VN
   (gồm M1 019-020 + M2 021-028)** trên **bản sao/snapshot production (mốc 018) được phép** — KHÔNG chỉ
   021–028 (CA merge-readiness feedback). Đối chiếu: migration checksums, row counts/invariants,
   roles/grants, indexes/constraints, backfill plan, post-migration reconciliation.
-- Tooling `m2_existing_apply_rehearsal.py` đã cập nhật: dựng DB ở **018** + apply **019..028**; dev-side
-  PASS (28 checksums, data bảo toàn, M1+M2 tables). Release: chạy trên **artifact production 018** thật.
+- Tooling **release-prep** (KHÔNG trong accepted RC): branch `release-prep/m2-full-chain-rehearsal` — harness
+  dựng DB ở **018** + apply **019..028**; dev-side PASS (28 checksums, data bảo toàn, M1+M2 tables),
+  evidence khóa command/timestamp/exit/path (`docs/PHASE1B-M2-FULL-CHAIN-REHEARSAL-EVIDENCE-VI.md`).
+  Release: chạy trên **artifact production 018** thật (production-access gate).
 - **Checkpoint:** ☐ rehearsal trên artifact prod PASS ☐ checksum/counts khớp ☐ no PII trong log.
 
 ## 5. Gate 5 — Runtime DB-role provisioning + secret
