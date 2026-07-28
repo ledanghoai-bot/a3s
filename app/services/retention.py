@@ -23,6 +23,14 @@ class RetentionError(Exception):
     pass
 
 
+# F-M3-R1-02(1): action ĐƯỢC IMPLEMENT cho từng category — ngoài map này = fail-closed
+# (action_not_implemented) TRƯỚC mọi mutation. anonymize/archive sẽ mở khi có handler thật.
+SUPPORTED_ACTIONS: dict[str, set[str]] = {
+    "raw_chat": {"delete"},
+    "deletion_requests": {"delete"},
+}
+
+
 async def _counts_raw_chat(conn, cutoff_days: int, respect_hold: bool):
     """Conversation 'quá hạn' = không có message nào mới hơn cutoff (và tạo trước cutoff)."""
     hold_clause = (
@@ -71,35 +79,51 @@ async def run_retention(conn, *, rule_id: str, version: int, dry_run: bool = Tru
     if not dry_run and pol["status"] != "approved":
         raise RetentionError(f"policy_not_approved:{rule_id}v{version}:{pol['status']}")
 
-    days = pol["retention_period_days"]
-    counts: dict = {"candidates": 0, "skipped_hold": 0}
-    if pol["data_category"] == "raw_chat":
-        conv_ids, held = await _counts_raw_chat(conn, days, pol["respect_legal_hold"])
-        counts["candidates"] = len(conv_ids)
-        counts["skipped_hold"] = held
-        if not dry_run:
-            counts.update(await _delete_raw_chat(conn, conv_ids))
-    elif pol["data_category"] == "deletion_requests":
-        if dry_run:
-            counts["candidates"] = await conn.fetchval(
-                "SELECT count(*) FROM data_deletion_requests "
-                "WHERE requested_at < now() - ($1 || ' days')::interval", str(days))
-        else:
-            res = await conn.execute(
-                "DELETE FROM data_deletion_requests "
-                "WHERE requested_at < now() - ($1 || ' days')::interval", str(days))
-            try:
-                counts["deleted"] = int(res.split()[-1])
-            except Exception:  # noqa: BLE001
-                counts["deleted"] = 0
-            counts["candidates"] = counts["deleted"]
-    else:
-        raise RetentionError(f"category_not_implemented:{pol['data_category']}")
+    category = pol["data_category"]
+    if category not in SUPPORTED_ACTIONS:
+        raise RetentionError(f"category_not_implemented:{category}")
+    # F-M3-R1-02(1): FAIL-CLOSED theo action TRƯỚC mọi mutation — approved không cho phép executor
+    # đổi hành động PO đã duyệt (anonymize/archive chưa implement -> lỗi rõ ràng, không DELETE nhầm).
+    if pol["action"] not in SUPPORTED_ACTIONS[category]:
+        raise RetentionError(f"action_not_implemented:{category}:{pol['action']}")
 
-    run_id = await conn.fetchval(
-        "INSERT INTO retention_run_log (rule_id, version, dry_run, counts, actor, finished_at) "
-        "VALUES ($1,$2,$3,$4::jsonb,$5, now()) RETURNING run_id",
-        rule_id, version, dry_run, json.dumps(counts), actor)
+    days = pol["retention_period_days"]
+    counts: dict = {"candidates": 0}
+    # F-M3-R1-02(4): mutation + run-log trong MỘT transaction boundary — không có chuyện xóa
+    # thành công nhưng mất audit record (log lỗi -> rollback toàn bộ, kể cả dry-run count log).
+    async with conn.transaction():
+        if category == "raw_chat":
+            # F-M3-R1-02(2): legal hold theo customer — linkable, enforce khi respect_legal_hold.
+            conv_ids, held = await _counts_raw_chat(conn, days, pol["respect_legal_hold"])
+            counts["candidates"] = len(conv_ids)
+            counts["skipped_hold"] = held
+            counts["legal_hold_semantics"] = (
+                "customer_linked_enforced" if pol["respect_legal_hold"] else "policy_disabled")
+            if not dry_run:
+                counts.update(await _delete_raw_chat(conn, conv_ids))
+        elif category == "deletion_requests":
+            # F-M3-R1-02(2): semantics tường minh — bản ghi deletion_request KHÔNG còn link tới
+            # customer (psid đã cắt khi xóa), legal hold per-customer/order KHÔNG áp được lên
+            # category này. KHÔNG báo skipped_hold=0 gây hiểu nhầm; khai báo not-linkable.
+            counts["legal_hold_semantics"] = "not_applicable_no_customer_link"
+            if dry_run:
+                counts["candidates"] = await conn.fetchval(
+                    "SELECT count(*) FROM data_deletion_requests "
+                    "WHERE requested_at < now() - ($1 || ' days')::interval", str(days))
+            else:
+                res = await conn.execute(
+                    "DELETE FROM data_deletion_requests "
+                    "WHERE requested_at < now() - ($1 || ' days')::interval", str(days))
+                try:
+                    counts["deleted"] = int(res.split()[-1])
+                except Exception:  # noqa: BLE001
+                    counts["deleted"] = 0
+                counts["candidates"] = counts["deleted"]
+
+        run_id = await conn.fetchval(
+            "INSERT INTO retention_run_log (rule_id, version, dry_run, counts, actor, finished_at) "
+            "VALUES ($1,$2,$3,$4::jsonb,$5, now()) RETURNING run_id",
+            rule_id, version, dry_run, json.dumps(counts), actor)
     return {"run_id": str(run_id), "rule_id": rule_id, "version": version,
             "dry_run": dry_run, "counts": counts}
 

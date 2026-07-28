@@ -128,7 +128,10 @@ async def main():  # noqa: C901
         check(n_draft == 2, f"033 seed policy draft — PO chua duyet ({n_draft})")
         n_mig = await conn.fetchval("SELECT count(*) FROM schema_migrations")
         n_ck = await conn.fetchval("SELECT count(DISTINCT checksum) FROM schema_migrations")
-        check(n_mig == 33 and n_ck == 33, f"schema_migrations 33 rows/33 checksums ({n_mig}/{n_ck})")
+        check(n_mig == 34 and n_ck == 34, f"schema_migrations 34 rows/34 checksums ({n_mig}/{n_ck})")
+        check(await conn.fetchval(
+            "SELECT count(*) FROM pg_trigger WHERE tgname='outbound_templates_guard_trg'") == 1,
+            "034: template immutability trigger hien dien sau existing-apply")
 
         print("[4] reconcile M2 van OK sau M3 (khong pha invariant)")
         rep = await recon.reconcile_inventory(conn, check_stock_compat=True)

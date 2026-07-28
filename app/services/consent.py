@@ -68,15 +68,38 @@ async def record_complaint(conn, *, customer_id: int, evidence_ref: str | None,
         evidence_ref=evidence_ref)
 
 
-async def _latest(conn, customer_id: int, purpose_code: str, channel: str):
-    """Record hiệu lực = revision cao nhất; channel cụ thể thắng 'any' khi cùng tồn tại
-    (lấy revision cao nhất trong cả hai — opt-out 'any' phủ mọi channel cùng purpose)."""
+async def _latest_in_channel(conn, customer_id: int, purpose_code: str, channel: str):
+    """Record mới nhất TRONG MỘT sequence (customer, purpose, channel) — revision chỉ so sánh
+    được trong cùng sequence này (CA F-M3-R1-01)."""
     return await conn.fetchrow(
         "SELECT consent_id, status, captured_via, authority_revision, policy_version, notice_version "
-        "FROM consent_records WHERE customer_id=$1 AND purpose_code=$2 AND channel IN ($3, 'any') "
-        "ORDER BY authority_revision DESC, captured_at DESC LIMIT 1",
+        "FROM consent_records WHERE customer_id=$1 AND purpose_code=$2 AND channel=$3 "
+        "ORDER BY authority_revision DESC LIMIT 1",
         customer_id, purpose_code, channel,
     )
+
+
+async def _latest(conn, customer_id: int, purpose_code: str, channel: str):
+    """Record hiệu lực theo PRECEDENCE deterministic (CA F-M3-R1-01) — KHÔNG so sánh
+    authority_revision giữa hai sequence độc lập (`any` vs channel cụ thể):
+
+      1. Global (`any`) denial/withdrawal THẮNG tuyệt đối — global opt-out/rút consent phủ mọi
+         channel cùng purpose, kể cả khi channel-specific grant có revision lớn hơn hoặc mới hơn.
+         (Muốn mở lại sau global opt-out: record grant mới trên sequence `any`.)
+      2. Nếu không có global denial/withdrawal: record mới nhất của CHANNEL CỤ THỂ (nếu có) thắng
+         — quyết định theo kênh là quyết định hẹp hơn, mọi status của nó đều được tôn trọng.
+      3. Còn lại: record mới nhất của `any`.
+
+    channel='any' đầu vào → chỉ xét sequence `any` (một sequence, revision so sánh hợp lệ)."""
+    latest_any = await _latest_in_channel(conn, customer_id, purpose_code, "any")
+    if channel == "any":
+        return latest_any
+    if latest_any is not None and latest_any["status"] in ("denied", "withdrawn"):
+        return latest_any  # precedence 1: global denial/withdrawal phủ mọi channel
+    latest_specific = await _latest_in_channel(conn, customer_id, purpose_code, channel)
+    if latest_specific is not None:
+        return latest_specific  # precedence 2
+    return latest_any  # precedence 3
 
 
 async def check_permission(conn, *, customer_id: int, purpose_code: str,
@@ -93,10 +116,13 @@ async def check_permission(conn, *, customer_id: int, purpose_code: str,
             return PermissionDecision("allow", "service_default", ref)
         if purpose_code in PURPOSES_CONSENT_REQUIRED:
             if purpose_code == "P06_MARKETING":
+                # complaint ledger nằm trọn trong sequence channel='any' (record_complaint) —
+                # revision so sánh hợp lệ trong 1 sequence (F-M3-R1-01).
                 comp = await conn.fetchrow(
                     "SELECT captured_via FROM consent_records WHERE customer_id=$1 "
-                    "AND purpose_code='P06_MARKETING' AND captured_via IN ('complaint','complaint_resolved') "
-                    "ORDER BY authority_revision DESC, captured_at DESC LIMIT 1", customer_id)
+                    "AND purpose_code='P06_MARKETING' AND channel='any' "
+                    "AND captured_via IN ('complaint','complaint_resolved') "
+                    "ORDER BY authority_revision DESC LIMIT 1", customer_id)
                 if comp is not None and comp["captured_via"] == "complaint":
                     return PermissionDecision("deny", "complaint_suppression", ref)
             if latest is None:
