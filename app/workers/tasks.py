@@ -6,10 +6,12 @@ va retry + dead-letter (khi Send API/LLM loi lien tuc).
 
 import json
 
+from arq import cron
 from arq.connections import RedisSettings
 
 from app.config import settings
 from app.services import conversation_log
+from app.services.command import outbox_worker
 from app.services.handoff import is_bot_paused
 from app.services.messenger import send_text
 from app.services.orchestrator import handle_message
@@ -98,8 +100,34 @@ async def _process_message_inner(event: dict) -> None:
         print(f"[worker] Bot dang paused cho {sender_id}, chi log, khong tra loi (nhan vien dang xu ly).")
         return
 
-    reply = await handle_message(sender_id, text, channel="messenger")
+    # CR-04: truyền provider message id (Messenger mid) thật vào command idempotency/causation.
+    reply = await handle_message(sender_id, text, channel="messenger",
+                                 provider_message_id=message.get("mid"))
     await send_text(sender_id, reply)
+
+
+async def deliver_outbox_job(ctx) -> None:
+    """I-B M1 (Slice 5): drain outbox_events dinh ky (at-least-once + retry/dead-letter).
+    SKIP LOCKED -> nhieu worker an toan. Khi flag order command TAT, outbox rong -> no-op.
+    Loi ben trong duoc bao ve, KHONG lam sap worker."""
+    try:
+        stats = await outbox_worker.run_once()
+        if stats["claimed"] or stats["reclaimed"] or stats["dead"]:
+            print(f"[outbox] drain {stats}")
+    except Exception as e:  # noqa: BLE001 - drain loi khong duoc lam sap worker
+        print(f"[outbox] drain loi (bo qua vong nay): {e}")
+
+
+async def expire_reservations_job(ctx) -> None:
+    """I-B M2 (Slice 6): sweep reservation đến hạn mỗi 60s -> command reservation.expire (§11.2).
+    Flag M2 TẮT -> no-op. Lỗi được bảo vệ, KHÔNG làm sập worker; reservation không bị bỏ quên."""
+    try:
+        from app.services.command import expiry_worker
+        stats = await expiry_worker.run_once()
+        if stats.get("claimed"):
+            print(f"[expiry] sweep {stats}")
+    except Exception as e:  # noqa: BLE001 - sweep loi khong duoc lam sap worker
+        print(f"[expiry] sweep loi (bo qua vong nay): {e}")
 
 
 async def _on_shutdown(ctx) -> None:
@@ -110,6 +138,12 @@ async def _on_shutdown(ctx) -> None:
 
 class WorkerSettings:
     functions = [process_message]
+    # I-B M1: cron drain outbox moi 10 giay (poller). Producer chi sinh event khi flag BAT.
+    cron_jobs = [
+        cron(deliver_outbox_job, second={0, 10, 20, 30, 40, 50}, run_at_startup=False),
+        # I-B M2: sweep reservation het han moi 60s (dau moi phut). Flag M2 TAT -> no-op.
+        cron(expire_reservations_job, second={0}, run_at_startup=False),
+    ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20
     max_tries = 3  # issue #9 Bat 1: khai bao ro rang thay vi dua vao default cua arq

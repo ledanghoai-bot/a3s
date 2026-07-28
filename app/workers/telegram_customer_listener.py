@@ -41,7 +41,8 @@ async def _send_reply(client: httpx.AsyncClient, chat_id: int, text: str) -> Non
         print(f"[telegram_customer_listener] Gui tin nhan that bai: {e}")
 
 
-async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text: str) -> None:
+async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text: str,
+                                   message_id: int | None = None) -> None:
     sender_id = f"tg:{chat_id}"
 
     # Human handoff (issue #7/#8): dung y het logic worker Messenger
@@ -53,7 +54,11 @@ async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text
         print(f"[telegram_customer_listener] Bot dang paused cho {sender_id}, chi log.")
         return
 
-    reply = await handle_message(sender_id, text, channel="telegram")
+    # channel='telegram_customer' (khớp CHANNELS của command envelope) + provider message id thật
+    # (message_id Telegram) cho idempotency/causation — CR-04.
+    reply = await handle_message(
+        sender_id, text, channel="telegram_customer",
+        provider_message_id=(f"tg:{message_id}" if message_id is not None else None))
     await _send_reply(client, chat_id, reply)
 
 
@@ -88,7 +93,7 @@ async def _poll_loop() -> None:
                     if not chat_id or not text:
                         continue  # bo qua sticker/anh/lenh he thong khac
 
-                    await _handle_customer_message(client, chat_id, text)
+                    await _handle_customer_message(client, chat_id, text, message.get("message_id"))
 
             except httpx.HTTPError as e:
                 print(f"[telegram_customer_listener] Loi goi Telegram API: {e}, thu lai sau 5s")

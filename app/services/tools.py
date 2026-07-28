@@ -159,6 +159,7 @@ async def create_order(
     address: str,
     sku: str,
     quantity: int,
+    command_ctx: dict | None = None,
 ) -> dict:
     """Tao don hang THAT trong DB (bang orders + order_items) va tru ton kho.
 
@@ -167,7 +168,26 @@ async def create_order(
     dinh dang VN hoac so luong > MAX_AUTO_QUANTITY - TRU KHI co dung 1 phe duyet
     staff (price_overrides) khop CHINH XAC psid + quantity nay, xem
     app/services/price_overrides.py. LLM khong the tu tao phe duyet cho chinh no.
+
+    I-B M1 (Slice 4): khi settings.m1_reliable_order_command BAT va co command_ctx (idempotency_key
+    + channel + actor), route qua command service (idempotent + atomic outbox + deterministic receipt).
+    Mac dinh TAT -> giu nguyen luong legacy ben duoi. command_ctx=None -> luon legacy (backward-compat).
     """
+    if settings.m1_reliable_order_command and command_ctx is not None:
+        from app.services.command import order_gateway
+        if order_gateway.can_route(command_ctx.get("channel", "")):
+            return await order_gateway.create_order_command(
+                channel=command_ctx["channel"],
+                actor_type=command_ctx.get("actor_type", "customer"),
+                actor_id=command_ctx.get("actor_id", psid),
+                idempotency_key=command_ctx.get("idempotency_key"),  # None (AI) -> gateway derive (CR-04R)
+                provider_message_id=command_ctx.get("provider_message_id"),
+                customer_name=customer_name, phone=phone, address=address,
+                sku=sku, quantity=quantity, psid=psid,
+                conversation_id=command_ctx.get("conversation_id"),
+                causation_id=command_ctx.get("causation_id"),
+            )
+
     if quantity <= 0:
         return {"error": "So luong phai lon hon 0."}
 

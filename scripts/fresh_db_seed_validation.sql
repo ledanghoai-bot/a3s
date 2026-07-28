@@ -1,9 +1,10 @@
--- fresh_db_seed_validation.sql — SQL SEED ASSERTIONS sau khi ap 001..014 (I-B M0).
--- Scope theo SKU '3S-100G' (CA-CHECK-IMPL-M0 §7 — KHONG assertion toan he thong).
--- Day la LOP 1 (SQL). Lop 2 (application) = scripts/app_integration_validation.py.
--- Lop 3 (KB regression) = KB harness (xem M0 Dev Report). Bao cao tach 3 lop, khong gom 1 chu PASS.
--- Chay: psql -v ON_ERROR_STOP=1 -f fresh_db_seed_validation.sql  (hoac runner up tu goi qua asyncpg).
--- RAISE EXCEPTION -> psql exit != 0 / asyncpg raise -> MIGRATION/VALIDATION FAIL -> service khong exit 0.
+-- fresh_db_seed_validation.sql — FRESH-INSTALL-ONLY canonical seed assertion (exact values).
+-- CA F-R1-01 §4.2: assert EXACT canonical seed (3S-100G = dung 3 tier: 1/170k, 5/160k, 20/140k).
+-- KHONG nam trong `post_migration_validations` (deploy path `up`) nua — vi existing production co the co
+-- them price tier hop le (staff tao qua chuc nang M0) khien exact-count fail sai. Lop nay CHI chay o
+-- fresh-DB bootstrap/test, goi TUONG MINH qua `migrate.py fresh-validate` (manifest fresh_install_validations).
+-- Operational (existing-safe) layer = scripts/operational_seed_validation.sql (nam trong post_migration_validations).
+-- RAISE EXCEPTION -> asyncpg raise -> FRESH VALIDATION FAIL -> exit != 0.
 DO $val$
 DECLARE
   v_approved CONSTANT text :=
