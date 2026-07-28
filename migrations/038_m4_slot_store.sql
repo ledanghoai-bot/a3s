@@ -5,8 +5,9 @@
 --   regression duoc CHAY LAI toan bo voi so moi — xem docs/PHASE1B-M4-REBASELINE-VI.md.
 -- Thiet ke:
 --   - EXPAND-only: bang moi, khong dung/sua/xoa object nao co san (§12 spec).
---   - encrypted_value: AES-256-GCM MA HOA O TANG APP (app/services/pii/crypto.py) voi AAD =
---     customer_ref|conversation_ref|slot_type -> row bi doi context (tamper/replay-bind) se
+--   - encrypted_value: AES-256-GCM MA HOA O TANG APP (app/services/pii/crypto.py) voi AAD v2
+--     canonical length-prefix cua (customer_ref, conversation_ref, slot_type) + domain tag —
+--     KHONG dung delimiter (CA F-M4-S1-01). Row bi doi context (tamper/replay-bind) se
 --     KHONG THE giai ma (fail closed tai tang crypto, khong chi tang query).
 --   - normalized_fingerprint: HMAC-SHA256 co khoa (keyed) cua gia tri da chuan hoa — de dedupe
 --     replay TRONG CUNG context; KHONG phai public identifier (§8 spec), khong the suy nguoc.
@@ -47,7 +48,7 @@ CREATE TABLE IF NOT EXISTS pii_slots (
 COMMENT ON TABLE pii_slots IS
   'M4 Trusted Slot Store — data_class: D1/D2 theo row; purpose_code: canonical registry id (vd P02_COMMERCE); PII chi o encrypted_value (AES-GCM v2 length-prefix AAD binding context); retention: expires_at + purge app-layer';
 COMMENT ON COLUMN pii_slots.encrypted_value IS
-  'AES-256-GCM: v1||nonce(12)||ct+tag. AAD=customer_ref|conversation_ref|slot_type -> doi context la KHONG giai ma duoc';
+  'AES-256-GCM blob: v2||nonce(12)||ct+tag. AAD v2 = domain-tag + length-prefix(customer_ref, conversation_ref, slot_type) -> doi context la KHONG giai ma duoc (khong delimiter, chong collision)';
 COMMENT ON COLUMN pii_slots.normalized_fingerprint IS
   'HMAC-SHA256 keyed (32 hex) cua gia tri chuan hoa — dedupe replay trong CUNG context; KHONG phai public identifier';
 

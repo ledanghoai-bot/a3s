@@ -26,7 +26,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from app.services.pii import slot_store
+from app.services.pii import sku_catalog, slot_store
 from app.services.pii.detector import detect
 from app.services.pii.masking import mask_history, mask_text, rehydrate_response
 from app.services.pii.semantic_schema import SchemaViolation, validate_semantic_output
@@ -51,6 +51,12 @@ _D2_TURN_MARKER = "[TURN_REDACTED_D2]"
 
 ModelCall = Callable[[list[dict]], Awaitable[dict]]
 CommandExecutor = Callable[[dict], Awaitable[dict]]
+# CA F-M4-S2-04: resolver catalog inject duoc (mock trong dev test); mac dinh
+# dung sku_catalog.resolve_skus tren bang products qua conn.
+SkuResolver = Callable[[list[str]], Awaitable[dict[str, str | None]]]
+
+_SKU_UNKNOWN_REPLY = ("Dạ em chưa nhận ra sản phẩm anh/chị muốn đặt ạ. Anh/chị xem giúp em "
+                      "tên/mã sản phẩm trên trang shop rồi nhắn lại giúp em nhé?")
 
 
 @dataclass
@@ -77,6 +83,7 @@ def _mask_last3(value: str) -> str:
 async def process_turn(conn, *, customer_ref: str, conversation_ref: str, text: str,
                        history: list[dict] | None = None,
                        model_call: ModelCall, command_executor: CommandExecutor,
+                       sku_resolver: SkuResolver | None = None,
                        source_message_ref: str | None = None,
                        form_ref: str = "[FORM_GIAO_HANG]") -> TurnOutcome:
     history = history or []
@@ -160,6 +167,32 @@ async def process_turn(conn, *, customer_ref: str, conversation_ref: str, text: 
             return TurnOutcome(kind="reply",
                                reply="Dạ anh/chị muốn đặt sản phẩm nào, số lượng bao nhiêu ạ?",
                                vendor_called=True, stored_slots=stored)
+
+        # 7a. CA F-M4-S2-04: SKU authority = TRUSTED CATALOG, khong phai model.
+        # Moi SKU model de xuat phai resolve ve canonical qua catalog; command
+        # args CHI nhan canonical string cua resolver. Unknown/ambiguous ->
+        # deterministic fallback (KHONG echo raw string — co the la PII
+        # transliterate); catalog loi -> escalate fail-closed. Executor khong
+        # chay trong moi truong hop tren.
+        try:
+            if sku_resolver is not None:
+                sku_map = await sku_resolver([it["sku"] for it in sem.items])
+            else:
+                sku_map = await sku_catalog.resolve_skus(conn, [it["sku"] for it in sem.items])
+        except Exception as e:  # noqa: BLE001 — catalog unavailable = fail closed
+            _log("m4_flow_catalog_error", error_type=type(e).__name__)
+            return TurnOutcome(kind="escalate", reply=_ESCALATE_REPLY,
+                               escalate_reason="catalog_error", vendor_called=True,
+                               stored_slots=stored)
+        unknown_count = sum(1 for v in sku_map.values() if v is None)
+        if unknown_count:
+            _log("m4_flow_sku_unknown", count=unknown_count)
+            return TurnOutcome(kind="reply", reply=_SKU_UNKNOWN_REPLY,
+                               vendor_called=True, stored_slots=stored,
+                               detail={"unknown_sku_count": unknown_count})
+        canonical_items = [{"sku": sku_map[it["sku"]], "qty": it["qty"]}
+                           for it in sem.items]
+
         resolved: dict[str, str] = {}
         missing: list[str] = []
         low_conf: list[str] = []
@@ -195,7 +228,7 @@ async def process_turn(conn, *, customer_ref: str, conversation_ref: str, text: 
             "shipping_phone": resolved["phone"],
             "shipping_address": resolved["address"],
             "shipping_name": resolved["name"],
-            "items": sem.items,
+            "items": canonical_items,  # CHI canonical SKU tu trusted resolver
             "source_message_ref": source_message_ref,
         }
         committed = await command_executor(command_args)
@@ -205,7 +238,7 @@ async def process_turn(conn, *, customer_ref: str, conversation_ref: str, text: 
             f"Giao tới {resolved['address']} — người nhận {resolved['name']}, "
             f"SĐT {_mask_last3(resolved['phone'])}. Em cảm ơn anh/chị nhiều ạ!"
         )
-        _log("m4_flow_command_receipt", items=len(sem.items))
+        _log("m4_flow_command_receipt", items=len(canonical_items))
         return TurnOutcome(kind="command_receipt", reply=receipt_reply,
                            receipt=committed, vendor_called=True, stored_slots=stored)
 

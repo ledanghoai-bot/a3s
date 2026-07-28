@@ -76,7 +76,7 @@ class SpyExecutor:
 
 
 ORDER_OUT = {"intent": "order.create", "missing_slot_types": [],
-             "response_candidate": "", "context": {"items": [{"sku": "3S-500G", "qty": 2}]}}
+             "response_candidate": "", "context": {"items": [{"sku": "3S-100G", "qty": 2}]}}
 SMALL_OUT = {"intent": "smalltalk", "missing_slot_types": [],
              "response_candidate": "Dạ đơn đang được chuẩn bị ạ", "context": {}}
 
@@ -176,6 +176,33 @@ async def main() -> int:
         check(d6.kind == "reply" and "tiểu đường" not in d6_sent
               and "[TURN_REDACTED_D2]" in d6_sent,
               "history D2 bi redact truoc vendor (marker thay noi dung)")
+
+        print("== [D-final] Trusted SKU catalog (CA F-M4-S2-04 final) ==")
+        # dung cust-B/conv-9 (da du 3 slot tu [B]); catalog THAT = bang products
+        executor.calls.clear()
+        d7 = await turn("cust-B", "conv-9", "chốt đơn như cũ nhé",
+                        {"intent": "order.create", "missing_slot_types": [],
+                         "response_candidate": "",
+                         "context": {"items": [{"sku": "3S100G", "qty": 2}]}})
+        check(d7.kind == "command_receipt" and executor.calls
+              and executor.calls[0]["items"] == [{"sku": "3S-100G", "qty": 2}],
+              "alias 3S100G -> executor CHI nhan canonical 3S-100G tu catalog that")
+        executor.calls.clear()
+        d8 = await turn("cust-B", "conv-9", "chốt đơn nhé",
+                        {"intent": "order.create", "missing_slot_types": [],
+                         "response_candidate": "",
+                         "context": {"items": [{"sku": "12-LE-LOI", "qty": 1}]}})
+        check(d8.kind in ("reply", "escalate") and executor.calls == []
+              and "12-LE-LOI" not in d8.reply,
+              "sku dang dia chi (12-LE-LOI) -> fail closed (schema hoac catalog), "
+              "executor 0 call, khong echo")
+        executor.calls.clear()
+        d9 = await turn("cust-B", "conv-9", "chốt đơn nhé",
+                        {"intent": "order.create", "missing_slot_types": [],
+                         "response_candidate": "",
+                         "context": {"items": [{"sku": "SO-12-P5-Q3", "qty": 1}]}})
+        check(d9.kind == "reply" and executor.calls == [],
+              "sku qua schema nhung KHONG thuoc catalog that -> fallback, executor 0 call")
 
         print("== [E] Cross-conversation binding ==")
         e1 = await turn("cust-B", "conv-KHAC", "chốt 2 gói như cũ nhé", dict(ORDER_OUT))

@@ -152,6 +152,10 @@ async def main() -> int:
                 "response_candidate": "",
                 "context": {"items": [{"sku": "3S-500G", "qty": 2}]}}
 
+    async def catalog_fake(proposed):
+        return {p: ("3S-500G" if p.replace("-", "").upper() == "3S500G" else None)
+                for p in proposed}
+
     exec_calls = []
 
     async def exec2(args):
@@ -163,7 +167,8 @@ async def main() -> int:
         outs = await asyncio.gather(*[
             trusted_flow.process_turn(None, customer_ref="cust-CC",
                                       conversation_ref="conv-CC", text=msg,
-                                      model_call=order_model, command_executor=exec2)
+                                      model_call=order_model, command_executor=exec2,
+                                      sku_resolver=catalog_fake)
             for _ in range(8)])
     kinds = {o.kind for o in outs}
     cross = [r for r in fake2.rows if r[0] != "cust-CC" or r[1] != "conv-CC"]

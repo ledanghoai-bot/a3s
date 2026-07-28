@@ -1,10 +1,12 @@
 """I-B M4-S1 — crypto cho Trusted Slot Store: AES-256-GCM + AAD context binding.
 
 Nguyen tac (spec §5/§8):
-- Gia tri slot MA HOA O TANG APP truoc khi cham DB. AAD (associated data) =
-  customer_ref|conversation_ref|slot_type -> mot row bi trao sang context khac
+- Gia tri slot MA HOA O TANG APP truoc khi cham DB. AAD (associated data) v2 =
+  canonical encoding CO LENGTH-PREFIX cua (customer_ref, conversation_ref,
+  slot_type) + domain tag (xem _aad) -> mot row bi trao sang context khac
   (tamper truc tiep DB, retry/replay bind nham) se KHONG THE giai ma: fail closed
-  ngay tai tang crypto, khong phu thuoc query filter dung hay sai.
+  ngay tai tang crypto, khong phu thuoc query filter dung hay sai. Khong dung
+  delimiter noi chuoi (CA F-M4-S1-01: delimiter co the collision).
 - Fingerprint = HMAC-SHA256 CO KHOA cua gia tri da chuan hoa: dung de dedupe
   replay trong CUNG context; khong co khoa thi khong the suy nguoc/doi chieu
   -> KHONG phai public identifier (§8).

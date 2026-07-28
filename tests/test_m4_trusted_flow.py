@@ -71,7 +71,15 @@ class SpyExecutor:
         return {"order_id": "SYN-001", "status": "created"}
 
 
-def _run(text, model_output, fake=None, history=None, monkeypatch=None):
+async def _catalog_fake(proposed):
+    """Resolver mac dinh cho unit test: catalog synthetic 2 SKU canonical."""
+    catalog = {"3S500G": "3S-500G", "3S100G": "3S-100G"}
+    return {p: catalog.get("".join(ch for ch in p.upper() if ch.isalnum()))
+            for p in proposed}
+
+
+def _run(text, model_output, fake=None, history=None, monkeypatch=None,
+         sku_resolver=_catalog_fake):
     fake = fake or FakeSlotStore()
     model = SpyModel(model_output)
     executor = SpyExecutor()
@@ -79,7 +87,8 @@ def _run(text, model_output, fake=None, history=None, monkeypatch=None):
     monkeypatch.setattr(trusted_flow.slot_store, "resolve_slot", fake.resolve_slot)
     outcome = asyncio.run(trusted_flow.process_turn(
         None, customer_ref="cust-A", conversation_ref="conv-1", text=text,
-        history=history or [], model_call=model, command_executor=executor))
+        history=history or [], model_call=model, command_executor=executor,
+        sku_resolver=sku_resolver))
     return outcome, model, executor, fake
 
 
@@ -205,7 +214,7 @@ def test_cross_conversation_khong_dung_slot_conv_khac(monkeypatch):
     outcome = asyncio.run(trusted_flow.process_turn(
         None, customer_ref="cust-A", conversation_ref="conv-2",  # HOI THOAI KHAC
         text="chốt đơn 2 gói nhé", history=[], model_call=model,
-        command_executor=executor))
+        command_executor=executor, sku_resolver=_catalog_fake))
     assert outcome.kind == "ask_slot"  # khong keo slot tu conv-1 sang
     assert executor.calls == []
 
@@ -262,6 +271,52 @@ def test_sku_smuggle_qua_flow_bi_escalate(monkeypatch):
            "context": {"items": [{"sku": "0912345678", "qty": 1}]}}
     outcome, _, executor, _ = _run(ORDER_TEXT, bad, monkeypatch=monkeypatch)
     assert outcome.kind == "escalate" and outcome.escalate_reason == "schema_violation"
+    assert executor.calls == []
+
+
+def _order_out_with_sku(sku):
+    return {"intent": "order.create", "missing_slot_types": [],
+            "response_candidate": "",
+            "context": {"items": [{"sku": sku, "qty": 1}]}}
+
+
+def test_sku_alias_resolve_ve_canonical(monkeypatch):
+    """CA F-M4-S2-04 final: alias '3S500G' -> executor CHI nhan canonical '3S-500G'
+    tu trusted resolver, khong copy raw model string."""
+    outcome, _, executor, _ = _run(ORDER_TEXT, _order_out_with_sku("3S500G"),
+                                   monkeypatch=monkeypatch)
+    assert outcome.kind == "command_receipt"
+    assert executor.calls[0]["items"] == [{"sku": "3S-500G", "qty": 1}]
+
+
+@pytest.mark.parametrize("sku", ["12-LE-LOI", "NGUYEN-VAN-AN", "SO-12-P5-Q3"])
+def test_sku_dang_dia_chi_ten_bi_tu_choi(monkeypatch, sku):
+    """Chuoi dang dia chi/ten transliterate -> fail closed o MOT trong hai tang:
+    schema scan (detector bat duoc -> escalate) hoac catalog (unknown -> fallback
+    reply). Ca hai deu: executor 0 call, khong echo raw string."""
+    outcome, _, executor, _ = _run(ORDER_TEXT, _order_out_with_sku(sku),
+                                   monkeypatch=monkeypatch)
+    assert outcome.kind in ("reply", "escalate")
+    assert executor.calls == []
+    assert sku not in outcome.reply  # khong echo (co the la PII transliterate)
+
+
+def test_sku_qua_schema_nhung_khong_thuoc_catalog(monkeypatch):
+    """Tang catalog la authority CUOI: 'SO-12-P5-Q3' qua duoc schema scan
+    (detector heuristic khong bat) nhung KHONG thuoc catalog -> fallback."""
+    outcome, _, executor, _ = _run(ORDER_TEXT, _order_out_with_sku("SO-12-P5-Q3"),
+                                   monkeypatch=monkeypatch)
+    assert outcome.kind == "reply" and outcome.detail["unknown_sku_count"] == 1
+    assert executor.calls == []
+
+
+def test_catalog_loi_fail_closed(monkeypatch):
+    async def _boom(proposed):
+        raise RuntimeError("catalog down")
+
+    outcome, _, executor, _ = _run(ORDER_TEXT, _order_out_with_sku("3S-500G"),
+                                   monkeypatch=monkeypatch, sku_resolver=_boom)
+    assert outcome.kind == "escalate" and outcome.escalate_reason == "catalog_error"
     assert executor.calls == []
 
 
