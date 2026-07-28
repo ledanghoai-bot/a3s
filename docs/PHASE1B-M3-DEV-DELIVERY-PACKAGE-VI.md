@@ -209,6 +209,29 @@ Current suite **19/19 EXIT=0**: pytest 81, ruff, `m3_r1_corrections_test` (mới
 (gồm fresh-apply 001..**034** + existing-apply 028→034 với trigger check), 9 script regression M2.
 (Script lịch sử `m2_r1_remediation_test` giữ nguyên phân loại §9 — ngoài denominator.)
 
+## 12. Release-prep delta theo PO Decision Record (28/7 — cho CA review trong merge/release gate)
+
+```yaml
+po_decision_record: docs/PHASE1B-M3-PO-DECISION-RECORD-VI.md (5 open inputs §7 ĐÃ CHỐT)
+release_prep_head: 290116b0d2164abdc4374cbcbfab218af1a782e8
+delta_from: 0b1da8c… (accepted R1 head; qua docs 3179ef7)
+ci: run 30347027213 success @ 290116b
+evidence: m3_release_prep_test ALL PASS + full suite 20/20 EXIT=0 (16:27→16:31+07:00) + pytest 81 + ruff
+flags_m3: vẫn default OFF toàn bộ — KHÔNG bật khi chưa có gate
+```
+
+| PO # | Delta | File |
+|---|---|---|
+| 1 | Migration **035** nâng RET-04/09 v1 → `approved`; executor vẫn bị flag OFF chặn (điều kiện PO: dry-run production + xem report trước khi bật) | `migrations/035_retention_policy_approval.sql` |
+| 3 | `--no-access-log` cho uvicorn (PSID không vào access log) | `Dockerfile`, `docker-compose.yml` |
+| 4 | Migration **036** template `order_status_fulfilled` **v2** "đã được bàn giao cho đơn vị vận chuyển" (v1 immutable giữ nguyên); version map tường minh `_TEMPLATE_VERSIONS` — flag OFF = text M2 nguyên trạng | `migrations/036_fulfilled_template_v2.sql`, `app/services/order/transition_service.py` |
+| 5 | `m3_contract_validation.sql` (existing-safe, theo mẫu operational_seed_validation) đăng ký `post_migration_validations` cả 2 manifest; evidence chứng minh validation DETECT thiếu contract (RAISE trên DB mốc 028) — không vacuous | `scripts/m3_contract_validation.sql`, `scripts/baseline_manifest.json`, `scripts/baseline_manifest_13.json` |
+| 2 | (ngoài code) Draft hồ sơ cross-border DeepSeek + email opt-out training đã soạn cho PO/legal: `E:/Alpha3s/Dev-review/DRAFT-DEEPSEEK-CROSS-BORDER-ASSESSMENT-VI.md`, `DRAFT-DEEPSEEK-OPTOUT-EMAIL.md`; bản chính thức sau M4 | — |
+
+Migrations M3 giờ = **029-036**. Test cập nhật theo seed mới: `m3_retention_test` (RET-04 v1 approved,
+refusal dùng draft riêng v90), `m3_existing_apply_rehearsal` (36/36, 7 template approved),
+`m3_dispatcher_test` (7 approved). Đề nghị CA phát hành **M3 merge/release gate** (review delta này cùng gate).
+
 ## Self-check checklist (CA-GOVERNANCE-001 §4)
 
 - [x] MỘT package hợp nhất, không status report rời
