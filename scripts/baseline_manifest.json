@@ -26,6 +26,6 @@
     { "name": "exactly one 3S-100G", "sql": "SELECT count(*)=1 FROM products WHERE sku='3S-100G'", "expect": true },
     { "name": "3S-100G has price tiers", "sql": "SELECT count(*)>=1 FROM price_tiers pt JOIN products p ON p.id=pt.product_id WHERE p.sku='3S-100G'", "expect": true }
   ],
-  "post_migration_validations": ["scripts/operational_seed_validation.sql"],
+  "post_migration_validations": ["scripts/operational_seed_validation.sql", "scripts/m3_contract_validation.sql"],
   "fresh_install_validations": ["scripts/fresh_db_seed_validation.sql"]
 }

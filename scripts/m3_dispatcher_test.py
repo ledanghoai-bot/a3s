@@ -116,7 +116,7 @@ async def main():  # noqa: C901
         print("[1] migrations 001..032 fresh apply + seed template")
         await migrate(conn)
         n = await conn.fetchval("SELECT count(*) FROM outbound_templates WHERE status='approved'")
-        check(n == 6, f"seed 6 template approved (got {n})")
+        check(n == 7, f"seed 6 v1 + fulfilled v2 (036) approved (got {n})")
         body = await conn.fetchval(
             "SELECT body FROM outbound_templates WHERE template_key='order_status_confirmed' AND version=1")
         check(body == "Đơn #{id} của bạn đã được xác nhận.", "text template = M2 nguyen van")

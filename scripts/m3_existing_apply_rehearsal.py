@@ -123,12 +123,14 @@ async def main():  # noqa: C901
             ok = await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{t}")
             check(ok, f"new table {t} hien dien sau existing-apply")
         n_tmpl = await conn.fetchval("SELECT count(*) FROM outbound_templates WHERE status='approved'")
-        check(n_tmpl == 6, f"032 seed 6 template approved ({n_tmpl})")
-        n_draft = await conn.fetchval("SELECT count(*) FROM retention_policies WHERE status='draft'")
-        check(n_draft == 2, f"033 seed policy draft — PO chua duyet ({n_draft})")
+        check(n_tmpl == 7, f"032+036 seed 6 v1 + fulfilled v2 approved ({n_tmpl})")
+        n_appr = await conn.fetchval(
+            "SELECT count(*) FROM retention_policies WHERE status='approved' "
+            "AND (rule_id, version) IN (('RET-04',1),('RET-09',1))")
+        check(n_appr == 2, f"033 seed -> 035 PO approved RET-04/09 v1 ({n_appr})")
         n_mig = await conn.fetchval("SELECT count(*) FROM schema_migrations")
         n_ck = await conn.fetchval("SELECT count(DISTINCT checksum) FROM schema_migrations")
-        check(n_mig == 34 and n_ck == 34, f"schema_migrations 34 rows/34 checksums ({n_mig}/{n_ck})")
+        check(n_mig == 36 and n_ck == 36, f"schema_migrations 36 rows/36 checksums ({n_mig}/{n_ck})")
         check(await conn.fetchval(
             "SELECT count(*) FROM pg_trigger WHERE tgname='outbound_templates_guard_trg'") == 1,
             "034: template immutability trigger hien dien sau existing-apply")

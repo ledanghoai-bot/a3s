@@ -85,7 +85,12 @@ async def main():  # noqa: C901
         await migrate(conn)
         st = await conn.fetchval(
             "SELECT status FROM retention_policies WHERE rule_id='RET-04' AND version=1")
-        check(st == "draft", f"seed RET-04 v1 = draft (PO chua duyet) (got {st})")
+        # 033 seed draft -> 035 (PO Decision Record M3 #1) nang approved
+        check(st == "approved", f"RET-04 v1 = approved sau 035 (PO da duyet) (got {st})")
+        # tao policy draft rieng de test refusal (v1 gio da approved)
+        await conn.execute(
+            "INSERT INTO retention_policies (rule_id, version, data_category, action, "
+            "retention_period_days, status) VALUES ('RET-04', 90, 'raw_chat', 'delete', 730, 'draft')")
 
         _, conv_old = await mk_chat(conn, "ret-old", 800)
         _, conv_new = await mk_chat(conn, "ret-new", 5)
@@ -98,7 +103,7 @@ async def main():  # noqa: C901
 
         print("[3] apply policy draft -> tu choi")
         try:
-            await retention.run_retention(conn, rule_id="RET-04", version=1, dry_run=False)
+            await retention.run_retention(conn, rule_id="RET-04", version=90, dry_run=False)
             check(False, "apply draft should raise")
         except retention.RetentionError as e:
             check("policy_not_approved" in str(e), f"policy_not_approved (got {e})")

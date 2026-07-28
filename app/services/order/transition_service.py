@@ -111,6 +111,9 @@ async def apply_transition(
     return TransitionResult(order_id, from_status, spec.to_status, spec.inventory_effect, affected)
 
 
+# Version template dispatcher chọn theo key (mặc định 1). fulfilled -> v2 (migration 036, PO M3 #4).
+_TEMPLATE_VERSIONS = {"order_status_fulfilled": 2}
+
 # Template deterministic từ committed status (KHÔNG LLM, không bịa quantity/tiền).
 _CUSTOMER_NOTIFY = {
     "confirmed": "Đơn #{id} của bạn đã được xác nhận.",
@@ -141,11 +144,14 @@ async def _notify_customer(conn, order, to_status: str, command_id) -> None:
     if settings.m3_outbound_dispatcher:
         # M3-S5: qua dispatcher — consent check + approved template lúc GỬI. Cùng dedupe_key ->
         # dedupe/at-least-once M1 giữ nguyên (AC-M3-06); template seed 032 = đúng text M2.
+        # Version map TƯỜNG MINH (deterministic, reviewable): fulfilled dùng v2 theo PO Decision
+        # Record M3 mục 4 (migration 036) — "bàn giao vận chuyển" vì delivered đã là mốc riêng.
         from app.services.command import dispatcher
+        version = _TEMPLATE_VERSIONS.get(f"order_status_{to_status}", 1)
         await dispatcher.enqueue_outbound(
             conn, command_id=command_id, customer_id=order["customer_id"], customer_ref=psid,
             destination=ch, purpose_code="P03_TRANSACTIONAL",
-            template_key=f"order_status_{to_status}", template_version=1,
+            template_key=f"order_status_{to_status}", template_version=version,
             params={"id": order["id"]},
             dedupe_key=f"order_status:{order['id']}:{to_status}", max_attempts=MAX_ATTEMPTS)
         return
