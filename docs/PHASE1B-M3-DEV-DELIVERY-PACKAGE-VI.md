@@ -182,6 +182,33 @@ Evidence re-run tại post-rebase head, 2026-07-28 14:12→14:16+07:00 (C-M3-RB-
 Correction này KHÔNG thay code/evidence script/migrations — chỉ package metadata. Code head giữ nguyên
 `17d094d19d0dd4655e3fc854ca9c048ecec645f6`.
 
+## 11. R1 Correction Package (theo A3S-PHASE1B-M3-CA-SUBSTANTIVE-REVIEW-R1 §4 — implementation delta)
+
+```yaml
+new_implementation_head: 0b1da8c2d487df2427d8bec7e05c7d535940d23f
+delta_from: 17d094d19d0dd4655e3fc854ca9c048ecec645f6 (qua docs 9775daf/e200717)
+delta_files: [app/services/consent.py, app/services/retention.py,
+              migrations/034_template_immutability.sql (MỚI), scripts/m3_r1_corrections_test.py (MỚI),
+              scripts/m3_existing_apply_rehearsal.py (assertion 34 migrations + trigger check)]
+ci: run 30343962023 success @ 0b1da8c
+flags_m3: m3_delivered_lifecycle / m3_utm_attribution / m3_outbound_dispatcher / m3_retention_executor — XÁC NHẬN vẫn default OFF, không đổi
+acceptance_note: KHÔNG auto-extend acceptance cũ — evidence chạy lại đầy đủ tại head mới (bảng dưới)
+```
+
+### Mapping findings → fix/test
+
+| Finding | Fix (file @ 0b1da8c) | Test (m3_r1_corrections_test.py) |
+|---|---|---|
+| F-M3-R1-01 consent trộn revision sequence | `consent.py`: `_latest` viết lại theo **precedence deterministic** — (1) global `any` denial/withdrawal phủ mọi channel (kể cả khi channel-specific grant revision cao hơn/mới hơn; mở lại = grant mới trên sequence `any`), (2) channel-specific latest, (3) global latest; KHÔNG so sánh revision chéo sequence; complaint ledger scope `channel='any'` (1 sequence) | [F01] a: channel grant rev 5 vs global withdrawal rev 1 mới hơn → deny; b: global denial rev cao vs channel grant mới hơn → deny; c: channel denial > global grant; d: channel khác không bị ảnh hưởng |
+| F-M3-R1-02 retention bỏ qua action + hold + tx | `retention.py`: `SUPPORTED_ACTIONS` per category, action ngoài map → `action_not_implemented` **fail-closed TRƯỚC mọi mutation**; legal-hold semantics tường minh per category (`raw_chat`=customer_linked_enforced; `deletion_requests`=`not_applicable_no_customer_link` — record không còn link customer sau khi psid bị cắt, bỏ skipped_hold=0 gây hiểu nhầm); mutation + run-log trong **một transaction** | [F02] a/b: anonymize/archive approved → error, 0 mutation; c: hold semantics khai báo; d: run-log lỗi → mutation ROLLBACK (không mất audit), chạy lại hợp lệ → atomic |
+| F-M3-R1-03 template không immutable ở DB | Migration **034** trigger `outbound_templates_guard` (BEFORE UPDATE/DELETE): approved → body/purpose_code/key/version/created_at bất biến, status chỉ → retired; retired bất biến hoàn toàn; draft sửa được, lifecycle một chiều draft→approved→retired; cấm DELETE approved/retired; postcondition **seed drift md5 check** (khắc phục ON CONFLICT DO NOTHING nuốt drift) | [F03] a-d: UPDATE body/purpose/un-approve/DELETE approved → reject, body nguyên vẹn; e-g: lifecycle hợp lệ; [F03-e] tamper ngoài luồng + re-apply 034 → RAISE drift |
+
+### Evidence re-run đầy đủ tại head 0b1da8c (exit 0 = PASS; 15:45→15:48+07:00 2026-07-28)
+
+Current suite **19/19 EXIT=0**: pytest 81, ruff, `m3_r1_corrections_test` (mới), 7 script M3
+(gồm fresh-apply 001..**034** + existing-apply 028→034 với trigger check), 9 script regression M2.
+(Script lịch sử `m2_r1_remediation_test` giữ nguyên phân loại §9 — ngoài denominator.)
+
 ## Self-check checklist (CA-GOVERNANCE-001 §4)
 
 - [x] MỘT package hợp nhất, không status report rời
