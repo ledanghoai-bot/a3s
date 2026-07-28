@@ -21,6 +21,10 @@ language: vi-VN
   `docs/PHASE1B-M2-DEV-DELIVERY-PACKAGE-VI.md`, `docs/PHASE1B-M2-EVIDENCE-LOG-VI.md`.
   → `git diff --stat 9b49628..ea4dba8` = 2 docs, **0 code/migration/test**.
 - **RC là ancestor** của reviewed head ✅ (`git merge-base --is-ancestor 9b49628 ea4dba8`).
+- **Cập nhật sau merge-readiness feedback (minh bạch):** RC→current head thêm docs + **một evidence
+  script** `scripts/m2_existing_apply_rehearsal.py` (mở rộng rehearsal 020→**018** để phủ 019–028 theo
+  CA feedback). **`app/` + `migrations/` byte-identical** với accepted RC `9b49628` (verify:
+  `git diff 9b49628..HEAD -- app migrations` = rỗng) → **product/schema KHÔNG drift**, chỉ evidence tooling.
 
 ## 2. Current main + full compare (Notice §3.2)
 - **Production main = `origin/main` = `4ce5f3ab2b95846cbc5a3dd5b21528a891b36314`** (M0 rc7, tag ib-m0-rc7).
@@ -39,8 +43,11 @@ Nghĩa là merge M2 = **deploy cả M1 và M2**. Đây là schema change lớn t
 
 ## 3. CI / checksum / drift (Notice §3.3)
 - **CI:** GitHub Actions run #29 tại PR head `ea4dba8` = **success** (CA acceptance §3 ghi nhận).
-- **Migration manifest/checksum:** `001`–`028`; rehearsal ghi 28 rows / 28 distinct checksums
-  (`m2_existing_apply_rehearsal`). Migrations expand-only, forward, postcondition fail-closed.
+- **Migration manifest/checksum:** `001`–`028`. **Existing-apply rehearsal (CA merge-readiness feedback):**
+  vì production ở M0 (≤018), rehearsal phủ **TOÀN CHUỖI `019`–`028` (M1 019-020 + M2 021-028) từ mốc 018**
+  — `m2_existing_apply_rehearsal` (updated) PASS: 28 checksums distinct, data hiện hữu bảo toàn (5 orders/1
+  product identical), M1 tables (command_executions/outbox_events/delivery_attempts) + M2 tables present,
+  roles/grants/indexes/constraints OK, backfill+reconcile OK. Migrations expand-only, forward, postcondition fail-closed.
 - **Changed-file manifest RC→PR head:** 2 docs (xem §1). **Không code drift sau accepted RC.**
 - **Evidence log:** `docs/PHASE1B-M2-EVIDENCE-LOG-VI.md` — 16/16 EXIT=0 tại RC.
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""M2 CA M2-S1-F07 evidence — EXISTING-APPLY migration rehearsal (AC-M2-16).
+"""M2 existing-apply migration rehearsal (AC-M2-16 + CA S2-F07 + Merge-readiness Gate 4).
 
-Chung minh migration 021..RC apply an toan tu DB DA TON TAI o moc 020 (khong chi fresh). Seed du lieu
-dai dien (products + orders nhieu legacy status + items + customer) o 020, ghi schema_migrations 001..020
-nhu mot DB that, roi apply 021..RC (record schema_migrations). Kiem tra:
+Production HIEN o M0 (migration <=018); M1 (019-020) CHUA tung deploy. Merge M2 -> deploy CA CHUOI
+019..RC. Rehearsal nay dung DB o moc **018 (M0)** + seed du lieu dai dien, roi apply **TOAN CHUOI
+019..RC (gom M1 019-020 + M2 021-028)** — dung duong upgrade production that. Kiem tra:
   - PRE/POST: du lieu hien huu KHONG mat (orders/products count + checksum id/status/stock identical).
   - Constraint/data hien huu migrate an toan (025 status CHECK khop legacy status dang co).
   - New schema (021..027) hien dien; postcondition moi migration PASS (RAISE neu fail).
@@ -31,7 +31,7 @@ _bf_spec.loader.exec_module(bf)
 ADMIN = "postgresql://alpha3s:alpha3s@db:5432/postgres"
 TEST_DB = "m2exist_itest"
 URL = "postgresql://alpha3s:alpha3s@db:5432/" + TEST_DB
-EXISTING_THROUGH = 20  # DB "hien huu" o moc M1 = migration 020
+EXISTING_THROUGH = 18  # DB "hien huu" = m-oc M0 PRODUCTION that = migration 018 (M1 019-020 chua deploy)
 
 _fail = []
 
@@ -84,7 +84,7 @@ async def main():  # noqa: C901
             "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, "
             "applied_at TIMESTAMPTZ NOT NULL DEFAULT now(), applied_by TEXT, transactional BOOLEAN NOT NULL DEFAULT true)")
 
-        print("[1] dựng DB hiện hữu ở mốc 020 + seed dữ liệu đại diện")
+        print(f"[1] dựng DB hiện hữu ở mốc {EXISTING_THROUGH:03d} (M0 production) + seed dữ liệu đại diện")
         await _apply(conn, existing)
         cust = await conn.fetchval("INSERT INTO customers (psid,name,phone,address) VALUES ('psid-ex','C','0912345678','addr') RETURNING id")
         await conn.execute("UPDATE products SET stock=500 WHERE sku='3S-100G'")
@@ -94,16 +94,16 @@ async def main():  # noqa: C901
             oid = await conn.fetchval("INSERT INTO orders (customer_id,status,total_vnd) VALUES ($1,$2,1000) RETURNING id", cust, stt)
             await conn.execute("INSERT INTO order_items (order_id,product_id,quantity,unit_price_vnd) VALUES ($1,$2,1,1000)", oid, pid)
         applied_through = await conn.fetchval("SELECT max(version) FROM schema_migrations")
-        check("020" in applied_through, f"schema_migrations tới 020 ({applied_through})")
+        check(f"{EXISTING_THROUGH:03d}" in applied_through, f"schema_migrations tới {EXISTING_THROUGH:03d} (M0) ({applied_through})")
 
         pre_ck, pre_orders, pre_prods = await _data_checksum(conn)
         legacy_statuses = sorted(r["status"] for r in await conn.fetch("SELECT DISTINCT status FROM orders"))
         print(f"[pre] orders={pre_orders} products={pre_prods} statuses={legacy_statuses} checksum={pre_ck[:12]}")
 
-        print("[2] EXISTING-APPLY: migration 021..RC trên DB đã có dữ liệu")
+        print(f"[2] EXISTING-APPLY: migration {m2[0].stem[:3]}..{m2[-1].stem[:3]} (M1+M2) trên DB đã có dữ liệu")
         try:
             await _apply(conn, m2)
-            check(True, f"apply 021..{m2[-1].stem[:3]} thành công (postcondition mỗi migration PASS)")
+            check(True, f"apply {m2[0].stem[:3]}..{m2[-1].stem[:3]} (gồm M1 019-020) thành công (postcondition mỗi migration PASS)")
         except Exception as e:  # noqa: BLE001
             check(False, f"existing-apply FAIL: {e}")
             raise
@@ -113,8 +113,9 @@ async def main():  # noqa: C901
         check(post_ck == pre_ck, f"du lieu hien huu KHONG doi (checksum {pre_ck[:12]} == {post_ck[:12]})")
         check(post_orders == pre_orders and post_prods == pre_prods,
               f"orders/products count giữ nguyên ({pre_orders}/{pre_prods} -> {post_orders}/{post_prods})")
-        # new schema present
-        for t in ["inventory_balances", "inventory_movements", "order_events", "inventory_adjustment_requests"]:
+        # new schema present — M1 (019-020) tables + M2 (021-028) tables
+        for t in ["command_executions", "outbox_events", "delivery_attempts",  # M1 019
+                  "inventory_balances", "inventory_movements", "order_events", "inventory_adjustment_requests"]:
             ok = await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{t}")
             check(ok, f"new table {t} hiện diện sau existing-apply")
         # cot moi tren orders (existing rows nhan default/null)
@@ -159,10 +160,9 @@ async def main():  # noqa: C901
         bad = await conn.fetchval("SELECT count(*) FROM inventory_balances WHERE reserved>on_hand OR on_hand<0 OR reserved<0")
         check(bad == 0, f"balance invariants hold ({bad} vi phạm)")
 
-        print("[caveat] Production hiện ở M0 (~018); M1 (019-020) CHƯA deploy production -> KHÔNG tồn tại")
-        print("         'M1 production DB' thật. Rehearsal dùng M1 schema (001-020) + representative data;")
-        print("         production data thật đã audit riêng qua read-only snapshot (Slice0/2, PII-free).")
-        print("         Full production dump vẫn cần gate production-access riêng.")
+        print("[caveat] Rehearsal khởi từ mốc 018 (= M0 production that) + apply TOAN CHUOI 019..028 (M1+M2)")
+        print("         -> dung duong upgrade production khi merge M2. Dung representative data (khong PII).")
+        print("         Full production dump/snapshot that van can production-access gate rieng (CA acceptance §4).")
 
         dur = round((time.monotonic() - t0), 2) if t0 else "n/a"
         print(f"[duration] {dur}s")
@@ -173,7 +173,7 @@ async def main():  # noqa: C901
     if _fail:
         print(f"RESULT: FAIL ({len(_fail)}) -> " + "; ".join(_fail))
         sys.exit(1)
-    print("RESULT: PASS — existing-apply 020->RC an toan; du lieu hien huu bao toan; no PII in output")
+    print("RESULT: PASS — existing-apply 018(M0)->028 (M1+M2) an toan; du lieu hien huu bao toan; no PII in output")
 
 
 if __name__ == "__main__":

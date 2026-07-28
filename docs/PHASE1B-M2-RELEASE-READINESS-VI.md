@@ -40,9 +40,12 @@ language: vi-VN
 - **Checkpoint:** ☐ backup mới + verify restore OK ☐ window chốt ☐ thông báo.
 
 ## 4. Gate 4 — Migration rehearsal trên artifact release-permitted
-- Chạy `021`–`028` trên **bản sao/snapshot production được phép** (không phải dev fresh). Đối chiếu:
-  migration checksums, row counts/invariants, roles/grants, indexes/constraints, backfill plan,
-  post-migration reconciliation. (Tooling đã có: `m2_existing_apply_rehearsal.py` — chạy trên artifact prod.)
+- **Production ở M0 (≤018); M1 (019-020) CHƯA deploy** → rehearsal phải phủ **TOÀN CHUỖI `019`–`028`
+  (gồm M1 019-020 + M2 021-028)** trên **bản sao/snapshot production (mốc 018) được phép** — KHÔNG chỉ
+  021–028 (CA merge-readiness feedback). Đối chiếu: migration checksums, row counts/invariants,
+  roles/grants, indexes/constraints, backfill plan, post-migration reconciliation.
+- Tooling `m2_existing_apply_rehearsal.py` đã cập nhật: dựng DB ở **018** + apply **019..028**; dev-side
+  PASS (28 checksums, data bảo toàn, M1+M2 tables). Release: chạy trên **artifact production 018** thật.
 - **Checkpoint:** ☐ rehearsal trên artifact prod PASS ☐ checksum/counts khớp ☐ no PII trong log.
 
 ## 5. Gate 5 — Runtime DB-role provisioning + secret
