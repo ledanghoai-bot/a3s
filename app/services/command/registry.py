@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.services import attribution
 from app.services.command import errors
 from app.services.command.hashing import canonical_hash
 from app.services.command.redaction import mask_phone
@@ -30,6 +31,9 @@ ORDER_CANCEL = "order.cancel"
 ORDER_MARK_DELIVERY_FAILED = "order.mark_delivery_failed"
 ORDER_REQUEST_RETURN = "order.request_return"
 ORDER_COMPLETE = "order.complete"
+# M3-S1 (spec M3 §7.2) — delivered lifecycle
+ORDER_MARK_DELIVERED = "order.mark_delivered"
+ORDER_RETRY_DELIVERY = "order.retry_delivery"
 INVENTORY_RETURN_INSPECT = "inventory.return_inspect"
 RESERVATION_EXTEND = "inventory.reservation.extend"
 RESERVATION_EXPIRE = "inventory.reservation.expire"
@@ -48,6 +52,9 @@ TRANSITION_ACTION: dict[str, str] = {
     ORDER_REQUEST_RETURN: "request_return",
     ORDER_COMPLETE: "complete",
     INVENTORY_RETURN_INSPECT: "return_inspect",
+    # M3-S1
+    ORDER_MARK_DELIVERED: "mark_delivered",
+    ORDER_RETRY_DELIVERY: "retry_delivery",
 }
 
 _M2_TYPES = [
@@ -56,9 +63,14 @@ _M2_TYPES = [
     RESERVATION_EXTEND, RESERVATION_EXPIRE, ADJUST_REQUEST, ADJUST_APPROVE, ADJUST_REJECT,
 ]
 
+_M3_TYPES = [
+    ORDER_MARK_DELIVERED, ORDER_RETRY_DELIVERY,
+]
+
 REGISTRY: set[tuple[str, int]] = {
     (ORDER_CREATE, ORDER_CREATE_VERSION),
     *((t, 1) for t in _M2_TYPES),
+    *((t, 1) for t in _M3_TYPES),
 }
 
 
@@ -115,6 +127,15 @@ def validate_order_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     psid = payload.get("psid")
     if psid:
         normalized["psid"] = str(psid)
+    # Optional (M3-S2): UTM attribution — validate deterministic (mapping v1, no-PII); request cu
+    # khong gui utm -> normalized khong doi (backward compat). Store xuong orders khi flag M3 bat
+    # (order_service). KHONG vao request_hash (attribution metadata, khong phai business intent).
+    try:
+        utm = attribution.sanitize_utm(payload.get("utm"))
+    except attribution.UTMValidationError as e:
+        raise errors.CommandError(errors.INVALID_ENVELOPE, str(e)) from e
+    if utm:
+        normalized["utm"] = utm
     return normalized
 
 

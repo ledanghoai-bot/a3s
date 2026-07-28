@@ -24,6 +24,7 @@ from app.services import conversation_log, data_deletion, handoff, products, too
 from app.services.messenger_profile import get_user_profile
 from app.services.nlu_hint import get_nlu_hint
 from app.services.rag import search_knowledge
+from app.services.safe_log import safe_exc
 
 SYSTEM_PROMPT = (
     Path(__file__).resolve().parents[1] / "prompts" / "system_prompt.md"
@@ -99,9 +100,9 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
         return {"error": f"Tool khong ton tai: {name}"}
     except TypeError as e:
         # Model truyen sai/thieu tham so so voi schema
-        return {"error": f"Tham so khong hop le cho tool '{name}': {e}"}
+        return {"error": f"Tham so khong hop le cho tool '{name}': {safe_exc(e)}"}
     except Exception as e:
-        print(f"[orchestrator] Tool '{name}' loi: {e}")
+        print(f"[orchestrator] Tool '{name}' loi: {safe_exc(e)}")
         return {"error": f"Loi he thong khi chay tool '{name}', vui long thu lai."}
 
 
@@ -204,7 +205,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 f"[{u['asset_id']}] {u['heading']}:\n{u['content'][:600]}" for u in units
             )
         except Exception as e:
-            print(f"[orchestrator] KB V2 loi, dung tam RAG cu: {e}")
+            print(f"[orchestrator] KB V2 loi, dung tam RAG cu: {safe_exc(e)}")
             chunks = await search_knowledge(text, top_k=4)
             rag_context = "\n\n".join(chunks) if chunks else ""
 
@@ -393,8 +394,9 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             from app.services.command import reply_guard
             shadow = reply_guard.shadow_evaluate(_reply_claims_order_created(reply), created_order_ids)
             if not shadow["consistent"]:
+                # M3-S4: KHONG in noi dung reply (chua ten/ma don) — chi metadata.
                 print(f"[orchestrator][M1-shadow] CLAIM-KHONG-RECEIPT sender={sender_id} "
-                      f"reply={reply[:120]!r}")
+                      f"reply_len={len(reply)}")
             # CR-08: order đã commit -> reply tức thì TRUNG TÍNH (không để LLM nói sai mã đơn/tổng tiền);
             # xác nhận CHÍNH THỨC (đúng committed data) đi qua durable receipt (outbox, CR-03).
             reply = reply_guard.finalize_customer_reply(reply, bool(created_order_ids))
@@ -406,10 +408,11 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # don, khach tuong da mua). Chuyen human that su + tra loi an toan, KHONG de
         # khach tin nham la da dat hang thanh cong.
         if not created_order_ids and _reply_claims_order_created(reply):
+            # M3-S4: KHONG in noi dung reply (ngu canh xac nhan don thuong chua ten/tien) — metadata.
             print(
                 f"[orchestrator] CHAN BIA DON: reply bao da tao don nhung khong co "
                 f"create_order thanh cong trong luot nay. sender={sender_id} "
-                f"reply_goc={reply[:200]!r}"
+                f"reply_len={len(reply)}"
             )
             try:
                 await tools.escalate_to_human(
@@ -421,7 +424,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                     last_message=text,
                 )
             except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
-                print(f"[orchestrator] escalate sau chan bia don loi: {e}")
+                print(f"[orchestrator] escalate sau chan bia don loi: {safe_exc(e)}")
             reply = (
                 "Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "
                 "ngay ạ. Đội ngũ 3S Coffee sẽ liên hệ anh/chị trong ít phút để chốt đơn."
@@ -439,7 +442,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
 
     except Exception as e:
         # Fallback an toan neu LLM loi
-        print(f"[orchestrator] LLM error: {e}")
+        print(f"[orchestrator] LLM error: {safe_exc(e)}")
         return "Đội ngũ 3S Coffee sẽ phản hồi bạn ngay."
 
     finally:

@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.api.auth import require_permission, require_staff_session
 from app.security import throttle
 from app.services import audit_service, auth_service, permission_service
+from app.services.safe_log import safe_exc
 
 router = APIRouter(prefix="/dashboard/auth", tags=["auth"])
 
@@ -54,7 +55,7 @@ async def login(body: dict, request: Request) -> dict:
         finally:
             await conn.close()
     except Exception as e:  # noqa: BLE001
-        print(f"[auth] touch last_login loi (bo qua): {e}")
+        print(f"[auth] touch last_login loi (bo qua): {safe_exc(e)}")
     await audit_service.record_best_effort(
         "staff", "auth.login", actor_staff_id=staff["id"], actor_ref=staff["username"], reason=f"ip={ip}")
     return {"token": token, "username": staff["username"], "name": staff["name"]}

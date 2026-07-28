@@ -82,6 +82,18 @@ class Settings(BaseSettings):
     m2_inventory_ledger: bool = False
     m2_order_transitions: bool = False
     m2_balance_authority: bool = False
+    # m3_delivered_lifecycle: mở transition delivered/retry/cancel-sau-delivery-failed (M3-S1).
+    # OFF (default) = matrix M2 nguyên trạng; missing config -> False (fail-safe).
+    m3_delivered_lifecycle: bool = False
+    # m3_utm_attribution: ghi UTM (đã validate) xuống orders khi order.create có utm (M3-S2).
+    # OFF = không ghi (cột NULL) — validate vẫn deterministic ở registry.
+    m3_utm_attribution: bool = False
+    # m3_outbound_dispatcher: customer notify đi qua dispatcher (consent check + approved template)
+    # thay vì payload text trực tiếp (M3-S5). OFF = đường M2 nguyên trạng. Dedupe key giữ nguyên.
+    m3_outbound_dispatcher: bool = False
+    # m3_retention_executor: cho phép retention job APPLY policy approved (M3-S6).
+    # OFF = job no-op (dry-run thủ công vẫn chạy được qua script).
+    m3_retention_executor: bool = False
 
 
 settings = Settings()

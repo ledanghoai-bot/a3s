@@ -28,6 +28,7 @@ import redis.asyncio as aioredis
 
 from app.config import settings
 from app.db_pool import get_pool
+from app.services.safe_log import mask_ref, safe_exc
 
 # Domain cong khai (khop {$DOMAIN} trong Caddy) - dung dung URL trang thai tra ve
 # cho Meta. Request tu Meta di qua Caddy nen request.url la noi bo (api:8000),
@@ -168,7 +169,7 @@ async def process_deletion(psid: str) -> dict:
         summary = await _delete_customer_data(psid, confirmation_code)
         await _record_request(confirmation_code, "completed")
     except Exception as e:  # noqa: BLE001 - khong duoc lam vo response callback/chat
-        print(f"[data_deletion] Loi xoa du lieu psid={psid}: {e}")
+        print(f"[data_deletion] Loi xoa du lieu psid={mask_ref(psid)}: {safe_exc(e)}")
         await _record_request(confirmation_code, "failed")
     return {"confirmation_code": confirmation_code, "summary": summary}
 

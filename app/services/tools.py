@@ -20,6 +20,7 @@ import asyncpg
 from app.config import settings
 from app.db_pool import acquire, release
 from app.services import handoff, price_overrides
+from app.services.safe_log import safe_exc
 
 PHONE_RE = re.compile(r"^(0|\+84)(3|5|7|8|9)\d{8}$")
 MAX_AUTO_QUANTITY = 100  # tren nguong nay: khong tu chot don, phai escalate
@@ -280,7 +281,7 @@ async def create_order(
                 "status": "new",
             })
         except Exception as e:  # noqa: BLE001 - thong bao phu, khong chan tao don
-            print(f"[tools] notify_admin_new_order loi (bo qua): {e}")
+            print(f"[tools] notify_admin_new_order loi (bo qua): {safe_exc(e)}")
 
         return {
             "order_id": order_id,
@@ -343,7 +344,7 @@ async def escalate_to_human(psid: str, reason: str, last_message: str = "") -> d
     try:
         await handoff.log_escalation(conversation_id, reason)
     except Exception as e:
-        print(f"[tools] Ghi log escalation that bai: {e}")
+        print(f"[tools] Ghi log escalation that bai: {safe_exc(e)}")
     await handoff.notify_admin(psid, reason, last_message)
 
     return {

@@ -13,6 +13,7 @@ from app.db_pool import acquire, release
 from app.services.command import lifecycle, registry
 from app.services.command.envelope import Actor
 from app.services.command.observability import log_event
+from app.services.safe_log import safe_exc
 
 DEFAULT_BATCH = 100
 
@@ -57,7 +58,7 @@ async def run_once(batch: int = DEFAULT_BATCH) -> dict:
                 noop += 1
         except Exception as e:  # noqa: BLE001 — 1 reservation lỗi không được làm hỏng cả batch
             failed += 1
-            log_event("reservation.expire.error", reservation_id=item["id"], error=str(e)[:200])
+            log_event("reservation.expire.error", reservation_id=item["id"], error=safe_exc(e))
 
     stats = {"claimed": len(due), "expired": expired, "noop": noop, "failed": failed}
     if due:

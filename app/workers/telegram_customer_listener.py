@@ -24,6 +24,7 @@ from app.config import settings
 from app.services import conversation_log
 from app.services.handoff import is_bot_paused
 from app.services.orchestrator import handle_message
+from app.services.safe_log import safe_exc
 
 API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 30
@@ -38,7 +39,7 @@ async def _send_reply(client: httpx.AsyncClient, chat_id: int, text: str) -> Non
     try:
         await client.post(url, json={"chat_id": chat_id, "text": text}, timeout=10.0)
     except Exception as e:
-        print(f"[telegram_customer_listener] Gui tin nhan that bai: {e}")
+        print(f"[telegram_customer_listener] Gui tin nhan that bai: {safe_exc(e)}")
 
 
 async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text: str,
@@ -69,7 +70,7 @@ async def _poll_loop() -> None:
         try:
             await client.post(f"{API_BASE}/bot{settings.telegram_customer_bot_token}/deleteWebhook")
         except Exception as e:
-            print(f"[telegram_customer_listener] deleteWebhook loi (bo qua): {e}")
+            print(f"[telegram_customer_listener] deleteWebhook loi (bo qua): {safe_exc(e)}")
 
         print("[telegram_customer_listener] Da ket noi, bat dau long-polling (kenh khach hang)...")
 
@@ -96,10 +97,10 @@ async def _poll_loop() -> None:
                     await _handle_customer_message(client, chat_id, text, message.get("message_id"))
 
             except httpx.HTTPError as e:
-                print(f"[telegram_customer_listener] Loi goi Telegram API: {e}, thu lai sau 5s")
+                print(f"[telegram_customer_listener] Loi goi Telegram API: {safe_exc(e)}, thu lai sau 5s")
                 await asyncio.sleep(5)
             except Exception as e:
-                print(f"[telegram_customer_listener] Loi khong xac dinh: {e}, thu lai sau 5s")
+                print(f"[telegram_customer_listener] Loi khong xac dinh: {safe_exc(e)}, thu lai sau 5s")
                 await asyncio.sleep(5)
 
 

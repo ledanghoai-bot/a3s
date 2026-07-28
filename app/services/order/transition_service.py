@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.config import settings
 from app.services.command import repository as cmd_repo
 from app.services.command.retry import MAX_ATTEMPTS
 from app.services.inventory import repository as inv_repo
@@ -51,6 +52,9 @@ async def apply_transition(
     if order is None:
         raise transitions.IllegalTransition("<missing>", action)
     from_status = order["status"]
+    # M3-S1 gate: transition delivered-lifecycle chỉ mở khi flag bật; OFF = hành vi M2 nguyên trạng.
+    if (from_status, action) in transitions.M3_PAIRS and not settings.m3_delivered_lifecycle:
+        raise transitions.IllegalTransition(from_status, action)
     spec = transitions.resolve(from_status, action)  # raise IllegalTransition nếu không hợp lệ
     prefix = idem_prefix or f"cmd:{command_id}"
     inv_before = order["inventory_status"]
@@ -86,9 +90,12 @@ async def apply_transition(
         )
 
     # --- update order (business + inventory summary cùng transaction §7.4) ---
+    # M3-S1: delivered_at chỉ set khi commit sang delivered; COALESCE -> retry/correction không overwrite.
     inv_after = spec.inventory_status_after or inv_before
     await conn.execute(
-        "UPDATE orders SET status=$2, inventory_status=$3, status_updated_at=now() WHERE id=$1",
+        "UPDATE orders SET status=$2, inventory_status=$3, status_updated_at=now(), "
+        "delivered_at = CASE WHEN $2='delivered' THEN COALESCE(delivered_at, now()) "
+        "ELSE delivered_at END WHERE id=$1",
         order_id, spec.to_status, inv_after,
     )
 
@@ -104,10 +111,16 @@ async def apply_transition(
     return TransitionResult(order_id, from_status, spec.to_status, spec.inventory_effect, affected)
 
 
+# Version template dispatcher chọn theo key (mặc định 1). fulfilled -> v2 (migration 036, PO M3 #4).
+_TEMPLATE_VERSIONS = {"order_status_fulfilled": 2}
+
 # Template deterministic từ committed status (KHÔNG LLM, không bịa quantity/tiền).
 _CUSTOMER_NOTIFY = {
     "confirmed": "Đơn #{id} của bạn đã được xác nhận.",
     "fulfilled": "Đơn #{id} của bạn đã được giao.",
+    # M3-S1: transactional notify khi giao thành công (P03; sensor COMM-04). Chỉ phát khi flag
+    # m3_delivered_lifecycle bật (transition không xảy ra khi OFF). Text 'fulfilled' giữ nguyên M2.
+    "delivered": "Đơn #{id} của bạn đã giao thành công. Cảm ơn bạn!",
     "cancelled": "Đơn #{id} của bạn đã được huỷ.",
     "cancelled_by_exception": "Đơn #{id} của bạn đã được huỷ.",
     "completed": "Đơn #{id} của bạn đã hoàn tất. Cảm ơn bạn!",
@@ -127,6 +140,20 @@ async def _notify_customer(conn, order, to_status: str, command_id) -> None:
         return
     psid = await conn.fetchval("SELECT psid FROM customers WHERE id=$1", order["customer_id"])
     if not psid:
+        return
+    if settings.m3_outbound_dispatcher:
+        # M3-S5: qua dispatcher — consent check + approved template lúc GỬI. Cùng dedupe_key ->
+        # dedupe/at-least-once M1 giữ nguyên (AC-M3-06); template seed 032 = đúng text M2.
+        # Version map TƯỜNG MINH (deterministic, reviewable): fulfilled dùng v2 theo PO Decision
+        # Record M3 mục 4 (migration 036) — "bàn giao vận chuyển" vì delivered đã là mốc riêng.
+        from app.services.command import dispatcher
+        version = _TEMPLATE_VERSIONS.get(f"order_status_{to_status}", 1)
+        await dispatcher.enqueue_outbound(
+            conn, command_id=command_id, customer_id=order["customer_id"], customer_ref=psid,
+            destination=ch, purpose_code="P03_TRANSACTIONAL",
+            template_key=f"order_status_{to_status}", template_version=version,
+            params={"id": order["id"]},
+            dedupe_key=f"order_status:{order['id']}:{to_status}", max_attempts=MAX_ATTEMPTS)
         return
     await cmd_repo.insert_outbox(
         conn, command_id=command_id, event_type="order.status.customer", event_version=1,

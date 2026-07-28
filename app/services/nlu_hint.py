@@ -20,6 +20,7 @@ from pathlib import Path
 from app.services.nlu.high_precision_rules import (
     get_vocative_prefixes,  # noqa: F401 (doc de ro nguon)
 )
+from app.services.safe_log import safe_exc
 
 _NLU_ROOT = Path(__file__).resolve().parents[2] / "datasets" / "nlu"
 
@@ -79,7 +80,7 @@ async def _ensure_loaded() -> bool:
         )
         return True
     except Exception as e:
-        print(f"[nlu_hint] Khong load duoc du lieu NLU (bo qua, dung flow cu): {e}")
+        print(f"[nlu_hint] Khong load duoc du lieu NLU (bo qua, dung flow cu): {safe_exc(e)}")
         return False
 
 
@@ -143,7 +144,7 @@ async def _build_knowledge_hint(message: str) -> str:
             lines.append(f"[{u['asset_id']}] {u['heading']}: {content_snippet}")
         return "\n".join(lines)
     except Exception as e:
-        print(f"[nlu_hint] Loi khi goi Knowledge Base V2 (bo qua, dung hint chung): {e}")
+        print(f"[nlu_hint] Loi khi goi Knowledge Base V2 (bo qua, dung hint chung): {safe_exc(e)}")
         return (
             "Cau hoi lien quan toi kien thuc san pham/thuong hieu - uu tien dung thong "
             "tin tham khao da co san trong prompt, khong bia them."
@@ -194,7 +195,7 @@ async def _build_knowledge_fallback_hint(message: str) -> str:
             lines.append(f"[{u['asset_id']}] {u['heading']}: {u['content'][:500]}")
         return "\n".join(lines)
     except Exception as e:
-        print(f"[nlu_hint] Loi fallback knowledge hint (bo qua): {e}")
+        print(f"[nlu_hint] Loi fallback knowledge hint (bo qua): {safe_exc(e)}")
         return ""
 
 
@@ -285,5 +286,5 @@ async def get_nlu_hint(message: str, sender_id: str | None = None) -> str:
         # distance) truoc khi chiu im lang. Xem _build_knowledge_fallback_hint().
         return await _build_knowledge_fallback_hint(message)
     except Exception as e:
-        print(f"[nlu_hint] Loi khi chay NLU Router (bo qua, dung flow cu): {e}")
+        print(f"[nlu_hint] Loi khi chay NLU Router (bo qua, dung flow cu): {safe_exc(e)}")
         return ""
