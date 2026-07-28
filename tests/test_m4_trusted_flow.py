@@ -6,10 +6,24 @@ mangle bi tu choi; module KHONG duoc noi vao orchestrator (test tinh).
 """
 
 import asyncio
+import base64
 from pathlib import Path
 
+import pytest
+
+from app.config import settings
 from app.services.pii import slot_store as slot_store_mod
 from app.services.pii import trusted_flow
+from app.services.pii.masking import make_placeholder
+
+
+@pytest.fixture(autouse=True)
+def _fp_key():
+    """S3: placeholder integrity tag can khoa HMAC — gan khoa synthetic co dinh."""
+    old = settings.m4_slot_fp_key_b64
+    settings.m4_slot_fp_key_b64 = base64.b64encode(bytes(range(32))).decode()
+    yield
+    settings.m4_slot_fp_key_b64 = old
 
 _CONF = {"high": 2, "medium": 1, "low": 0}
 PHONE, NAME, ADDR = "0912345678", "Nguyễn Văn An", "số 12 đường Lê Lợi, phường 5, quận 3"
@@ -84,7 +98,7 @@ def test_happy_path_model_khong_thay_pii_va_args_tu_store(monkeypatch):
     sent = " ".join(m["content"] for call in model.calls for m in call)
     for leak in (PHONE, NAME, "Lê Lợi"):
         assert leak not in sent
-    assert "[PII_PHONE_1]" in sent
+    assert "[PII_PHONE_1_" in sent  # S3: placeholder kem integrity tag
     # command args do trusted code lap: refs tu tham so, PII tu store, items tu context
     args = executor.calls[0]
     assert args["customer_ref"] == "cust-A" and args["conversation_ref"] == "conv-1"
@@ -149,10 +163,28 @@ def test_placeholder_mangle_bi_tu_choi(monkeypatch):
 
 
 def test_placeholder_hop_le_duoc_rehydrate(monkeypatch):
+    ph = make_placeholder("phone", 1, "conv-1")  # dung tag cua CHINH conv-1
     out = {"intent": "smalltalk", "missing_slot_types": [],
-           "response_candidate": "Dạ em sẽ gọi [PII_PHONE_1] trước khi giao ạ", "context": {}}
+           "response_candidate": f"Dạ em sẽ gọi {ph} trước khi giao ạ", "context": {}}
     outcome, _, _, _ = _run("gọi mình qua 0912345678", out, monkeypatch=monkeypatch)
     assert outcome.kind == "reply" and "0912345678" in outcome.reply
+
+
+def test_placeholder_conversation_khac_bi_tu_choi(monkeypatch):
+    """S3 cross-context: placeholder duc tu conv-KHAC (tag khac) -> reject."""
+    ph_other = make_placeholder("phone", 1, "conv-KHAC")
+    out = {"intent": "smalltalk", "missing_slot_types": [],
+           "response_candidate": f"Em gọi {ph_other} nhé", "context": {}}
+    outcome, _, _, _ = _run("gọi mình qua 0912345678", out, monkeypatch=monkeypatch)
+    assert outcome.kind == "escalate" and outcome.escalate_reason == "placeholder_reject"
+
+
+def test_placeholder_lap_bi_tu_choi(monkeypatch):
+    ph = make_placeholder("phone", 1, "conv-1")
+    out = {"intent": "smalltalk", "missing_slot_types": [],
+           "response_candidate": f"Gọi {ph} hoặc {ph} đều được", "context": {}}
+    outcome, _, _, _ = _run("gọi mình qua 0912345678", out, monkeypatch=monkeypatch)
+    assert outcome.kind == "escalate" and outcome.escalate_reason == "placeholder_reject"
 
 
 def test_model_loi_escalate(monkeypatch):

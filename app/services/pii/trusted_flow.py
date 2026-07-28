@@ -100,9 +100,10 @@ async def process_turn(conn, *, customer_ref: str, conversation_ref: str, text: 
             source_message_ref=source_message_ref)
         stored += 1
 
-    # 4. Mask current + history (assistant turns cung mask — receipt cu co PII khach)
-    masked_hist, hist_map = mask_history(history)
-    cur = mask_text(text)
+    # 4. Mask current + history (assistant turns cung mask — receipt cu co PII
+    # khach). S3: placeholder LUON kem integrity tag bind conversation nay.
+    masked_hist, hist_map = mask_history(history, conversation_ref=conversation_ref)
+    cur = mask_text(text, conversation_ref=conversation_ref)
     mapping = {**hist_map, **cur.mapping}
     masked_messages = masked_hist + [{"role": "user", "content": cur.masked_text}]
 
@@ -180,8 +181,10 @@ async def process_turn(conn, *, customer_ref: str, conversation_ref: str, text: 
         return TurnOutcome(kind="command_receipt", reply=receipt_reply,
                            receipt=committed, vendor_called=True, stored_slots=stored)
 
-    # Intent thuong: rehydrate placeholder fail-closed (mangle/bia -> escalate)
-    rehydrated = rehydrate_response(sem.response_candidate, mapping)
+    # Intent thuong: rehydrate placeholder fail-closed (sua/thieu/lap/cross-context
+    # -> escalate; tag phai khop conversation nay — spec §10)
+    rehydrated = rehydrate_response(sem.response_candidate, mapping,
+                                    conversation_ref=conversation_ref)
     if rehydrated is None:
         _log("m4_flow_placeholder_reject")
         return TurnOutcome(kind="escalate", reply=_ESCALATE_REPLY,
