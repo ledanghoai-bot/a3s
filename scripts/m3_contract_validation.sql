@@ -39,15 +39,36 @@ BEGIN
                          'order_status_cancelled','order_status_cancelled_by_exception',
                          'order_status_completed');
   IF n <> 6 THEN RAISE EXCEPTION 'M3 FAIL: seed template v1 thieu (%/6)', n; END IF;
-  IF NOT EXISTS (SELECT 1 FROM outbound_templates
-                 WHERE template_key='order_status_fulfilled' AND version=2 AND status='approved') THEN
-    RAISE EXCEPTION 'M3 FAIL: thieu order_status_fulfilled v2 (036/PO #4)'; END IF;
+  -- F-M3-GATE-R1-02: EXACT TUPLE cho fulfilled v2 (khong chi ton tai + approved)
+  IF (SELECT count(*) FROM outbound_templates
+      WHERE template_key='order_status_fulfilled' AND version=2
+        AND purpose_code='P03_TRANSACTIONAL'
+        AND body='Đơn #{id} của bạn đã được bàn giao cho đơn vị vận chuyển.'
+        AND status='approved') <> 1 THEN
+    RAISE EXCEPTION 'M3 FAIL: order_status_fulfilled v2 khong khop EXACT tuple PO duyet (036/PO #4)'; END IF;
+  -- Seed v1 exact content (cung md5 nhu 034 apply-time — validation chay MOI deploy)
+  IF (SELECT md5(string_agg(template_key || '|' || version || '|' || purpose_code || '|' || status
+                            || '|' || body, E'\n' ORDER BY template_key))
+        FROM outbound_templates
+       WHERE version = 1
+         AND template_key IN ('order_status_confirmed','order_status_fulfilled','order_status_delivered',
+                              'order_status_cancelled','order_status_cancelled_by_exception',
+                              'order_status_completed'))
+     IS DISTINCT FROM '538cf5f754455679ae4bd3beb6eab009' THEN
+    RAISE EXCEPTION 'M3 FAIL: seed template v1 content drift (md5 khong khop)'; END IF;
 
-  -- 033+035: retention policy/log/hold + RET-04/09 v1 approved (PO #1)
+  -- 033+035+037: retention policy/log/hold + EXACT approved contract (F-M3-GATE-R1-01) + trigger
   IF to_regclass('public.retention_policies') IS NULL OR to_regclass('public.retention_run_log') IS NULL
      OR to_regclass('public.legal_holds') IS NULL THEN
     RAISE EXCEPTION 'M3 FAIL: thieu bang retention/legal_holds'; END IF;
-  SELECT count(*) INTO n FROM retention_policies
-    WHERE (rule_id, version) IN (('RET-04',1),('RET-09',1)) AND status='approved';
-  IF n <> 2 THEN RAISE EXCEPTION 'M3 FAIL: RET-04/RET-09 v1 chua approved (%/2)', n; END IF;
+  IF (SELECT count(*) FROM retention_policies
+      WHERE rule_id='RET-04' AND version=1 AND data_category='raw_chat' AND action='delete'
+        AND retention_period_days=730 AND respect_legal_hold=true AND status='approved') <> 1 THEN
+    RAISE EXCEPTION 'M3 FAIL: RET-04 v1 khong khop EXACT approved contract (raw_chat/delete/730/hold=true)'; END IF;
+  IF (SELECT count(*) FROM retention_policies
+      WHERE rule_id='RET-09' AND version=1 AND data_category='deletion_requests' AND action='delete'
+        AND retention_period_days=730 AND respect_legal_hold=true AND status='approved') <> 1 THEN
+    RAISE EXCEPTION 'M3 FAIL: RET-09 v1 khong khop EXACT approved contract (deletion_requests/delete/730/hold=true)'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='retention_policies_guard_trg') THEN
+    RAISE EXCEPTION 'M3 FAIL: thieu trigger retention_policies_guard_trg (037 immutability)'; END IF;
 END $val$;

@@ -130,7 +130,10 @@ async def main():  # noqa: C901
         check(n_appr == 2, f"033 seed -> 035 PO approved RET-04/09 v1 ({n_appr})")
         n_mig = await conn.fetchval("SELECT count(*) FROM schema_migrations")
         n_ck = await conn.fetchval("SELECT count(DISTINCT checksum) FROM schema_migrations")
-        check(n_mig == 36 and n_ck == 36, f"schema_migrations 36 rows/36 checksums ({n_mig}/{n_ck})")
+        check(n_mig == 37 and n_ck == 37, f"schema_migrations 37 rows/37 checksums ({n_mig}/{n_ck})")
+        check(await conn.fetchval(
+            "SELECT count(*) FROM pg_trigger WHERE tgname='retention_policies_guard_trg'") == 1,
+            "037: retention policy immutability trigger hien dien sau existing-apply")
         check(await conn.fetchval(
             "SELECT count(*) FROM pg_trigger WHERE tgname='outbound_templates_guard_trg'") == 1,
             "034: template immutability trigger hien dien sau existing-apply")
