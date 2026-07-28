@@ -18,8 +18,8 @@ author_role: Dev
 | Package head | commit chứa tài liệu này (docs-only trên RC — xem PR) |
 | Branch / PR | `feat/phase1b-m3-compliance-sensor-foundations` — PR #3 (draft, KHÔNG merge) |
 | CI | CI/CD **success** tại `a3b88e7`: https://github.com/ledanghoai-bot/a3s/actions/runs/30291350048 |
-| Diff so với base | 48 files, +2689/−50 |
-| Re-baseline (Directive §2.2) | CHƯA áp dụng — M2 chưa merge `main`; gate re-baseline giữ nguyên BLOCKED cho M3 merge review |
+| Diff so với base | 48 files, +2689/−50 (pre-rebase) / 50 files vs main (post-rebase) |
+| Re-baseline (Directive §2.2) | **ĐÃ THỰC HIỆN — xem §9** (M2 merge `main` 28/7, notice A3S-PHASE1B-M2-M3-COORDINATION-NOTICE-001 Work order B) |
 
 ## 2. Scope đã triển khai (slice → commit)
 
@@ -128,7 +128,10 @@ khi release (open input — xem §7).
    (log format/tắt access log) hoặc milestone riêng — đổi route là breaking dashboard API.
 4. Text notify `fulfilled` hiện là "đã được giao" (M2 nguyên văn) — sau khi có `delivered` nên đổi
    thành "đã bàn giao vận chuyển"? Đổi = behavior change → chờ CA/PO, làm bằng template version 2.
-5. Re-baseline sau M2 merge main (Directive §2.2) — Dev sẽ thực hiện đủ 7 bước trước M3 merge review.
+5. ~~Re-baseline sau M2 merge main~~ — **ĐÃ HOÀN THÀNH** (xem §9).
+6. Baseline manifest release (F-R1-01) hiện pin migrations 001-028 — release M3 cần mở rộng manifest
+   029-033 + fresh/existing validation tương ứng (release-prep, ngoài dev scope; phát hiện qua
+   `m2_r1_remediation_test` §9).
 
 ## 8. Submission Index
 
@@ -140,6 +143,27 @@ khi release (open input — xem §7).
 | 4 | Migration manifest 029-033 + rehearsal fresh/existing/forward-fix | §5 |
 | 5 | AC-M3-01..07 mapping | §4 |
 | 6 | Open decisions | §7 |
+
+## 9. Re-baseline evidence (Directive §2.2 / Coordination Notice Work order B — 2026-07-28 14:10..14:16+07:00)
+
+| Bước §2.2 | Kết quả |
+|---|---|
+| 1. Exact M2 merge SHA trên main | `42aab7192a94b259538f7591b9268945256f6b4e` (Merge PR #5: M2 + F-R1-01) |
+| 2. Accepted RC là ancestor | `git merge-base --is-ancestor 9b49628… origin/main` → EXIT=0 ✓; impl head release = `66db876` (descendant của RC, app/+migrations 001-028 unchanged theo remediation package M2) |
+| 3. Rebase M3 lên merged baseline | `git rebase origin/main` — 8/8 commit apply sạch |
+| 4. Conflict resolution | **Không phát sinh conflict nào** (M3 additive; F-R1-01 chỉ chạm migrate.py/validations/scripts — không giao file với M3) |
+| 5. Re-run migration + regression + checksum | Fresh: mọi evidence script apply 001..033 PASS; existing-apply `m3_existing_apply_rehearsal` (028→033) PASS; regression 19 lệnh (bảng dưới); migrations 001–028 `git diff` với main = **rỗng** (identical); manifest sha256 toàn bộ 001-033 chốt tại head mới |
+| 6. Pre/post-rebase SHA | pre: code `a3b88e76605ac25d6a1c5ef578c6cc76b3aadeb1` / package `79de5ae0eba120963068040356e038244392705f` → post: **code `17d094d19d0dd4655e3fc854ca9c048ecec645f6`** / package = commit chứa bản cập nhật này |
+| 7. Drift check | Không drift ngoài M2 accepted RC + approved release changes (main chỉ thêm docs-only tail + release-prep + F-R1-01 đã qua gate R1/R2 closure) |
+
+Evidence re-run tại post-rebase head (exit 0 = PASS): 2026-07-28 14:12→14:16+07:00 —
+pytest 81 ✓, ruff ✓, 7 script M3 ✓, 9 script regression M2 ✓ (**18/18 EXIT=0**, cùng danh mục §3).
+
+**Ngoại lệ khai báo trung thực:** `m2_r1_remediation_test.py` (script release M2 mới trên main) EXIT=1
+trên nhánh M3 **by-design**: nó pin cứng migration head=028/count=28 theo baseline manifest release M2,
+trong khi M3 hợp lệ mở head tới 033. Mọi case khác của script PASS. Hệ quả thật cần ghi nhận:
+**release M3 sẽ phải cập nhật baseline_manifest (029-033 + validations)** — release-prep input, bổ sung
+vào §7 Open decisions (mục 6).
 
 ## Self-check checklist (CA-GOVERNANCE-001 §4)
 
