@@ -120,5 +120,5 @@ BEGIN
       problems := problems || ' app_has_update'; END IF;
   END IF;
   IF problems <> '' THEN
-    RAISE EXCEPTION '040 postcondition FAIL —%', problems; END IF;
+    RAISE EXCEPTION '038 postcondition FAIL —%', problems; END IF;
 END $$;

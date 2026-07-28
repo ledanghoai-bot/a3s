@@ -90,7 +90,7 @@ def _aad(customer_ref: str, conversation_ref: str, slot_type: str) -> bytes:
 
 def encrypt_slot_value(plaintext: str, *, customer_ref: str,
                        conversation_ref: str, slot_type: str) -> bytes:
-    """Ma hoa gia tri slot, BIND vao context. Blob: v1 || nonce(12) || ct+tag."""
+    """Ma hoa gia tri slot, BIND vao context. Blob: v2 || nonce(12) || ct+tag."""
     key = _load_key(settings.m4_slot_key_b64, "m4_slot_key_b64")
     nonce = os.urandom(_NONCE_LEN)
     ct = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"),
