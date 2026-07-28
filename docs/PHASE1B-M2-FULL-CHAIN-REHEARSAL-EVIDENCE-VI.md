@@ -4,24 +4,30 @@ milestone: M2
 type: release-preparation-artifact
 title: Full-chain existing-apply rehearsal 018(M0)->028 — evidence (release-prep, NGOAI accepted RC)
 branch: release-prep/m2-full-chain-rehearsal
-base: ea4dba8124b5cc73b755656c8789f331bcc2854d (M2 accepted head)
+run_head_sha: 5556f504b3bf1abefc25412f3363976dcdd4e627
+base: ea4dba8124b5cc73b755656c8789f331bcc2854d (M2 accepted head — branch-off point, CHUA chua harness)
 language: vi-VN
 ---
 
 # Full-chain rehearsal 018→028 — Evidence (release-preparation)
 
-> Artifact chuẩn bị release theo CA Gate 4 feedback + CA correction (option 1): full-chain rehearsal
-> `019`–`028` (M1 019-020 + M2 021-028) từ mốc **018 (M0 = production thật)**. **KHÔNG thuộc M2 accepted
-> RC** — nằm trên branch release-prep riêng để PR M2 giữ accepted RC + docs-only tail. Harness ở đây là
+> Artifact chuẩn bị release theo CA Gate 4 feedback + correction. Full-chain rehearsal `019`–`028`
+> (M1 019-020 + M2 021-028) từ mốc **018 (M0 = production thật)**. **KHÔNG thuộc M2 accepted RC** — trên
+> branch release-prep riêng để PR M2 giữ accepted RC + docs-only tail. Harness =
 > `scripts/m2_existing_apply_rehearsal.py` với `EXISTING_THROUGH=18` (chỉ trên branch này).
 
-## Run capture (exact command · timestamp · exit code · artifact)
-- **Artifact path:** `docs/PHASE1B-M2-FULL-CHAIN-REHEARSAL-EVIDENCE-VI.md` (file này) — commit cùng harness trên branch `release-prep/m2-full-chain-rehearsal`.
+## Run capture — exact command · timestamp · exit code · exact commit
+- **run_head_sha (full 40-char):** `5556f504b3bf1abefc25412f3363976dcdd4e627` — **commit release-prep ĐÃ
+  CHỨA harness** mà run thực thi (KHÔNG phải base `ea4dba8`). Lần run này `git rev-parse HEAD` =
+  `5556f504…` (harness đã committed).
+- **Artifact path:** `docs/PHASE1B-M2-FULL-CHAIN-REHEARSAL-EVIDENCE-VI.md` (file này). Được cập nhật ở
+  **docs-only successor** của `5556f504…` (chỉ file này đổi; harness KHÔNG đổi) — compare rõ.
 - **Environment:** Docker Compose, container `alpha3s-api-1`, Postgres 16 + pgvector; throwaway DB `m2exist_itest`.
 
 ```text
-timestamp: 2026-07-28 08:52:45 +0700
-branch: release-prep/m2-full-chain-rehearsal @ ea4dba8124b5cc73b755656c8789f331bcc2854d
+run_head_sha (full 40-char): 5556f504b3bf1abefc25412f3363976dcdd4e627
+branch: release-prep/m2-full-chain-rehearsal
+timestamp: 2026-07-28 09:05:41 +0700
 command: docker exec alpha3s-api-1 python scripts/m2_existing_apply_rehearsal.py
 --- OUTPUT ---
 [setup] existing=001..018 (18 files); apply=['019', '020', '021', '022', '023', '024', '025', '026', '027', '028']
@@ -59,12 +65,12 @@ command: docker exec alpha3s-api-1 python scripts/m2_existing_apply_rehearsal.py
 [caveat] Rehearsal khởi từ mốc 018 (= M0 production that) + apply TOAN CHUOI 019..028 (M1+M2)
          -> dung duong upgrade production khi merge M2. Dung representative data (khong PII).
          Full production dump/snapshot that van can production-access gate rieng (CA acceptance §4).
-[duration] 2.88s
+[duration] 3.01s
 
 RESULT: PASS — existing-apply 018(M0)->028 (M1+M2) an toan; du lieu hien huu bao toan; no PII in output
 EXIT=0
 ```
 
 ## Ghi chú
-- Release thật: chạy trên **artifact production 018** (snapshot/dump được phép) — production-access gate riêng (CA acceptance §4).
-- Accepted M2 rehearsal (`m2_existing_apply_rehearsal.py` bản 020→028) giữ NGUYÊN trong accepted RC `9b49628`; harness 018 CHỈ tồn tại trên branch release-prep này.
+- Release thật: chạy harness trên **artifact production 018** (snapshot/dump được phép) — production-access gate riêng (CA acceptance §4).
+- Accepted M2 rehearsal (`m2_existing_apply_rehearsal.py` bản 020→028) giữ NGUYÊN trong accepted RC `9b49628`; harness 018 CHỈ trên branch release-prep này.
