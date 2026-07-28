@@ -15,7 +15,9 @@ author_role: Dev
 |---|---|
 | Implementation base (Directive §2.1) | `9b49628a83ba1fe02b97913f20f33e4883560b5b` (exact M2 accepted RC — checkout detached, object verified, `git status` sạch; evidence `docs/PHASE1B-M3-SLICE0-BASELINE-VI.md`) |
 | **Code/evidence head (RC M3)** | `a3b88e76605ac25d6a1c5ef578c6cc76b3aadeb1` |
-| Package head | commit chứa tài liệu này (docs-only trên RC — xem PR) |
+| Package head (re-baseline, CA đã review) | `9775daf74f20c463de6cf89fbedc8b760fd68950` (C-M3-RB-01) |
+| Package tail (code head → package head) | **evidence-script + docs** — 2 commit / 2 file: `scripts/m3_existing_apply_rehearsal.py` (executable evidence, thuộc reviewed/tested scope) + `docs/PHASE1B-M3-DEV-DELIVERY-PACKAGE-VI.md` (C-M3-RB-02; KHÔNG phải docs-only) |
+| Correction tail | commit Correction Note C-M3-RB-01..04 (docs-only — xem §10) |
 | Branch / PR | `feat/phase1b-m3-compliance-sensor-foundations` — PR #3 (draft, KHÔNG merge) |
 | CI | CI/CD **success** tại `a3b88e7`: https://github.com/ledanghoai-bot/a3s/actions/runs/30291350048 |
 | Diff so với base | 48 files, +2689/−50 (pre-rebase) / 50 files vs main (post-rebase) |
@@ -129,9 +131,11 @@ khi release (open input — xem §7).
 4. Text notify `fulfilled` hiện là "đã được giao" (M2 nguyên văn) — sau khi có `delivered` nên đổi
    thành "đã bàn giao vận chuyển"? Đổi = behavior change → chờ CA/PO, làm bằng template version 2.
 5. ~~Re-baseline sau M2 merge main~~ — **ĐÃ HOÀN THÀNH** (xem §9).
-6. Baseline manifest release (F-R1-01) hiện pin migrations 001-028 — release M3 cần mở rộng manifest
-   029-033 + fresh/existing validation tương ứng (release-prep, ngoài dev scope; phát hiện qua
-   `m2_r1_remediation_test` §9).
+6. (sửa theo C-M3-RB-04) `baseline_manifest` **không** pin migration head/count — nó quản lý
+   baseline-through + danh sách validation; pin `028/28` nằm trong `scripts/m2_r1_remediation_test.py`
+   (historical release evidence). Open input đúng: **đánh giá riêng** liệu M3 cần thêm post-migration
+   validation cho contract 029–033; nếu cần thay manifest/runner thì đó là implementation/release delta
+   phải được review + test (new exact head + CI); KHÔNG sửa manifest chỉ để script lịch sử PASS.
 
 ## 8. Submission Index
 
@@ -152,18 +156,31 @@ khi release (open input — xem §7).
 | 2. Accepted RC là ancestor | `git merge-base --is-ancestor 9b49628… origin/main` → EXIT=0 ✓; impl head release = `66db876` (descendant của RC, app/+migrations 001-028 unchanged theo remediation package M2) |
 | 3. Rebase M3 lên merged baseline | `git rebase origin/main` — 8/8 commit apply sạch |
 | 4. Conflict resolution | **Không phát sinh conflict nào** (M3 additive; F-R1-01 chỉ chạm migrate.py/validations/scripts — không giao file với M3) |
-| 5. Re-run migration + regression + checksum | Fresh: mọi evidence script apply 001..033 PASS; existing-apply `m3_existing_apply_rehearsal` (028→033) PASS; regression 19 lệnh (bảng dưới); migrations 001–028 `git diff` với main = **rỗng** (identical); manifest sha256 toàn bộ 001-033 chốt tại head mới |
+| 5. Re-run migration + regression + checksum | Fresh: mọi evidence script apply 001..033 PASS; existing-apply `m3_existing_apply_rehearsal` (028→033) PASS; **current regression suite 18/18 PASS** (denominator không gồm script lịch sử — C-M3-RB-03, xem ghi chú dưới); migrations 001–028 `git diff` với main = **rỗng** (identical); manifest sha256 toàn bộ 001-033 chốt tại head mới |
 | 6. Pre/post-rebase SHA | pre: code `a3b88e76605ac25d6a1c5ef578c6cc76b3aadeb1` / package `79de5ae0eba120963068040356e038244392705f` → post: **code `17d094d19d0dd4655e3fc854ca9c048ecec645f6`** / package = commit chứa bản cập nhật này |
 | 7. Drift check | Không drift ngoài M2 accepted RC + approved release changes (main chỉ thêm docs-only tail + release-prep + F-R1-01 đã qua gate R1/R2 closure) |
 
-Evidence re-run tại post-rebase head (exit 0 = PASS): 2026-07-28 14:12→14:16+07:00 —
-pytest 81 ✓, ruff ✓, 7 script M3 ✓, 9 script regression M2 ✓ (**18/18 EXIT=0**, cùng danh mục §3).
+Evidence re-run tại post-rebase head, 2026-07-28 14:12→14:16+07:00 (C-M3-RB-03 — tách rõ 2 nhóm):
 
-**Ngoại lệ khai báo trung thực:** `m2_r1_remediation_test.py` (script release M2 mới trên main) EXIT=1
-trên nhánh M3 **by-design**: nó pin cứng migration head=028/count=28 theo baseline manifest release M2,
-trong khi M3 hợp lệ mở head tới 033. Mọi case khác của script PASS. Hệ quả thật cần ghi nhận:
-**release M3 sẽ phải cập nhật baseline_manifest (029-033 + validations)** — release-prep input, bổ sung
-vào §7 Open decisions (mục 6).
+1. **Current regression suite: 18/18 EXIT=0** — pytest 81, ruff, 7 script M3, 9 script regression M2
+   (đúng danh mục §3).
+2. **Ngoài denominator — script lịch sử release M2:** `m2_r1_remediation_test.py` đã chạy và EXIT=1
+   do **expected scope mismatch**: script tự pin `FULL-CHAIN 018→028, expected head=028, count=28`
+   (pin nằm TRONG chính script — C-M3-RB-04), trong khi nhánh M3 hợp lệ có head 033. Đây KHÔNG phải
+   bằng chứng M2 invariant regression; các case khác của script PASS. Không tuyên bố "toàn bộ lệnh
+   PASS" — 1 lệnh lịch sử đã chạy exit 1 với lý do scope nêu trên.
+
+## 10. Correction Note (theo A3S-PHASE1B-M3-CA-REBASELINE-REVIEW-001 §6-§7 — docs-only, không dùng submission slot)
+
+| ID | Sửa gì | Ở đâu |
+|---|---|---|
+| C-M3-RB-01 | Package head ghi full SHA `9775daf74f20c463de6cf89fbedc8b760fd68950` | §1 |
+| C-M3-RB-02 | Tail code→package = **evidence-script + docs** (2 commit / 2 file: `scripts/m3_existing_apply_rehearsal.py` + package doc), không ghi docs-only | §1 |
+| C-M3-RB-03 | Tách denominator: current suite 18/18 PASS; `m2_r1_remediation_test` = historical, expected scope mismatch, ngoài denominator; không tuyên bố toàn bộ lệnh PASS | §9 |
+| C-M3-RB-04 | Bỏ phát biểu "baseline_manifest pin 001-028"; pin 028/28 nằm trong script lịch sử; open input viết lại thành đánh-giá-riêng validation 029-033 (delta nếu có phải review+test) | §7.6, §9 |
+
+Correction này KHÔNG thay code/evidence script/migrations — chỉ package metadata. Code head giữ nguyên
+`17d094d19d0dd4655e3fc854ca9c048ecec645f6`.
 
 ## Self-check checklist (CA-GOVERNANCE-001 §4)
 
