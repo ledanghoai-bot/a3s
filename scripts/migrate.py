@@ -7,7 +7,9 @@ Lenh:
                                     validations (fail-closed). Exit != 0 neu apply/validate loi.
   baseline [--manifest P]         — ghi cac version <= manifest.baseline_through la applied
                                     (KHONG chay), CHI sau khi verify TOAN BO manifest.
-  validate [--manifest P]         — chi chay post-migration validations (khong ap gi).
+  validate [--manifest P]         — chi chay post-migration validations (operational, khong ap gi).
+  fresh-validate [--manifest P]   — chi chay FRESH-INSTALL-ONLY validations (manifest.fresh_install_validations);
+                                    goi TUONG MINH o fresh-DB bootstrap/test. KHONG nam trong `up` deploy path.
 
 Safety (theo CA-REVIEW-M0-DEV-001):
 - §4 baseline KHONG nhan threshold tuy y: chi baseline toi `manifest.baseline_through`; version trong
@@ -153,6 +155,25 @@ async def run_post_validations(conn, manifest: dict) -> None:
         print(f"Post-migration validations pass ({len(files)} file).")
 
 
+async def run_fresh_validations(conn, manifest: dict) -> None:
+    """Chay FRESH-INSTALL-ONLY validations (manifest.fresh_install_validations) — exact canonical seed.
+    CHI goi tuong minh qua `fresh-validate`; KHONG chay trong `up` deploy path (CA F-R1-01 §4.2).
+    Loi -> raise SystemExit (exit != 0)."""
+    files = manifest.get("fresh_install_validations", [])
+    for rel in files:
+        p = ROOT / rel
+        if not p.exists():
+            raise SystemExit(f"STOP: fresh-install validation khong ton tai: {rel}")
+        sql = p.read_text(encoding="utf-8")
+        try:
+            await conn.execute(sql)
+        except asyncpg.PostgresError as e:
+            raise SystemExit(f"FRESH VALIDATION FAIL ({rel}): {e}")
+        print(f"  fresh validation OK: {rel}")
+    if files:
+        print(f"Fresh-install validations pass ({len(files)} file).")
+
+
 # ---- Commands ---------------------------------------------------------------
 
 async def cmd_status(conn, migs) -> None:
@@ -196,6 +217,10 @@ async def cmd_validate(conn, manifest) -> None:
     await run_post_validations(conn, manifest)
 
 
+async def cmd_fresh_validate(conn, manifest) -> None:
+    await run_fresh_validations(conn, manifest)
+
+
 async def cmd_baseline(conn, migs, manifest, actor) -> None:
     await ensure_table(conn)
     await _drift_stop(conn, migs)  # §4.5 drift check truoc baseline
@@ -230,7 +255,7 @@ async def cmd_baseline(conn, migs, manifest, actor) -> None:
 async def main() -> None:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     actor = os.environ.get("MIGRATE_ACTOR", "rehearsal")
-    manifest = load_manifest(_arg_manifest()) if cmd in ("up", "baseline", "validate") else {}
+    manifest = load_manifest(_arg_manifest()) if cmd in ("up", "baseline", "validate", "fresh-validate") else {}
     conn = await asyncpg.connect(db_url())
     try:
         if not await conn.fetchval("SELECT pg_try_advisory_lock($1)", LOCK_KEY):
@@ -243,6 +268,8 @@ async def main() -> None:
                 await cmd_up(conn, migs, manifest, actor)
             elif cmd == "validate":
                 await cmd_validate(conn, manifest)
+            elif cmd == "fresh-validate":
+                await cmd_fresh_validate(conn, manifest)
             elif cmd == "baseline":
                 await cmd_baseline(conn, migs, manifest, actor)
             else:

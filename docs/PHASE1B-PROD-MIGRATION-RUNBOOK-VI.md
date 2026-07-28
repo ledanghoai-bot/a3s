@@ -130,6 +130,27 @@ docker compose -f docker-compose.prod.yml exec -T api python /srv/scripts/migrat
   `schema_migrations` có 001-018; `audit_log`/`roles`/`role_permissions` tồn tại; `role_permissions` đã
   seed (018).
 
+### 3.1. Hai lớp post-migration validation (CA F-R1-01 — bắt buộc hiểu trước mọi deploy)
+`migrate.py up` (deploy path production, kể cả M1/M2 `019→028`) **chỉ** chạy lớp **OPERATIONAL** —
+`scripts/operational_seed_validation.sql` trong `post_migration_validations`. Lớp này **existing-safe**:
+kiểm 1 product `3S-100G` · description approved · không "100% Robusta" · `serving_size_g NULL` ·
+`net_weight_g=100` · **≥1** price tier · structural invariant tier (min_qty≥1, unit_price_vnd>0).
+**KHÔNG** assert exact count / exact canonical price-tier values → production đã có thêm price tier hợp lệ
+(staff tạo qua chức năng M0) **vẫn PASS**, `up` **exit 0**.
+
+Lớp **FRESH-INSTALL-ONLY** — `scripts/fresh_db_seed_validation.sql` (exact canonical: `1/170k, 5/160k,
+20/140k`, đúng 3 tier) — **KHÔNG** nằm trong `up`. Chỉ chạy ở **fresh-DB bootstrap/test**, gọi **tường minh**:
+```bash
+docker compose -f docker-compose.prod.yml exec -T api python /srv/scripts/migrate.py fresh-validate
+```
+Manifest key `fresh_install_validations` (versioned) trỏ lớp này; runner có command `fresh-validate` riêng
+(không heuristic đoán môi trường). **Fresh install mới** = chạy `up` (operational) **rồi** `fresh-validate`
+(canonical). **Existing production deploy** = chỉ `up` (operational); **KHÔNG** chạy `fresh-validate` trên
+production có giá thật (sẽ fail đúng thiết kế vì prod có tier ngoài canonical).
+> Bối cảnh: R1 rehearsal trên restored production phát hiện `fresh_db_seed_validation` (exact 3 tier) làm
+> `up` exit 1 vì prod đã có 5 tier hợp lệ → deploy abort. Split này (CA remediation F-R1-01) khắc phục:
+> operational tolerant trong deploy path, canonical giữ nguyên nhưng chuyển sang fresh-only tường minh.
+
 ## 3A. RBAC CUTOVER UNIT (trong maintenance — CA §4, §5)
 > Một unit liên tục, `RBAC_STRICT` bật SAU CÙNG, **staff traffic vẫn đóng** cho tới §3B.
 1. **Seed mapping đã PO duyệt = migration `018_rbac_seed.sql`** (đã áp ở §3 up) — KHÔNG chạy file proposal

@@ -26,5 +26,6 @@
     { "name": "exactly one 3S-100G", "sql": "SELECT count(*)=1 FROM products WHERE sku='3S-100G'", "expect": true },
     { "name": "data_deletion_requests exists (013 applied)", "sql": "SELECT to_regclass('public.data_deletion_requests') IS NOT NULL", "expect": true }
   ],
-  "post_migration_validations": ["scripts/fresh_db_seed_validation.sql"]
+  "post_migration_validations": ["scripts/operational_seed_validation.sql"],
+  "fresh_install_validations": ["scripts/fresh_db_seed_validation.sql"]
 }
