@@ -3,8 +3,9 @@ id: A3S-PHASE1B-M4-STAGE-0P-GOVERNANCE-PACKAGE-001
 title: Alpha3S Phase I-B M4 — Stage 0P Governance Package (Production Shadow Request)
 document_type: governance_request_package
 owner: Dev
-status: PROPOSED — chờ PO/CA phê duyệt
+status: PARTIAL PO APPROVAL (29/7 07:43) — mục 5, 6 PO đã duyệt; mục 2, 4 PO đồng ý chờ CA xác nhận; mục 1, 3 chờ CA
 created_at: 2026-07-29 06:17+07:00
+last_updated: 2026-07-29 07:43+07:00
 governing_spec: A3S-PHASE1B-M4-SPEC-001 v1.1.0
 governing_directive: A3S-PHASE1B-M4-DEV-DIRECTIVE-001 v1.1.0 §6, §7
 base_reference: CA Development Acceptance Closure (M4-S0..S3 ACCEPTED, evidence 5fee922, package cebbd68)
@@ -20,6 +21,11 @@ danh mục Directive §6 để PO/CA có đủ thông tin phê duyệt hoặc t�
 migration, flag hay hạ tầng nào bị thay đổi khi soạn tài liệu này.** Nếu được duyệt, bước triển
 khai kỹ thuật (migration Slot Store cho sample zone, bật `m4_pii_shadow=true` trên tập con
 traffic) là một submission riêng, có evidence riêng, sau khi có approval record bằng văn bản.
+
+**Cập nhật 29/7 07:43 — PO đã ra quyết định cho 4/6 mục ở §10** (xem bảng §10 để có trạng thái
+đầy đủ): mục 5 (reviewer) và mục 6 (cơ sở pháp lý) **PO DUYỆT**; mục 2 (purpose code) và mục 4
+(ranh giới vendor gap) **PO ĐỒNG Ý VỀ NGUYÊN TẮC, chờ CA xác nhận kỹ thuật** trước khi ghi chính
+thức. Mục 1 (thiết kế tổng thể) và mục 3 (retention 45 ngày) **còn chờ CA** — chưa có quyết định.
 
 Directive §6 quy định 5 prerequisite phải PASS trước khi mở Stage 0P:
 
@@ -65,14 +71,14 @@ P12_PII_DETECTOR_EVAL
   Mô tả: Lấy mẫu có kiểm soát từ hội thoại thật để gán nhãn thủ công, đo recall/precision
          của PII detector nội bộ (không gửi vendor, không ảnh hưởng response khách).
   Data class: D1_PERSONAL_BASIC, D2_PERSONAL_SENSITIVE (nội dung tin nhắn thô trong sample)
-  Cơ sở pháp lý: legitimate interest (cải thiện kiểm soát bảo vệ dữ liệu) — CẦN PO/legal xác
-                 nhận cơ sở cụ thể theo quy định hiện hành trước khi kích hoạt.
-  Trạng thái: PROPOSED
+  Cơ sở pháp lý: legitimate interest (cải thiện kiểm soát bảo vệ dữ liệu) — PO ĐÃ DUYỆT
+                 (29/7 07:43, mục 6 §10).
+  Trạng thái: PO ĐỒNG Ý — chờ CA xác nhận format/tính nhất quán với registry (mục 2 §10)
 ```
 
-Đây là format khớp các mục hiện có trong `PROCESSING-PURPOSE-REGISTRY.md`; nếu PO/CA duyệt,
-Dev sẽ nộp addition này như một correction nhỏ vào registry chung (KHÔNG tự ý sửa file M3
-trong lúc soạn gói đề nghị này).
+Đây là format khớp các mục hiện có trong `PROCESSING-PURPOSE-REGISTRY.md`. Cơ sở pháp lý đã có
+quyết định PO (xem trên); mã purpose và nội dung đăng ký cụ thể vẫn chờ CA xác nhận trước khi
+Dev nộp addition chính thức vào registry chung (KHÔNG tự ý sửa file M3 trong lúc soạn gói này).
 
 ## 3. Data minimization (Directive §6 mục 2)
 
@@ -103,7 +109,7 @@ trong lúc soạn gói đề nghị này).
 
 | Vai trò | Quyền | Ghi chú |
 |---|---|---|
-| Reviewer (gán nhãn) | SELECT trên sample zone (đọc tin nhắn thô để gán nhãn slot) | Danh sách người cụ thể do PO chỉ định bằng tên — **không phải role chung chung**; tối thiểu hoá số người |
+| Reviewer (gán nhãn) | SELECT trên sample zone (đọc tin nhắn thô để gán nhãn slot) | **PO ĐÃ DUYỆT (29/7 07:43, mục 5 §10): PO (anh Hoài) là reviewer duy nhất.** Không có người thứ hai — tối thiểu hoá số người đúng nguyên tắc đề xuất |
 | Dev (vận hành/đo eval) | SELECT trên nhãn + metric đã gán (KHÔNG cần đọc lại tin nhắn thô sau khi label xong) | Tách quyền: eval script chạy trên nhãn, không cần quyền đọc raw liên tục |
 | Runtime app (`alpha3s_app`) | KHÔNG có quyền trên sample zone | Sample zone tách biệt hoàn toàn khỏi runtime path — detector production (nếu shadow bật) chỉ ghi *metric*, không ghi raw message vào sample zone tự động (xem §6) |
 | Vendor-path role | KHÔNG có quyền (đúng nguyên tắc `alpha3s_vendor_path` DENY ALL đã áp cho `pii_slots`) | Áp dụng cùng nguyên tắc cho sample zone khi migration |
@@ -177,14 +183,20 @@ Tái dùng cơ chế đã có, không tạo quy trình riêng cho M4:
 
 ## 10. Điều kiện Dev đề nghị PO/CA quyết định
 
-1. Duyệt/không duyệt mở Stage 0P với thiết kế §2–§9.
-2. Duyệt purpose code mới `P12_PII_DETECTOR_EVAL` (§2) hoặc chỉ định mã khác.
-3. Duyệt con số retention 45 ngày (§6) hoặc chỉ định số khác.
-4. Xác nhận cách đọc ranh giới vendor gap (§1: Stage 0P không cần chờ gap cross-border DeepSeek).
-5. Chỉ định danh sách reviewer cụ thể (tên, không phải role chung).
-6. Xác nhận cơ sở pháp lý xử lý (§2) — cần legal/PO, không phải quyết định kỹ thuật của Dev.
+| # | Nội dung | Trạng thái | Quyết định |
+|---|---|---|---|
+| 1 | Duyệt/không duyệt mở Stage 0P với thiết kế §2–§9 | ⏳ CHỜ CA | — |
+| 2 | Duyệt purpose code mới `P12_PII_DETECTOR_EVAL` (§2) hoặc chỉ định mã khác | 🟡 PO ĐỒNG Ý, chờ CA xác nhận | **PO (29/7 07:43): đồng ý về nguyên tắc** — chờ CA xác nhận format/nhất quán registry trước khi ghi chính thức |
+| 3 | Duyệt con số retention 45 ngày (§6) hoặc chỉ định số khác | ⏳ CHỜ CA | — (gắn với gap DSR #17 chưa code — xem §7) |
+| 4 | Xác nhận cách đọc ranh giới vendor gap (§1) | 🟡 PO ĐỒNG Ý, chờ CA xác nhận | **PO (29/7 07:43): đồng ý về nguyên tắc** — chờ CA xác nhận vì gate/directive do CA phát hành |
+| 5 | Chỉ định danh sách reviewer cụ thể | ✅ **PO ĐÃ DUYỆT** | **PO (29/7 07:43): PO (anh Hoài) là reviewer duy nhất** — xem §5 |
+| 6 | Xác nhận cơ sở pháp lý xử lý (§2) | ✅ **PO ĐÃ DUYỆT** | **PO (29/7 07:43): legitimate interest như đề xuất** — xem §2 |
 
-**Không có bước nào ở trên được Dev tự thực hiện.** Sau khi có quyết định bằng văn bản, Dev sẽ
-mở submission kỹ thuật riêng: migration `m4_shadow_review_samples`, cập nhật Deletion Propagation
-Map (mục #17), bổ sung UC-004 chính thức, sample job, rồi mới bật `m4_pii_shadow=true` trên tập
-traffic đã duyệt — mỗi bước có evidence riêng theo đúng khuôn mẫu S0–S3.
+**Vẫn chưa có bước triển khai kỹ thuật nào được thực hiện** — mục 5, 6 là quyết định thuộc thẩm
+quyền PO nên đã chốt ngay; mục 2, 4 PO đồng ý về nguyên tắc nhưng CẦN CA xác nhận (đúng phạm vi
+kiến trúc/gate do CA quản); mục 1, 3 CHƯA có quyết định, PO chủ động để CA đánh giá thiết kế
+tổng thể và retention trước (mục 3 gắn trực tiếp với gap DSR #17 ở §7 hiện chưa code). Sau khi
+CA ra quyết định cho 4 mục còn lại, Dev sẽ mở submission kỹ thuật riêng: migration
+`m4_shadow_review_samples`, cập nhật Deletion Propagation Map (mục #17), bổ sung UC-004 chính
+thức, sample job, rồi mới bật `m4_pii_shadow=true` trên tập traffic đã duyệt — mỗi bước có
+evidence riêng theo đúng khuôn mẫu S0–S3.
