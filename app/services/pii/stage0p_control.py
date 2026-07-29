@@ -10,14 +10,27 @@ Fail-closed toan dien:
 - `statement_timeout` gan cho CHINH cau doc -> maximum stop latency co CO CHE THAT (khong phai
   uoc luong "mili-giay" suong) — CA yeu cau tuong minh o Review #3.
 
-Ghi (bat/tat) PHAI qua role rieng `alpha3s_m4_control_plane` (F-M4-0P-01B acceptance criteria
-muc 4) — KHONG dung cot `updated_by_note` (chi de tham khao) lam nguon tham quyen; tham quyen
-THAT la audit_log record (actor_staff_id + approval_ref) ghi trong CUNG transaction voi UPDATE.
+REV 2 (CA Technical Review #1, finding T1-01/T1-05): doc/ghi kill switch KHONG con la 2 buoc
+Python rieng (SELECT roi UPDATE+INSERT do caller tu quan ly transaction). Ghi (bat/tat) gio CHI
+qua ham SECURITY DEFINER `m4_stage0p_set_capture` (migration 039 §5b) — ham nay TU GIU
+`pg_advisory_xact_lock(4013003)` (CUNG lock key voi `m4_stage0p_fetch_next_message`), validate
+actor/approval_ref, UPDATE + INSERT audit_log ATOMIC trong 1 statement/transaction. Khong con
+phu thuoc caller nho mo transaction dung cach (T1-05 goc: "caller dung autocommit co the commit
+control change truoc, sau do audit loi rieng, tao thay doi khong duoc audit").
+
+`read_capture_enabled()` van la 1 SELECT doc-tuoi don gian, dung cho hien thi trang thai /
+logging — KHONG dung ket qua nay lam co so quyet dinh doc plaintext (quyet dinh THAT nam ben
+trong `m4_stage0p_fetch_next_message`, doc control SAU KHI da giu advisory lock — xem
+stage0p_sampling.py).
 """
 
 import json
 
 CONTROL_READ_TIMEOUT_MS = 2000  # F-M4-0P-01B: statement_timeout that, khong phai uoc luong
+
+
+class ControlChangeRejectedError(Exception):
+    """m4_stage0p_set_capture tu choi (actor khong hop le / approval_ref rong / loi khac)."""
 
 
 def _log(event: str, **fields) -> None:
@@ -26,14 +39,11 @@ def _log(event: str, **fields) -> None:
 
 
 async def read_capture_enabled(conn) -> bool:
-    """Doc TUOI trang thai capture. Loi/timeout/thieu row -> False (fail closed).
+    """Doc TUOI trang thai capture (tham khao/hien thi). Loi/timeout/thieu row -> False.
 
     `conn` phai la connection RIENG cho lan doc nay (khong tai dung transaction dang mo lau —
-    de statement_timeout khong anh huong cau khac). Goi truoc MOI don vi ghi (1 tin nhan)."""
+    de statement_timeout khong anh huong cau khac)."""
     try:
-        # asyncpg `timeout=` la client-side deadline cho DUNG cau nay — dung hon SET LOCAL
-        # statement_timeout (SET LOCAL chi co hieu luc trong 1 transaction block ro rang; goi
-        # rieng le nhu 2 statement khac nhau se KHONG mang tac dung sang cau SELECT ke tiep).
         row = await conn.fetchrow("SELECT capture_enabled FROM m4_stage0p_control WHERE id = 1",
                                   timeout=CONTROL_READ_TIMEOUT_MS / 1000)
     except Exception as e:  # noqa: BLE001 — fail closed la hop dong, khong phai loi can sua
@@ -46,29 +56,31 @@ async def read_capture_enabled(conn) -> bool:
 
 
 async def set_capture_enabled(conn, *, enabled: bool, actor_staff_id: int,
-                              approval_ref: str) -> None:
-    """Bat/tat control — PHAI goi tren connection xac thuc bang role
-    `alpha3s_m4_control_plane` (migration 039 chi GRANT UPDATE cho role nay).
+                              approval_ref: str) -> bool:
+    """Bat/tat control qua ham SECURITY DEFINER `m4_stage0p_set_capture` — PHAI goi tren
+    connection xac thuc bang role `alpha3s_m4_control_plane` (migration 039 chi GRANT EXECUTE
+    cho role nay, KHONG con UPDATE truc tiep tren bang — T1-05).
 
-    Ghi audit_log TRONG CUNG transaction voi UPDATE (conn.transaction() do caller mo, giong
-    convention command repository M1) — audit that bai se rollback ca UPDATE, khong co thay doi
-    "am tham" nao khong duoc ghi lai. `approval_ref` la bat buoc (khong duoc rong) — day la
-    tham chieu quyet dinh PO/CA cho phep bat/tat, KHONG phai tu Dev tu quyet."""
+    Ham nay la 1 LENH DUY NHAT (khong phai caller tu quan ly transaction nhieu buoc) — fence
+    (advisory lock), validate actor/approval_ref, UPDATE, va INSERT audit_log deu nam TRONG
+    than ham SQL, atomic that su boi transaction cua chinh statement goi ham nay.
+
+    Tra ve gia tri `before_enabled` (trang thai TRUOC khi doi) de caller log/so sanh.
+    Nem `ControlChangeRejectedError` neu actor khong hop le hoac approval_ref rong."""
     if not approval_ref or not approval_ref.strip():
-        raise ValueError("approval_ref bat buoc — khong duoc bat/tat control khi khong co tham chieu quyet dinh")
+        raise ControlChangeRejectedError(
+            "approval_ref bat buoc — khong duoc bat/tat control khi khong co tham chieu quyet dinh")
+    try:
+        row = await conn.fetchrow(
+            "SELECT * FROM m4_stage0p_set_capture($1, $2, $3)",
+            enabled, actor_staff_id, approval_ref,
+        )
+    except Exception as e:  # noqa: BLE001 — bao boc loi DB (actor khong active, v.v.) thanh loi ro rang cho caller
+        _log("m4_control_change_rejected", enabled=enabled, actor_staff_id=actor_staff_id,
+             error=str(e))
+        raise ControlChangeRejectedError(str(e)) from e
 
-    before = await conn.fetchrow("SELECT capture_enabled FROM m4_stage0p_control WHERE id = 1")
-    await conn.execute(
-        "UPDATE m4_stage0p_control SET capture_enabled = $1, updated_at = now(), "
-        "updated_by_note = $2 WHERE id = 1",
-        enabled, f"staff:{actor_staff_id} ref:{approval_ref}",
-    )
-    await conn.execute(
-        "INSERT INTO audit_log (actor_type, actor_staff_id, action, entity_type, entity_id, "
-        "before, after, reason) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8)",
-        "staff", actor_staff_id, "m4_capture_control_change", "m4_stage0p_control", "1",
-        json.dumps({"capture_enabled": before["capture_enabled"] if before else None}),
-        json.dumps({"capture_enabled": enabled}),
-        approval_ref,
-    )
-    _log("m4_control_changed", enabled=enabled, actor_staff_id=actor_staff_id)
+    before_enabled = bool(row["before_enabled"])
+    _log("m4_control_changed", enabled=enabled, actor_staff_id=actor_staff_id,
+        before_enabled=before_enabled)
+    return before_enabled

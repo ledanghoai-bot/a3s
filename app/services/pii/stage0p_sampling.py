@@ -8,10 +8,16 @@ Pha 1 (metadata-only, KHONG doc messages.content):
   1d. lock_batch — khoa vao m4_selection_batches; TU DAY collector CHI biet batch_id.
 
 Pha 2 (collector — doc noi dung qua ham SECURITY DEFINER, MA HOA + GHI):
-  run_collector — 1 checkpoint DUY NHAT truoc MOI INSERT: (a) capture control con ON? (doc
-  tuoi qua stage0p_control, F-M4-0P-01B) (b) khach khong pending-deletion? (re-check rang chong
-  race, F-M4-0P-02B). Advisory lock don-writer (F-M4-0P-03B, tai dung pattern scripts/migrate.py
-  nhung LOCK_KEY rieng). MAX_CHARS/MAX_BYTES cat truoc khi ma hoa, UTF-8-safe 2 buoc.
+  run_collector — REV2 (CA Technical Review #1, T1-01/T1-02): 1 MESSAGE = 1 transaction tren
+  collector_conn, trong do goi ham SECURITY DEFINER `m4_stage0p_fetch_next_message` (migration
+  039 §5a). Ham nay TU giu `pg_advisory_xact_lock(4013003)` (CUNG lock key voi
+  `m4_stage0p_set_capture`) roi MOI doc control — nen khong con "control_conn" rieng o tang
+  Python: khong co cach nao collector doc plaintext ma khong kiem tra control TRUOC, va khong co
+  sample nao commit duoc SAU KHI 1 lenh set_capture(OFF) da commit (2 ben tranh nhau CUNG 1 khoa,
+  ai giu truoc hoan tat/rollback truoc). Cap MAX_CHARS ap NGAY trong SQL (truoc khi plaintext roi
+  DB); MAX_BYTES UTF-8-safe van o Python (can lam viec voi bytes da encode). Advisory lock
+  don-writer 4013002 (session-scoped, KHAC voi 4013003 xact-scoped) giu nguyen — chan 2 tien
+  trinh collector chay dong thoi tren CUNG batch (invariant lien tuc, khac voi fencing bao mat).
 """
 
 import hashlib
@@ -21,7 +27,6 @@ import uuid
 
 from app.services.pii.crypto import encrypt_sample_value
 from app.services.pii.normalize import nfc
-from app.services.pii.stage0p_control import read_capture_enabled
 from app.services.pii.stage0p_eligibility import is_pending_deletion
 
 MAX_CONVERSATIONS = 260
@@ -31,7 +36,8 @@ SELECTION_SEED_LABEL = "m4-stage0p-v1"
 RETENTION_DAYS = 45
 PURPOSE_CODE = "P12_PII_DETECTOR_EVAL"
 NORMALIZATION_VERSION = "nfc-v1"
-# Rieng voi LOCK_KEY 4013001 cua scripts/migrate.py — khac namespace, khong dung tranh nhau.
+# Rieng voi LOCK_KEY 4013001 cua scripts/migrate.py va 4013003 (control fence, xem migration 039
+# §5a/§5b) — 3 namespace doc lap, khong dung tranh nhau.
 ADVISORY_LOCK_KEY = 4013002
 
 
@@ -127,87 +133,110 @@ async def lock_batch(conn, *, window_start, window_end, eligible_count,
     return row["batch_id"]
 
 
-async def run_collector(collector_conn, control_conn, pending_conn, *, batch_id) -> dict:
-    """Pha 2. `collector_conn`/`control_conn`/`pending_conn` PHAI la 3 connection XAC THUC
-    BANG 3 ROLE KHAC NHAU (alpha3s_m4_sample_collector / bat ky role co the doc control /
-    alpha3s_m4_pending_checker) — dung 1 connection chung cho ca 3 se lam mat y nghia tach
-    quyen. Don-writer bang advisory lock (F-M4-0P-03B) — tien trinh thu 2 fail-fast."""
+async def run_collector(collector_conn, pending_conn, *, batch_id) -> dict:
+    """Pha 2. REV2: chi con 2 connection (`collector_conn` role alpha3s_m4_sample_collector,
+    `pending_conn` role alpha3s_m4_pending_checker) — KHONG con `control_conn` rieng, vi kiem
+    tra control gio nam BEN TRONG ham SECURITY DEFINER `m4_stage0p_fetch_next_message`, chay
+    boi alpha3s_m4_definer bat ke collector_conn dung role gi (T1-01).
+
+    Don-writer bang advisory lock session-scoped 4013002 (F-M4-0P-03B) — tien trinh thu 2
+    fail-fast, giu nguyen tu ban goc. Ben trong, MOI message la 1 transaction rieng tren
+    collector_conn giu advisory lock xact-scoped 4013003 (T1-01/T1-02) xuyen suot fetch->
+    encrypt->insert — xem docstring module."""
     got_lock = await collector_conn.fetchval("SELECT pg_try_advisory_lock($1)", ADVISORY_LOCK_KEY)
     if not got_lock:
         _log("m4_collector_lock_failed")
         return {"inserted": 0, "skipped_pending": 0, "truncated": 0,
                 "aborted_control_off": False, "lock_failed": True}
 
+    inserted = skipped_pending = truncated_count = 0
+    pending_customers: set[int] = set()
+    cust_cache: dict[int, int | None] = {}
+    aborted_control_off = False
+    after_conv, after_msg = -1, -1
+
     try:
-        rows = await collector_conn.fetch(
-            "SELECT * FROM m4_stage0p_fetch_batch_content($1)", batch_id
-        )
-        conv_ids = sorted({r["conversation_id"] for r in rows})
-        cust_map: dict[int, int] = {}
-        if conv_ids:
-            cust_rows = await collector_conn.fetch(
-                "SELECT id, customer_id FROM conversations WHERE id = ANY($1)", conv_ids
-            )
-            cust_map = {r["id"]: r["customer_id"] for r in cust_rows}
+        while True:
+            async with collector_conn.transaction():
+                fetched = await collector_conn.fetchrow(
+                    "SELECT * FROM m4_stage0p_fetch_next_message($1, $2, $3)",
+                    batch_id, after_conv, after_msg,
+                )
+                status = fetched["status"]
 
-        inserted = skipped_pending = truncated_count = 0
-        pending_customers: set[int] = set()
-        aborted = False
+                if status == "control_off":
+                    _log("m4_collector_stopped_control_off", inserted=inserted)
+                    aborted_control_off = True
+                    break
+                if status == "exhausted":
+                    break
 
-        for row in rows:
-            # 1 checkpoint duy nhat truoc MOI INSERT: control ON? khach khong pending?
-            if not await read_capture_enabled(control_conn):
-                _log("m4_collector_stopped_control_off", inserted=inserted)
-                aborted = True
-                break
+                conv_id = fetched["conversation_id"]
+                msg_id = fetched["message_id"]
+                after_conv, after_msg = conv_id, msg_id
 
-            customer_id = cust_map.get(row["conversation_id"])
-            if customer_id in pending_customers:
-                skipped_pending += 1
-                continue
-            if await is_pending_deletion(pending_conn, customer_id):
-                pending_customers.add(customer_id)
-                skipped_pending += 1
-                continue
+                customer_id = cust_cache.get(conv_id)
+                if customer_id is None and conv_id not in cust_cache:
+                    cust_row = await collector_conn.fetchrow(
+                        "SELECT customer_id FROM conversations WHERE id = $1", conv_id
+                    )
+                    customer_id = cust_row["customer_id"] if cust_row else None
+                    cust_cache[conv_id] = customer_id
 
-            text, was_truncated = _truncate(nfc(row["content"]))
-            if was_truncated:
-                truncated_count += 1
-            sample_id = str(uuid.uuid4())
-            customer_ref = str(customer_id)
-            conversation_ref = str(row["conversation_id"])
-            blob = encrypt_sample_value(text, customer_ref=customer_ref,
-                                        conversation_ref=conversation_ref, sample_id=sample_id)
-            await collector_conn.execute(
-                """
-                INSERT INTO m4_shadow_review_samples
-                  (sample_id, customer_ref, conversation_ref, encrypted_message,
-                   canonical_text_len, truncated, expires_at, purpose_code,
-                   normalization_version, selection_batch)
-                VALUES ($1,$2,$3,$4,$5,$6, now() + make_interval(days => $7), $8, $9, $10)
-                """,
-                sample_id, customer_ref, conversation_ref, blob, len(text), was_truncated,
-                RETENTION_DAYS, PURPOSE_CODE, NORMALIZATION_VERSION, batch_id,
-            )
-            inserted += 1
+                if customer_id in pending_customers:
+                    skipped_pending += 1
+                    continue
+                if await is_pending_deletion(pending_conn, customer_id):
+                    pending_customers.add(customer_id)
+                    skipped_pending += 1
+                    continue
+
+                text, was_truncated = _truncate(nfc(fetched["content"]))
+                was_truncated = was_truncated or bool(fetched["char_truncated"])
+                if was_truncated:
+                    truncated_count += 1
+                sample_id = str(uuid.uuid4())
+                customer_ref = str(customer_id)
+                conversation_ref = str(conv_id)
+                blob = encrypt_sample_value(text, customer_ref=customer_ref,
+                                            conversation_ref=conversation_ref, sample_id=sample_id)
+                await collector_conn.execute(
+                    """
+                    INSERT INTO m4_shadow_review_samples
+                      (sample_id, customer_ref, conversation_ref, encrypted_message,
+                       canonical_text_len, truncated, expires_at, purpose_code,
+                       normalization_version, selection_batch)
+                    VALUES ($1,$2,$3,$4,$5,$6, now() + make_interval(days => $7), $8, $9, $10)
+                    """,
+                    sample_id, customer_ref, conversation_ref, blob, len(text), was_truncated,
+                    RETENTION_DAYS, PURPOSE_CODE, NORMALIZATION_VERSION, batch_id,
+                )
+                inserted += 1
 
         _log("m4_collector_done", inserted=inserted, skipped_pending=skipped_pending,
-             truncated=truncated_count, aborted_control_off=aborted)
+             truncated=truncated_count, aborted_control_off=aborted_control_off)
         return {"inserted": inserted, "skipped_pending": skipped_pending,
-                "truncated": truncated_count, "aborted_control_off": aborted,
+                "truncated": truncated_count, "aborted_control_off": aborted_control_off,
                 "lock_failed": False}
     finally:
         await collector_conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
 
 
 async def purge_expired(conn) -> int:
-    """Retention RET-11b: `eval completed OR 45 ngay, tuy dieu kien nao truoc`. `conn` phai
-    xac thuc bang role `alpha3s_m4_sample_purge`. Log counts-only (khong sample_id/customer_ref
-    trong log). DELETE la vo hai neu khop 0 row — idempotent tu nhien."""
+    """Retention RET-11b: `eval completed (m4_selection_batches.evaluation_completed_at) OR 45
+    ngay tu captured_at, tuy dieu kien nao truoc`. REV2 (CA Technical Review #1, T1-06): JOIN
+    sang m4_selection_batches — KHONG con suy trang thai "eval xong" tu label_status/
+    predicted_slots cap-row (finding cu: prediction-writer chay xong CHUA co nghia evaluator da
+    chay/report da seal; 1 scheduler purge xen ke co the xoa corpus TRUOC KHI eval thuc su hoan
+    tat). `conn` phai xac thuc bang role `alpha3s_m4_sample_purge`. Log counts-only (khong
+    sample_id/customer_ref trong log). DELETE la vo hai neu khop 0 row — idempotent tu nhien."""
     result = await conn.execute(
-        "DELETE FROM m4_shadow_review_samples "
-        "WHERE expires_at <= now() "
-        "   OR (label_status = 'labeled' AND predicted_slots IS NOT NULL)"
+        """
+        DELETE FROM m4_shadow_review_samples s
+        USING m4_selection_batches b
+        WHERE s.selection_batch = b.batch_id
+          AND (s.expires_at <= now() OR b.evaluation_completed_at IS NOT NULL)
+        """
     )
     count = int(result.split()[-1]) if result.startswith("DELETE") else 0
     _log("m4_purge_done", count=count)

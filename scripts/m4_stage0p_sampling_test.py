@@ -85,7 +85,7 @@ async def main() -> int:
     from app.services.pii.crypto import encrypt_sample_value
     blob = encrypt_sample_value(truncated_text, customer_ref="1", conversation_ref="1",
                                 sample_id="utf8-test")
-    check(len(blob) <= 8045, f"ciphertext <= 8045 byte (thuc te {len(blob)})")
+    check(len(blob) <= 8030, f"ciphertext <= 8030 byte REV2 T1-02 (thuc te {len(blob)})")
     rt = decrypt_sample_value(blob, customer_ref="1", conversation_ref="1", sample_id="utf8-test")
     check(rt == truncated_text, "giai ma khop dung noi dung da cat")
 
@@ -135,8 +135,6 @@ async def main() -> int:
     await conn1.execute("SET ROLE alpha3s_m4_sample_collector")
     conn2 = await asyncpg.connect(DB_URL)
     await conn2.execute("SET ROLE alpha3s_m4_sample_collector")
-    ctrl1 = await asyncpg.connect(DB_URL)
-    ctrl2 = await asyncpg.connect(DB_URL)
     pend1 = await asyncpg.connect(DB_URL)
     await pend1.execute("SET ROLE alpha3s_m4_pending_checker")
     pend2 = await asyncpg.connect(DB_URL)
@@ -145,9 +143,11 @@ async def main() -> int:
     got2 = await conn2.fetchval("SELECT pg_try_advisory_lock($1)", s.ADVISORY_LOCK_KEY)
     check(got1 is True and got2 is False, "2 tien trinh cung xin lock -> dung 1 thanh cong")
     await conn1.execute("SELECT pg_advisory_unlock($1)", s.ADVISORY_LOCK_KEY)
-    r2 = await s.run_collector(conn2, ctrl2, pend2, batch_id=batch["batch_id"])
+    # REV2: run_collector khong con nhan control_conn rieng (T1-01 — kiem tra control nam
+    # TRONG ham DB m4_stage0p_fetch_next_message, chay boi alpha3s_m4_definer).
+    r2 = await s.run_collector(conn2, pend2, batch_id=batch["batch_id"])
     check(r2.get("lock_failed") is False, "sau khi tra lock, tien trinh 2 chay binh thuong")
-    for c in (conn1, conn2, ctrl1, ctrl2, pend1, pend2):
+    for c in (conn1, conn2, pend1, pend2):
         await c.close()
 
     print("== [E]+[F] Eligibility: hoi thoai ngoai cua so / khong lien quan don hang ==")
@@ -187,13 +187,14 @@ async def main() -> int:
         "INSERT INTO m4_selection_batches (window_start,window_end,eligible_count,selected_count,"
         "algorithm_seed,locked_conversation_ids,purpose_code) VALUES (now()-interval '1 day',now(),"
         "1,1,'capg',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL') RETURNING batch_id", convG["id"])
+    staff_g = await admin.fetchrow(
+        "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
+        "VALUES ('m4-sampling-test-staff', 'x', 'x', true) RETURNING id")
     cp_conn = await asyncpg.connect(DB_URL)
     await cp_conn.execute("SET ROLE alpha3s_m4_control_plane")
-    async with cp_conn.transaction():
-        await set_capture_enabled(cp_conn, enabled=True, actor_staff_id=None, approval_ref="CAP-G")
+    await set_capture_enabled(cp_conn, enabled=True, actor_staff_id=staff_g["id"], approval_ref="CAP-G")
     collector_conn2 = await asyncpg.connect(DB_URL)
     await collector_conn2.execute("SET ROLE alpha3s_m4_sample_collector")
-    control_conn2 = await asyncpg.connect(DB_URL)
     pending_conn2 = await asyncpg.connect(DB_URL)
     await pending_conn2.execute("SET ROLE alpha3s_m4_pending_checker")
 
@@ -214,13 +215,17 @@ async def main() -> int:
             await watch.close()
 
     result_g, _ = await asyncio.gather(
-        s.run_collector(collector_conn2, control_conn2, pending_conn2, batch_id=batchG["batch_id"]),
+        s.run_collector(collector_conn2, pending_conn2, batch_id=batchG["batch_id"]),
         _mark_pending_mid_run(),
     )
-    async with cp_conn.transaction():
-        await set_capture_enabled(cp_conn, enabled=False, actor_staff_id=None, approval_ref="CAP-G-OFF")
+    await set_capture_enabled(cp_conn, enabled=False, actor_staff_id=staff_g["id"], approval_ref="CAP-G-OFF")
     check(result_g["skipped_pending"] > 0, f"co tin nhan bi bo qua vi pending giua chung (thuc te {result_g})")
     check(result_g["inserted"] < 5, "khong ghi het 5 tin (mot phan bi chan boi pending)")
+    # audit_log tham chieu staff_g qua actor_staff_id (FK) — xoa truoc khi xoa staff, khong doi
+    # den _reset() cua section [I] (section [H] ngay sau day CAN GIU du lieu 'cap-g', khong
+    # duoc _reset()).
+    await admin.execute("DELETE FROM audit_log WHERE actor_staff_id=$1", staff_g["id"])
+    await admin.execute("DELETE FROM staff_users WHERE id=$1", staff_g["id"])
 
     print("== [H] DSR retry/idempotency ==")
     r1 = await data_deletion.process_deletion("cap-g")

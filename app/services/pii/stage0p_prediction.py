@@ -3,9 +3,15 @@
 Chay detector tren `encrypted_message` GIAI MA TAM THOI trong bo nho (plaintext KHONG BAO GIO
 log/return ra ngoai ham nay) — ghi `predicted_slots` CUNG format `labeled_slots` (co offset).
 
-Rang buoc CAU TRUC chong thien lech xac nhan (§5.4): TU CHOI chay neu con BAT KY row nao trong
-batch chua `label_status='labeled'` — khong phai quy uoc quy trinh, la kiem tra bat buoc truoc
-khi ghi bat ky gi.
+REV 2 (CA Technical Review #1, T1-03): rang buoc CAU TRUC chong thien lech xac nhan (§5.4)
+KHONG con la 1 kiem tra Python (`unlabeled count`) roi UPDATE truc tiep — do la TOCTOU, va role
+`alpha3s_m4_prediction_writer` truoc day co UPDATE truc tiep tren cot du doan nen co the bi bypass
+bang SQL truc tiep hoac bug. Gio: `run_prediction_writer` CHI doc (decrypt + detect trong bo
+nho), roi ghi TAT CA prediction qua 1 loi goi DUY NHAT den ham SECURITY DEFINER
+`m4_stage0p_write_predictions` (migration 039 §5d) — ham DO tu kiem tra ATOMIC la batch DA
+`labels_sealed_at IS NOT NULL` (seal qua `stage0p_evaluation.seal_labels`) truoc khi ghi bat ky
+gi; role nay khong con UPDATE truc tiep tren `predicted_slots`/`detector_version`/
+`evaluation_batch` (chi con EXECUTE ham).
 """
 
 import json
@@ -18,7 +24,7 @@ from app.services.pii.taxonomy import DETECTOR_VERSION
 
 
 class PredictionNotAllowedError(Exception):
-    """Batch con row unlabeled — chong thien lech xac nhan (§5.4)."""
+    """Batch chua sealed (con row unlabeled, hoac chua goi seal_labels) — DB tu choi ghi."""
 
 
 def _log(event: str, **fields) -> None:
@@ -27,18 +33,11 @@ def _log(event: str, **fields) -> None:
 
 
 async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -> dict:
-    """`conn` phai xac thuc bang role `alpha3s_m4_prediction_writer`. Tra {updated, skipped}."""
-    unlabeled = await conn.fetchval(
-        "SELECT count(*) FROM m4_shadow_review_samples "
-        "WHERE selection_batch = $1 AND label_status <> 'labeled'",
-        batch_id,
-    )
-    if unlabeled > 0:
-        _log("m4_prediction_refused", batch_id=str(batch_id), unlabeled_count=unlabeled)
-        raise PredictionNotAllowedError(
-            f"batch {batch_id} con {unlabeled} row chua labeled — tu choi chay du doan"
-        )
-
+    """`conn` phai xac thuc bang role `alpha3s_m4_prediction_writer`. Doc + decrypt + chay
+    detector cho MOI row chua co prediction (Python-side, khong ghi gi trong buoc nay), roi ghi
+    TAT CA prediction qua 1 loi goi `m4_stage0p_write_predictions` — ham DO tu choi (raise
+    Postgres error, boc lai thanh `PredictionNotAllowedError` o day) neu batch chua sealed.
+    Tra {updated, skipped_version_mismatch}."""
     rows = await conn.fetch(
         "SELECT sample_id, encrypted_message, customer_ref, conversation_ref, "
         "canonical_text_len, normalization_version FROM m4_shadow_review_samples "
@@ -46,7 +45,8 @@ async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -
         batch_id,
     )
 
-    updated = skipped_version_mismatch = 0
+    predictions: list[dict] = []
+    skipped_version_mismatch = 0
     for row in rows:
         if row["normalization_version"] != NORMALIZATION_VERSION:
             skipped_version_mismatch += 1
@@ -60,13 +60,23 @@ async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -
         result = detect(plaintext)
         # plaintext KHONG duoc dua vao bien nao khac tu day tro di — chi span (offset/enum)
         spans = [span_to_dict(s) for s in result.spans]
-        await conn.execute(
-            "UPDATE m4_shadow_review_samples SET predicted_slots = $1::jsonb, "
-            "detector_version = $2, evaluation_batch = $3 WHERE sample_id = $4",
-            json.dumps(spans), DETECTOR_VERSION, evaluation_batch, row["sample_id"],
-        )
-        updated += 1
+        predictions.append({"sample_id": str(row["sample_id"]), "predicted_slots": spans})
 
+    if not predictions:
+        _log("m4_prediction_done", batch_id=str(batch_id), updated=0,
+             skipped_version_mismatch=skipped_version_mismatch)
+        return {"updated": 0, "skipped_version_mismatch": skipped_version_mismatch}
+
+    try:
+        write_row = await conn.fetchrow(
+            "SELECT * FROM m4_stage0p_write_predictions($1, $2::jsonb, $3, $4)",
+            batch_id, json.dumps(predictions), DETECTOR_VERSION, evaluation_batch,
+        )
+    except Exception as e:  # noqa: BLE001 — boc loi DB (chua sealed, v.v.) thanh loi ro rang
+        _log("m4_prediction_refused", batch_id=str(batch_id), error=str(e))
+        raise PredictionNotAllowedError(str(e)) from e
+
+    updated = write_row["updated_count"]
     _log("m4_prediction_done", batch_id=str(batch_id), updated=updated,
          skipped_version_mismatch=skipped_version_mismatch)
     return {"updated": updated, "skipped_version_mismatch": skipped_version_mismatch}

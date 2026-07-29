@@ -81,3 +81,15 @@ class TestSampleCrypto:
         blob = encrypt_sample_value("x", customer_ref="a|b", conversation_ref="c", sample_id="s")
         with pytest.raises(SlotBindingError):
             decrypt_sample_value(blob, customer_ref="a", conversation_ref="b|c", sample_id="s")
+
+    def test_exact_ciphertext_boundary_8030_bytes(self):
+        # REV2 (CA Technical Review #1, T1-02): _SAMPLE_VERSION = b"v1" la 2 BYTE (khong phai 1
+        # nhu gia dinh sai truoc do trong migration 039). Overhead dung = 2 (version) + 12
+        # (nonce) + 16 (tag GCM) = 30. Plaintext dung DUNG 8000 byte (MAX_BYTES) -> ciphertext
+        # PHAI dung 8030 byte — khoa boundary nay bang test de CHECK constraint DB (8030) khong
+        # bao gio lech khoi thuc te crypto.py again.
+        plaintext_8000_bytes = "a" * 8000  # ASCII, 1 byte/ky tu -> dung 8000 byte khi encode utf-8
+        assert len(plaintext_8000_bytes.encode("utf-8")) == 8000
+        blob = encrypt_sample_value(plaintext_8000_bytes, **_CTX)
+        assert len(blob) == 8030
+        assert decrypt_sample_value(blob, **_CTX) == plaintext_8000_bytes
