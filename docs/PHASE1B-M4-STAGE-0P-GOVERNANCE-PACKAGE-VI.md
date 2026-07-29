@@ -3,10 +3,10 @@ id: A3S-PHASE1B-M4-STAGE-0P-GOVERNANCE-PACKAGE-001
 title: Alpha3S Phase I-B M4 — Stage 0P Governance Package (Production Shadow Request)
 document_type: governance_request_package
 owner: Dev
-status: CA REVIEW #2 CHANGES_REQUIRED (29/7 11:05) — F-04 CLOSED AT DESIGN LEVEL; F-01/02/03 PARTIALLY CLOSED + F-05 mới, đã sửa trong bản này (v3), chờ CA review lại
+status: CA REVIEW #3 CHANGES_REQUIRED (29/7 13:41) — F-04 CLOSED; 01A/02A/03A OPEN→01B/02B/03B, F-05 OPEN→05A, đã sửa trong bản này (v4), chờ CA review lại
 created_at: 2026-07-29 06:17+07:00
-last_updated: 2026-07-29 11:40+07:00
-version: 3.0.0 — Correction #2 theo PHASE1B-M4-STAGE-0P-GOVERNANCE-REVIEW-2-VI.md
+last_updated: 2026-07-29 15:18+07:00
+version: 4.0.0 — Correction #3 theo PHASE1B-M4-STAGE-0P-GOVERNANCE-REVIEW-3-VI.md
 governing_spec: A3S-PHASE1B-M4-SPEC-001 v1.1.0
 governing_directive: A3S-PHASE1B-M4-DEV-DIRECTIVE-001 v1.1.0 §6, §7
 base_reference: CA Development Acceptance Closure (M4-S0..S3 ACCEPTED, evidence 5fee922, package cebbd68)
@@ -48,7 +48,19 @@ Correction #1: **CHANGES_REQUIRED**. Kết quả từng finding cũ: F-M4-0P-01 
 CLOSED AT DESIGN LEVEL** ✅ (domain tag/AAD riêng + DSR direct-link đã đủ, chuyển sang chờ
 implementation evidence — không cần sửa thêm ở tầng thiết kế). Thêm **F-M4-0P-05 mới** (P1):
 evaluation dataset thiếu prediction/detector-version bên cạnh ground truth. Đã sửa cả 4 mục
-`01A/02A/03A/05` trong bản v3.0.0 này — mapping đầy đủ ở §12.
+`01A/02A/03A/05` trong bản v3.0.0 (commit `ff1233a`) — mapping đầy đủ ở §12.
+
+**Cập nhật 29/7 13:41 — CA Review #3** (`PHASE1B-M4-STAGE-0P-GOVERNANCE-REVIEW-3-VI.md`), review
+Correction #2: **CHANGES_REQUIRED**, nhưng **F-M4-0P-04 vẫn CLOSED** (giữ nguyên). Kết quả:
+F-M4-0P-01A **OPEN** (checkpoint per-row đúng hướng nhưng nguồn control đọc từ `settings` nạp 1
+lần lúc process start — không quan sát được thay đổi giữa lúc job đang chạy); F-M4-0P-02A
+**CONDITIONALLY CLOSED AT DESIGN LEVEL** (hàm `SECURITY DEFINER` đúng hướng, cần hardening cụ
+thể + xử lý pending-DSR lookup không trao PSID cho collector); F-M4-0P-03A **OPEN** (cap tôi gọi
+là "byte" thực chất là character — cap byte thật có thể gấp ~4 lần; eligibility có thể kéo nhầm
+hội thoại cũ/không liên quan của cùng khách); F-M4-0P-05 **OPEN** (count-only theo slot_type có
+thể chấm đúng số nhưng sai vị trí/thực thể — false acceptance, không đủ để đo precision/recall
+thật trên sample thật, dù S0 dùng được cho corpus synthetic smoke test). 4 mục con mới
+`01B/02B/03B/05A` đã sửa trong bản v4.0.0 này — mapping đầy đủ ở §12.
 
 Directive §6 quy định 5 prerequisite phải PASS trước khi mở Stage 0P:
 
@@ -59,7 +71,7 @@ Directive §6 quy định 5 prerequisite phải PASS trước khi mở Stage 0P:
 | 3 | Production-data access approved PO/CA | ⏳ **ĐANG XIN** — chính là mục đích gói này |
 | 4 | Retention/labeling environment verified | ⏳ **THIẾT KẾ TRONG GÓI NÀY** — xem §5, §6 (RET-11 trong Retention Schedule hiện chỉ là khung rỗng "thiết kế tại M4") |
 | 5a | Rollback/kill switch — detector shadow (`m4_pii_shadow`) | ✅ **PASS** — flag OFF = 0 code path chạy (evidence S0/S3: 214 pytest bao gồm flag-OFF regression, static check orchestrator không tham chiếu `m4_trusted_pii_path`) |
-| 5b | Rollback/kill switch — raw sample capture (`m4_stage0p_capture_enabled`) | 🔧 **DESIGN DEFINED / NOT VERIFIED** (F-M4-0P-01A) — ngữ nghĩa thiết kế ở §9; chỉ chuyển PASS sau implementation test (chứng minh 0 write sau khi OFF giữa batch) + rollback rehearsal thật, KHÔNG suy diễn từ evidence của 5a |
+| 5b | Rollback/kill switch — raw sample capture | 🔧 **DESIGN DEFINED / NOT VERIFIED** (F-M4-0P-01B) — control source giờ là **row DB động** (không phải `settings` nạp 1 lần), ngữ nghĩa ở §9; PASS chỉ sau implementation test (OFF từ session khác giữa lúc job chạy, chứng minh không commit nào sau boundary) + rollback rehearsal thật |
 
 ## 1. Vendor/AI Use Case — làm rõ ranh giới (prerequisite #2)
 
@@ -118,74 +130,97 @@ thức vào registry chung sau khi có "Stage 0P Design Accepted" (KHÔNG tự �
 - Sample lưu **tách rời khỏi `messages`/`conversations` chính** (không mở rộng quyền truy cập
   vào bảng vận hành) — xem storage zone §6.
 
-## 4. Sampling method (Directive §6 mục 3) + quy mô đại diện — **sửa theo F-M4-0P-03 và F-M4-0P-03A**
+## 4. Sampling method (Directive §6 mục 3) + quy mô đại diện — **sửa theo F-M4-0P-03B**
 
 **Sửa lỗi schema (tự phát hiện khi thiết kế lại):** bản trước viết "`orders.conversation_id`" —
 cột này **không tồn tại**. Schema thật: `orders.customer_id → customers.id`,
 `conversations.customer_id → customers.id` (không có liên kết trực tiếp order↔conversation).
 Đã sửa câu truy vấn eligibility bên dưới cho khớp schema thật.
 
-**Sampling UNIT tường minh (F-M4-0P-03A yêu cầu):** đơn vị **chọn** là **hội thoại**; đơn vị
-**lưu trữ** là **tin nhắn** (đúng như schema §6 mô tả — 1 row = 1 `encrypted_message`). Cả hai
-đều phải có cap riêng, không suy diễn cap này ra cap kia:
+**Sampling UNIT tường minh:** đơn vị **chọn** là **hội thoại**; đơn vị **lưu trữ** là **tin
+nhắn** (1 row = 1 `encrypted_message`, §6). Cả hai đều có cap riêng, không suy diễn cap này ra
+cap kia.
+
+**Sửa cap byte (F-M4-0P-03B — CA chỉ đúng: `text[:2000]` là 2000 CODE POINT, không phải byte;
+1 ký tự tiếng Việt có dấu có thể chiếm 2-3 byte UTF-8, worst case 4 byte/ký tự):**
 
 - **Cửa sổ:** 14 ngày liên tục kể từ ngày kích hoạt.
-- **Cap A — hội thoại:** hard cap **260** (200 mục tiêu + buffer).
-- **Cap B — tin nhắn khách/hội thoại:** hard cap **20** — nếu hội thoại có >20 tin nhắn khách,
-  chỉ lấy **20 tin đầu tiên** theo `created_at ASC, id ASC` (deterministic); phần dư **không**
-  được thu thập (không phải "thu rồi ẩn"), log 1 metric đếm (`truncated_conversations=K`).
-- **Cap C — byte/tin nhắn:** hard cap **2000 ký tự** (tái dùng đúng hằng số
-  `_MAX_CANDIDATE_LEN` đã dùng ở `semantic_schema.py`, nhất quán trong toàn bộ code M4). Cắt
-  bằng **string-level slicing trên chuỗi đã decode** (`text[:2000]`, KHÔNG cắt theo byte thô —
-  luôn an toàn UTF-8 vì Python string index theo code point, không bao giờ chẻ đôi 1 ký tự đa
-  byte). Row bị cắt đánh dấu `truncated=true` — **loại khỏi mẫu số recall/precision chính**
-  (cùng nguyên tắc `gate=false` đã dùng cho corpus known-limitation ở S0), chỉ báo cáo riêng.
-- **Cap D — trần byte tuyệt đối (để CA thấy worst-case thật):** 260 × 20 × 2000 ký tự ≈ **10.4 MB**
-  plaintext-equivalent tối đa toàn bộ sample zone (ciphertext lớn hơn không đáng kể do overhead
-  nonce+tag cố định 12+16 byte/row).
-- **Thực thi đơn-writer (chống race điều kiện đồng thời — F-M4-0P-03A yêu cầu test concurrent
-  collector):** job thu thập dùng **đúng pattern advisory lock đã có** trong
-  `scripts/migrate.py` (`pg_try_advisory_lock` fail-fast, `LOCK_KEY` riêng cho M4 — không phát
-  minh cơ chế khoá mới). Chỉ 1 tiến trình collector chạy tại một thời điểm ⇒ mọi cap ở trên được
-  giữ bởi một bộ đếm trong tiến trình đó (check trước mỗi INSERT — cùng checkpoint với kill
-  switch §9), loại bỏ hoàn toàn race điều kiện thay vì cố enforce cap dưới concurrency thật.
+- **Cap A — hội thoại:** hard cap **260**.
+- **Cap B — tin nhắn khách/hội thoại:** hard cap **20** — chỉ lấy **20 tin đầu tiên** theo
+  `created_at ASC, id ASC` (deterministic); phần dư không thu thập, log metric đếm.
+- **Cap C — BYTE thật/tin nhắn (tách riêng khỏi cap ký tự, đặt tên rõ ràng theo yêu cầu CA):**
+  - `MAX_CHARS = 2000` (character cap — vẫn giữ, dùng cho bước cắt ban đầu để giới hạn khối
+    lượng xử lý).
+  - `MAX_BYTES = 8000` (**byte cap thật**, = 2000 × 4 byte — worst case UTF-8 cho 1 code point).
+    Đây là **constraint chính**, không suy ra từ cap ký tự.
+  - **Thuật toán cắt 2 bước, UTF-8-safe cả hai bước:**
+    1. Cắt theo ký tự trước: `s = text[:MAX_CHARS]` (string-level, an toàn code-point).
+    2. Mã hoá UTF-8, nếu `len(s.encode('utf-8')) > MAX_BYTES`: cắt tiếp trên **bytes đã encode**
+       tại `MAX_BYTES`, sau đó `decode('utf-8', errors='ignore')` — `errors='ignore'` ở đây CHỈ
+       loại bỏ đúng phần chuỗi byte KHÔNG HOÀN CHỈNH bị cắt dở ở cuối (1 ký tự đa-byte bị chẻ
+       đôi), không làm hỏng bất kỳ ký tự nào đứng trước nó — kết quả luôn là UTF-8 hợp lệ.
+  - Row bị cắt ở BẤT KỲ bước nào → `truncated=true` — loại khỏi mẫu số recall/precision chính
+    (nguyên tắc `gate=false` như S0), báo cáo riêng.
+- **Cap D — trần byte tuyệt đối (con số THẬT, không phải ước lượng sai trước đây):**
+  260 × 20 × **8000 byte** (MAX_BYTES, không phải MAX_CHARS) = **41.6 MB** plaintext-equivalent
+  tối đa toàn sample zone — **gấp ~4 lần con số 10.4MB đã khai báo sai ở bản v3** (CA phát hiện
+  đúng). Ciphertext lớn hơn không đáng kể (overhead nonce+tag cố định 12+16+1 byte/row).
+- **Enforce lại ở DB boundary, không chỉ counter trong process (CA yêu cầu tường minh):** thêm
+  `CHECK (octet_length(encrypted_message) <= 8045)` (8000 + 29 byte overhead cố định của
+  `encrypt_sample_value`: version 1 + nonce 12 + tag 16 = 29 — dư biên nhỏ) trên chính cột —
+  Postgres từ chối INSERT nếu logic cắt ở tầng ứng dụng có bug, không phụ thuộc 100% vào code
+  Python đúng.
+- **Thực thi đơn-writer (chống race — test concurrent collector):** advisory lock **tái dùng
+  đúng pattern** `scripts/migrate.py` (`pg_try_advisory_lock` fail-fast, `LOCK_KEY` riêng M4).
+  Chỉ 1 tiến trình collector chạy tại một thời điểm ⇒ cap giữ bởi bộ đếm trong tiến trình đó
+  (check tại đúng 1 checkpoint trước mỗi INSERT — cùng điểm với kill switch §9 và pending-
+  deletion re-check §5.3).
 - **Thuật toán chọn — 2 pha tách bạch, KHÔNG đọc nội dung tin nhắn ở pha 1:**
-  1. **Pha chọn (metadata-only, sửa đúng schema):** `E` = tập `conversations.id` sao cho tồn tại
-     ≥1 `orders` với `orders.customer_id = conversations.customer_id` và
-     `orders.created_at` trong cửa sổ 14 ngày — **không đọc `messages.content`**. Sắp xếp
-     deterministic theo `conversations.id ASC`.
+  1. **Pha chọn (metadata-only, sửa đúng schema VÀ sửa phạm vi eligibility — F-M4-0P-03B):**
+     `E` = tập `conversations.id` sao cho **(a)** tồn tại ≥1 `orders` với
+     `orders.customer_id = conversations.customer_id` và `orders.created_at` trong cửa sổ 14
+     ngày, **VÀ (b) `conversations.created_at` CŨNG nằm trong đúng cửa sổ 14 ngày đó** (KHÔNG
+     chỉ ràng buộc qua `orders`). Điều kiện (b) là bổ sung mới — thiếu nó, join theo
+     `customer_id` một mình có thể kéo theo **mọi hội thoại cũ, không liên quan** của một khách
+     hàng chỉ vì họ có 1 đơn hàng mới trong cửa sổ (đúng lỗ hổng CA chỉ ra). Không đọc
+     `messages.content`. Sắp xếp deterministic theo `conversations.id ASC`.
   2. `|E| ≤ 260` → chọn toàn bộ `E`. `|E| > 260` → chọn 260 bằng permutation seed cố định công
-     khai `SHA256("m4-stage0p-v1")` (không dùng `random()` không seed) — tái lập được độc lập.
-  3. Tập chọn được **KHOÁ LẠI** thành 1 row trong bảng `m4_selection_batches` (thiết kế mới, xem
-     §5) — **chỉ sau khi khoá xong**, pha thu thập mới được phép đọc nội dung, và chỉ đọc đúng
-     batch đã khoá (xem §5 — collector không tự do truy vấn `conversation_id` bất kỳ).
-  4. Mỗi row lưu `selection_batch` = id của batch đã khoá, để truy vết đúng lô/thuật toán.
-- **Loại trừ khi chọn (sửa theo F-M4-0P-02A — không quét nội dung, xem thêm §5):**
-  - Đang chờ xác nhận xoá: Redis key `del_pending:{psid}` còn tồn tại → loại (kiểm tra key,
-    KHÔNG phải content scan).
-  - **Đã hoàn tất xoá dữ liệu: TỰ ĐỘNG loại, không cần luật riêng** — `_delete_customer_data()`
-    xoá cứng (`DELETE`) toàn bộ `conversations` của khách đó, nên họ **không còn hội thoại nào**
-    để xuất hiện trong tập `E` ở bước 1. Bản trước đề xuất luật "loại nếu đã gửi XOA DU LIEU
-    trong 90 ngày" — **rút lại**: luật đó vừa cần quét `messages.content` (đúng điều CA cấm),
-    vừa **không khả thi** vì `data_deletion_requests` (013) **cố ý không lưu psid** ("CO Y khong
-    luu psid lau dai" — comment gốc trong migration) để không giữ lại định danh của người đã bị
-    xoá — không có nguồn dữ liệu 90-ngày nào để tra cứu. Loại bỏ luật này không giảm an toàn vì
-    trường hợp nó nhắm tới (khách đã xoá) đã được loại tự động qua cơ chế trên.
+     khai `SHA256("m4-stage0p-v1")` — tái lập được độc lập.
+  3. Tập chọn được **KHOÁ LẠI** thành 1 row trong bảng `m4_selection_batches` (§5.1) — chỉ sau
+     khi khoá xong, pha thu thập mới đọc nội dung, chỉ đọc đúng batch đã khoá (§5.2).
+  4. Mỗi row lưu `selection_batch` = id batch đã khoá.
+- **Test bổ sung khi triển khai (F-M4-0P-03B, đúng 4 case CA yêu cầu):** multi-byte (tin nhắn
+  toàn ký tự có dấu, kiểm MAX_BYTES là constraint chốt chặn thật, không phải MAX_CHARS);
+  oversized ciphertext (cố tình vượt `octet_length` CHECK → INSERT bị DB từ chối); old
+  conversation (hội thoại `created_at` NGOÀI cửa sổ dù khách có order trong cửa sổ → loại khỏi
+  `E`); unrelated conversation (hội thoại khác của cùng khách, không liên quan đơn hàng, ngoài
+  cửa sổ → loại).
+- **Loại trừ khi chọn (không quét nội dung — chi tiết interface hẹp ở §5.3 theo F-M4-0P-02B):**
+  - Đang chờ xác nhận xoá: kiểm tra qua **interface hẹp riêng** (§5.3) trả về boolean, KHÔNG trao
+    PSID cho collector (sửa từ bản v3: trước đây viết tắt "Redis key `del_pending:{psid}`" như
+    thể collector tự tra — nay tách hẳn thành 1 dịch vụ nội bộ, xem §5.3). Re-check lại lần nữa
+    ngay trước persist mỗi tin nhắn (chống race — §5.3).
+  - **Đã hoàn tất xoá dữ liệu: TỰ ĐỘNG loại** — `_delete_customer_data()` xoá cứng toàn bộ
+    `conversations`, khách không còn xuất hiện trong `E`. Luật "90 ngày" giữ nguyên rút lại như
+    bản v3 (lý do đầy đủ ở Correction #2) — không lặp lại ở đây.
 - **Dưới ngưỡng:** nếu `|E| < 200` khi hết cửa sổ 14 ngày → dừng, báo cáo, chờ quyết định (không
   tự gia hạn) — giữ nguyên.
-- **Metric:** chỉ log counts (`eligible=N excluded_pending=K selected=M
-  truncated_conversations=T truncated_messages=U`), không định danh hội thoại/khách trong log.
-- **Test boundary khi triển khai kỹ thuật:** hội thoại đúng 21 tin nhắn khách → chỉ 20 được lưu +
-  metric truncation; tin nhắn đúng 2001 ký tự → cắt còn 2000 tại ranh giới ký tự, `truncated=true`;
-  2 tiến trình collector cùng khởi động → tiến trình thứ 2 fail-fast (không giữ được advisory
-  lock), không có ghi trùng/vượt cap.
+- **Metric:** chỉ log counts (`eligible=N excluded_old_conversation=X excluded_pending=K
+  selected=M truncated_conversations=T truncated_messages=U`), không định danh hội thoại/khách.
+- **Test boundary khi triển khai kỹ thuật:** hội thoại đúng 21 tin nhắn khách → chỉ 20 được lưu;
+  tin nhắn toàn ký tự đa-byte đúng 2001 code point → cắt theo MAX_CHARS rồi MAX_BYTES, kiểm tra
+  byte cap là constraint chốt (không phải char cap); cố tình đẩy `octet_length` vượt 8045 →
+  DB CHECK từ chối INSERT; 2 collector cùng khởi động → fail-fast; hội thoại cũ ngoài cửa sổ của
+  khách có order mới → loại khỏi `E`; hội thoại khác không liên quan cùng khách → loại.
 
-## 5. Labeling roles / access matrix (Directive §6 mục 4) + reviewer audit (mục 7) — **sửa theo F-M4-0P-02, F-M4-0P-02A, F-M4-0P-05**
+## 5. Labeling roles / access matrix (Directive §6 mục 4) + reviewer audit (mục 7) — **sửa theo F-M4-0P-02, F-M4-0P-02A, F-M4-0P-02B, F-M4-0P-05**
 
-CA chỉ ra đúng (Review #1): bản v1 vừa cấp `SELECT` trực tiếp cho reviewer vừa nói "phải qua
-view/API" — mâu thuẫn. CA chỉ ra tiếp (Review #2): bản v2 định nghĩa collector chỉ SELECT
-metadata, nhưng **không nói ai/bằng cách nào đọc được `messages.content`** thật — đó là lỗ hổng
-thiết kế, không phải chi tiết bỏ sót. Thiết kế lại đầy đủ:
+CA chỉ ra đúng qua 3 vòng: (Review #1) bản v1 vừa cấp `SELECT` trực tiếp cho reviewer vừa nói
+"phải qua view/API" — mâu thuẫn. (Review #2) bản v2 không nói ai/bằng cách nào đọc được
+`messages.content` thật. (Review #3) hướng hàm `SECURITY DEFINER` đúng nhưng **thiếu hardening
+cụ thể** (search_path, owner, revoke-from-public, validate trạng thái batch) **và** thiết kế
+kiểm tra pending-deletion ngầm giả định collector có PSID mà không nói rõ đường lấy — cần 1
+interface hẹp riêng. Thiết kế đầy đủ:
 
 ### 5.1. Bảng khoá lựa chọn `m4_selection_batches` (mới, hỗ trợ §4 bước 3 + chặn collector tự do)
 
@@ -201,36 +236,45 @@ status         TEXT   -- 'locked' | 'collecting' | 'closed'
 
 Collector **không** tự chọn/truyền `conversation_id`; nó chỉ biết `batch_id` và gọi hàm §5.2.
 
-### 5.2. Đường đọc nội dung duy nhất — hàm `SECURITY DEFINER`, không SELECT trực tiếp trên `messages`
+### 5.2. Đường đọc nội dung duy nhất — hàm `SECURITY DEFINER`, không SELECT trực tiếp trên `messages` — **hardening theo F-M4-0P-02B**
 
 `m4_stage0p_fetch_batch_content(batch_id UUID) RETURNS TABLE(conversation_id, message_id,
-content, created_at)` — sở hữu bởi migration-owner (đọc `messages` bằng quyền của **hàm**, không
-phải quyền của caller — chuẩn Postgres `SECURITY DEFINER`). Ràng buộc cứng trong thân hàm (không
-phải quy ước, mà là logic bắt buộc):
+content, created_at)`. Ràng buộc cứng trong thân hàm (logic bắt buộc, không phải quy ước):
 
-- **Chỉ trả `role = 'customer'`** (loại trừ tuyệt đối `bot`/`agent` — output máy/nhân viên).
+- **Chỉ trả `role = 'customer'`** (loại trừ tuyệt đối `bot`/`agent`).
 - **Chỉ trả tin nhắn thuộc `conversation_id` nằm trong `locked_conversation_ids` của ĐÚNG
-  `batch_id` truyền vào** — hàm tự tra `m4_selection_batches`, **không nhận `conversation_id`
-  làm tham số** ⇒ collector không thể truy vấn tuỳ ý một `conversation_id` ngoài batch đã khoá
-  (loại bỏ chính xác nguy cơ CA nêu "arbitrary conversation-id query").
-- **Không có cột/loại attachment trong schema `messages` hiện tại** (chỉ có `content TEXT`) —
-  ghi rõ ràng buộc này để nếu sau này thêm cột đính kèm, hàm phải cập nhật tường minh loại trừ,
-  không "tự động an toàn".
-- Áp **Cap B/C của §4** (20 tin/hội thoại, cắt 2000 ký tự) **ngay trong hàm** trước khi trả — cắt
-  càng sớm càng ít bề mặt rủi ro giữ nguyên nội dung dư thừa dù chỉ tạm thời trong bộ nhớ caller.
-- `alpha3s_m4_sample_collector` chỉ có `EXECUTE` trên hàm này — **KHÔNG có SELECT nào trên bảng
-  `messages`** (đúng yêu cầu CA "không cấp SELECT rộng"). Thu hồi `EXECUTE` là một lever kill
-  riêng, độc lập với §9.
-- **Audit mỗi lần gọi:** `actor_type='system', action='m4_batch_fetch', entity_type=
-  'm4_selection_batch', entity_id=batch_id, after={"row_count": N}` — đếm, không nội dung/ID
-  tin nhắn cụ thể trong audit (đúng "audit counts/IDs an toàn" — chỉ đếm, ID chỉ là batch_id).
+  `batch_id` truyền vào** — hàm tự tra `m4_selection_batches`, không nhận `conversation_id` làm
+  tham số ⇒ loại bỏ "arbitrary conversation-id query".
+- **Validate trạng thái batch TRƯỚC khi trả bất kỳ row nào** (mới, F-M4-0P-02B): `status =
+  'locked'` (từ chối nếu `'closed'` hoặc không tìm thấy — chặn tái sử dụng batch cũ);
+  `now() BETWEEN window_start AND window_end + khoảng đệm hợp lý` (chặn replay batch_id ngoài
+  cửa sổ hợp lệ); `purpose_code` khớp `P12_PII_DETECTOR_EVAL`.
+- **Không có cột/loại attachment trong schema `messages` hiện tại** — ghi rõ ràng buộc để nếu
+  sau này thêm cột đính kèm, hàm phải cập nhật tường minh, không "tự động an toàn".
+- Áp Cap B/MAX_CHARS/MAX_BYTES của §4 **ngay trong hàm** trước khi trả.
+- **Hardening `SECURITY DEFINER` chuẩn Postgres (mới, F-M4-0P-02B — không phải tuỳ chọn):**
+  - `SET search_path = pg_catalog, public` khai báo ngay trong `CREATE FUNCTION` (chặn
+    search-path injection).
+  - Mọi object tham chiếu trong thân hàm **schema-qualify tường minh** (`public.messages`,
+    `public.m4_selection_batches`) — phòng thủ kép dù đã khoá search_path.
+  - **Owner = `alpha3s`** (role migration-owner sẵn có, đã xác nhận non-superuser qua
+    postcondition 038) — KHÔNG tạo role đặc quyền mới cho việc này.
+  - `REVOKE EXECUTE ON FUNCTION m4_stage0p_fetch_batch_content(uuid) FROM PUBLIC;` tường minh,
+    sau đó `GRANT EXECUTE ... TO alpha3s_m4_sample_collector` — không dựa vào default PUBLIC
+    EXECUTE mà Postgres cấp ngầm cho function mới tạo.
+- **Audit fail-closed TRONG CÙNG STATEMENT** (mới, F-M4-0P-02B — không phải audit-rồi-mới-đọc
+  như §5.1 review trước mô tả chung chung): hàm ghi dòng audit (`action='m4_batch_fetch',
+  entity_type='m4_selection_batch', entity_id=batch_id, after={"row_count": N}`) là một phần của
+  CÙNG câu lệnh trả dữ liệu (vd CTE ghi audit rồi SELECT nội dung trong 1 statement) — nếu ghi
+  audit lỗi, toàn bộ statement rollback, không có content nào được trả. Thu hồi `EXECUTE` là
+  lever kill riêng, độc lập với §9.
 
 | Role DB | Quyền trên `m4_shadow_review_samples` | Quyền khác | Dùng bởi |
 |---|---|---|---|
 | `alpha3s_m4_sample_collector` | INSERT-only | `EXECUTE m4_stage0p_fetch_batch_content` (§5.2); SELECT metadata `orders.customer_id, orders.created_at, conversations.id, conversations.customer_id` cho pha chọn §4 (KHÔNG `messages`) | Job thu thập, serialize bằng advisory lock (§4) — **principal DUY NHẤT ghi vào sample zone và DUY NHẤT đọc `messages.content`, qua hàm, không qua SELECT** |
-| `alpha3s_m4_sample_reviewer_api` | SELECT `sample_id, encrypted_message, customer_ref, conversation_ref, captured_at, label_status` — **KHÔNG** `predicted_slots`/`detector_version` (chống thiên lệch xác nhận, F-M4-0P-05) | UPDATE `labeled_slots, label_status` (ghi nhãn) | **CHỈ credential tiến trình API nội bộ** (ops endpoint, tái dùng xác thực `staff_users`/`staff_sessions` — `app/services/auth_service.py`). Con người không bao giờ cầm credential DB này; PO đăng nhập qua session staff, endpoint giải mã + **ghi audit TRƯỚC KHI trả dữ liệu** (fail closed nếu audit lỗi) |
-| `alpha3s_m4_sample_evaluator` | SELECT **chỉ** `sample_id, label_status, labeled_slots, predicted_slots, detector_version, evaluation_batch, selection_batch` — **KHÔNG** `encrypted_message`, **KHÔNG** `customer_ref`/`conversation_ref` | — | Eval script (Dev) đo recall/precision — không đọc được nội dung thô, chỉ nhãn + dự đoán (§5.3) |
-| `alpha3s_m4_prediction_writer` (mới) | UPDATE **chỉ** `predicted_slots, detector_version, evaluation_batch` | `EXECUTE` hàm chạy detector nội bộ (đọc `encrypted_message` **của chính hàm này**, giải mã tạm trong bộ nhớ, KHÔNG trả plaintext ra ngoài, chỉ ghi lại kết quả `as_safe_dict`-shape) | Job chấm điểm sau-labeling (§5.3) — tách khỏi reviewer-api và evaluator |
+| `alpha3s_m4_sample_reviewer_api` | SELECT `sample_id, encrypted_message, canonical_text_len, normalization_version, customer_ref, conversation_ref, captured_at, label_status` — **KHÔNG** `predicted_slots`/`detector_version` (chống thiên lệch xác nhận, F-M4-0P-05) | UPDATE `labeled_slots, label_status` (ghi nhãn kèm offset) | **CHỈ credential tiến trình API nội bộ** (ops endpoint, tái dùng xác thực `staff_users`/`staff_sessions` — `app/services/auth_service.py`). Con người không bao giờ cầm credential DB này; PO đăng nhập qua session staff, endpoint giải mã + **ghi audit TRƯỚC KHI trả dữ liệu** (fail closed nếu audit lỗi) |
+| `alpha3s_m4_sample_evaluator` | SELECT **chỉ** `sample_id, label_status, labeled_slots, predicted_slots, canonical_text_len, normalization_version, detector_version, evaluation_batch, selection_batch, truncated` — **KHÔNG** `encrypted_message`, **KHÔNG** `customer_ref`/`conversation_ref` | — | Eval script (Dev) đo recall/precision qua offset (§10) — không đọc được nội dung thô, chỉ nhãn + dự đoán + metadata cần để validate bounds |
+| `alpha3s_m4_prediction_writer` (mới) | UPDATE **chỉ** `predicted_slots, detector_version, evaluation_batch` | `EXECUTE` hàm chạy detector nội bộ (đọc `encrypted_message` **của chính hàm này**, giải mã tạm trong bộ nhớ, KHÔNG trả plaintext ra ngoài, chỉ ghi lại kết quả `as_safe_dict`-shape) | Job chấm điểm sau-labeling (§5.4) — tách khỏi reviewer-api và evaluator |
 | `alpha3s_m4_sample_purge` | DELETE + SELECT **chỉ** `customer_ref, expires_at, sample_id` | — | Purge job (retention §6 + DSR §7) |
 | `alpha3s_app` (runtime) | KHÔNG có quyền nào | — | Sample zone hoàn toàn ngoài request-path production |
 | `alpha3s_vendor_path` | KHÔNG có quyền nào (REVOKE ALL, đúng nguyên tắc `pii_slots` 038) | — | — |
@@ -238,7 +282,30 @@ phải quy ước, mà là logic bắt buộc):
 `REVOKE ALL ON m4_shadow_review_samples, m4_selection_batches FROM PUBLIC` là bước đầu tiên của
 migration khi triển khai — mọi quyền trên đều là GRANT tường minh, không có quyền ngầm định.
 
-### 5.3. Chống thiên lệch xác nhận (F-M4-0P-05) — thứ tự bắt buộc, không chỉ là quy ước API
+### 5.3. Interface hẹp kiểm tra pending-deletion — KHÔNG trao PSID cho collector (mới, F-M4-0P-02B)
+
+CA chỉ đúng: §4 nói kiểm tra `del_pending:{psid}` nhưng collector chỉ có `customer_id` (từ
+metadata §4), không có `psid` — thiết kế trước bỏ ngỏ ai/bằng cách nào lấy `psid` để tra Redis,
+và tra ngầm như vậy sẽ vô tình "trao PSID" cho collector.
+
+- **Hàm/module riêng** (Python, KHÔNG phải SQL — Postgres không gọi Redis trực tiếp được):
+  `is_pending_deletion(customer_id: int) -> bool`. Bên trong: tra `customers.psid` bằng
+  `customer_id` (đọc có kiểm soát, không phải SELECT rộng), gọi Redis `EXISTS del_pending:
+  {psid}`, trả **boolean**. Biến `psid` **chỉ tồn tại trong scope của hàm này** — không được
+  trả ra, không log, không đưa vào audit metadata, không gán vào state của collector.
+- **Audit riêng cho lần gọi này:** `action='m4_pending_check', entity_type='customer',
+  entity_id=customer_id` (KHÔNG phải psid), `after={"pending": true/false}` — chỉ boolean.
+- **Race giữa eligibility check (Phase 1) và persist (Phase 2) — CA yêu cầu xử lý tường minh:**
+  gọi lại `is_pending_deletion()` **lần nữa ngay trước mỗi lệnh INSERT** (cùng checkpoint với
+  kill switch §9 và cap §4 — 1 điểm kiểm tra duy nhất trước mỗi ghi, gộp cả 3 điều kiện: flag
+  ON? cap chưa vượt? khách không pending-deletion?). Nếu pending xuất hiện giữa 2 lần check →
+  bỏ qua (không ghi) các tin nhắn còn lại của khách đó trong lượt chạy, log metric đếm.
+  **Ngay cả khi race vẫn lọt** (vd deletion hoàn tất đúng lúc): **DSR §7 là thẩm quyền cuối
+  cùng, không điều kiện** — `DELETE ... WHERE customer_ref = $1` chạy vô điều kiện khi có yêu
+  cầu xoá, xoá sạch bất kỳ row nào đã lỡ lọt qua re-check. Re-check ở đây là phòng thủ giảm cửa
+  sổ rủi ro, KHÔNG phải lớp bảo vệ duy nhất.
+
+### 5.4. Chống thiên lệch xác nhận (F-M4-0P-05) — thứ tự bắt buộc, không chỉ là quy ước API
 
 `predicted_slots` **KHÔNG được ghi cho tới khi TOÀN BỘ row trong batch có `label_status=
 'labeled'`** — job chấm điểm (`alpha3s_m4_prediction_writer`) tự kiểm tra điều kiện này trước
@@ -267,11 +334,12 @@ hàm §5.2 mới hợp lệ); gọi hàm §5.2 với `batch_id` giả/chưa kho�
 evaluator` thử `SELECT encrypted_message` → bị từ chối (cùng pattern test đã dùng cho
 `alpha3s_vendor_path`/`alpha3s_app` ở migration 038, `m4_slot_store_test.py` [9]).
 
-## 6. Storage zone + retention/expiry (Directive §6 mục 5, 6) — **F-M4-0P-04 CLOSED AT DESIGN LEVEL (CA Review #2); bổ sung cột cho F-M4-0P-03A/05**
+## 6. Storage zone + retention/expiry (Directive §6 mục 5, 6) — **F-M4-0P-04 CLOSED; cột cho F-M4-0P-03B/05A**
 
-CA Review #2 xác nhận phần domain tag/AAD riêng + DSR direct-link (nội dung §6/§7 bản v2.0.0)
-**đã đủ ở tầng thiết kế** — giữ nguyên, không sửa lại phần crypto/DSR. Phần dưới đây bổ sung cột
-còn thiếu để đáp ứng F-M4-0P-03A (truncation) và F-M4-0P-05 (prediction/detector version).
+CA xác nhận phần domain tag/AAD riêng + DSR direct-link (§6/§7 bản v2.0.0) **đã đủ ở tầng thiết
+kế qua cả 3 vòng review** — giữ nguyên, không sửa lại phần crypto/DSR. Phần dưới đây cập nhật cột
+cho F-M4-0P-03B (byte cap thật) và **F-M4-0P-05A (offset — thay đổi quan trọng nhất ở v4):
+ground truth và prediction giờ PHẢI giữ vị trí span, không còn instance-count-only**.
 
 **Thiết kế đề xuất** (triển khai bằng migration RIÊNG, sau khi có approval — không nằm trong gói
 này):
@@ -293,19 +361,26 @@ này):
   Khoá riêng (`m4_sample_key_b64`, không dùng chung `m4_slot_key_b64`) — tách biệt hoàn toàn với
   Slot Store kể cả khi rotate khoá.
 - Cột tối thiểu: `sample_id` (UUID PK, sinh trước khi mã hoá vì là 1 field của AAD),
-  `customer_ref` (đề xuất = `customers.id`, KHÔNG dùng `psid` — lý do: `psid` bị ghi đè thành
+  `customer_ref` (= `customers.id`, KHÔNG dùng `psid` — lý do: `psid` bị ghi đè thành
   `deleted:<code>` khi xoá, còn `customers.id` bất biến suốt vòng đời, tra cứu DSR §7 ổn định
   hơn), `conversation_ref` (**plaintext, indexed** — lý do giữ plaintext ở dưới),
-  `encrypted_message` (blob `encrypt_sample_value` output, đã cắt theo Cap C §4 TRƯỚC khi mã
-  hoá), `truncated` (bool, đúng Cap B/C §4 — loại khỏi mẫu số recall/precision chính khi True),
-  `captured_at`, `expires_at` (NOT NULL), `purpose_code='P12_PII_DETECTOR_EVAL'`, `label_status`
-  (unlabeled/labeled), `labeled_slots` (jsonb — **ground truth**, reviewer gán tay, format
-  `[{slot_type, confidence, reason}]` theo dạng `PIISpan.as_safe_dict()` nhưng KHÔNG offset —
-  xem lý do chọn instance-count matching thay vì offset-overlap ở §10), `predicted_slots`
-  (jsonb — **output detector**, CÙNG FORMAT với `labeled_slots` để so sánh trực tiếp; NULL cho
-  tới khi cả batch labeled xong — §5.3), `detector_version` (text, vd `m4d-0.1.0` — tái dùng
-  hằng số `DETECTOR_VERSION` đã có ở `taxonomy.py`), `evaluation_batch` (text — phân biệt lần
-  chấm điểm nếu detector re-run version mới trên cùng ground truth), `selection_batch` (§4).
+  `encrypted_message` (blob `encrypt_sample_value` output, đã cắt theo MAX_CHARS/MAX_BYTES §4
+  TRƯỚC khi mã hoá — CHECK `octet_length` §4), `canonical_text_len` (int — độ dài chuỗi canonical
+  ĐÃ CẮT, dùng để validate offset bounds khi chấm điểm, KHÔNG phải nội dung), `truncated` (bool —
+  loại khỏi mẫu số recall/precision chính khi True), `captured_at`, `expires_at` (NOT NULL),
+  `purpose_code='P12_PII_DETECTOR_EVAL'`, `label_status` (unlabeled/labeled),
+  `normalization_version` (text, vd `"nfc-v1"` — khớp `app/services/pii/normalize.py:nfc()`,
+  **bắt buộc** vì offset chỉ có nghĩa khi biết chuỗi canonical nào sinh ra nó — F-M4-0P-05A),
+  `labeled_slots` (jsonb — **ground truth**, reviewer gán tay, format
+  `[{slot_type, start, end, confidence, reason}]` — **CÓ offset** (sửa từ v3: CA Review #3 xác
+  nhận "offset không phải plaintext PII", nên khác với `PIISpan.as_safe_dict()` dùng cho log
+  live-traffic ở S0 — xem giải trình vì sao 2 format khác nhau ở §10), `predicted_slots` (jsonb
+  — **output detector**, CÙNG FORMAT `{slot_type, start, end, confidence, reason}`; NULL cho tới
+  khi cả batch labeled xong — §5.4), `detector_version` (text, vd `m4d-0.1.0` — tái dùng hằng số
+  `DETECTOR_VERSION` ở `taxonomy.py`), `evaluation_batch` (text — phân biệt lần chấm điểm nếu
+  detector re-run version mới trên cùng ground truth; cùng với `detector_version` +
+  `normalization_version` tạo thành **evaluation hash** truy vết được — §10), `selection_batch`
+  (§4).
 - **Vì sao `customer_ref`/`conversation_ref` vẫn giữ plaintext (không tokenize):** CA gợi ý cân
   nhắc "không lưu thêm plaintext identifier nếu không cần". Đã cân nhắc phương án token hoá
   (HMAC(customer_ref)) nhưng **không khả thi**: nếu không giữ plaintext, không ai (kể cả reviewer
@@ -320,10 +395,12 @@ này):
     tối đa **45 ngày** kể từ `captured_at`, tuỳ điều kiện nào tới trước. 45 ngày = 14 ngày thu
     thập + buffer gán nhãn/review + margin an toàn — con số này Dev đề xuất, PO/CA có thể điều
     chỉnh.
-  - `labeled_slots` (nhãn, không phải raw): có thể giữ lâu hơn nếu PO muốn dùng làm regression
-    corpus cho detector version sau — nhưng **chỉ khi đã tách khỏi `encrypted_message`** và bản
-    thân nhãn không tái tạo lại được nội dung gốc (offset + slot_type, giống
-    `PIISpan.as_safe_dict()` đã dùng trong S0, không lưu giá trị plaintext trong nhãn).
+  - `labeled_slots`/`predicted_slots` (nhãn — không phải raw): có thể giữ lâu hơn nếu PO muốn
+    dùng làm regression corpus cho detector version sau — nhưng **chỉ khi đã tách khỏi
+    `encrypted_message`**. Offset (start/end) tự nó **không phải plaintext PII** (2 số nguyên,
+    không suy ngược được nội dung nếu không còn `encrypted_message`/`canonical_text_len` đi
+    kèm) — CA Review #3 xác nhận rõ điều này; khác với quyết định S0 (`PIISpan.as_safe_dict()`
+    loại offset) vốn áp cho **log live-traffic phát ra liên tục** (bối cảnh khác — xem §10).
   - Purge job tái dùng pattern `purge_expired` đã có ở `app/services/pii/slot_store.py` (DELETE
     theo `expires_at`, log counts-only).
 - **Storage zone vật lý:** cùng Postgres instance production (không tách DB riêng — đơn giản hoá
@@ -372,38 +449,57 @@ output không chứa giá trị PII đã gieo) và tái xác nhận qua `scripts
 guard (ALL PASS trên toàn bộ code M4 hiện tại). Khi chạy Stage 0P thật, đề nghị chạy lại đúng 2
 evidence này trên traffic thật (không chỉ synthetic) trước khi coi là đủ bằng chứng.
 
-## 9. Incident path (Directive §6 mục 10) — **kill switch sửa theo F-M4-0P-01 và F-M4-0P-01A**
+## 9. Incident path (Directive §6 mục 10) — **kill switch sửa theo F-M4-0P-01, F-M4-0P-01A, F-M4-0P-01B**
 
-CA chỉ ra đúng (Review #1): `m4_pii_shadow` chỉ tắt detector trong orchestrator — không liên
-quan raw sample capture. CA chỉ ra tiếp (Review #2): nói job "no-op ở lượt chạy tiếp theo" là
-**chưa đủ chặt** — nếu 1 lượt chạy (batch) đang đọc/ghi hàng loạt record thì tắt cờ giữa chừng
-vẫn không ngăn được các ghi còn lại của batch đó. Cần 2 công tắc **tách biệt** + **ngữ nghĩa
-dừng ở cấp đơn vị ghi nhỏ nhất**, không phải cấp lượt chạy:
+CA chỉ ra qua 3 vòng: (#1) `m4_pii_shadow` không liên quan raw sample capture — cần công tắc
+riêng. (#2) "no-op ở lượt chạy tiếp theo" không đủ chặt cho 1 batch đang ghi dở — cần re-check ở
+đơn vị nhỏ nhất. (#3) — **đúng và quan trọng nhất**: dù đã re-check trước mỗi INSERT, nếu nguồn
+đọc là `settings.m4_stage0p_capture_enabled` (pydantic-settings, nạp **một lần** lúc process
+khởi động — đúng cách toàn bộ `app/config.py` hoạt động, xem `settings = Settings()` module-level
+singleton) thì **process đang chạy không bao giờ thấy được thay đổi env/config bên ngoài** — re-
+check trước mỗi INSERT chỉ đọc lại đúng 1 giá trị Python tĩnh trong bộ nhớ, không phải trạng thái
+động. Đây là lỗi thiết kế thật, không phải chi tiết.
 
-| Công tắc | Phạm vi | Default | Khi TẮT |
-|---|---|---|---|
-| `m4_pii_shadow` (đã có từ S0) | Detector chạy trong orchestrator (đo metric, không liên quan sample) | OFF | 0 code path chạy — không đổi so với thiết kế S0 |
-| `m4_stage0p_capture_enabled` (**mới**, đề xuất tên) | Job thu thập raw sample (§4) | OFF, **missing config = OFF** | Xem ngữ nghĩa dừng dưới đây |
+**Sửa: nguồn control chuyển từ static settings sang 1 ROW DB động, đọc tươi mỗi lần (F-M4-0P-01B):**
 
-**Ngữ nghĩa "kill" — dừng ở cấp TỪNG TIN NHẮN, không phải cấp job/batch (F-M4-0P-01A):**
+```text
+CREATE TABLE m4_stage0p_control (
+  id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),  -- singleton, dung idiom Postgres chuan
+  capture_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by TEXT
+)
+```
 
-1. Collector **re-check `m4_stage0p_capture_enabled` ngay trước MỖI lệnh INSERT một row** (đơn
-   vị nhỏ nhất — 1 tin nhắn), **không** re-check ở cấp hội thoại hay cấp lượt chạy. Đây là cùng
-   checkpoint dùng để giữ cap §4 (Cap A/B) — 1 điểm kiểm tra duy nhất trước mỗi ghi, kiểm tra cả
-   "flag còn ON?" lẫn "cap chưa vượt?".
-2. **Maximum stop latency định nghĩa tường minh:** thời gian hoàn tất **1 lệnh INSERT một row
-   đang thực thi dở** tại thời điểm cờ chuyển OFF (thực tế: single-row INSERT trên Postgres,
-   quy mô mili-giây) — **không phụ thuộc** số hội thoại/tin nhắn còn lại trong lượt chạy. Đây là
-   cận trên xấu nhất có thể chứng minh được, không phải ước lượng "lượt chạy tiếp theo".
-3. Tắt cờ → dừng ghi MỚI theo ngữ nghĩa trên; **không** xoá row đã có sẵn (xoá chỉ qua retention
-   §6/DSR §7 — tránh "báo động giả" gây mất dữ liệu đang chờ review ngoài ý muốn).
-4. **Thu hồi quyền reviewer là hành động ĐỘC LẬP** với công tắc capture (§5: revoke permission
-   `m4.sample.read` hoặc revoke `EXECUTE` trên hàm §5.2 — không cần đụng `m4_stage0p_capture_
-   enabled`, và ngược lại).
-5. **Evidence bắt buộc trước khi prerequisite 5b (§0) được coi là PASS:** test khẳng định 0 write
-   xảy ra sau khi cờ chuyển OFF giữa batch (harness: bắt đầu capture N tin nhắn, chuyển OFF sau
-   khi M<N đã ghi, assert đúng M row tồn tại — không hơn); rollback rehearsal thật (không chỉ
-   suy luận trên giấy). Đây là việc của submission kỹ thuật, không phải gói governance này.
+| Công tắc | Nguồn | Phạm vi | Default | Khi TẮT |
+|---|---|---|---|---|
+| `m4_pii_shadow` (đã có từ S0) | `settings` (static — đúng, vì đây chỉ là flag đọc 1 lần lúc orchestrator xử lý 1 request, không phải long-running job) | Detector trong orchestrator | OFF | 0 code path — không đổi |
+| capture control | **row `m4_stage0p_control`** (động — SỬA theo F-01B, không dùng `settings` cho control của 1 long-running job) | Job thu thập (§4) | `capture_enabled=FALSE` mặc định; **thiếu row = coi như FALSE** (fail closed, giữ đúng nguyên tắc "missing config = OFF" dù nguồn đã đổi từ settings sang DB) | Xem ngữ nghĩa dưới |
+
+**Ngữ nghĩa "kill" — đọc tươi từ DB trước MỖI INSERT, có giới hạn thời gian đọc tường minh:**
+
+1. Trước mỗi INSERT 1 row, collector chạy `SELECT capture_enabled FROM m4_stage0p_control WHERE
+   id=1` trên **connection/transaction hiện tại** — Postgres READ COMMITTED đảm bảo mỗi câu SELECT
+   mới thấy giá trị **đã commit gần nhất** từ bất kỳ session nào khác, giải quyết đúng vấn đề CA
+   nêu (không còn đọc lại 1 biến Python tĩnh). Cùng checkpoint dùng cho cap §4 và pending-deletion
+   §5.3 — 1 điểm kiểm tra duy nhất trước mỗi ghi.
+2. **Đọc lỗi/timeout = OFF (fail closed, tường minh — CA yêu cầu):** câu SELECT control chạy với
+   `SET LOCAL statement_timeout = '2s'` — nếu không trả về trong 2 giây (DB quá tải, mất kết nối,
+   …) → coi như đọc thất bại → xử lý như FALSE → dừng ghi. Không có nhánh "đọc lỗi thì cứ tiếp tục
+   giả định vẫn ON".
+3. **Maximum stop latency định nghĩa lại — có cơ chế thật đứng sau, không phải ước lượng:**
+   ≤ 2 giây (statement_timeout ở trên) + thời gian hoàn tất 1 INSERT một row đang thực thi dở
+   (thực tế mili-giây, nhưng KHÔNG còn là con số duy nhất tự đứng — có timeout 2s làm cận trên
+   cứng khi đường đọc control gặp sự cố).
+4. Tắt (`UPDATE m4_stage0p_control SET capture_enabled=false ...` từ session khác) → dừng ghi MỚI
+   theo ngữ nghĩa trên; KHÔNG xoá row đã có sẵn (chỉ qua retention §6/DSR §7).
+5. Thu hồi quyền reviewer vẫn là hành động ĐỘC LẬP với control này (không đổi từ v3).
+6. **Evidence bắt buộc trước khi prerequisite 5b được PASS (methodology CA yêu cầu, thực hiện ở
+   submission kỹ thuật):** từ 1 session KHÁC, `UPDATE` control row thành FALSE **giữa lúc** job
+   collector đang chạy dở (không dừng job trước); sau đó xác nhận: (a) không có row nào trong
+   `m4_shadow_review_samples` có `captured_at` SAU thời điểm commit của UPDATE đó (chứng minh
+   ranh giới, không chỉ "job dừng lại"); (b) đọc-lỗi-giả-lập (ngắt kết nối control table) cũng
+   dừng ghi tương đương. Đây là việc của submission kỹ thuật, không phải gói governance này.
 
 **Escalation** (không đổi): theo đúng kênh hiện dùng cho các gate M1–M3 — Telegram ping tới anh
 Hoài khi phát hiện sự cố privacy/security (đúng thoả thuận đã ghi ở [[telegram-approve-pings]]),
@@ -415,59 +511,87 @@ cập ngoài audit (audit ghi `outcome=denied` bất thường hoặc API bị b
 14 ngày/hard cap 260 mà chưa có quyết định gia hạn (§4); DSR không xoá được sample trong 1
 transaction (§7).
 
-## 10. Evaluation methodology — matching rule + aggregation (mới, F-M4-0P-05)
+## 10. Evaluation methodology — matching rule + aggregation — **sửa theo F-M4-0P-05A**
 
-**Matching rule đã chọn: instance-count matching theo `(message, slot_type)` — KHÔNG offset-
-overlap.** Lý do: (1) đây **chính là phương pháp đã dùng ở S0** cho corpus synthetic
-(`m4_pii_shadow_test.py`: `got = đếm span theo slot_type; want = đếm kỳ vọng`, `TP = min(got,
-want)`) — CA đã review S0/S3 không phản đối phương pháp này; giữ nhất quán tránh 2 chuẩn đo song
-song. (2) Offset-overlap đòi hỏi lưu vị trí bắt đầu/kết thúc trong cả `labeled_slots` lẫn
-`predicted_slots` — dù bản thân con số vị trí không phải PII, đây là bề mặt dữ liệu KHÔNG cần
-thiết cho mục tiêu đo recall/precision tổng thể; bỏ offset là lựa chọn tối giản hoá dữ liệu
-nhất quán với `PIISpan.as_safe_dict()` (S0) vốn đã cố ý không có offset.
+**Rút lại instance-count-only.** CA Review #3 chỉ đúng: count theo `(message, slot_type)` có thể
+báo TP dù detector khoanh SAI vị trí/thực thể miễn số lượng và loại khớp — ví dụ tin nhắn có 2 số
+điện thoại, detector bắt trúng số #1 hai lần (bỏ sót số #2), count-only vẫn báo `2 khớp 2` = TP=2,
+sai hoàn toàn. Phương pháp S0 (đúng cho smoke test synthetic, nơi Dev tự kiểm soát cả corpus lẫn
+kỳ vọng) **không tự động mở rộng thành acceptance methodology cho sample thật** — CA nói rõ điều
+này, và đúng.
 
-- **Đơn vị so khớp:** với mỗi `(sample_id, slot_type)`: `TP = min(đếm trong labeled_slots, đếm
-  trong predicted_slots)`, `FN = max(0, đếm labeled - đếm predicted)`, `FP = max(0, đếm predicted
-  - đếm labeled)`.
-- **Aggregation: micro** (gộp TP/FN/FP toàn bộ batch trước khi tính recall/precision — đúng cách
-  S0 đã làm), không dùng macro (trung bình theo từng row) để tránh hội thoại ít tin nhắn có
-  trọng số bất thường so với hội thoại nhiều tin nhắn.
-- **Loại trừ khỏi mẫu số:** row `truncated=true` (§4/§6) — không tính vào recall/precision
-  chính, báo cáo riêng số lượng (đúng nguyên tắc `gate=false` đã dùng cho corpus S0).
-- **Thứ tự bắt buộc — chống thiên lệch xác nhận:** ground-truth labeling **phải hoàn tất toàn bộ
-  batch** trước khi `predicted_slots` được ghi (§5.3, ràng buộc cấu trúc — cột rỗng cho tới lúc
-  đó, không phải quy ước quy trình).
+**Matching rule mới — exact-span là chính, count-only chỉ là metric phụ:**
+
+- Cả `labeled_slots` và `predicted_slots` giữ `start`/`end` (offset ký tự trên **canonical text
+  đã normalize + đã cắt theo cap §4** — chuỗi này không lưu trực tiếp nhưng xác định qua
+  `encrypted_message` giải mã + `normalization_version` + `canonical_text_len` §6). Offset **không
+  phải plaintext PII** (CA xác nhận) — khác quyết định S0 (`PIISpan.as_safe_dict()` loại offset)
+  vì bối cảnh khác hẳn: S0 là **log live-traffic phát liên tục ra stdout** (bối cảnh rủi ro cao
+  hơn, tối giản triệt để); Stage 0P sample là **jsonb trong DB restricted-access có RBAC + audit
+  chặt (§5)**, offset ở đây an toàn và cần thiết để đo đúng. **Không sửa `as_safe_dict()`/S0** —
+  giữ nguyên, 2 format phục vụ 2 mục đích khác nhau.
+- **Gate chính: exact-span match** — `slot_type` khớp VÀ `(start, end)` khớp chính xác giữa 1 cặp
+  ground-truth/prediction (không ghép chéo — 1 prediction chỉ khớp tối đa 1 ground-truth và
+  ngược lại, ưu tiên khớp theo thứ tự offset tăng dần khi có nhiều ứng viên).
+- **Metric phụ: overlap/IoU** — `IoU = |giao (start,end)| / |hợp (start,end)|`, ngưỡng khớp
+  **cần PO/CA phê duyệt cụ thể** trước khi dùng cho bất kỳ quyết định gate nào (Dev không tự chọn
+  ngưỡng) — báo cáo song song với exact-span để CA thấy độ nhạy của kết quả với định nghĩa "khớp".
+- **Count-only (§10 bản v3)** hạ xuống **metric tham khảo bổ sung**, không còn là gate.
+- **Non-overlap policy:** trong CÙNG một tập nhãn (ground-truth hoặc prediction) của 1 message,
+  các span không được chồng lấn nhau — nếu detector/reviewer tạo span chồng lấn, coi là lỗi dữ
+  liệu, loại row khỏi batch tính gate (không âm thầm gộp/chọn 1 trong 2).
+- **Offset bounds:** `0 ≤ start < end ≤ canonical_text_len` — vi phạm bounds là lỗi dữ liệu, loại
+  khỏi gate, log riêng (không phải "gate=false" như truncated — đây là bug cần điều tra).
+- **Normalization mapping:** ground-truth VÀ prediction của CÙNG 1 message phải cùng
+  `normalization_version` — khác version thì không so khớp trực tiếp được (offset không còn cùng
+  ý nghĩa), loại khỏi gate cho tới khi ground-truth được relabel với version khớp.
+- **Truncated row:** giữ nguyên loại khỏi mẫu số gate chính (§4/§6), báo cáo riêng — không đổi.
+- **Aggregation: micro** (gộp TP/FN/FP toàn batch trước khi tính recall/precision) — giữ như v3,
+  vẫn đúng dù đổi matching rule.
+- **Evaluation hash:** `(detector_version, normalization_version, evaluation_batch)` cùng nhau
+  xác định duy nhất 1 lần chấm điểm — ghi trong report để tái lập/audit lại được.
+- **Thứ tự bắt buộc — chống thiên lệch xác nhận (không đổi):** ground-truth labeling phải hoàn
+  tất toàn bộ batch trước khi `predicted_slots` được ghi (§5.4, ràng buộc cấu trúc).
+- **Test khi triển khai kỹ thuật:** offset ngoài bounds → loại + log; 2 span chồng lấn trong cùng
+  message → loại + log; ground-truth/prediction khác `normalization_version` → loại khỏi gate;
+  detector đúng số nhưng sai vị trí (case tái tạo ví dụ CA nêu: 2 phone, detector bắt trùng 1 vị
+  trí 2 lần) → exact-span phải báo FN=1 (số #2 bị bỏ sót) + FP=1 (bắt trùng số #1), KHÔNG còn là
+  TP=2 giả như count-only.
 
 ## 11. Điều kiện Dev đề nghị PO/CA quyết định
 
-| # | Nội dung | Trạng thái sau CA Review #2 |
+| # | Nội dung | Trạng thái sau CA Review #3 |
 |---|---|---|
-| 1 | Duyệt/không duyệt mở Stage 0P với thiết kế §2–§10 | ⏳ CHỜ CA review lại — 4 finding (01A/02A/03A/05) đã sửa, mapping ở §12, chờ "Stage 0P Design Accepted" |
-| 2 | Purpose code mới `P12_PII_DETECTOR_EVAL` | ✅ **CA ACCEPTED** (tên/mục đích/data-class) — còn bước nộp addition kỹ thuật vào registry |
-| 3 | Retention 45 ngày | 🟡 **CA ACCEPTED trần kỹ thuật, có điều kiện** — hiệu lực sau khi DSR/purge/evidence (§7, F-04 đã CLOSED AT DESIGN LEVEL) được nghiệm thu ở tầng implementation |
-| 4 | Ranh giới vendor gap | ✅ **CA ACCEPTED có điều kiện** — miễn Stage 0P không có byte nào đi vendor path |
-| 5 | Reviewer cụ thể | ✅ PO ĐÃ DUYỆT (29/7 07:43); CA ghi nhận |
-| 5b | Kill switch capture path | 🔧 DESIGN DEFINED / NOT VERIFIED (F-01A) — PASS chỉ sau implementation test + rollback rehearsal |
-| 6 | Cơ sở pháp lý xử lý | ✅ PO ĐÃ DUYỆT (29/7 07:43); CA ghi nhận |
+| 1 | Duyệt/không duyệt mở Stage 0P với thiết kế §2–§10 | ⏳ CHỜ CA review lại — 4 mục con (01B/02B/03B/05A) đã sửa, mapping ở §12, chờ "Stage 0P Design Accepted" |
+| 2 | Purpose code mới `P12_PII_DETECTOR_EVAL` | ✅ CA ACCEPTED (Review #1) — không đổi |
+| 3 | Retention 45 ngày | 🟡 CA ACCEPTED trần kỹ thuật, có điều kiện (Review #1) — không đổi |
+| 4 | Ranh giới vendor gap | ✅ CA ACCEPTED có điều kiện (Review #1) — không đổi |
+| 5 | Reviewer cụ thể | ✅ PO ĐÃ DUYỆT (29/7 07:43); CA ghi nhận — không đổi |
+| 5b | Kill switch capture path | 🔧 DESIGN DEFINED / NOT VERIFIED (F-01B) — nguồn control đổi sang DB row động; PASS chỉ sau implementation test (OFF giữa batch từ session khác + chứng minh boundary) + rollback rehearsal |
+| 6 | Cơ sở pháp lý xử lý | ✅ PO ĐÃ DUYỆT (29/7 07:43); CA ghi nhận — không đổi |
 
-**Vẫn chưa có bước triển khai kỹ thuật nào được thực hiện** (không migration, không sample
-collector, không cấp quyền production, không bật flag) — đúng ranh giới CA nhắc lại cuối cả 2
-lần review. Sau khi CA ra "Stage 0P Design Accepted", Dev mở submission kỹ thuật riêng: migration
-`m4_shadow_review_samples` + `m4_selection_batches` + hàm `m4_stage0p_fetch_batch_content` + 6
-role DB (§5) + 2 công tắc với re-check per-message (§9), cập nhật Deletion Propagation Map (mục
-#17, §7), bổ sung UC-004 chính thức, sample job 2 pha có cap 4 lớp (§4), job chấm điểm sau-
-labeling (§5.3), rồi mới bật `m4_stage0p_capture_enabled=true` trên tập traffic đã duyệt — mỗi
-bước có evidence riêng theo đúng khuôn mẫu S0–S3.
+**Vẫn chưa có bước triển khai kỹ thuật nào được thực hiện** — đúng ranh giới CA nhắc lại cuối cả
+3 lần review. Sau khi CA ra "Stage 0P Design Accepted", Dev mở submission kỹ thuật riêng:
+migration `m4_shadow_review_samples` + `m4_selection_batches` + `m4_stage0p_control` + hàm
+`m4_stage0p_fetch_batch_content` (hardened) + hàm `is_pending_deletion` + 6 role DB (§5) + control
+động với re-check trước mỗi INSERT (§9), cập nhật Deletion Propagation Map (mục #17, §7), bổ
+sung UC-004 chính thức, sample job 2 pha cap 4 lớp + eligibility window đúng (§4), job chấm điểm
+sau-labeling dùng exact-span (§5.4, §10), rồi mới bật capture control trên tập traffic đã duyệt —
+mỗi bước có evidence riêng theo đúng khuôn mẫu S0–S3.
 
-## 12. Mapping finding → sửa ở đâu (cộng dồn Review #1 + #2, bản v3.0.0)
+## 12. Mapping finding → sửa ở đâu (cộng dồn 3 vòng review, bản v4.0.0)
 
-| Finding | Vòng | Mức | Trạng thái | Sửa tại |
-|---|---|---|---|---|
-| F-M4-0P-01 | #1 | P1 | Base đã tách 2 công tắc | §9 |
-| F-M4-0P-01A | #2 | P1 | **Sửa ở v3** | §9 — re-check per-message (không phải per-batch), max stop latency = 1 INSERT dở, prerequisite 5b tách trạng thái |
-| F-M4-0P-02 | #1 | P1 | Base đã tách role/audit | §5 |
-| F-M4-0P-02A | #2 | P1 | **Sửa ở v3** | §5.1, §5.2 — bảng khoá `m4_selection_batches`, hàm `SECURITY DEFINER` duy nhất đọc `messages`, loại bỏ luật loại-trừ-90-ngày cần content-scan (thay bằng loại trừ tự nhiên từ metadata + Redis key) |
-| F-M4-0P-03 | #1 | P1 | Base đã cap hội thoại | §4 |
-| F-M4-0P-03A | #2 | P1 | **Sửa ở v3** | §4, §6 — thêm Cap B (tin/hội thoại), Cap C (byte/tin), Cap D (trần byte tuyệt đối), cắt UTF-8-safe, đơn-writer bằng advisory lock |
-| F-M4-0P-04 | #1→#2 | P1 | ✅ **CLOSED AT DESIGN LEVEL** | §6, §7 — không sửa thêm, chỉ bổ sung cột không liên quan crypto/DSR |
-| F-M4-0P-05 | #2 (mới) | P1 | **Sửa ở v3** | §5.2 (`predicted_slots`/`detector_version` role tách), §5.3 (chống thiên lệch — cấu trúc, không phải quy ước), §6 (cột mới), §10 (matching rule + aggregation) |
+| Finding | Vòng phát sinh | Vòng đóng | Sửa tại |
+|---|---|---|---|
+| F-M4-0P-01 | #1 | base | §9 |
+| F-M4-0P-01A | #2 | v3 (nhưng #3 phát hiện chưa đủ → 01B) | §9 |
+| **F-M4-0P-01B** | **#3** | **Sửa ở v4** | §9 — control nguồn từ **row DB động** `m4_stage0p_control` (không phải `settings` static), đọc tươi trước mỗi INSERT, `statement_timeout=2s` + đọc-lỗi=OFF, evidence methodology boundary rõ |
+| F-M4-0P-02 | #1 | base | §5 |
+| F-M4-0P-02A | #2 | v3 (nhưng #3 yêu cầu hardening → 02B) | §5.1, §5.2 |
+| **F-M4-0P-02B** | **#3** | **Sửa ở v4** | §5.2 — hardening `SECURITY DEFINER` (search_path/schema-qualify/owner non-superuser/revoke-from-public/validate batch status+window+purpose/audit cùng statement); §5.3 mới — interface hẹp `is_pending_deletion(customer_id)` không trao PSID, re-check race trước persist, DSR §7 là thẩm quyền cuối |
+| F-M4-0P-03 | #1 | base | §4 |
+| F-M4-0P-03A | #2 | v3 (nhưng #3 phát hiện char≠byte + eligibility hở → 03B) | §4, §6 |
+| **F-M4-0P-03B** | **#3** | **Sửa ở v4** | §4 — tách MAX_CHARS (2000)/MAX_BYTES (8000, cắt 2-bước UTF-8-safe), Cap D thật = 41.6MB (không phải 10.4MB sai trước); DB CHECK `octet_length` enforce lại; eligibility thêm ràng buộc `conversations.created_at` trong cửa sổ (chặn kéo hội thoại cũ/không liên quan) |
+| F-M4-0P-04 | #1 | #2 | ✅ **CLOSED**, giữ nguyên qua cả Review #3 |
+| F-M4-0P-05 | #2 (mới) | v3 (nhưng #3 bác methodology → 05A) | §5.2, §5.4, §6, §10 |
+| **F-M4-0P-05A** | **#3** | **Sửa ở v4** | §6 — thêm `start/end` offset + `normalization_version` + `canonical_text_len` vào `labeled_slots`/`predicted_slots`; §10 — viết lại hoàn toàn: exact-span là gate chính, overlap/IoU là metric phụ cần ngưỡng CA/PO duyệt, count-only hạ xuống tham khảo, non-overlap policy, offset bounds, normalization mapping, evaluation hash |
