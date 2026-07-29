@@ -134,3 +134,56 @@ def fingerprint(value: str, slot_type: str) -> str:
     key = _load_key(settings.m4_slot_fp_key_b64, "m4_slot_fp_key_b64")
     norm = normalize_for_fingerprint(value, slot_type)
     return hmac.new(key, f"{slot_type}:{norm}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+# ---------------------------------------------------------------------------
+# Stage 0P sample zone (F-M4-0P-04, CLOSED AT DESIGN LEVEL) — crypto RIENG,
+# KHONG tai dung nguyen trang AAD cua slot store. "slot_type" khong co y nghia
+# voi 1 tin nhan tho (khong phai gia tri 1 slot) nen dung sample_id (UUID, DUY
+# NHAT moi row) thay the — moi row co AAD KHONG THE trung nhau, manh hon
+# slot_type von lap lai giua nhieu row cua slot store. Khoa RIENG
+# (m4_sample_key_b64), tach biet hoan toan Slot Store ke ca khi rotate khoa.
+# ---------------------------------------------------------------------------
+
+_SAMPLE_VERSION = b"v1"
+
+
+def _sample_aad(customer_ref: str, conversation_ref: str, sample_id: str) -> bytes:
+    """AAD domain rieng cho sample zone — cung ky thuat length-prefix canonical
+    voi _aad() nhung domain tag va bo field khac (F-M4-0P-04)."""
+    parts = (_validate_ref(customer_ref, "customer_ref"),
+             _validate_ref(conversation_ref, "conversation_ref"),
+             _validate_ref(sample_id, "sample_id"))
+    out = [b"a3s-m4-shadow-sample-aad-v1"]
+    for p in parts:
+        out.append(len(p).to_bytes(4, "big"))
+        out.append(p)
+    return b"".join(out)
+
+
+def encrypt_sample_value(plaintext: str, *, customer_ref: str,
+                         conversation_ref: str, sample_id: str) -> bytes:
+    """Ma hoa 1 tin nhan mau cho Stage 0P. Blob: v1 || nonce(12) || ct+tag."""
+    key = _load_key(settings.m4_sample_key_b64, "m4_sample_key_b64")
+    nonce = os.urandom(_NONCE_LEN)
+    ct = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"),
+                             _sample_aad(customer_ref, conversation_ref, sample_id))
+    return _SAMPLE_VERSION + nonce + ct
+
+
+def decrypt_sample_value(blob: bytes, *, customer_ref: str,
+                         conversation_ref: str, sample_id: str) -> str:
+    """Giai ma NEU VA CHI NEU context khop AAD luc ma hoa — fail closed nhu
+    decrypt_slot_value. SlotBindingError khi sai context/tamper."""
+    key = _load_key(settings.m4_sample_key_b64, "m4_sample_key_b64")
+    if (len(blob) < len(_SAMPLE_VERSION) + _NONCE_LEN + 16
+            or blob[:len(_SAMPLE_VERSION)] != _SAMPLE_VERSION):
+        raise SlotCryptoError("blob sai dinh dang")
+    nonce = blob[len(_SAMPLE_VERSION):len(_SAMPLE_VERSION) + _NONCE_LEN]
+    ct = blob[len(_SAMPLE_VERSION) + _NONCE_LEN:]
+    try:
+        pt = AESGCM(key).decrypt(nonce, ct,
+                                 _sample_aad(customer_ref, conversation_ref, sample_id))
+    except InvalidTag as e:
+        raise SlotBindingError("context binding khong khop hoac du lieu bi sua") from e
+    return pt.decode("utf-8")

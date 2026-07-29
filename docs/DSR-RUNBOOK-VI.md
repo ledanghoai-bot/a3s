@@ -45,6 +45,7 @@ giữ lại và căn cứ) → lưu audit tuân thủ (opaque reference).
 | 14 | Vector/embedding | KB vectors = D0 product truth, KHÔNG có customer vector | ✅ n/a hiện tại (M4 slot store sẽ thêm mục mới) |
 | 15 | `outbox_events`/`delivery_attempts` payload | có thể chứa tên/SĐT trong alert cũ | ❌ GAP → S5 template minimization + S6 retention RET-05 |
 | 16 | (S3 tương lai) `consent_records` | KHÔNG xóa evidence tuân thủ — khóa purpose "chứng minh tuân thủ" (§13.5) | thiết kế S3 |
+| 17 | **M4 Stage 0P** `m4_shadow_review_samples` | `_delete_customer_data()` DELETE trực tiếp `WHERE customer_ref = customers.id` — KHÔNG join `conversations`/`messages` nên không phụ thuộc thứ tự (chạy trong CÙNG transaction, sau bước xóa conversations ở trên); vô điều kiện, không phụ thuộc pending-check của collector (F-M4-0P-02B/04). Guard `to_regclass` — môi trường chưa có migration 039 (production, tính tới CA Design Acceptance 29/7) bỏ qua bước này, không làm vỡ luồng xóa chính. | ✅ (F-M4-0P-04 CLOSED AT DESIGN LEVEL; evidence: `app/services/data_deletion.py`, smoke test DSR retry/idempotency PASS) |
 
 ## 3. Checklist thao tác thủ công (access/correction — tới khi tự động hóa)
 

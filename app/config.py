@@ -117,5 +117,13 @@ class Settings(BaseSettings):
     m4_slot_fp_key_b64: str = ""
     m4_slot_ttl_hours: int = 24
 
+    # Stage 0P (m4_shadow_review_samples, migration 039 — CA Design Acceptance d2a63c5, package
+    # v4.0.0). Khoa RIENG voi Slot Store (F-M4-0P-04) — khong dung chung m4_slot_key_b64.
+    # m4_stage0p_capture_enabled: PLACEHOLDER — control THAT nam o bang DB `m4_stage0p_control`
+    # (F-M4-0P-01B, doc dong khong dung settings static). Truong nay CHUA co active code path,
+    # giu de tuong thich neu can fallback/tai lieu — KHONG duoc dung lam kill switch that.
+    m4_sample_key_b64: str = ""
+    m4_stage0p_capture_enabled: bool = False
+
 
 settings = Settings()

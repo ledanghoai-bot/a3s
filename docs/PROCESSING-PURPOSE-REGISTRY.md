@@ -23,6 +23,7 @@ rule: không xử lý dữ liệu nếu không có purpose_code hợp lệ; cons
 | `P09_UGC_PUBLICATION` | Công khai quote/review/UGC | **not-active** | D1→D0 sau permission | Permission tường minh từng item | — | TBD | PO |
 | `P10_AI_PROCESSING` | AI/model/vendor được phê duyệt | **active** (chat qua DeepSeek — UC-001) | D1 hiện tại (mục tiêu M4: masked) | AI Use Case Register + Vendor Review; khách đã được disclosure | DeepSeek | RET-02 | PO |
 | `P11_LEGAL_RETENTION` | Lưu giữ do luật/tranh chấp | **active** (orders ẩn danh giữ cho kế toán) | D1→ẩn danh | Nghĩa vụ pháp lý; KHÔNG dùng cho marketing | — | RET-03 | PO |
+| `P12_PII_DETECTOR_EVAL` | Lấy mẫu có kiểm soát từ hội thoại thật để gán nhãn thủ công, đo recall/precision PII detector nội bộ | **dev/test scope** (M4 Stage 0P — CA Design Acceptance 29/7, `d2a63c5`; CHƯA bật capture production) | D1/D2 (nội dung tin nhắn thô trong sample zone `m4_shadow_review_samples`, restricted RBAC — §5 gói governance) | Legitimate interest (cải thiện kiểm soát bảo vệ dữ liệu) — PO duyệt 29/7 07:43; KHÔNG gửi vendor, KHÔNG ảnh hưởng response khách | — (thuần nội bộ, không vendor) | RET-11 | PO |
 
 ## Enforcement points hiện có / sẽ có
 

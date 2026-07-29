@@ -107,6 +107,7 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
         "conversations_deleted": 0,
         "escalations_deleted": 0,
         "orders_anonymized": 0,
+        "m4_samples_deleted": 0,
         "profile_cache_cleared": False,
     }
     pool = await get_pool()
@@ -131,6 +132,22 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
                 summary["escalations_deleted"] = _tag_count(r)
                 r = await conn.execute("DELETE FROM conversations WHERE customer_id = $1", cid)
                 summary["conversations_deleted"] = _tag_count(r)
+                # I-B M4 Stage 0P (Deletion Propagation Map muc #17, migration 039): xoa sample
+                # zone theo customer_ref (= customers.id::text) — LOC TRUC TIEP, KHONG JOIN sang
+                # conversations/messages (da xoa o tren) nen KHONG orphan du chay truoc/sau buoc
+                # nao. Vo dieu kien — DSR la tham quyen cuoi cung bat ke pending-check/race o
+                # collector tra gi truoc do (F-M4-0P-02B). Guard to_regclass: migration 039 la
+                # dev/test scope (CA Design Acceptance), CHUA ap dung production — thieu bang thi
+                # bo qua, KHONG lam vo luong xoa du lieu chinh (backward-compat, dung pattern
+                # audit_service.audit_exists()).
+                if await conn.fetchval(
+                    "SELECT to_regclass('public.m4_shadow_review_samples') IS NOT NULL"
+                ):
+                    r = await conn.execute(
+                        "DELETE FROM m4_shadow_review_samples WHERE customer_ref = $1",
+                        str(cid),
+                    )
+                    summary["m4_samples_deleted"] = _tag_count(r)
                 # An danh don hang (giu lai cho ke toan, bo PII)
                 r = await conn.execute(
                     "UPDATE orders SET shipping_name = NULL, shipping_phone = NULL, "
