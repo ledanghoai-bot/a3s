@@ -16,6 +16,11 @@ REV 3 (CA Technical Review #2, T2-02/T2-03/T2-04): 2 sua doi lon:
     normalization_version khong khop duoc dua vao `exclusions` (co ly do ro rang) thay vi chi
     "bo qua am tham"; va phai truyen `expected_labels_sealed_hash` (doc tu batch row TRUOC) de DB
     doi chieu, tu choi neu stale/forged.
+
+REV 4 (CA Technical Review #3, T3-03): `write_predictions` gio con nhan them
+`p_current_normalization_version` — DB TU XAC MINH dieu kien "normalization_version_mismatch" la
+THAT (so voi gia tri nay) chu khong tin caller khai bao dung; reason exclusion cung phai nam
+trong allowlist DB-side.
 """
 
 import json
@@ -84,9 +89,9 @@ async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -
 
     try:
         write_row = await conn.fetchrow(
-            "SELECT * FROM m4_stage0p_write_predictions($1, $2, $3::jsonb, $4::jsonb, $5, $6)",
+            "SELECT * FROM m4_stage0p_write_predictions($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)",
             batch_id, expected_hash, json.dumps(predictions), json.dumps(exclusions),
-            DETECTOR_VERSION, evaluation_batch,
+            DETECTOR_VERSION, evaluation_batch, NORMALIZATION_VERSION,
         )
     except Exception as e:  # noqa: BLE001 — boc loi DB (validation/coverage/immutability) ro rang
         _log("m4_prediction_refused", batch_id=str(batch_id), error=str(e))

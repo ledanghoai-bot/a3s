@@ -21,8 +21,12 @@ ghi, giu lai se la dead code gay hieu nham "day la nguon hash that". `MATCHING_R
 `AGGREGATION_VERSION` giu lai lam hang so THAM KHAO (khop cung gia tri DB hardcode trong
 `m4_stage0p_complete_evaluation` — dung cho hien thi/doi chieu, khong dung de tu tinh hash).
 
-Them `compute_batch_metrics()` — buoc "cham diem that su" (can logic `exact_span_match`, khong
-the thay the boi DB thuan SQL) ma evaluator PHAI chay TRUOC khi goi `complete_evaluation()`.
+REV 4 (CA Technical Review #3, T3-04): CA chi ro `complete_evaluation()` REV3 van nhan `p_metrics`
+JSON TUY Y tu caller — DB chi hash no, khong xac minh/tinh lai. Sua: XOA HAN tham so metrics —
+`m4_stage0p_complete_evaluation` gio TU TINH exact-span TP/FN/FP tren chinh `labeled_slots`/
+`predicted_slots` bang SQL (multiset intersection theo (sample_id,slot_type,start,end), khoa
+pham vi tung sample). Ham Python `compute_batch_metrics()` (REV3) vi vay bi XOA — khong con
+load-bearing, DB moi la nguon tinh metrics duy nhat.
 """
 
 import json
@@ -164,37 +168,21 @@ async def seal_labels(conn, *, batch_id: str, actor_staff_id: int) -> dict:
     return {"labels_sealed_hash": result["sealed_hash"], "sample_count": result["sample_count"]}
 
 
-async def compute_batch_metrics(conn, *, batch_id: str) -> dict:
-    """REV3: `conn` phai xac thuc bang role `alpha3s_m4_sample_evaluator`. Day la buoc "cham
-    diem" THAT SU (can `exact_span_match`, khong the thay the boi DB thuan SQL) — chay TREN TOAN
-    BO sample DA CO prediction (bo qua sample bi `prediction_excluded_reason`), tra metrics dung
-    lam tham so `metrics` cho `complete_evaluation()`."""
-    rows = await conn.fetch(
-        "SELECT labeled_slots, predicted_slots FROM m4_shadow_review_samples "
-        "WHERE selection_batch = $1 AND prediction_excluded_reason IS NULL", batch_id,
-    )
-    # asyncpg tra jsonb la TEXT tho (khong co codec dang ky trong du an nay) — phai json.loads
-    # tuong minh, khong duoc coi la Python object san co.
-    def _parse(v):
-        if v is None:
-            return []
-        return json.loads(v) if isinstance(v, str) else v
-
-    per_row = [match_by_slot_type(_parse(r["labeled_slots"]), _parse(r["predicted_slots"])) for r in rows]
-    return aggregate_micro(per_row)
-
-
 async def complete_evaluation(conn, *, batch_id: str, actor_staff_id: int,
-                              expected_result_hash: str, metrics: dict) -> dict:
-    """REV3 (T2-04/T2-06): trang thai "eval xong" TACH BIET "prediction da ghi". `conn` phai xac
-    thuc bang role `alpha3s_m4_sample_evaluator`. `expected_result_hash` PHAI la
+                              expected_result_hash: str) -> dict:
+    """REV4 (T3-04): trang thai "eval xong" TACH BIET "prediction da ghi". `conn` phai xac thuc
+    bang role `alpha3s_m4_sample_evaluator`. `expected_result_hash` PHAI la
     `m4_selection_batches.result_hash` hien tai (doc truoc khi goi) — DB tu choi neu khong khop
     (chong stale/forged corpus reference). Goi ham SECURITY DEFINER
     `m4_stage0p_complete_evaluation` — ham DO kiem tra ATOMIC batch da sealed + da ghi prediction
-    + result_hash khop, roi TU TINH `evaluation_report_hash` (bind matching/aggregation version +
-    result_hash + metrics) — Python KHONG con tu tinh/truyen report_hash."""
+    + result_hash khop, TU TINH metrics (exact-span, tren chinh du lieu trong bang — Python KHONG
+    con truyen metrics), roi TU TINH `evaluation_report_hash` (bind matching/aggregation version +
+    result_hash + metrics). Tra ve ca `metrics` DB tinh duoc de caller/evidence xem lai."""
     row = await conn.fetchrow(
-        "SELECT * FROM m4_stage0p_complete_evaluation($1, $2, $3, $4::jsonb)",
-        batch_id, actor_staff_id, expected_result_hash, json.dumps(metrics),
+        "SELECT * FROM m4_stage0p_complete_evaluation($1, $2, $3)",
+        batch_id, actor_staff_id, expected_result_hash,
     )
-    return {"completed_at": row["completed_at"], "report_hash": row["report_hash"]}
+    metrics = row["metrics"]
+    if isinstance(metrics, str):  # asyncpg tra jsonb la TEXT tho — parse tuong minh
+        metrics = json.loads(metrics)
+    return {"completed_at": row["completed_at"], "report_hash": row["report_hash"], "metrics": metrics}

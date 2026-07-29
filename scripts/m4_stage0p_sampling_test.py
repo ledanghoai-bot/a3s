@@ -199,7 +199,7 @@ async def main() -> int:
     await approval_conn.execute("SET ROLE alpha3s_m4_approval_recorder")
     now_g = datetime.datetime.now(datetime.timezone.utc)
     await record_capture_approval(
-        approval_conn, approval_ref="CAP-G", requested_enabled=True, status="approved",
+        approval_conn, approval_ref="CAP-G", requested_enabled=True,
         valid_from=now_g - datetime.timedelta(hours=1), valid_until=now_g + datetime.timedelta(hours=1),
         recorded_by=staff_g["id"])
     await approval_conn.execute("RESET ROLE")

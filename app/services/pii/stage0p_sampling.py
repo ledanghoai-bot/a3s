@@ -8,22 +8,22 @@ Pha 1 (metadata-only, KHONG doc messages.content):
   1d. lock_batch — khoa vao m4_selection_batches; TU DAY collector CHI biet batch_id.
 
 Pha 2 (collector — doc noi dung qua ham SECURITY DEFINER, MA HOA + GHI):
-  run_collector — REV3 (CA Technical Review #2, T2-01/T2-06): fenced work unit REV2 (khoa
-  4013003 giu tu fetch->pending-check->encrypt->insert trong CUNG transaction) bi CA tu choi vi
-  co the giu VO THOI HAN (pending-check/Redis/INSERT khong timeout). Thiet ke moi tach lam 2 buoc
-  ro rang cho MOI ung vien message:
-    1. `m4_stage0p_peek_next_candidate` — KHONG lock, KHONG kiem tra control, KHONG tra plaintext
-       (chi conversation_id/message_id/customer_id) — goi TU DO, an toan truoc khi giu fence.
-    2. Pending-check NGOAI fence (timeout `PENDING_CHECK_TIMEOUT_SECONDS`) — neu pending, bo qua
-       HOAN TOAN, khong bao gio cham fence.
-    3. Neu khong pending: mo 1 transaction (fence 4013003 giu qua `m4_stage0p_fetch_message_content`
-       + recheck pending NGAN (`PENDING_RECHECK_TIMEOUT_SECONDS`, dong Redis nhanh) +
-       `m4_stage0p_record_sample`), TOAN BO boc trong `asyncio.wait_for(FENCE_UNIT_DEADLINE_SECONDS)`
-       — vuot han se cancel (asyncpg huy query dang cho tren server, xem docstring
-       `_run_fenced_unit`), dam bao lock KHONG BAO GIO giu qua deadline nay bat ke buoc nao ben
-       trong treo (Redis, DB lock contention, v.v.).
-  `m4_stage0p_record_sample` gop INSERT + tang `captured_count` ATOMIC (T2-06) — counter CHI tang
-  khi sample THAT SU duoc luu, khong con tang cung luc fetch (truoc ca pending-check) nhu ban cu.
+  run_collector — REV3 (T2-01/T2-06): peek (khong lock) -> pending-check ngoai fence -> fenced
+  unit (fetch+recheck+record_sample, boc `asyncio.wait_for(FENCE_UNIT_DEADLINE_SECONDS)`).
+
+  REV4 (CA Technical Review #3, T3-01/T3-02): 2 thay doi cau truc:
+    - `m4_stage0p_record_sample` REV4 KHONG con nhan customer_ref/conversation_ref/retention_days/
+      normalization_version tu Python — ham TU DERIVE customer_ref/conversation_ref tu DB va TU
+      DOC retention_days/normalization_version tu chinh batch row (dat 1 lan luc lock_batch). Ham
+      con doi hoi 1 "capability token" transaction-scoped ma CHI `m4_stage0p_fetch_message_content`
+      dat duoc khi thanh cong — dong hoan toan duong goi record_sample DOC LAP voi du lieu tu bia
+      (T3-01: truoc day la mot lo hong that, role collector co the EXECUTE record_sample truc
+      tiep, bo qua toan bo authorization).
+    - Khi `peek_next_candidate` bao 'exhausted' (het ung vien THAT SU, khong phai do loi/control
+      off), `run_collector` goi `m4_stage0p_close_collection` — chuyen batch sang trang thai
+      'collection_closed', DIEU KIEN BAT BUOC truoc khi reviewer duoc seal labels (T3-02: seal
+      khong con dong duoc collection tu no — phai co buoc dong tuong minh, doi chieu
+      captured_count vs so row that truoc khi cho dong).
   Advisory lock don-writer 4013002 (session-scoped) giu nguyen — chan 2 tien trinh collector chay
   dong thoi tren CUNG batch.
 """
@@ -137,12 +137,12 @@ async def lock_batch(conn, *, window_start, window_end, eligible_count,
         """
         INSERT INTO m4_selection_batches
           (window_start, window_end, eligible_count, selected_count, algorithm_seed,
-           locked_conversation_ids, purpose_code, status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,'locked')
+           locked_conversation_ids, purpose_code, status, retention_days, normalization_version)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'locked',$8,$9)
         RETURNING batch_id
         """,
         window_start, window_end, eligible_count, len(conversation_ids), SELECTION_SEED_LABEL,
-        conversation_ids, PURPOSE_CODE,
+        conversation_ids, PURPOSE_CODE, RETENTION_DAYS, NORMALIZATION_VERSION,
     )
     _log("m4_batch_locked", batch_id=str(row["batch_id"]), selected_count=len(conversation_ids))
     return row["batch_id"]
@@ -179,10 +179,13 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
         conversation_ref = str(conversation_id)
         blob = encrypt_sample_value(text, customer_ref=customer_ref,
                                     conversation_ref=conversation_ref, sample_id=sample_id)
+        # REV4 T3-01: khong con truyen customer_ref/conversation_ref/retention_days/
+        # normalization_version — ham DB tu derive/doc lai (xem docstring module). Capability
+        # token da duoc dat boi fetch_message_content o tren, trong CUNG transaction nay.
         await collector_conn.fetchrow(
-            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-            batch_id, sample_id, customer_ref, conversation_ref, blob, len(text), was_truncated,
-            RETENTION_DAYS, NORMALIZATION_VERSION, timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7)",
+            batch_id, conversation_id, message_id, sample_id, blob, len(text), was_truncated,
+            timeout=DB_STATEMENT_TIMEOUT_SECONDS,
         )
         return {"status": "ok", "truncated": was_truncated}
 
@@ -204,6 +207,7 @@ async def run_collector(collector_conn, pending_conn, *, batch_id) -> dict:
     pending_customers: set[int] = set()
     aborted_control_off = False
     fence_timeout_hit = False
+    naturally_exhausted = False
     after_conv, after_msg = -1, -1
 
     try:
@@ -213,6 +217,7 @@ async def run_collector(collector_conn, pending_conn, *, batch_id) -> dict:
                 batch_id, after_conv, after_msg, timeout=DB_STATEMENT_TIMEOUT_SECONDS,
             )
             if peek["status"] == "exhausted":
+                naturally_exhausted = True
                 break
 
             conv_id = peek["conversation_id"]
@@ -255,12 +260,25 @@ async def run_collector(collector_conn, pending_conn, *, batch_id) -> dict:
             if unit["truncated"]:
                 truncated_count += 1
 
+        collection_closed = False
+        if naturally_exhausted:
+            # REV4 T3-02: het ung vien THAT SU (khong phai do control OFF/fence timeout) -> dong
+            # collection ngay — dieu kien bat buoc truoc khi reviewer duoc seal labels. Ham DB tu
+            # doi chieu captured_count vs so row that (RAISE neu lech, dau hieu bug can dieu tra
+            # thay vi am tham dong 1 batch khong nhat quan).
+            close_row = await collector_conn.fetchrow(
+                "SELECT * FROM m4_stage0p_close_collection($1)", batch_id,
+                timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+            )
+            collection_closed = close_row["status"] == "collection_closed"
+
         _log("m4_collector_done", inserted=inserted, skipped_pending=skipped_pending,
              truncated=truncated_count, aborted_control_off=aborted_control_off,
-             fence_timeout=fence_timeout_hit)
+             fence_timeout=fence_timeout_hit, collection_closed=collection_closed)
         return {"inserted": inserted, "skipped_pending": skipped_pending,
                 "truncated": truncated_count, "aborted_control_off": aborted_control_off,
-                "lock_failed": False, "fence_timeout": fence_timeout_hit}
+                "lock_failed": False, "fence_timeout": fence_timeout_hit,
+                "collection_closed": collection_closed}
     finally:
         await collector_conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
 

@@ -77,7 +77,7 @@ async def _grant_approval(admin, *, approval_ref: str, staff_id: int, now: datet
     await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
     try:
         await record_capture_approval(
-            conn, approval_ref=approval_ref, requested_enabled=True, status="approved",
+            conn, approval_ref=approval_ref, requested_enabled=True,
             valid_from=now - datetime.timedelta(hours=1), valid_until=now + datetime.timedelta(hours=1),
             recorded_by=staff_id)
     finally:

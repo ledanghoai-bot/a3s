@@ -17,11 +17,16 @@ qua ham SECURITY DEFINER `m4_stage0p_set_capture` (migration 039 §5d) — ham n
 trong 1 statement/transaction.
 
 REV 3 (CA Technical Review #2, T2-05): bat ON gio doi hoi 1 approval record THAT trong bang
-`m4_stage0p_capture_approvals` (APPROVED, dung purpose/window, chua het han/thu hoi) — khong con
-chi kiem `approval_ref` la chuoi khong rong. Ghi bang nay qua role RIENG
-`alpha3s_m4_approval_recorder` (`record_capture_approval()` duoi day) — TACH BIET
-`alpha3s_m4_control_plane`, chong tu duyet cho chinh minh. Tat OFF KHONG doi hoi approval record
-(chi can actor hop le) — CA yeu cau ro OFF khong duoc bi chan vi approval het han/thu hoi.
+`m4_stage0p_capture_approvals` (dung purpose/window, chua thu hoi) — khong con chi kiem
+`approval_ref` la chuoi khong rong. Tat OFF KHONG doi hoi approval record (chi can actor hop le)
+— CA yeu cau ro OFF khong duoc bi chan vi approval het han/thu hoi.
+
+REV 4 (CA Technical Review #3, T3-05): bang approval BAT BIEN (khong con cot `status` — truoc day
+"flip" tu approved sang revoked tren CUNG row la bat kha thi vi approval_ref la PK va recorder
+khong co UPDATE). Thu hoi la 1 SU KIEN RIENG (bang `m4_stage0p_capture_approval_revocations`).
+`record_capture_approval()`/`revoke_capture_approval()` duoi day goi 2 ham SECURITY DEFINER
+tuong ung — role `alpha3s_m4_approval_recorder` KHONG con INSERT/SELECT bang truc tiep nua, CHI
+con EXECUTE 2 ham nay (ca hai tu xac thuc actor + audit BEN TRONG).
 
 `read_capture_enabled()` van la 1 SELECT doc-tuoi don gian, dung cho hien thi trang thai /
 logging — KHONG dung ket qua nay lam co so quyet dinh doc plaintext (quyet dinh THAT nam ben
@@ -89,22 +94,49 @@ async def set_capture_enabled(conn, *, enabled: bool, actor_staff_id: int,
     return before_enabled
 
 
-async def record_capture_approval(conn, *, approval_ref: str, requested_enabled: bool,
-                                  status: str, valid_from, valid_until, recorded_by: int,
-                                  note: str | None = None) -> None:
-    """REV3 T2-05: ghi 1 approval/decision record — PHAI goi tren connection xac thuc bang role
-    `alpha3s_m4_approval_recorder` (TACH BIET `alpha3s_m4_control_plane` — chong tu duyet cho
-    chinh minh, khong role nao la member cua role kia).
+class ApprovalRejectedError(Exception):
+    """m4_stage0p_record_approval/m4_stage0p_revoke_approval tu choi (actor khong hop le / du
+    lieu khong hop le / da thu hoi truoc do / v.v.)."""
 
-    `status` phai la 'approved' hoac 'revoked' (CHECK constraint DB). `requested_enabled=True`
-    danh dau record nay dung cho yeu cau BAT (ON) — `m4_stage0p_set_capture(ON)` chi chap nhan
-    record co `requested_enabled=True AND status='approved' AND now() BETWEEN valid_from AND
-    valid_until AND purpose_code='P12_PII_DETECTOR_EVAL'`."""
-    await conn.execute(
-        "INSERT INTO m4_stage0p_capture_approvals "
-        "(approval_ref, purpose_code, requested_enabled, status, valid_from, valid_until, "
-        "recorded_by, note) VALUES ($1, 'P12_PII_DETECTOR_EVAL', $2, $3, $4, $5, $6, $7)",
-        approval_ref, requested_enabled, status, valid_from, valid_until, recorded_by, note,
-    )
+
+async def record_capture_approval(conn, *, approval_ref: str, requested_enabled: bool,
+                                  valid_from, valid_until, recorded_by: int,
+                                  note: str | None = None) -> str:
+    """REV4 T3-05: ghi 1 approval record BAT BIEN qua ham SECURITY DEFINER
+    `m4_stage0p_record_approval` — PHAI goi tren connection xac thuc bang role
+    `alpha3s_m4_approval_recorder` (TACH BIET `alpha3s_m4_control_plane` — chong tu duyet cho
+    chinh minh). Row nay KHONG con "status" — bat bien tu luc ghi; thu hoi la 1 su kien rieng,
+    xem `revoke_capture_approval()`.
+
+    `requested_enabled=True` danh dau record nay dung cho yeu cau BAT (ON) —
+    `m4_stage0p_set_capture(ON)` chi chap nhan record co `requested_enabled=True`, con hieu luc,
+    VA khong xuat hien trong bang revocations."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT * FROM m4_stage0p_record_approval($1, $2, $3, $4, $5, $6)",
+            approval_ref, requested_enabled, valid_from, valid_until, recorded_by, note,
+        )
+    except Exception as e:  # noqa: BLE001 — boc loi DB thanh loi ro rang cho caller
+        _log("m4_capture_approval_rejected", approval_ref=approval_ref, error=str(e))
+        raise ApprovalRejectedError(str(e)) from e
     _log("m4_capture_approval_recorded", approval_ref=approval_ref,
-        requested_enabled=requested_enabled, status=status, recorded_by=recorded_by)
+        requested_enabled=requested_enabled, recorded_by=recorded_by)
+    return row["approval_ref"]
+
+
+async def revoke_capture_approval(conn, *, approval_ref: str, actor_staff_id: int, reason: str):
+    """REV4 T3-05 (MOI): thu hoi 1 approval record qua ham SECURITY DEFINER
+    `m4_stage0p_revoke_approval` — ghi 1 row RIENG trong `m4_stage0p_capture_approval_revocations`
+    (append-only, PK ngan thu hoi lap). Sau khi goi thanh cong, `m4_stage0p_set_capture(ON)` voi
+    `approval_ref` nay se BI TU CHOI ngay lap tuc (khong can cho het `valid_until`)."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT * FROM m4_stage0p_revoke_approval($1, $2, $3)",
+            approval_ref, actor_staff_id, reason,
+        )
+    except Exception as e:  # noqa: BLE001
+        _log("m4_capture_approval_revoke_rejected", approval_ref=approval_ref, error=str(e))
+        raise ApprovalRejectedError(str(e)) from e
+    _log("m4_capture_approval_revoked", approval_ref=approval_ref, actor_staff_id=actor_staff_id,
+        reason=reason)
+    return row["revoked_at"]

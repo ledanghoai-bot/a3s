@@ -48,7 +48,6 @@ from app.services.pii.crypto import (  # noqa: E402
 )
 from app.services.pii.stage0p_evaluation import (  # noqa: E402
     complete_evaluation,
-    compute_batch_metrics,
     seal_labels,
     validate_spans,
 )
@@ -87,8 +86,9 @@ async def main() -> int:
     conv = await admin.fetchrow("INSERT INTO conversations (customer_id) VALUES ($1) RETURNING id", cust["id"])
     batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start,window_end,eligible_count,selected_count,"
-        "algorithm_seed,locked_conversation_ids,purpose_code) VALUES (now()-interval '1 day',now(),"
-        "1,1,'evalt',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL') RETURNING batch_id", conv["id"])
+        "algorithm_seed,locked_conversation_ids,purpose_code,status,collection_closed_at) VALUES "
+        "(now()-interval '1 day',now(),1,1,'evalt',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL',"
+        "'collection_closed',now()) RETURNING batch_id", conv["id"])
 
     text = "so dien thoai cua toi la 0912345678 va 0987654321 nhe shop"
     sample_id = str(uuid.uuid4())
@@ -169,28 +169,36 @@ async def main() -> int:
     check(sealed_batch_row["labels_sealed_hash"] == sealed_hash, "labels_sealed_hash tren DB khop gia tri tra ve")
     await reviewer_conn.close()
 
-    print("== [8] REV3 T2-02: normalization_version mismatch -> EXCLUSION co ly do (khong con am tham) ==")
+    print("== [8] REV3 T2-02/REV4 T3-03: normalization_version mismatch -> EXCLUSION co ly do (khong con am tham) ==")
+    # 2 sample: 1 mismatch (bi exclude) + 1 khop version hien hanh (duoc predict binh thuong) —
+    # giu ty le exclusion dung 50% (KHONG > 50%) de khong cham T3-03 INSUFFICIENT_DATA gate (gate
+    # do thiet ke rieng de chan exclude-toan-bo/gan-toan-bo, khong phai muc tieu cua test nay).
     sample_id2 = str(uuid.uuid4())
     blob2 = encrypt_sample_value("khac version", customer_ref=str(cust["id"]), conversation_ref=str(conv["id"]),
                                  sample_id=sample_id2)
+    sample_id2b = str(uuid.uuid4())
+    blob2b = encrypt_sample_value("dung version", customer_ref=str(cust["id"]), conversation_ref=str(conv["id"]),
+                                  sample_id=sample_id2b)
     batch2 = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start,window_end,eligible_count,selected_count,"
-        "algorithm_seed,locked_conversation_ids,purpose_code) VALUES (now()-interval '1 day',now(),"
-        "1,1,'evalt2',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL') RETURNING batch_id", conv["id"])
+        "algorithm_seed,locked_conversation_ids,purpose_code,status,collection_closed_at) VALUES "
+        "(now()-interval '1 day',now(),1,1,'evalt2',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL',"
+        "'collection_closed',now()) RETURNING batch_id", conv["id"])
     await admin.execute(
         "INSERT INTO m4_shadow_review_samples (sample_id,customer_ref,conversation_ref,encrypted_message,"
         "canonical_text_len,expires_at,purpose_code,normalization_version,label_status,labeled_slots,"
-        "selection_batch) "
-        "VALUES ($1,$2,$3,$4,$5,now()+interval '1 day','P12_PII_DETECTOR_EVAL','nfc-v0-cu','labeled',"
-        "'[]'::jsonb,$6)",
-        sample_id2, str(cust["id"]), str(conv["id"]), blob2, 12, batch2["batch_id"])
+        "selection_batch) VALUES "
+        "($1,$2,$3,$4,$5,now()+interval '1 day','P12_PII_DETECTOR_EVAL','nfc-v0-cu','labeled','[]'::jsonb,$6),"
+        "($7,$2,$3,$8,$9,now()+interval '1 day','P12_PII_DETECTOR_EVAL','nfc-v1','labeled','[]'::jsonb,$6)",
+        sample_id2, str(cust["id"]), str(conv["id"]), blob2, 12, batch2["batch_id"],
+        sample_id2b, blob2b, 12)
     reviewer_conn2 = await asyncpg.connect(DB_URL)
     await reviewer_conn2.execute("SET ROLE alpha3s_m4_sample_reviewer_api")
     await seal_labels(reviewer_conn2, batch_id=batch2["batch_id"], actor_staff_id=staff["id"])
     await reviewer_conn2.close()
     pred_result = await run_prediction_writer(pw_conn, batch_id=batch2["batch_id"], evaluation_batch="ev-1")
     check(pred_result["skipped_version_mismatch"] == 1, "row normalization_version cu bi loai (exclusion)")
-    check(pred_result["updated"] == 0, "khong co row nao duoc cham diem trong batch2 (chi 1 row, bi exclude)")
+    check(pred_result["updated"] == 1, "row con lai (khop version hien hanh) duoc cham diem binh thuong")
     excl_row = await admin.fetchrow(
         "SELECT prediction_excluded_reason, predicted_slots FROM m4_shadow_review_samples WHERE sample_id=$1",
         sample_id2)
@@ -220,14 +228,15 @@ async def main() -> int:
         check(True, "rerun tren batch da ghi prediction -> PredictionNotAllowedError dung (bat bien)")
     await pw_conn.close()
 
-    print("== [10] REV3 T2-04/T2-06: complete_evaluation() — evaluation_completed_at dung sau predict xong ==")
+    print("== [10] REV4 T3-04/T2-06: complete_evaluation() — DB TU TINH metrics, evaluation_completed_at dung sau predict xong ==")
     evaluator_conn = await asyncpg.connect(DB_URL)
     await evaluator_conn.execute("SET ROLE alpha3s_m4_sample_evaluator")
-    metrics = await compute_batch_metrics(evaluator_conn, batch_id=batch["batch_id"])
-    check("phone" in metrics, f"compute_batch_metrics tra metrics THAT tu exact_span_match (thuc te: {metrics})")
     complete_result = await complete_evaluation(evaluator_conn, batch_id=batch["batch_id"],
-                                                actor_staff_id=staff["id"], expected_result_hash=result_hash_1,
-                                                metrics=metrics)
+                                                actor_staff_id=staff["id"], expected_result_hash=result_hash_1)
+    metrics = complete_result["metrics"]
+    check("phone" in metrics,
+          f"T3-04: complete_evaluation tra metrics DB TU TINH tu exact-span (khong con qua "
+          f"compute_batch_metrics/caller-supplied) (thuc te: {metrics})")
     check(complete_result["completed_at"] is not None, "complete_evaluation tra ve completed_at")
     report_hash_1 = complete_result["report_hash"]
     check(bool(report_hash_1) and len(report_hash_1) == 64, "T2-04: DB tu tinh evaluation_report_hash")
@@ -237,7 +246,8 @@ async def main() -> int:
     check(batch_after["evaluation_completed_at"] is not None, "evaluation_completed_at duoc set tren DB")
     check(batch_after["evaluation_report_hash"] == report_hash_1,
           "evaluation_report_hash tren DB khop gia tri tra ve")
-    check(batch_after["status"] == "closed", "batch chuyen status='closed' sau complete_evaluation")
+    check(batch_after["status"] == "evaluation_completed",
+          "batch chuyen status='evaluation_completed' sau complete_evaluation (REV4 6-value state machine)")
     await evaluator_conn.close()
 
     print("== purge_expired() ton trong evaluation_completed_at (T1-06) ==")
@@ -250,7 +260,7 @@ async def main() -> int:
     check(remaining == 0, "sample cua batch1 (da eval-completed) da bi xoa het")
     remaining2 = await admin.fetchval(
         "SELECT count(*) FROM m4_shadow_review_samples WHERE selection_batch=$1", batch2["batch_id"])
-    check(remaining2 == 1, "sample cua batch2 (CHUA eval-completed, chua het han) KHONG bi purge")
+    check(remaining2 == 2, "2 sample cua batch2 (CHUA eval-completed, chua het han) KHONG bi purge")
     await purge_conn.close()
 
     for tbl in ("m4_shadow_review_samples", "m4_selection_batches", "audit_log",
