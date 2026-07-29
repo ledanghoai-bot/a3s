@@ -6,37 +6,44 @@ Chay:
       -e REDIS_URL=redis://alpha3s-m4-redis:6379/0 \
       alpha3s-m4-test python scripts/m4_stage0p_kill_test.py
 
-REV 2 (CA Technical Review #1, F-M4-0P-T1-01): ban goc dung `xmin`/`txid_current()` va CHAP
-NHAN "toi da 1 row dua" — CA tu choi ro: "Kiem tra bang xmin va cho phep mot row dua khong chung
-minh kill boundary". Thiet ke moi (migration 039 §5a/§5b) dung `pg_advisory_xact_lock(4013003)`
-CUNG 1 lock key giua `m4_stage0p_fetch_next_message` va `m4_stage0p_set_capture` — ai giu lock
-truoc PHAI hoan tat/rollback (COMMIT/ROLLBACK, tuc la nha lock) TRUOC KHI ben kia duoc tiep tuc.
-Vi xid duoc Postgres cap phat theo thu tu TANG DAN toan cluster tai lan ghi DAU TIEN cua transaction
-(XidGenLock, dam bao toan cuc — xem ghi chu trong ham `_flip_off_mid_run`), va OFF-transaction
-CHI ghi (cap phat xid) SAU KHI da giu duoc lock (tuc la SAU KHI collector transaction dang giu
-lock da commit/rollback), MOI row sample da INSERT trong luc dua PHAI co xid < off_txid — dung
-"0 tuyet doi", KHONG con la "toi da 1" nhu ban goc.
+REV 2 (CA Technical Review #1, T1-01): xmin/txid_current() DB-native boundary, "0 row dua"
+nghiem ngat (khong con "toi da 1").
+
+REV 3 (CA Technical Review #2, F-M4-0P-T2-01): CA chi ro REV2 van CHUA DU — fenced work unit
+(khoa 4013003) giu tu fetch->pending-check->encrypt->insert TRONG CUNG transaction co the bi giu
+VO THOI HAN neu 1 buoc ben trong treo (Redis hang, DB row-lock contention, process chet giua
+chung) — luc do `m4_stage0p_set_capture(OFF)` cho CUNG 1 lock se KHONG BAO GIO commit duoc, phu
+nhan toan bo bao dam "OFF dat cai tran thoi gian". Thiet ke moi (stage0p_sampling.py REV3): tach
+`peek_next_candidate` (khong lock) khoi `fetch_message_content`+`record_sample` (fenced, boc
+trong `asyncio.wait_for(FENCE_UNIT_DEADLINE_SECONDS)`); pending-check co timeout tuong minh o CA
+2 lop (truoc fence + recheck ngan trong fence). Script nay THEM 3 kich ban CA yeu cau ro: mo
+phong Redis hang, DB write hang, va process death trong luc giu lock — chung minh OFF dat cai
+tran thoi gian THAT SU (khong phai chi ly thuyet) va khong co post-hang commit.
 
 Kiem tra:
-  [1] OFF NGAY TU DAU (chua tung bat ON) -> 0 raw fetch (audit_log khong co row m4_message_fetch
-      nao cho batch nay) + 0 insert — CA yeu cau rieng, tach biet voi kich ban mid-run.
-  [2] Kill GIUA luc collector dang chay that (2 task asyncio dan xen qua await point that —
-      khong phai dung truoc khi bat dau). aborted_control_off=True va 0 < inserted < tong so.
-  [3] DB-native boundary NGHIEM NGAT: TAT CA row da insert deu co xmin < off_txid — 0 row dua,
-      khong con "toi da 1" (T1-01 fixed).
-  [4] captured_count tren m4_selection_batches (T1-02, dem BEN VUNG tai DB) khop dung so INSERT
-      thuc te — khong chi dua vao Python counter.
-  [5] Fail-to-read=OFF cho `read_capture_enabled` (ham hien thi/tham khao, KHONG con nam tren
-      duong quyet dinh doc plaintext — quyet dinh THAT nam trong ham DB, da kiem lai o
-      m4_stage0p_permissions_test.py).
-  [6] Thu hoi quyen reviewer doc lap voi cong tac capture (revoke permission khong dung
-      m4_stage0p_capture_enabled).
+  [1] OFF NGAY TU DAU -> 0 raw fetch + 0 insert.
+  [2] Kill GIUA luc collector dang chay that (asyncio interleave that).
+  [3] DB-native boundary NGHIEM NGAT: 0 row dua (T1-01).
+  [4] captured_count (T1-02/T2-06) khop dung so INSERT thuc te.
+  [5] Fail-to-read=OFF cho read_capture_enabled (ham hien thi/tham khao).
+  [6] Thu hoi quyen reviewer doc lap voi cong tac capture.
+  [7] REV3 T2-01: Redis hang (socket khong routable) trong pending-check -> fail-closed (pending=
+      True) TRONG thoi gian bounded (khong vo han).
+  [8] REV3 T2-01: DB write hang (row FOR UPDATE tu 1 session khac chan UPDATE ben trong
+      record_sample) -> fenced unit TIMEOUT dung han (asyncio.wait_for + asyncpg cancel query
+      that su), transaction rollback (0 sample luu), VA set_capture(OFF) van thanh cong nhanh
+      NGAY SAU DO (lock 4013003 da duoc nha khi transaction abort).
+  [9] REV3 T2-01: process death — connection giu pg_advisory_xact_lock(4013003) bi dong dot ngot
+      (khong COMMIT/ROLLBACK) -> Postgres tu phat hien mat ket noi, abort transaction, nha lock;
+      set_capture(OFF) ngay sau do van thanh cong nhanh (khong bi ro ri lock vinh vien).
 """
 
 import asyncio
 import base64
+import datetime
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,8 +55,10 @@ from app.config import settings  # noqa: E402
 from app.services.pii import stage0p_sampling as s  # noqa: E402
 from app.services.pii.stage0p_control import (  # noqa: E402
     read_capture_enabled,
+    record_capture_approval,
     set_capture_enabled,
 )
+from app.services.pii.stage0p_eligibility import is_pending_deletion  # noqa: E402
 
 DB_URL = (os.environ.get("DATABASE_URL")
           or "postgresql://alpha3s:alpha3s@alpha3s-m4-db:5432/alpha3s").replace("+asyncpg", "")
@@ -63,12 +72,27 @@ def check(cond: bool, label: str) -> None:
         _fail.append(label)
 
 
+async def _grant_approval(admin, *, approval_ref: str, staff_id: int, now: datetime.datetime) -> None:
+    conn = await asyncpg.connect(DB_URL)
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    try:
+        await record_capture_approval(
+            conn, approval_ref=approval_ref, requested_enabled=True, status="approved",
+            valid_from=now - datetime.timedelta(hours=1), valid_until=now + datetime.timedelta(hours=1),
+            recorded_by=staff_id)
+    finally:
+        await conn.execute("RESET ROLE")
+        await conn.close()
+
+
 async def main() -> int:
     settings.m4_sample_key_b64 = base64.b64encode(os.urandom(32)).decode()
+    real_redis_url = settings.redis_url
 
     admin = await asyncpg.connect(DB_URL)
     await admin.execute("DELETE FROM m4_shadow_review_samples")
     await admin.execute("DELETE FROM m4_selection_batches")
+    await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref LIKE 'kill-test-%'")
     await admin.execute("DELETE FROM audit_log")
     await admin.execute("DELETE FROM staff_users WHERE username LIKE 'm4-kill-test%'")
     await admin.execute("UPDATE m4_stage0p_control SET capture_enabled=false WHERE id=1")
@@ -77,6 +101,8 @@ async def main() -> int:
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ('m4-kill-test-staff', 'x', 'x', true) RETURNING id"
     )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    await _grant_approval(admin, approval_ref="kill-test-approval", staff_id=staff["id"], now=now)
 
     cust = await admin.fetchrow("INSERT INTO customers (psid, name) VALUES ('kill-test','X') RETURNING id")
     conv = await admin.fetchrow(
@@ -97,7 +123,6 @@ async def main() -> int:
     cp_conn = await asyncpg.connect(DB_URL)
     await cp_conn.execute("SET ROLE alpha3s_m4_control_plane")
 
-    import datetime
     window_start = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
     window_end = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
 
@@ -118,9 +143,9 @@ async def main() -> int:
     check(raw_fetch_count == 0, "OFF tu dau -> 0 audit row m4_message_fetch (0 RAW FETCH, "
           "khong chi 0 insert — chung minh content khong bao gio roi DB)")
 
-    print("== BAT control that su (qua ham, actor/approval hop le) de chuan bi kich ban [2] ==")
+    print("== BAT control that su (approval hop le) de chuan bi kich ban [2] ==")
     await set_capture_enabled(cp_conn, enabled=True, actor_staff_id=staff["id"],
-                              approval_ref="KILL-REHEARSAL-ON")
+                              approval_ref="kill-test-approval")
 
     eligible = await s.select_eligible_conversations(collector_conn, pending_conn,
                                                        window_start=window_start, window_end=window_end)
@@ -131,12 +156,7 @@ async def main() -> int:
     off_txid_holder: dict = {}
 
     async def _flip_off_mid_run():
-        """Tat NGAY SAU KHI collector da bat dau (>=1 row) — cho collector THAT SU dang chay,
-        khong phai tat truoc khi bat dau. off_txid duoc doc SAU KHI set_capture_enabled() da
-        thuc thi UPDATE (cung 1 transaction — txid da duoc cap phat luc do, SELECT txid_current()
-        sau do chi tra lai CUNG gia tri, khong cap phat moi) — KHONG doc txid_current() TRUOC khi
-        goi ham (se cap phat xid som hon luc thuc su giu duoc advisory lock, lam sai lech thu tu
-        so sanh)."""
+        """Tat NGAY SAU KHI collector da bat dau (>=1 row)."""
         watch_conn = await asyncpg.connect(DB_URL)
         try:
             for _ in range(500):
@@ -147,7 +167,7 @@ async def main() -> int:
                 await asyncio.sleep(0.001)
             async with cp_conn.transaction():
                 await set_capture_enabled(cp_conn, enabled=False, actor_staff_id=staff["id"],
-                                          approval_ref="KILL-REHEARSAL-OFF-MID-RUN")
+                                          approval_ref="kill-test-off-mid-run")
                 row = await cp_conn.fetchrow("SELECT txid_current() AS txid")
                 off_txid_holder["txid"] = row["txid"]
         finally:
@@ -171,10 +191,9 @@ async def main() -> int:
     xids = sorted(int(r["xmin"]) for r in rows)
     racing = [x for x in xids if x >= off_txid]
     check(len(racing) == 0,
-          f"0 row co xid >= off_txid={off_txid} (fence bang advisory lock 4013003 dam bao ranh "
-          f"gioi TUYET DOI — khong con 'toi da 1' — thuc te: {len(racing)} row: {racing})")
+          f"0 row co xid >= off_txid={off_txid} (thuc te: {len(racing)} row: {racing})")
 
-    print("== [4] captured_count (T1-02, dem BEN VUNG tai DB) khop dung so insert thuc te ==")
+    print("== [4] captured_count (T1-02/T2-06, dem BEN VUNG tai DB) khop dung so insert thuc te ==")
     captured_count = await admin.fetchval(
         "SELECT captured_count FROM m4_selection_batches WHERE batch_id=$1", batch_id)
     check(captured_count == result["inserted"],
@@ -182,9 +201,98 @@ async def main() -> int:
 
     print("== [5] Fail-to-read = OFF (ham hien thi/tham khao read_capture_enabled) ==")
     broken_conn = await asyncpg.connect(DB_URL)
-    await broken_conn.close()  # dong truoc khi dung -> moi query se loi
+    await broken_conn.close()
     result_broken = await read_capture_enabled(broken_conn)
     check(result_broken is False, "connection da dong -> doc that bai -> coi la OFF (fail closed)")
+
+    print("== [7] REV3 T2-01: Redis hang -> pending-check fail-closed TRONG thoi gian bounded ==")
+    settings.redis_url = "redis://10.255.255.1:6399/0"  # dia chi khong routable — mo phong hang
+    t0 = time.monotonic()
+    hang_result = await is_pending_deletion(pending_conn, cust["id"], timeout=1.0)
+    elapsed_redis = time.monotonic() - t0
+    settings.redis_url = real_redis_url
+    check(hang_result is True, "Redis khong routable -> fail-closed (pending=True)")
+    check(elapsed_redis < 3.0,
+          f"Redis hang bi chan trong thoi gian bounded (thuc te {elapsed_redis:.2f}s < 3.0s, "
+          f"khong phai vo han)")
+
+    print("== [8] REV3 T2-01: DB write hang (row FOR UPDATE) -> fenced unit TIMEOUT dung han, rollback ==")
+    cust_h = await admin.fetchrow("INSERT INTO customers (psid, name) VALUES ('kill-test-hang','H') RETURNING id")
+    conv_h = await admin.fetchrow(
+        "INSERT INTO conversations (customer_id, created_at) VALUES ($1, now()) RETURNING id", cust_h["id"])
+    msg_h = await admin.fetchrow(
+        "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer','tin nhan hang') RETURNING id",
+        conv_h["id"])
+    hang_batch = await admin.fetchrow(
+        "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
+        "algorithm_seed, locked_conversation_ids, purpose_code) VALUES (now()-interval '1 day', now(), "
+        "1, 1, 'kill-test-hang', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL') RETURNING batch_id",
+        conv_h["id"])
+    await set_capture_enabled(cp_conn, enabled=True, actor_staff_id=staff["id"],
+                              approval_ref="kill-test-approval")
+
+    lock_holder = await asyncpg.connect(DB_URL)
+    tr = lock_holder.transaction()
+    await tr.start()
+    await lock_holder.fetchrow("SELECT * FROM m4_selection_batches WHERE batch_id=$1 FOR UPDATE",
+                               hang_batch["batch_id"])
+    try:
+        collector_conn2 = await asyncpg.connect(DB_URL)
+        await collector_conn2.execute("SET ROLE alpha3s_m4_sample_collector")
+        timed_out = False
+        t0 = time.monotonic()
+        try:
+            await asyncio.wait_for(
+                s._run_fenced_unit(collector_conn2, pending_conn, batch_id=hang_batch["batch_id"],
+                                   conversation_id=conv_h["id"], message_id=msg_h["id"],
+                                   customer_id=cust_h["id"]),
+                timeout=s.FENCE_UNIT_DEADLINE_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+        elapsed_hang = time.monotonic() - t0
+        check(timed_out, "DB write hang (row FOR UPDATE tu session khac) -> fenced unit TIMEOUT dung han")
+        check(elapsed_hang < s.FENCE_UNIT_DEADLINE_SECONDS + 3.0,
+              f"elapsed ({elapsed_hang:.1f}s) gan deadline ({s.FENCE_UNIT_DEADLINE_SECONDS}s), khong vo han")
+        await collector_conn2.close()
+    finally:
+        await tr.rollback()  # nha row lock — mo phong session giu lock ket thuc
+    await lock_holder.close()
+
+    count_after_hang = await admin.fetchval(
+        "SELECT captured_count FROM m4_selection_batches WHERE batch_id=$1", hang_batch["batch_id"])
+    check(count_after_hang == 0, "DB write hang -> transaction rollback, 0 sample duoc luu (khong nua-ghi)")
+    sample_count_after_hang = await admin.fetchval(
+        "SELECT count(*) FROM m4_shadow_review_samples WHERE selection_batch=$1", hang_batch["batch_id"])
+    check(sample_count_after_hang == 0, "DB write hang -> 0 row sample trong bang (INSERT cung rollback theo)")
+
+    t0 = time.monotonic()
+    await set_capture_enabled(cp_conn, enabled=False, actor_staff_id=staff["id"],
+                              approval_ref="kill-test-off-after-hang")
+    elapsed_off = time.monotonic() - t0
+    check(elapsed_off < 3.0,
+          f"set_capture(OFF) SAU KHI DB write hang timeout -> thanh cong NHANH ({elapsed_off:.2f}s, "
+          f"lock 4013003 da duoc nha khi fenced unit bi cancel)")
+
+    print("== [9] REV3 T2-01: process death — connection giu lock 4013003 bi dong dot ngot ==")
+    dying_conn = await asyncpg.connect(DB_URL)
+    dying_tr = dying_conn.transaction()
+    await dying_tr.start()
+    await dying_conn.fetchval("SELECT pg_advisory_xact_lock(4013003)")
+    await dying_conn.close()  # mo phong crash: dong THAT SU, khong COMMIT/ROLLBACK tuong minh
+
+    t0 = time.monotonic()
+    off_conn = await asyncpg.connect(DB_URL)
+    await off_conn.execute("SET ROLE alpha3s_m4_control_plane")
+    off_after_death_row = await off_conn.fetchrow(
+        "SELECT * FROM m4_stage0p_set_capture($1,$2,$3)", False, staff["id"], "kill-test-off-after-death")
+    elapsed_death = time.monotonic() - t0
+    await off_conn.execute("RESET ROLE")
+    await off_conn.close()
+    check(off_after_death_row["after_enabled"] is False,
+          "set_capture(OFF) thanh cong SAU KHI connection giu lock 'chet' dot ngot")
+    check(elapsed_death < 3.0,
+          f"set_capture(OFF) hoan tat nhanh ({elapsed_death:.2f}s) — lock KHONG bi ro ri sau process death")
 
     print("== [6] Thu hoi quyen reviewer doc lap voi cong tac capture ==")
     reviewer_conn = await asyncpg.connect(DB_URL)
@@ -204,14 +312,16 @@ async def main() -> int:
     check(can_select_before and not can_select_after_revoke,
           "revoke SELECT cua reviewer co hieu luc ngay (khong can dung capture)")
     check(control_still_off_state is False,
-          "capture control KHONG bi anh huong boi viec revoke quyen reviewer (2 lever doc lap) "
-          "— van OFF vi [2] da tat lai giua chung")
-    # khoi phuc quyen cho cac evidence script khac chay sau
+          "capture control KHONG bi anh huong boi viec revoke quyen reviewer (2 lever doc lap)")
     await admin.execute(
         "GRANT SELECT (sample_id, encrypted_message, canonical_text_len, normalization_version, "
         "customer_ref, conversation_ref, captured_at, label_status, selection_batch, labeled_slots) "
         "ON m4_shadow_review_samples TO alpha3s_m4_sample_reviewer_api")
     await reviewer_conn.close()
+
+    print("== Xac nhan control ve OFF cuoi script ==")
+    final_state = await admin.fetchval("SELECT capture_enabled FROM m4_stage0p_control WHERE id=1")
+    check(final_state is False, "control ve OFF truoc khi script ket thuc")
 
     await admin.execute("DELETE FROM m4_shadow_review_samples")
     await admin.execute("DELETE FROM m4_selection_batches")
@@ -220,6 +330,7 @@ async def main() -> int:
     await admin.execute("DELETE FROM orders")
     await admin.execute("DELETE FROM conversations")
     await admin.execute("DELETE FROM customers")
+    await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref LIKE 'kill-test-%'")
     await admin.execute("DELETE FROM staff_users WHERE id=$1", staff["id"])
     await admin.close()
     await collector_conn.close()

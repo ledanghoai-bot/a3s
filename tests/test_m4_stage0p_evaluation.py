@@ -6,14 +6,10 @@ bo lot (detector bat trung 1 vi tri 2 lan, bo sot vi tri con lai).
 
 from app.services.pii.stage0p_evaluation import (
     aggregate_micro,
-    corpus_manifest_hash,
     count_only_match,
     exact_span_match,
-    label_set_hash,
     match_by_slot_type,
     overlap_match,
-    report_hash,
-    result_hash,
     validate_spans,
 )
 
@@ -123,72 +119,8 @@ class TestMatchBySlotType:
         assert result["name"] == {"tp": 0, "fn": 1, "fp": 0}
 
 
-class TestLabelSetHash:
-    def test_deterministic_bat_ke_thu_tu_input(self):
-        rows_a = [{"sample_id": "s1", "labeled_slots": [_span("phone", 0, 10)]},
-                  {"sample_id": "s2", "labeled_slots": []}]
-        rows_b = list(reversed(rows_a))
-        assert label_set_hash(rows_a) == label_set_hash(rows_b)
-
-    def test_doi_1_labeled_slots_doi_hash(self):
-        h1 = label_set_hash([{"sample_id": "s1", "labeled_slots": [_span("phone", 0, 10)]}])
-        h2 = label_set_hash([{"sample_id": "s1", "labeled_slots": [_span("phone", 0, 11)]}])
-        assert h1 != h2
-
-
-class TestCorpusManifestHash:
-    """REV2 T1-04: CA yeu cau ro — 2 corpus KHAC NHAU voi CUNG 3 tham so roi (batch_id/
-    normalization_version/detector_version) phai ra hash KHAC NHAU (evaluation_hash() cu bi
-    XOA vi khong dat duoc dieu nay)."""
-
-    def test_sensitivity_2_corpus_khac_noi_dung_cung_tham_so_roi(self):
-        common = {"batch_id": "b1", "normalization_version": "nfc-v1"}
-        corpus_a = [{"sample_id": "s1", "labeled_slots": [_span("phone", 0, 10)], "truncated": False}]
-        corpus_b = [{"sample_id": "s1", "labeled_slots": [_span("phone", 0, 11)], "truncated": False}]
-        h1 = corpus_manifest_hash(samples=corpus_a, **common)
-        h2 = corpus_manifest_hash(samples=corpus_b, **common)
-        assert h1 != h2
-
-    def test_doi_sample_id_doi_hash(self):
-        common = {"batch_id": "b1", "normalization_version": "nfc-v1"}
-        h1 = corpus_manifest_hash(samples=[{"sample_id": "s1", "labeled_slots": [], "truncated": False}], **common)
-        h2 = corpus_manifest_hash(samples=[{"sample_id": "s2", "labeled_slots": [], "truncated": False}], **common)
-        assert h1 != h2
-
-    def test_doi_truncated_doi_hash(self):
-        common = {"batch_id": "b1", "normalization_version": "nfc-v1"}
-        h1 = corpus_manifest_hash(samples=[{"sample_id": "s1", "labeled_slots": [], "truncated": False}], **common)
-        h2 = corpus_manifest_hash(samples=[{"sample_id": "s1", "labeled_slots": [], "truncated": True}], **common)
-        assert h1 != h2
-
-    def test_deterministic_bat_ke_thu_tu_input(self):
-        common = {"batch_id": "b1", "normalization_version": "nfc-v1"}
-        samples = [{"sample_id": "s1", "labeled_slots": [], "truncated": False},
-                   {"sample_id": "s2", "labeled_slots": [], "truncated": False}]
-        assert corpus_manifest_hash(samples=samples, **common) == \
-            corpus_manifest_hash(samples=list(reversed(samples)), **common)
-
-
-class TestResultAndReportHash:
-    def test_result_hash_doi_prediction_doi_hash(self):
-        base = {"corpus_hash": "c1", "detector_version": "m4d-0.1.0"}
-        h1 = result_hash(ordered_predictions=[{"sample_id": "s1", "predicted_slots": [_span("phone", 0, 10)]}], **base)
-        h2 = result_hash(ordered_predictions=[{"sample_id": "s1", "predicted_slots": [_span("phone", 0, 11)]}], **base)
-        assert h1 != h2
-
-    def test_result_hash_doi_corpus_hash_doi_hash(self):
-        preds = [{"sample_id": "s1", "predicted_slots": []}]
-        h1 = result_hash(corpus_hash="c1", detector_version="m4d-0.1.0", ordered_predictions=preds)
-        h2 = result_hash(corpus_hash="c2", detector_version="m4d-0.1.0", ordered_predictions=preds)
-        assert h1 != h2
-
-    def test_report_hash_doi_metrics_doi_hash(self):
-        base = {"corpus_hash": "c1", "result_hash_value": "r1"}
-        h1 = report_hash(metrics={"phone": {"tp": 1, "fn": 0, "fp": 0}}, **base)
-        h2 = report_hash(metrics={"phone": {"tp": 0, "fn": 1, "fp": 0}}, **base)
-        assert h1 != h2
-
-    def test_report_hash_deterministic(self):
-        kwargs = {"corpus_hash": "c1", "result_hash_value": "r1",
-                  "metrics": {"phone": {"tp": 1, "fn": 0, "fp": 0}}}
-        assert report_hash(**kwargs) == report_hash(**kwargs)
+## REV3 (CA Technical Review #2, T2-04): `label_set_hash`/`corpus_manifest_hash`/`result_hash`/
+## `report_hash` (REV2, hash tinh o Python) bi XOA — DB gio TU TINH hash tren chinh du lieu
+## trong bang (pgcrypto), khong con nhan Python truyen vao. Test hash sensitivity/tamper-
+## rejection tuong ung nam o scripts/m4_stage0p_evaluation_test.py (DB-integrated, khong phai
+## unit test thuan logic).

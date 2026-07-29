@@ -41,7 +41,10 @@ from app.config import settings  # noqa: E402
 from app.services import data_deletion  # noqa: E402
 from app.services.pii import stage0p_sampling as s  # noqa: E402
 from app.services.pii.crypto import decrypt_sample_value  # noqa: E402
-from app.services.pii.stage0p_control import set_capture_enabled  # noqa: E402
+from app.services.pii.stage0p_control import (  # noqa: E402
+    record_capture_approval,
+    set_capture_enabled,
+)
 
 DB_URL = (os.environ.get("DATABASE_URL")
           or "postgresql://alpha3s:alpha3s@alpha3s-m4-db:5432/alpha3s").replace("+asyncpg", "")
@@ -67,6 +70,8 @@ async def main() -> int:
     settings.m4_sample_key_b64 = base64.b64encode(os.urandom(32)).decode()
     admin = await asyncpg.connect(DB_URL)
     await _reset(admin)
+    await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref='CAP-G'")
+    await admin.execute("DELETE FROM staff_users WHERE username='m4-sampling-test-staff'")
 
     print("== [A] Multi-byte UTF-8 truncation ==")
     long_text = "đường " * 500  # 6 ky tu/tu, co dau, > MAX_CHARS(2000) va > MAX_BYTES(8000)
@@ -190,6 +195,15 @@ async def main() -> int:
     staff_g = await admin.fetchrow(
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ('m4-sampling-test-staff', 'x', 'x', true) RETURNING id")
+    approval_conn = await asyncpg.connect(DB_URL)
+    await approval_conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    now_g = datetime.datetime.now(datetime.timezone.utc)
+    await record_capture_approval(
+        approval_conn, approval_ref="CAP-G", requested_enabled=True, status="approved",
+        valid_from=now_g - datetime.timedelta(hours=1), valid_until=now_g + datetime.timedelta(hours=1),
+        recorded_by=staff_g["id"])
+    await approval_conn.execute("RESET ROLE")
+    await approval_conn.close()
     cp_conn = await asyncpg.connect(DB_URL)
     await cp_conn.execute("SET ROLE alpha3s_m4_control_plane")
     await set_capture_enabled(cp_conn, enabled=True, actor_staff_id=staff_g["id"], approval_ref="CAP-G")
@@ -225,6 +239,7 @@ async def main() -> int:
     # den _reset() cua section [I] (section [H] ngay sau day CAN GIU du lieu 'cap-g', khong
     # duoc _reset()).
     await admin.execute("DELETE FROM audit_log WHERE actor_staff_id=$1", staff_g["id"])
+    await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref='CAP-G'")
     await admin.execute("DELETE FROM staff_users WHERE id=$1", staff_g["id"])
 
     print("== [H] DSR retry/idempotency ==")

@@ -8,18 +8,27 @@ Pha 1 (metadata-only, KHONG doc messages.content):
   1d. lock_batch — khoa vao m4_selection_batches; TU DAY collector CHI biet batch_id.
 
 Pha 2 (collector — doc noi dung qua ham SECURITY DEFINER, MA HOA + GHI):
-  run_collector — REV2 (CA Technical Review #1, T1-01/T1-02): 1 MESSAGE = 1 transaction tren
-  collector_conn, trong do goi ham SECURITY DEFINER `m4_stage0p_fetch_next_message` (migration
-  039 §5a). Ham nay TU giu `pg_advisory_xact_lock(4013003)` (CUNG lock key voi
-  `m4_stage0p_set_capture`) roi MOI doc control — nen khong con "control_conn" rieng o tang
-  Python: khong co cach nao collector doc plaintext ma khong kiem tra control TRUOC, va khong co
-  sample nao commit duoc SAU KHI 1 lenh set_capture(OFF) da commit (2 ben tranh nhau CUNG 1 khoa,
-  ai giu truoc hoan tat/rollback truoc). Cap MAX_CHARS ap NGAY trong SQL (truoc khi plaintext roi
-  DB); MAX_BYTES UTF-8-safe van o Python (can lam viec voi bytes da encode). Advisory lock
-  don-writer 4013002 (session-scoped, KHAC voi 4013003 xact-scoped) giu nguyen — chan 2 tien
-  trinh collector chay dong thoi tren CUNG batch (invariant lien tuc, khac voi fencing bao mat).
+  run_collector — REV3 (CA Technical Review #2, T2-01/T2-06): fenced work unit REV2 (khoa
+  4013003 giu tu fetch->pending-check->encrypt->insert trong CUNG transaction) bi CA tu choi vi
+  co the giu VO THOI HAN (pending-check/Redis/INSERT khong timeout). Thiet ke moi tach lam 2 buoc
+  ro rang cho MOI ung vien message:
+    1. `m4_stage0p_peek_next_candidate` — KHONG lock, KHONG kiem tra control, KHONG tra plaintext
+       (chi conversation_id/message_id/customer_id) — goi TU DO, an toan truoc khi giu fence.
+    2. Pending-check NGOAI fence (timeout `PENDING_CHECK_TIMEOUT_SECONDS`) — neu pending, bo qua
+       HOAN TOAN, khong bao gio cham fence.
+    3. Neu khong pending: mo 1 transaction (fence 4013003 giu qua `m4_stage0p_fetch_message_content`
+       + recheck pending NGAN (`PENDING_RECHECK_TIMEOUT_SECONDS`, dong Redis nhanh) +
+       `m4_stage0p_record_sample`), TOAN BO boc trong `asyncio.wait_for(FENCE_UNIT_DEADLINE_SECONDS)`
+       — vuot han se cancel (asyncpg huy query dang cho tren server, xem docstring
+       `_run_fenced_unit`), dam bao lock KHONG BAO GIO giu qua deadline nay bat ke buoc nao ben
+       trong treo (Redis, DB lock contention, v.v.).
+  `m4_stage0p_record_sample` gop INSERT + tang `captured_count` ATOMIC (T2-06) — counter CHI tang
+  khi sample THAT SU duoc luu, khong con tang cung luc fetch (truoc ca pending-check) nhu ban cu.
+  Advisory lock don-writer 4013002 (session-scoped) giu nguyen — chan 2 tien trinh collector chay
+  dong thoi tren CUNG batch.
 """
 
+import asyncio
 import hashlib
 import json
 import random
@@ -37,8 +46,14 @@ RETENTION_DAYS = 45
 PURPOSE_CODE = "P12_PII_DETECTOR_EVAL"
 NORMALIZATION_VERSION = "nfc-v1"
 # Rieng voi LOCK_KEY 4013001 cua scripts/migrate.py va 4013003 (control fence, xem migration 039
-# §5a/§5b) — 3 namespace doc lap, khong dung tranh nhau.
+# §5) — 3 namespace doc lap, khong dung tranh nhau.
 ADVISORY_LOCK_KEY = 4013002
+
+# REV3 T2-01: cac cận thoi gian tuong minh cho fenced work unit — khong con "vo han".
+DB_STATEMENT_TIMEOUT_SECONDS = 2.0
+PENDING_CHECK_TIMEOUT_SECONDS = 1.5   # kiem pending TRUOC khi giu fence
+PENDING_RECHECK_TIMEOUT_SECONDS = 0.5  # recheck NGAN BEN TRONG fence (dong Redis, phai nhanh)
+FENCE_UNIT_DEADLINE_SECONDS = 5.0     # tran TUYET DOI cho 1 don vi fenced (fetch+recheck+insert)
 
 
 def _log(event: str, **fields) -> None:
@@ -133,91 +148,119 @@ async def lock_batch(conn, *, window_start, window_end, eligible_count,
     return row["batch_id"]
 
 
+async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversation_id,
+                           message_id, customer_id) -> dict:
+    """REV3 T2-01: 1 don vi fenced DUY NHAT cho 1 message da biet truoc (conversation_id,
+    message_id) — fetch content (fence 4013003) + recheck pending NGAN + encrypt + record_sample,
+    tat ca trong CUNG 1 transaction Python. Goi ham nay PHAI duoc boc trong
+    `asyncio.wait_for(FENCE_UNIT_DEADLINE_SECONDS)` boi caller (xem run_collector) — asyncpg huy
+    (cancel) query dang cho tren server khi task Python bi huy, nen KHONG can tu dong/close
+    connection thu cong o day; lock 4013003 tu dong nha khi transaction abort do cancel.
+
+    Tra {"status": "ok"|"control_off"|"pending", "truncated": bool}."""
+    async with collector_conn.transaction():
+        fetched = await collector_conn.fetchrow(
+            "SELECT * FROM m4_stage0p_fetch_message_content($1, $2, $3)",
+            batch_id, conversation_id, message_id, timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+        )
+        if fetched["status"] == "control_off":
+            return {"status": "control_off", "truncated": False}
+
+        # T2-01: recheck NGAN BEN TRONG fence de dong cua so dua con lai — timeout ngat han hon
+        # (fail-closed = pending) de khong giu lock lau hon can thiet.
+        if await is_pending_deletion(pending_conn, customer_id,
+                                     timeout=PENDING_RECHECK_TIMEOUT_SECONDS):
+            return {"status": "pending", "truncated": False}
+
+        text, was_truncated = _truncate(nfc(fetched["content"]))
+        was_truncated = was_truncated or bool(fetched["char_truncated"])
+        sample_id = str(uuid.uuid4())
+        customer_ref = str(customer_id)
+        conversation_ref = str(conversation_id)
+        blob = encrypt_sample_value(text, customer_ref=customer_ref,
+                                    conversation_ref=conversation_ref, sample_id=sample_id)
+        await collector_conn.fetchrow(
+            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            batch_id, sample_id, customer_ref, conversation_ref, blob, len(text), was_truncated,
+            RETENTION_DAYS, NORMALIZATION_VERSION, timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+        )
+        return {"status": "ok", "truncated": was_truncated}
+
+
 async def run_collector(collector_conn, pending_conn, *, batch_id) -> dict:
-    """Pha 2. REV2: chi con 2 connection (`collector_conn` role alpha3s_m4_sample_collector,
-    `pending_conn` role alpha3s_m4_pending_checker) — KHONG con `control_conn` rieng, vi kiem
-    tra control gio nam BEN TRONG ham SECURITY DEFINER `m4_stage0p_fetch_next_message`, chay
-    boi alpha3s_m4_definer bat ke collector_conn dung role gi (T1-01).
+    """Pha 2. REV3 (CA Technical Review #2, T2-01/T2-06): xem docstring module cho thiet ke day
+    du. `collector_conn` role alpha3s_m4_sample_collector, `pending_conn` role
+    alpha3s_m4_pending_checker.
 
     Don-writer bang advisory lock session-scoped 4013002 (F-M4-0P-03B) — tien trinh thu 2
-    fail-fast, giu nguyen tu ban goc. Ben trong, MOI message la 1 transaction rieng tren
-    collector_conn giu advisory lock xact-scoped 4013003 (T1-01/T1-02) xuyen suot fetch->
-    encrypt->insert — xem docstring module."""
+    fail-fast, giu nguyen tu ban goc."""
     got_lock = await collector_conn.fetchval("SELECT pg_try_advisory_lock($1)", ADVISORY_LOCK_KEY)
     if not got_lock:
         _log("m4_collector_lock_failed")
         return {"inserted": 0, "skipped_pending": 0, "truncated": 0,
-                "aborted_control_off": False, "lock_failed": True}
+                "aborted_control_off": False, "lock_failed": True, "fence_timeout": False}
 
     inserted = skipped_pending = truncated_count = 0
     pending_customers: set[int] = set()
-    cust_cache: dict[int, int | None] = {}
     aborted_control_off = False
+    fence_timeout_hit = False
     after_conv, after_msg = -1, -1
 
     try:
         while True:
-            async with collector_conn.transaction():
-                fetched = await collector_conn.fetchrow(
-                    "SELECT * FROM m4_stage0p_fetch_next_message($1, $2, $3)",
-                    batch_id, after_conv, after_msg,
+            peek = await collector_conn.fetchrow(
+                "SELECT * FROM m4_stage0p_peek_next_candidate($1, $2, $3)",
+                batch_id, after_conv, after_msg, timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+            )
+            if peek["status"] == "exhausted":
+                break
+
+            conv_id = peek["conversation_id"]
+            msg_id = peek["message_id"]
+            customer_id = peek["customer_id"]
+            after_conv, after_msg = conv_id, msg_id  # cursor/progress state — TACH BIET captured_count (T2-06)
+
+            if customer_id in pending_customers:
+                skipped_pending += 1
+                continue
+
+            # T2-01: pending-check TRUOC khi giu fence — timeout bounded, KHONG cham lock 4013003.
+            if await is_pending_deletion(pending_conn, customer_id,
+                                         timeout=PENDING_CHECK_TIMEOUT_SECONDS):
+                pending_customers.add(customer_id)
+                skipped_pending += 1
+                continue
+
+            try:
+                unit = await asyncio.wait_for(
+                    _run_fenced_unit(collector_conn, pending_conn, batch_id=batch_id,
+                                     conversation_id=conv_id, message_id=msg_id,
+                                     customer_id=customer_id),
+                    timeout=FENCE_UNIT_DEADLINE_SECONDS,
                 )
-                status = fetched["status"]
+            except asyncio.TimeoutError:
+                fence_timeout_hit = True
+                _log("m4_collector_fence_timeout", conversation_id=conv_id, message_id=msg_id)
+                continue
 
-                if status == "control_off":
-                    _log("m4_collector_stopped_control_off", inserted=inserted)
-                    aborted_control_off = True
-                    break
-                if status == "exhausted":
-                    break
-
-                conv_id = fetched["conversation_id"]
-                msg_id = fetched["message_id"]
-                after_conv, after_msg = conv_id, msg_id
-
-                customer_id = cust_cache.get(conv_id)
-                if customer_id is None and conv_id not in cust_cache:
-                    cust_row = await collector_conn.fetchrow(
-                        "SELECT customer_id FROM conversations WHERE id = $1", conv_id
-                    )
-                    customer_id = cust_row["customer_id"] if cust_row else None
-                    cust_cache[conv_id] = customer_id
-
-                if customer_id in pending_customers:
-                    skipped_pending += 1
-                    continue
-                if await is_pending_deletion(pending_conn, customer_id):
-                    pending_customers.add(customer_id)
-                    skipped_pending += 1
-                    continue
-
-                text, was_truncated = _truncate(nfc(fetched["content"]))
-                was_truncated = was_truncated or bool(fetched["char_truncated"])
-                if was_truncated:
-                    truncated_count += 1
-                sample_id = str(uuid.uuid4())
-                customer_ref = str(customer_id)
-                conversation_ref = str(conv_id)
-                blob = encrypt_sample_value(text, customer_ref=customer_ref,
-                                            conversation_ref=conversation_ref, sample_id=sample_id)
-                await collector_conn.execute(
-                    """
-                    INSERT INTO m4_shadow_review_samples
-                      (sample_id, customer_ref, conversation_ref, encrypted_message,
-                       canonical_text_len, truncated, expires_at, purpose_code,
-                       normalization_version, selection_batch)
-                    VALUES ($1,$2,$3,$4,$5,$6, now() + make_interval(days => $7), $8, $9, $10)
-                    """,
-                    sample_id, customer_ref, conversation_ref, blob, len(text), was_truncated,
-                    RETENTION_DAYS, PURPOSE_CODE, NORMALIZATION_VERSION, batch_id,
-                )
-                inserted += 1
+            if unit["status"] == "control_off":
+                _log("m4_collector_stopped_control_off", inserted=inserted)
+                aborted_control_off = True
+                break
+            if unit["status"] == "pending":
+                pending_customers.add(customer_id)
+                skipped_pending += 1
+                continue
+            inserted += 1
+            if unit["truncated"]:
+                truncated_count += 1
 
         _log("m4_collector_done", inserted=inserted, skipped_pending=skipped_pending,
-             truncated=truncated_count, aborted_control_off=aborted_control_off)
+             truncated=truncated_count, aborted_control_off=aborted_control_off,
+             fence_timeout=fence_timeout_hit)
         return {"inserted": inserted, "skipped_pending": skipped_pending,
                 "truncated": truncated_count, "aborted_control_off": aborted_control_off,
-                "lock_failed": False}
+                "lock_failed": False, "fence_timeout": fence_timeout_hit}
     finally:
         await collector_conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
 

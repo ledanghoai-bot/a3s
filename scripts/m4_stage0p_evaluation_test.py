@@ -1,34 +1,30 @@
 #!/usr/bin/env python
 """I-B M4 Stage 0P — evidence: crypto DB-integrated + evaluation methodology (CA acceptance
-criteria #10, #11, #12; REV2 CA Technical Review #1 T1-03/T1-04/T1-06).
+criteria #10, #11, #12; REV3 CA Technical Review #2 T2-02/T2-03/T2-04/T2-06).
 
 Chay:
   docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@alpha3s-m4-db:5432/alpha3s \
       alpha3s-m4-test python scripts/m4_stage0p_evaluation_test.py
 
 Kiem tra (tren DB that, khac tests/test_m4_stage0p_crypto.py va test_m4_stage0p_evaluation.py
-von thuan logic — o day dung row that trong bang, qua role that):
-  [1] Crypto domain/key separation: sample encrypt bang khoa/domain M4 Stage 0P KHONG giai ma
-      duoc bang ham slot store (pii_slots) du dung API tuong tu.
-  [2] Tamper tren row DB that: sua encrypted_message truc tiep -> decrypt fail.
-  [3] Cross-context tren row DB that: doi customer_ref/conversation_ref cua ROW (khong phai
-      chi tham so ham) -> decrypt that bai (AAD khong con khop).
-  [4] Offset-bounds validation tren du doan detector THAT (chay tren cau that co PII, kiem
-      validate_spans khong bao loi).
-  [5] Non-overlap: 2 span detector doc lap khong chong lan tren cung 1 cau (thuoc tinh detector
-      da co tu S0 — xac nhan lai qua duong Stage 0P).
-  [6] REV2 (T1-03): seal_labels() qua DB — chong thien lech xac nhan van dung sau khi chuyen
-      sang ham SECURITY DEFINER (khong con Python-level unlabeled-count check).
-  [7] REV2 (T1-03): write_predictions() tu choi tren batch CHUA sealed (goi qua Python wrapper
-      run_prediction_writer, khong phai goi SQL truc tiep nhu permissions_test.py — chung minh
-      wrapper Python truyen dung loi tu DB len thanh PredictionNotAllowedError).
-  [8] normalization_version mismatch bi loai khoi gate (khong so sanh nham 2 chuan hoa khac nhau)
-      — chay SAU KHI batch da sealed (T1-03 doi thu tu: sealed truoc, predict sau).
-  [9] REV2 (T1-04): corpus_manifest_hash/result_hash/report_hash — deterministic + nhay voi noi
-      dung THAT (khac evaluation_hash() cu da XOA).
-  [10] REV2 (T1-06): complete_evaluation() qua DB — evaluation_completed_at duoc set DUNG SAU
-      KHI tat ca prediction da ghi; purge_expired() ton trong cot nay (kiem lai o
-      m4_stage0p_permissions_test.py cho phan tu choi, o day kiem luong THANH CONG completo).
+von thuan logic — o day dung row that trong bang, qua role that, qua Python wrapper thay vi SQL
+truc tiep nhu m4_stage0p_permissions_test.py):
+  [1] Crypto domain/key separation.
+  [2] Tamper tren row DB that.
+  [3] Cross-context tren row DB that.
+  [4]+[5] Offset-bounds + non-overlap tren detector output THAT.
+  [6] seal_labels() qua DB — chong thien lech xac nhan; DB TU TINH labels_sealed_hash (T2-04).
+  [7] run_prediction_writer() tu choi tren batch CHUA sealed — qua Python wrapper, chung minh
+      loi DB duoc boc lai dung thanh PredictionNotAllowedError.
+  [8] REV3 T2-02: run_prediction_writer() KHONG con SELECT truc tiep — doc qua
+      m4_stage0p_fetch_sealed_message (kiem sealed truoc MOI row); normalization_version mismatch
+      tro thanh EXCLUSION co ly do (khong con "bo qua am tham").
+  [9] REV3 T2-03: write_predictions bat bien — goi lai run_prediction_writer() TREN BATCH DA GHI
+      -> PredictionNotAllowedError (qua Python wrapper, bo sung cho kiem tra SQL truc tiep o
+      permissions_test.py).
+  [10] REV3 T2-04/T2-06: complete_evaluation() qua compute_batch_metrics() + expected_result_hash
+      doc tu batch row — evaluation_completed_at set DUNG SAU KHI predict xong; purge_expired()
+      ton trong cot nay.
 """
 
 import asyncio
@@ -52,9 +48,7 @@ from app.services.pii.crypto import (  # noqa: E402
 )
 from app.services.pii.stage0p_evaluation import (  # noqa: E402
     complete_evaluation,
-    corpus_manifest_hash,
-    report_hash,
-    result_hash,
+    compute_batch_metrics,
     seal_labels,
     validate_spans,
 )
@@ -144,7 +138,7 @@ async def main() -> int:
     errors = validate_spans(spans, len(text))
     check(errors == [], f"detector output THAT khong vi pham bounds/non-overlap (loi: {errors})")
 
-    print("== [7] REV2 T1-03: write_predictions tu choi tren batch CHUA sealed (qua Python wrapper) ==")
+    print("== [7] write_predictions tu choi tren batch CHUA sealed (qua Python wrapper) ==")
     pw_conn = await asyncpg.connect(DB_URL)
     await pw_conn.execute("SET ROLE alpha3s_m4_prediction_writer")
     try:
@@ -153,7 +147,7 @@ async def main() -> int:
     except PredictionNotAllowedError:
         check(True, "batch chua sealed -> PredictionNotAllowedError dung (loi DB duoc boc lai dung)")
 
-    print("== [6] REV2 T1-03: seal_labels() qua DB — chong thien lech xac nhan ==")
+    print("== [6] seal_labels() qua DB — chong thien lech xac nhan + DB tu tinh hash (T2-04) ==")
     reviewer_conn = await asyncpg.connect(DB_URL)
     await reviewer_conn.execute("SET ROLE alpha3s_m4_sample_reviewer_api")
     try:
@@ -166,15 +160,16 @@ async def main() -> int:
         "WHERE sample_id=$2", '[]', sample_id)
     seal_result = await seal_labels(reviewer_conn, batch_id=batch["batch_id"], actor_staff_id=staff["id"])
     check(seal_result["sample_count"] == 1, "sau khi labeled -> seal_labels thanh cong (sample_count=1)")
-    corpus_hash_1 = seal_result["labels_sealed_hash"]
+    sealed_hash = seal_result["labels_sealed_hash"]
+    check(bool(sealed_hash) and len(sealed_hash) == 64, "T2-04: DB tu tinh labels_sealed_hash (sha256 hex)")
     sealed_batch_row = await admin.fetchrow(
         "SELECT labels_sealed_at, labels_sealed_hash FROM m4_selection_batches WHERE batch_id=$1",
         batch["batch_id"])
     check(sealed_batch_row["labels_sealed_at"] is not None, "labels_sealed_at duoc set tren DB")
-    check(sealed_batch_row["labels_sealed_hash"] == corpus_hash_1, "labels_sealed_hash tren DB khop gia tri tra ve")
+    check(sealed_batch_row["labels_sealed_hash"] == sealed_hash, "labels_sealed_hash tren DB khop gia tri tra ve")
     await reviewer_conn.close()
 
-    print("== [8] normalization_version mismatch bi loai khoi gate (SAU KHI batch da sealed) ==")
+    print("== [8] REV3 T2-02: normalization_version mismatch -> EXCLUSION co ly do (khong con am tham) ==")
     sample_id2 = str(uuid.uuid4())
     blob2 = encrypt_sample_value("khac version", customer_ref=str(cust["id"]), conversation_ref=str(conv["id"]),
                                  sample_id=sample_id2)
@@ -194,56 +189,54 @@ async def main() -> int:
     await seal_labels(reviewer_conn2, batch_id=batch2["batch_id"], actor_staff_id=staff["id"])
     await reviewer_conn2.close()
     pred_result = await run_prediction_writer(pw_conn, batch_id=batch2["batch_id"], evaluation_batch="ev-1")
-    check(pred_result["skipped_version_mismatch"] == 1, "row normalization_version cu bi bo qua (khong cham)")
-    check(pred_result["updated"] == 0, "khong co row nao duoc cham diem trong batch2 (chi 1 row, bi skip)")
+    check(pred_result["skipped_version_mismatch"] == 1, "row normalization_version cu bi loai (exclusion)")
+    check(pred_result["updated"] == 0, "khong co row nao duoc cham diem trong batch2 (chi 1 row, bi exclude)")
+    excl_row = await admin.fetchrow(
+        "SELECT prediction_excluded_reason, predicted_slots FROM m4_shadow_review_samples WHERE sample_id=$1",
+        sample_id2)
+    check(excl_row["prediction_excluded_reason"] == "normalization_version_mismatch",
+          "T2-03: ly do exclusion ghi ro rang tren DB (khong con NULL vo thoi han)")
+    check(excl_row["predicted_slots"] is None, "sample bi exclude -> predicted_slots van NULL (khong lam gia)")
 
-    print("== write_predictions THANH CONG tren batch1 (da sealed o buoc [6]) ==")
+    print("== write_predictions THANH CONG tren batch1 (da sealed o buoc [6]) — qua fetch_sealed_message ==")
     pred_result_1 = await run_prediction_writer(pw_conn, batch_id=batch["batch_id"], evaluation_batch="ev-main")
     check(pred_result_1["updated"] == 1, "batch1 da sealed -> prediction ghi thanh cong (updated=1)")
+    result_hash_1 = pred_result_1["result_hash"]
+    check(bool(result_hash_1) and len(result_hash_1) == 64, "T2-04: DB tu tinh result_hash (sha256 hex)")
     predicted_row = await admin.fetchrow(
         "SELECT predicted_slots, detector_version FROM m4_shadow_review_samples WHERE sample_id=$1", sample_id)
     check(predicted_row["detector_version"] == DETECTOR_VERSION, "detector_version thuc te khop hang so taxonomy")
+    sealed_fetch_count = await admin.fetchval(
+        "SELECT count(*) FROM audit_log WHERE action='m4_sealed_sample_fetch' AND entity_id=$1",
+        str(batch["batch_id"]))
+    check(sealed_fetch_count >= 1,
+          "T2-02: co audit row m4_sealed_sample_fetch cho batch1 (doc qua duong sealed-only, co audit)")
+
+    print("== [9] REV3 T2-03: write_predictions bat bien — rerun qua Python wrapper -> tu choi ==")
+    try:
+        await run_prediction_writer(pw_conn, batch_id=batch["batch_id"], evaluation_batch="ev-main-rerun")
+        check(False, "rerun tren batch da ghi prediction -> phai raise PredictionNotAllowedError")
+    except PredictionNotAllowedError:
+        check(True, "rerun tren batch da ghi prediction -> PredictionNotAllowedError dung (bat bien)")
     await pw_conn.close()
 
-    print("== [9] REV2 T1-04: corpus_manifest_hash/result_hash/report_hash — deterministic + nhay noi dung ==")
-    samples_for_hash = [{"sample_id": sample_id, "labeled_slots": [], "truncated": False}]
-    ch1 = corpus_manifest_hash(batch_id=str(batch["batch_id"]), samples=samples_for_hash,
-                               normalization_version="nfc-v1")
-    ch2 = corpus_manifest_hash(batch_id=str(batch["batch_id"]), samples=samples_for_hash,
-                               normalization_version="nfc-v1")
-    check(ch1 == ch2, "corpus_manifest_hash deterministic tren CUNG corpus")
-    samples_diff = [{"sample_id": sample_id, "labeled_slots": [{"slot_type": "phone", "start": 0, "end": 3,
-                                                                "confidence": "high", "reason": "x"}],
-                     "truncated": False}]
-    ch3 = corpus_manifest_hash(batch_id=str(batch["batch_id"]), samples=samples_diff,
-                               normalization_version="nfc-v1")
-    check(ch1 != ch3, "corpus KHAC noi dung -> hash KHAC (CA T1-04: khong con chi hash 3 chuoi roi)")
-
-    predictions_for_hash = [{"sample_id": sample_id, "predicted_slots": predicted_row["predicted_slots"]}]
-    rh1 = result_hash(corpus_hash=ch1, detector_version=DETECTOR_VERSION,
-                      ordered_predictions=predictions_for_hash)
-    rh2 = result_hash(corpus_hash=ch1, detector_version=DETECTOR_VERSION,
-                      ordered_predictions=predictions_for_hash)
-    check(rh1 == rh2, "result_hash deterministic")
-    metrics = {"phone": {"tp": 2, "fn": 0, "fp": 0, "recall": 1.0, "precision": 1.0}}
-    rep1 = report_hash(corpus_hash=ch1, result_hash_value=rh1, metrics=metrics)
-    rep2 = report_hash(corpus_hash=ch1, result_hash_value=rh1, metrics=metrics)
-    check(rep1 == rep2, "report_hash deterministic")
-    metrics_diff = {"phone": {"tp": 1, "fn": 1, "fp": 0, "recall": 0.5, "precision": 1.0}}
-    rep3 = report_hash(corpus_hash=ch1, result_hash_value=rh1, metrics=metrics_diff)
-    check(rep1 != rep3, "metrics KHAC -> report_hash KHAC")
-
-    print("== [10] REV2 T1-06: complete_evaluation() — evaluation_completed_at set dung sau khi predict xong ==")
+    print("== [10] REV3 T2-04/T2-06: complete_evaluation() — evaluation_completed_at dung sau predict xong ==")
     evaluator_conn = await asyncpg.connect(DB_URL)
     await evaluator_conn.execute("SET ROLE alpha3s_m4_sample_evaluator")
+    metrics = await compute_batch_metrics(evaluator_conn, batch_id=batch["batch_id"])
+    check("phone" in metrics, f"compute_batch_metrics tra metrics THAT tu exact_span_match (thuc te: {metrics})")
     complete_result = await complete_evaluation(evaluator_conn, batch_id=batch["batch_id"],
-                                                actor_staff_id=staff["id"], report_hash_value=rep1)
+                                                actor_staff_id=staff["id"], expected_result_hash=result_hash_1,
+                                                metrics=metrics)
     check(complete_result["completed_at"] is not None, "complete_evaluation tra ve completed_at")
+    report_hash_1 = complete_result["report_hash"]
+    check(bool(report_hash_1) and len(report_hash_1) == 64, "T2-04: DB tu tinh evaluation_report_hash")
     batch_after = await admin.fetchrow(
         "SELECT evaluation_completed_at, evaluation_report_hash, status FROM m4_selection_batches "
         "WHERE batch_id=$1", batch["batch_id"])
     check(batch_after["evaluation_completed_at"] is not None, "evaluation_completed_at duoc set tren DB")
-    check(batch_after["evaluation_report_hash"] == rep1, "evaluation_report_hash tren DB khop gia tri truyen vao")
+    check(batch_after["evaluation_report_hash"] == report_hash_1,
+          "evaluation_report_hash tren DB khop gia tri tra ve")
     check(batch_after["status"] == "closed", "batch chuyen status='closed' sau complete_evaluation")
     await evaluator_conn.close()
 
