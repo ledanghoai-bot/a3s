@@ -123,6 +123,8 @@ FUNCTIONS = [
     ("m4_stage0p_complete_evaluation", "uuid,text", "alpha3s_m4_sample_evaluator"),
     ("m4_stage0p_unpin_actor", "", "alpha3s_m4_actor_binder"),
     ("m4_stage0p_set_current_normalization_version", "text,text", "alpha3s_m4_approval_recorder"),
+    ("m4_stage0p_record_normalization_approval", "text,text,timestamptz,timestamptz,text", "alpha3s_m4_approval_recorder"),
+    ("m4_stage0p_revoke_normalization_approval", "text,text", "alpha3s_m4_approval_recorder"),
 ]
 
 PERMISSIONS = ["m4.stage0p.approve", "m4.stage0p.operate", "m4.stage0p.review", "m4.stage0p.evaluate"]
@@ -175,6 +177,28 @@ async def _revoke_approval(conn, *, staff_id, approval_ref, reason):
     await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
     try:
         return await conn.fetchrow("SELECT * FROM m4_stage0p_revoke_approval($1,$2)", approval_ref, reason)
+    finally:
+        await conn.execute("RESET ROLE")
+
+
+async def _record_normalization_approval(conn, *, staff_id, approval_ref, requested_version,
+                                          valid_from, valid_until, note=None):
+    await _pin(conn, staff_id)
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    try:
+        return await conn.fetchrow(
+            "SELECT * FROM m4_stage0p_record_normalization_approval($1,$2,$3,$4,$5)",
+            approval_ref, requested_version, valid_from, valid_until, note)
+    finally:
+        await conn.execute("RESET ROLE")
+
+
+async def _revoke_normalization_approval(conn, *, staff_id, approval_ref, reason):
+    await _pin(conn, staff_id)
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    try:
+        return await conn.fetchrow(
+            "SELECT * FROM m4_stage0p_revoke_normalization_approval($1,$2)", approval_ref, reason)
     finally:
         await conn.execute("RESET ROLE")
 
@@ -448,6 +472,10 @@ async def main() -> int:
          "SELECT * FROM m4_stage0p_staff_permissions", False),
         ("alpha3s_vendor_path", "exclusion_gate", "SELECT",
          "SELECT * FROM m4_stage0p_exclusion_gate", False),
+        ("alpha3s_vendor_path", "normalization_approvals", "SELECT",
+         "SELECT * FROM m4_stage0p_normalization_approvals", False),
+        ("alpha3s_vendor_path", "normalization_approval_revocations", "SELECT",
+         "SELECT * FROM m4_stage0p_normalization_approval_revocations", False),
 
         ("public", "samples", "SELECT", "SELECT * FROM m4_shadow_review_samples", False),
         ("public", "control", "SELECT", "SELECT * FROM m4_stage0p_control", False),
@@ -458,6 +486,10 @@ async def main() -> int:
         ("public", "capture_progress", "SELECT", "SELECT * FROM m4_stage0p_capture_progress", False),
         ("public", "staff_permissions", "SELECT", "SELECT * FROM m4_stage0p_staff_permissions", False),
         ("public", "exclusion_gate", "SELECT", "SELECT * FROM m4_stage0p_exclusion_gate", False),
+        ("public", "normalization_approvals", "SELECT",
+         "SELECT * FROM m4_stage0p_normalization_approvals", False),
+        ("public", "normalization_approval_revocations", "SELECT",
+         "SELECT * FROM m4_stage0p_normalization_approval_revocations", False),
     ]
 
     table_name_map = {
@@ -471,6 +503,8 @@ async def main() -> int:
         "actor_credentials": "m4_stage0p_actor_credentials",
         "actor_session": "m4_stage0p_actor_session",
         "normalization_registry": "m4_stage0p_normalization_registry",
+        "normalization_approvals": "m4_stage0p_normalization_approvals",
+        "normalization_approval_revocations": "m4_stage0p_normalization_approval_revocations",
     }
 
     for role, table, action, sql, expected in matrix:
@@ -490,7 +524,7 @@ async def main() -> int:
         check(allowed == expected, f"{role} / {table} {action} -> {verb} (thuc te: "
               f"{'allowed' if allowed else 'denied'})")
 
-    print("== Ma tran EXECUTE tren 15 ham SECURITY DEFINER (REV5) ==")
+    print("== Ma tran EXECUTE tren 19 ham SECURITY DEFINER (REV9 T8-03) ==")
     for fname, fsig, owner_role in FUNCTIONS:
         for role in ROLES:
             expected = (role == owner_role)
@@ -504,7 +538,7 @@ async def main() -> int:
             check(allowed == expected,
                   f"{role} / EXECUTE {fname} -> {verb} (thuc te: {'allowed' if allowed else 'denied'})")
 
-    print("== SECURITY DEFINER hardening (15 ham nghiep vu + trigger REV5) ==")
+    print("== SECURITY DEFINER hardening (19 ham nghiep vu + trigger REV9 T8-03) ==")
     for fname, fsig, _owner_role in FUNCTIONS:
         row = await admin.fetchrow(
             "SELECT prosecdef, proowner::regrole::text AS owner, "
@@ -1487,6 +1521,14 @@ async def main() -> int:
     # Doi "current" TOAN CUC sang 1 version MOI HOAN TOAN — batch pinned_batch van khoa 'nfc-v1'
     # tu luc _make_large_batch tao (khong doi). Neu write_predictions con doc "current" toan cuc
     # (loi REV7 CA chi ra), toan bo 200 sample se bi loai NHAM vi "mismatch" — phai KHONG xay ra.
+    t703_now = datetime.datetime.now(datetime.timezone.utc)
+    norm_conn_t703 = await asyncpg.connect(DB_URL)
+    await _record_normalization_approval(
+        norm_conn_t703, staff_id=staff["id"], approval_ref="PO-DECISION-T703",
+        requested_version="nfc-v703-test",
+        valid_from=t703_now - datetime.timedelta(hours=1), valid_until=t703_now + datetime.timedelta(hours=1))
+    await norm_conn_t703.close()
+
     conn = await asyncpg.connect(DB_URL)
     await _pin(conn, staff["id"])
     await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
@@ -1736,11 +1778,88 @@ async def main() -> int:
     await conn.execute("RESET ROLE")
     await conn.close()
 
+    print("== T8-03: normalization approval authority — approval_ref phai tro toi record THAT, dung version, con hieu luc, chua bi thu hoi ==")
+    now_t803 = datetime.datetime.now(datetime.timezone.utc)
+
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
+                            "nfc-v2-test", "PO-DECISION-FORGED-NOTREAL")
+        check(False, "approval_ref GIA MAO (khong ton tai) -> phai RAISE (T8-03)")
+    except asyncpg.PostgresError as e:
+        check("khong hop le" in str(e), "approval_ref gia mao -> RAISE dung (T8-03)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
+    norm_conn = await asyncpg.connect(DB_URL)
+    await _record_normalization_approval(
+        norm_conn, staff_id=staff["id"], approval_ref="perm-test-norm-approval-expired",
+        requested_version="nfc-v2-test",
+        valid_from=now_t803 - datetime.timedelta(days=2), valid_until=now_t803 - datetime.timedelta(days=1))
+    await _record_normalization_approval(
+        norm_conn, staff_id=staff["id"], approval_ref="perm-test-norm-approval-torevoke",
+        requested_version="nfc-v2-test",
+        valid_from=now_t803 - datetime.timedelta(hours=1), valid_until=now_t803 + datetime.timedelta(hours=1))
+    norm_revoke_result = await _revoke_normalization_approval(
+        norm_conn, staff_id=staff["id"], approval_ref="perm-test-norm-approval-torevoke",
+        reason="permissions test rehearsal")
+    check(norm_revoke_result["revoked_at"] is not None, "revoke_normalization_approval thanh cong (T8-03)")
+    await _record_normalization_approval(
+        norm_conn, staff_id=staff["id"], approval_ref="perm-test-norm-approval-wrongversion",
+        requested_version="nfc-v3-does-not-match",
+        valid_from=now_t803 - datetime.timedelta(hours=1), valid_until=now_t803 + datetime.timedelta(hours=1))
+    await norm_conn.close()
+
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
+                            "nfc-v2-test", "perm-test-norm-approval-expired")
+        check(False, "approval HET HAN -> phai RAISE (T8-03)")
+    except asyncpg.PostgresError as e:
+        check("khong hop le" in str(e), "approval het han -> RAISE dung (T8-03)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
+                            "nfc-v2-test", "perm-test-norm-approval-torevoke")
+        check(False, "approval DA BI THU HOI -> phai RAISE (T8-03)")
+    except asyncpg.PostgresError as e:
+        check("khong hop le" in str(e), "approval da bi thu hoi -> RAISE dung (T8-03)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
+                            "nfc-v2-test", "perm-test-norm-approval-wrongversion")
+        check(False, "approval hop le cho VERSION KHAC (khong phai nfc-v2-test) -> phai RAISE (T8-03)")
+    except asyncpg.PostgresError as e:
+        check("khong hop le" in str(e), "approval sai version -> RAISE dung (T8-03, khong the 'muon' approval)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
+    norm_conn2 = await asyncpg.connect(DB_URL)
+    await _record_normalization_approval(
+        norm_conn2, staff_id=staff["id"], approval_ref="perm-test-norm-approval-valid",
+        requested_version="nfc-v2-test",
+        valid_from=now_t803 - datetime.timedelta(hours=1), valid_until=now_t803 + datetime.timedelta(hours=1))
+    await norm_conn2.close()
+
     conn = await asyncpg.connect(DB_URL)
     await _pin(conn, staff["id"])
     await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
     new_reg = await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
-                                  "nfc-v2-test", "PO-DECISION-001")
+                                  "nfc-v2-test", "perm-test-norm-approval-valid")
     check(new_reg["version"] == "nfc-v2-test", "set_current_normalization_version thanh cong -> version moi tra ve dung")
     cur_row = await admin.fetchrow(
         "SELECT version FROM m4_stage0p_normalization_registry WHERE is_current")
@@ -1748,6 +1867,10 @@ async def main() -> int:
     old_row = await admin.fetchrow(
         "SELECT is_current FROM m4_stage0p_normalization_registry WHERE version='nfc-v1'")
     check(old_row["is_current"] is False, "version cu 'nfc-v1' van con (lich su bat bien), chi is_current=false")
+    reg_approval_ref = await admin.fetchval(
+        "SELECT approval_ref FROM m4_stage0p_normalization_registry WHERE version='nfc-v2-test'")
+    check(reg_approval_ref == "perm-test-norm-approval-valid",
+          "registry entry ghi dung approval_ref THAT da xac minh (T8-03, khong con 'khong rong' la du)")
     # REV8 T7-01: pin la consume-on-use — lan goi THANH CONG o tren da tieu thu pin, phai pin LAI
     # truoc khi goi tiep (khong con "1 pin dung nhieu lan" nhu REV7).
     await conn.execute("RESET ROLE")
@@ -1755,7 +1878,7 @@ async def main() -> int:
     await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
     try:
         await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
-                            "nfc-v2-test", "PO-DECISION-002")
+                            "nfc-v2-test", "perm-test-norm-approval-valid")
         check(False, "set_current_normalization_version voi version DA TON TAI -> phai RAISE (T6-04)")
     except asyncpg.PostgresError as e:
         check("da ton tai" in str(e), "set_current_normalization_version version trung -> RAISE dung (T6-04)")
@@ -1764,6 +1887,12 @@ async def main() -> int:
     # khoi phuc registry ve 'nfc-v1' de khong anh huong gia tri seed mac dinh cho cac lan chay khac.
     await admin.execute("UPDATE m4_stage0p_normalization_registry SET is_current=false WHERE version='nfc-v2-test'")
     await admin.execute("UPDATE m4_stage0p_normalization_registry SET is_current=true WHERE version='nfc-v1'")
+    await admin.execute(
+        "DELETE FROM m4_stage0p_normalization_approval_revocations "
+        "WHERE approval_ref LIKE 'perm-test-norm-approval-%' OR approval_ref = 'PO-DECISION-T703'")
+    await admin.execute(
+        "DELETE FROM m4_stage0p_normalization_approvals "
+        "WHERE approval_ref LIKE 'perm-test-norm-approval-%' OR approval_ref = 'PO-DECISION-T703'")
 
     print("== Xac nhan control da ve OFF (bat buoc truoc khi ket thuc script) ==")
     final_state = await admin.fetchval("SELECT capture_enabled FROM m4_stage0p_control WHERE id=1")

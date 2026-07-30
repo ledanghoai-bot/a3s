@@ -277,6 +277,46 @@ REVOKE ALL ON m4_stage0p_capture_approval_revocations FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_capture_approval_revocations FROM alpha3s_app;
 
 -- ===========================================================================
+-- 2c2. Bang m4_stage0p_normalization_approvals / _revocations - REV9 T8-03 (MOI). CA chi ro
+--      approval_ref cua set_current_normalization_version (T6-04) chi kiem "khong rong" - 1 actor
+--      co quyen co the truyen chuoi tuy y, registry row + audit log sau do TRONG GIONG nhu da co
+--      approval that. Sua: bang approval THAT rieng cho normalization (KHONG tai dien giai capture-
+--      ON approval — bang/ham hoan toan tach biet), moi row RIENG cho 1 version cu the
+--      (requested_version) — 1 approval CHI hop le de doi sang DUNG version do, khong the dung lai
+--      cho version khac. Cung mau immutable-record + revocation-event-rieng nhu capture approvals
+--      (T3-05).
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS m4_stage0p_normalization_approvals (
+  approval_ref      TEXT PRIMARY KEY,
+  requested_version TEXT NOT NULL,
+  valid_from        TIMESTAMPTZ NOT NULL,
+  valid_until       TIMESTAMPTZ NOT NULL,
+  recorded_by       BIGINT NOT NULL REFERENCES staff_users(id),
+  recorded_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  note              TEXT,
+  CONSTRAINT m4_norm_approval_window_valid CHECK (valid_until > valid_from)
+);
+
+COMMENT ON TABLE m4_stage0p_normalization_approvals IS
+  'REV9 T8-03: approval record BAT BIEN rieng cho normalization version change (KHONG tai dien giai capture-ON approval — bang/hanh dong hoan toan tach biet). 1 row chi hop le cho DUNG requested_version cua no. Ghi qua m4_stage0p_record_normalization_approval.';
+
+REVOKE ALL ON m4_stage0p_normalization_approvals FROM PUBLIC;
+REVOKE ALL ON m4_stage0p_normalization_approvals FROM alpha3s_app;
+
+CREATE TABLE IF NOT EXISTS m4_stage0p_normalization_approval_revocations (
+  approval_ref TEXT PRIMARY KEY REFERENCES m4_stage0p_normalization_approvals(approval_ref),
+  revoked_by   BIGINT NOT NULL REFERENCES staff_users(id),
+  revoked_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reason       TEXT NOT NULL
+);
+
+COMMENT ON TABLE m4_stage0p_normalization_approval_revocations IS
+  'REV9 T8-03: 1 row = 1 approval_ref (normalization) bi thu hoi vinh vien (PK ngan thu hoi lap). Ghi qua m4_stage0p_revoke_normalization_approval.';
+
+REVOKE ALL ON m4_stage0p_normalization_approval_revocations FROM PUBLIC;
+REVOKE ALL ON m4_stage0p_normalization_approval_revocations FROM alpha3s_app;
+
+-- ===========================================================================
 -- 2d. Bang m4_stage0p_staff_permissions - REV5 T4-04 (MOI): quyen CU THE tren tung staff, tach
 --     biet theo hanh dong (chong 1 role DB dung chung mao danh BAT KY staff active nao - CA yeu
 --     cau ro "approval recorder va control operator phai la principals/permissions tach biet").
@@ -1378,11 +1418,25 @@ BEGIN
   IF p_version IS NULL OR length(btrim(p_version)) = 0 THEN
     RAISE EXCEPTION 'm4_stage0p_set_current_normalization_version: version khong duoc rong';
   END IF;
-  IF p_approval_ref IS NULL OR length(btrim(p_approval_ref)) = 0 THEN
-    RAISE EXCEPTION 'm4_stage0p_set_current_normalization_version: approval_ref khong duoc rong (T6-04)';
-  END IF;
   IF EXISTS (SELECT 1 FROM public.m4_stage0p_normalization_registry AS nr WHERE nr.version = p_version) THEN
     RAISE EXCEPTION 'm4_stage0p_set_current_normalization_version: version % da ton tai (lich su bat bien, khong tao lai - T6-04)', p_version;
+  END IF;
+  -- REV9 T8-03: approval_ref gio PHAI tro toi 1 approval record THAT (rieng, khong tai dien giai
+  -- capture-ON) — con hieu luc (chua het han/chua bi thu hoi) VA dung DUNG cho p_version nay (1
+  -- approval CHI hop le cho version no de xuat, khong the "muon" cho version khac). CA chi ro
+  -- REV8 chi kiem "khong rong" la KHONG DU — 1 actor co quyen truoc day co the truyen chuoi tuy y.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.m4_stage0p_normalization_approvals a
+    WHERE a.approval_ref = p_approval_ref
+      AND a.requested_version = p_version
+      AND now() BETWEEN a.valid_from AND a.valid_until
+      AND NOT EXISTS (
+        SELECT 1 FROM public.m4_stage0p_normalization_approval_revocations r
+        WHERE r.approval_ref = a.approval_ref
+      )
+  ) THEN
+    RAISE EXCEPTION 'm4_stage0p_set_current_normalization_version: approval_ref % khong hop le cho version % (khong ton tai/het han/bi thu hoi/sai version - T8-03)',
+      p_approval_ref, p_version;
   END IF;
 
   UPDATE public.m4_stage0p_normalization_registry SET is_current = FALSE WHERE is_current = TRUE;
@@ -1552,6 +1606,95 @@ $$;
 
 ALTER FUNCTION m4_stage0p_revoke_approval(TEXT, TEXT) OWNER TO alpha3s_m4_definer;
 REVOKE EXECUTE ON FUNCTION m4_stage0p_revoke_approval(TEXT, TEXT) FROM PUBLIC;
+
+-- ===========================================================================
+-- 5g0. m4_stage0p_record_normalization_approval / m4_stage0p_revoke_normalization_approval -
+--      REV9 T8-03 (MOI). Cung mau immutable-record + revocation-event-rieng nhu record_approval/
+--      revoke_approval (T3-05) o tren, nhung HOAN TOAN TACH BIET bang/hanh dong - khong tai dien
+--      giai capture-ON approval cho normalization change.
+-- ===========================================================================
+CREATE OR REPLACE FUNCTION m4_stage0p_record_normalization_approval(
+  p_approval_ref TEXT,
+  p_requested_version TEXT,
+  p_valid_from TIMESTAMPTZ,
+  p_valid_until TIMESTAMPTZ,
+  p_note TEXT
+)
+RETURNS TABLE(approval_ref TEXT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE v_actor_id BIGINT; v_audit_id BIGINT;
+BEGIN
+  v_actor_id := m4_stage0p_require_pinned_actor('m4.stage0p.approve');
+
+  IF p_approval_ref IS NULL OR length(btrim(p_approval_ref)) = 0 THEN
+    RAISE EXCEPTION 'm4_stage0p_record_normalization_approval: approval_ref khong duoc rong';
+  END IF;
+  IF p_requested_version IS NULL OR length(btrim(p_requested_version)) = 0 THEN
+    RAISE EXCEPTION 'm4_stage0p_record_normalization_approval: requested_version khong duoc rong (T8-03)';
+  END IF;
+  IF p_valid_until <= p_valid_from THEN
+    RAISE EXCEPTION 'm4_stage0p_record_normalization_approval: valid_until phai sau valid_from';
+  END IF;
+
+  INSERT INTO public.m4_stage0p_normalization_approvals
+    (approval_ref, requested_version, valid_from, valid_until, recorded_by, note)
+  VALUES (p_approval_ref, p_requested_version, p_valid_from, p_valid_until, v_actor_id, p_note);
+
+  INSERT INTO public.audit_log (actor_type, actor_staff_id, action, entity_type, entity_id, after)
+  VALUES ('staff', v_actor_id, 'm4_stage0p_record_normalization_approval', 'm4_stage0p_normalization_approval',
+          p_approval_ref, jsonb_build_object('requested_version', p_requested_version,
+                                              'valid_from', p_valid_from, 'valid_until', p_valid_until))
+  RETURNING id INTO v_audit_id;
+
+  RETURN QUERY SELECT p_approval_ref;
+END;
+$$;
+
+ALTER FUNCTION m4_stage0p_record_normalization_approval(TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT)
+  OWNER TO alpha3s_m4_definer;
+REVOKE EXECUTE ON FUNCTION m4_stage0p_record_normalization_approval(TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT)
+  FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION m4_stage0p_revoke_normalization_approval(
+  p_approval_ref TEXT,
+  p_reason TEXT
+)
+RETURNS TABLE(revoked_at TIMESTAMPTZ)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE v_actor_id BIGINT; v_audit_id BIGINT; v_now TIMESTAMPTZ := now();
+BEGIN
+  v_actor_id := m4_stage0p_require_pinned_actor('m4.stage0p.approve');
+
+  IF p_reason IS NULL OR length(btrim(p_reason)) = 0 THEN
+    RAISE EXCEPTION 'm4_stage0p_revoke_normalization_approval: reason khong duoc rong';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.m4_stage0p_normalization_approvals WHERE approval_ref = p_approval_ref) THEN
+    RAISE EXCEPTION 'm4_stage0p_revoke_normalization_approval: approval_ref % khong ton tai', p_approval_ref;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.m4_stage0p_normalization_approval_revocations WHERE approval_ref = p_approval_ref) THEN
+    RAISE EXCEPTION 'm4_stage0p_revoke_normalization_approval: approval_ref % da bi thu hoi truoc do', p_approval_ref;
+  END IF;
+
+  INSERT INTO public.m4_stage0p_normalization_approval_revocations (approval_ref, revoked_by, revoked_at, reason)
+  VALUES (p_approval_ref, v_actor_id, v_now, p_reason);
+
+  INSERT INTO public.audit_log (actor_type, actor_staff_id, action, entity_type, entity_id, after)
+  VALUES ('staff', v_actor_id, 'm4_stage0p_revoke_normalization_approval', 'm4_stage0p_normalization_approval',
+          p_approval_ref, jsonb_build_object('reason', p_reason))
+  RETURNING id INTO v_audit_id;
+
+  RETURN QUERY SELECT v_now;
+END;
+$$;
+
+ALTER FUNCTION m4_stage0p_revoke_normalization_approval(TEXT, TEXT) OWNER TO alpha3s_m4_definer;
+REVOKE EXECUTE ON FUNCTION m4_stage0p_revoke_normalization_approval(TEXT, TEXT) FROM PUBLIC;
 
 -- ===========================================================================
 -- 5g. m4_stage0p_seal_labels - REV5 T4-04: bo p_actor_staff_id, doc actor qua
@@ -2058,6 +2201,9 @@ GRANT SELECT, UPDATE (capture_enabled, updated_at, updated_by_note) ON public.m4
   TO alpha3s_m4_definer;
 GRANT SELECT, INSERT ON public.m4_stage0p_capture_approvals TO alpha3s_m4_definer;
 GRANT SELECT, INSERT ON public.m4_stage0p_capture_approval_revocations TO alpha3s_m4_definer;
+-- REV9 T8-03.
+GRANT SELECT, INSERT ON public.m4_stage0p_normalization_approvals TO alpha3s_m4_definer;
+GRANT SELECT, INSERT ON public.m4_stage0p_normalization_approval_revocations TO alpha3s_m4_definer;
 GRANT SELECT, INSERT, DELETE ON public.m4_stage0p_fetch_capability TO alpha3s_m4_definer;
 GRANT SELECT, INSERT, UPDATE ON public.m4_stage0p_capture_progress TO alpha3s_m4_definer;
 GRANT SELECT ON public.m4_stage0p_staff_permissions TO alpha3s_m4_definer;
@@ -2189,6 +2335,11 @@ GRANT EXECUTE ON FUNCTION m4_stage0p_record_approval(TEXT, BOOLEAN, TIMESTAMPTZ,
 GRANT EXECUTE ON FUNCTION m4_stage0p_revoke_approval(TEXT, TEXT) TO alpha3s_m4_approval_recorder;
 GRANT EXECUTE ON FUNCTION m4_stage0p_set_current_normalization_version(TEXT, TEXT)
   TO alpha3s_m4_approval_recorder;
+-- REV9 T8-03 (MOI): approval record THAT rieng cho normalization version change.
+GRANT EXECUTE ON FUNCTION m4_stage0p_record_normalization_approval(TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT)
+  TO alpha3s_m4_approval_recorder;
+GRANT EXECUTE ON FUNCTION m4_stage0p_revoke_normalization_approval(TEXT, TEXT)
+  TO alpha3s_m4_approval_recorder;
 
 -- 6i. actor_binder - REV5 T4-04 (MOI): role RIENG, CHI EXECUTE pin_actor + unpin_actor (REV7
 -- T6-01, MOI). Dai dien lop trung gian DA xac thuc staff (vd HTTP session/JWT) truoc khi goi vao
@@ -2209,7 +2360,8 @@ BEGIN
       m4_stage0p_capture_approvals, m4_stage0p_capture_approval_revocations,
       m4_stage0p_fetch_capability, m4_stage0p_capture_progress, m4_stage0p_staff_permissions,
       m4_stage0p_exclusion_gate, m4_stage0p_actor_credentials, m4_stage0p_actor_session,
-      m4_stage0p_normalization_registry FROM alpha3s_vendor_path;
+      m4_stage0p_normalization_registry, m4_stage0p_normalization_approvals,
+      m4_stage0p_normalization_approval_revocations FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_peek_next_candidate(UUID) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_fetch_message_content(UUID, BIGINT, BIGINT) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
@@ -2224,6 +2376,9 @@ BEGIN
     REVOKE EXECUTE ON FUNCTION m4_stage0p_record_approval(TEXT, BOOLEAN, TIMESTAMPTZ, TIMESTAMPTZ, TEXT)
       FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_revoke_approval(TEXT, TEXT) FROM alpha3s_vendor_path;
+    REVOKE EXECUTE ON FUNCTION m4_stage0p_record_normalization_approval(TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT)
+      FROM alpha3s_vendor_path;
+    REVOKE EXECUTE ON FUNCTION m4_stage0p_revoke_normalization_approval(TEXT, TEXT) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_seal_labels(UUID) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_fetch_sealed_message(UUID, UUID) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_write_predictions(UUID, TEXT, JSONB, JSONB, TEXT, TEXT) FROM alpha3s_vendor_path;
@@ -2289,7 +2444,8 @@ BEGIN
       'm4_stage0p_pin_actor','m4_stage0p_require_pinned_actor','m4_stage0p_set_capture',
       'm4_stage0p_record_approval','m4_stage0p_revoke_approval','m4_stage0p_seal_labels',
       'm4_stage0p_fetch_sealed_message','m4_stage0p_write_predictions','m4_stage0p_complete_evaluation',
-      'm4_stage0p_block_label_after_seal')
+      'm4_stage0p_block_label_after_seal','m4_stage0p_record_normalization_approval',
+      'm4_stage0p_revoke_normalization_approval')
       AND (proowner::regrole::text <> 'alpha3s_m4_definer' OR prosecdef IS NOT TRUE
            OR proconfig IS NULL
            OR NOT EXISTS (SELECT 1 FROM unnest(proconfig) c WHERE c LIKE 'search_path=%'))
@@ -2318,6 +2474,11 @@ BEGIN
     problems := problems || ' record_approval_execute_public'; END IF;
   IF has_function_privilege('public', 'm4_stage0p_revoke_approval(text,text)', 'EXECUTE') THEN
     problems := problems || ' revoke_approval_execute_public'; END IF;
+  IF has_function_privilege('public',
+       'm4_stage0p_record_normalization_approval(text,text,timestamptz,timestamptz,text)', 'EXECUTE') THEN
+    problems := problems || ' record_normalization_approval_execute_public_dup'; END IF;
+  IF has_function_privilege('public', 'm4_stage0p_revoke_normalization_approval(text,text)', 'EXECUTE') THEN
+    problems := problems || ' revoke_normalization_approval_execute_public'; END IF;
   IF has_function_privilege('public', 'm4_stage0p_seal_labels(uuid)', 'EXECUTE') THEN
     problems := problems || ' seal_labels_execute_public'; END IF;
   IF has_function_privilege('public', 'm4_stage0p_fetch_sealed_message(uuid,uuid)', 'EXECUTE') THEN
@@ -2418,6 +2579,24 @@ BEGIN
        'm4_stage0p_set_current_normalization_version(text,text)', 'EXECUTE') THEN
     problems := problems || ' approval_recorder_no_execute_set_normalization_version'; END IF;
 
+  -- REV9 T8-03: normalization approval authority - table ton tai + EXECUTE dung role.
+  IF to_regclass('public.m4_stage0p_normalization_approvals') IS NULL THEN
+    problems := problems || ' normalization_approvals_table_missing'; END IF;
+  IF to_regclass('public.m4_stage0p_normalization_approval_revocations') IS NULL THEN
+    problems := problems || ' normalization_approval_revocations_table_missing'; END IF;
+  IF has_function_privilege('public',
+       'm4_stage0p_record_normalization_approval(text,text,timestamptz,timestamptz,text)', 'EXECUTE') THEN
+    problems := problems || ' record_normalization_approval_execute_public'; END IF;
+  IF has_function_privilege('public',
+       'm4_stage0p_revoke_normalization_approval(text,text)', 'EXECUTE') THEN
+    problems := problems || ' revoke_normalization_approval_execute_public'; END IF;
+  IF NOT has_function_privilege('alpha3s_m4_approval_recorder',
+       'm4_stage0p_record_normalization_approval(text,text,timestamptz,timestamptz,text)', 'EXECUTE') THEN
+    problems := problems || ' approval_recorder_no_execute_record_normalization_approval'; END IF;
+  IF NOT has_function_privilege('alpha3s_m4_approval_recorder',
+       'm4_stage0p_revoke_normalization_approval(text,text)', 'EXECUTE') THEN
+    problems := problems || ' approval_recorder_no_execute_revoke_normalization_approval'; END IF;
+
   -- REV7 T6-02: fetch_capability co digest; REV7 T6-03: batch co capture_gate_policy.
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                  WHERE table_name='m4_stage0p_fetch_capability' AND column_name='fetched_canonical_digest') THEN
@@ -2511,6 +2690,12 @@ BEGIN
     IF has_function_privilege('alpha3s_vendor_path',
                               'm4_stage0p_set_current_normalization_version(text,text)','EXECUTE') THEN
       problems := problems || ' vendor_can_execute_set_normalization_version'; END IF;
+    IF has_function_privilege('alpha3s_vendor_path',
+         'm4_stage0p_record_normalization_approval(text,text,timestamptz,timestamptz,text)','EXECUTE') THEN
+      problems := problems || ' vendor_can_execute_record_normalization_approval'; END IF;
+    IF has_function_privilege('alpha3s_vendor_path',
+                              'm4_stage0p_revoke_normalization_approval(text,text)','EXECUTE') THEN
+      problems := problems || ' vendor_can_execute_revoke_normalization_approval'; END IF;
   END IF;
 
   IF has_table_privilege('public','m4_shadow_review_samples','SELECT') THEN
@@ -2523,6 +2708,10 @@ BEGIN
     problems := problems || ' public_can_select_approvals'; END IF;
   IF has_table_privilege('public','m4_stage0p_capture_approval_revocations','SELECT') THEN
     problems := problems || ' public_can_select_approval_revocations'; END IF;
+  IF has_table_privilege('public','m4_stage0p_normalization_approvals','SELECT') THEN
+    problems := problems || ' public_can_select_normalization_approvals'; END IF;
+  IF has_table_privilege('public','m4_stage0p_normalization_approval_revocations','SELECT') THEN
+    problems := problems || ' public_can_select_normalization_approval_revocations'; END IF;
   IF has_table_privilege('public','m4_stage0p_fetch_capability','SELECT') THEN
     problems := problems || ' public_can_select_fetch_capability'; END IF;
   IF has_table_privilege('public','m4_stage0p_capture_progress','SELECT') THEN
