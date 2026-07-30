@@ -42,6 +42,7 @@ from app.services import data_deletion  # noqa: E402
 from app.services.pii import stage0p_sampling as s  # noqa: E402
 from app.services.pii.crypto import decrypt_sample_value  # noqa: E402
 from app.services.pii.stage0p_control import (  # noqa: E402
+    pin_actor,
     record_capture_approval,
     set_capture_enabled,
 )
@@ -58,9 +59,16 @@ def check(cond: bool, label: str) -> None:
         _fail.append(label)
 
 
+async def _pin(conn, staff_id: int) -> None:
+    """T4-04: pin actor vao session (role alpha3s_m4_actor_binder), roi RESET ROLE."""
+    await conn.execute("SET ROLE alpha3s_m4_actor_binder")
+    await pin_actor(conn, staff_id=staff_id)
+    await conn.execute("RESET ROLE")
+
+
 async def _reset(admin) -> None:
-    for tbl in ("m4_shadow_review_samples", "m4_selection_batches", "audit_log",
-               "messages", "orders", "conversations", "customers"):
+    for tbl in ("m4_shadow_review_samples", "m4_stage0p_capture_progress", "m4_selection_batches",
+               "audit_log", "messages", "orders", "conversations", "customers"):
         await admin.execute(f"DELETE FROM {tbl}")
     await admin.execute("UPDATE m4_stage0p_control SET capture_enabled=false WHERE id=1")
 
@@ -195,18 +203,23 @@ async def main() -> int:
     staff_g = await admin.fetchrow(
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ('m4-sampling-test-staff', 'x', 'x', true) RETURNING id")
+    for perm in ("m4.stage0p.approve", "m4.stage0p.operate"):
+        await admin.execute(
+            "INSERT INTO m4_stage0p_staff_permissions (staff_id, permission, granted_by) "
+            "VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", staff_g["id"], perm)
     approval_conn = await asyncpg.connect(DB_URL)
+    await _pin(approval_conn, staff_g["id"])
     await approval_conn.execute("SET ROLE alpha3s_m4_approval_recorder")
     now_g = datetime.datetime.now(datetime.timezone.utc)
     await record_capture_approval(
         approval_conn, approval_ref="CAP-G", requested_enabled=True,
-        valid_from=now_g - datetime.timedelta(hours=1), valid_until=now_g + datetime.timedelta(hours=1),
-        recorded_by=staff_g["id"])
+        valid_from=now_g - datetime.timedelta(hours=1), valid_until=now_g + datetime.timedelta(hours=1))
     await approval_conn.execute("RESET ROLE")
     await approval_conn.close()
     cp_conn = await asyncpg.connect(DB_URL)
+    await _pin(cp_conn, staff_g["id"])
     await cp_conn.execute("SET ROLE alpha3s_m4_control_plane")
-    await set_capture_enabled(cp_conn, enabled=True, actor_staff_id=staff_g["id"], approval_ref="CAP-G")
+    await set_capture_enabled(cp_conn, enabled=True, approval_ref="CAP-G")
     collector_conn2 = await asyncpg.connect(DB_URL)
     await collector_conn2.execute("SET ROLE alpha3s_m4_sample_collector")
     pending_conn2 = await asyncpg.connect(DB_URL)
@@ -232,7 +245,9 @@ async def main() -> int:
         s.run_collector(collector_conn2, pending_conn2, batch_id=batchG["batch_id"]),
         _mark_pending_mid_run(),
     )
-    await set_capture_enabled(cp_conn, enabled=False, actor_staff_id=staff_g["id"], approval_ref="CAP-G-OFF")
+    await _pin(cp_conn, staff_g["id"])
+    await cp_conn.execute("SET ROLE alpha3s_m4_control_plane")
+    await set_capture_enabled(cp_conn, enabled=False, approval_ref="CAP-G-OFF")
     check(result_g["skipped_pending"] > 0, f"co tin nhan bi bo qua vi pending giua chung (thuc te {result_g})")
     check(result_g["inserted"] < 5, "khong ghi het 5 tin (mot phan bi chan boi pending)")
     # audit_log tham chieu staff_g qua actor_staff_id (FK) — xoa truoc khi xoa staff, khong doi
@@ -240,6 +255,7 @@ async def main() -> int:
     # duoc _reset()).
     await admin.execute("DELETE FROM audit_log WHERE actor_staff_id=$1", staff_g["id"])
     await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref='CAP-G'")
+    await admin.execute("DELETE FROM m4_stage0p_staff_permissions WHERE staff_id=$1", staff_g["id"])
     await admin.execute("DELETE FROM staff_users WHERE id=$1", staff_g["id"])
 
     print("== [H] DSR retry/idempotency ==")

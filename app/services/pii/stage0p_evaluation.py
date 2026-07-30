@@ -27,6 +27,12 @@ JSON TUY Y tu caller — DB chi hash no, khong xac minh/tinh lai. Sua: XOA HAN t
 `predicted_slots` bang SQL (multiset intersection theo (sample_id,slot_type,start,end), khoa
 pham vi tung sample). Ham Python `compute_batch_metrics()` (REV3) vi vay bi XOA — khong con
 load-bearing, DB moi la nguon tinh metrics duy nhat.
+
+REV 5 (CA Technical Review #4, T4-04): `seal_labels()`/`complete_evaluation()` KHONG con nhan
+`actor_staff_id` — caller PHAI `stage0p_control.pin_actor()` TREN CUNG connection TRUOC (role
+`alpha3s_m4_actor_binder`), roi `SET ROLE` sang role nghiep vu tuong ung
+(`alpha3s_m4_sample_reviewer_api`/`alpha3s_m4_sample_evaluator`) — GUC actor da pin sinh ton qua
+`SET ROLE` (session-scoped). DB tu doc actor + kiem quyen `m4.stage0p.review`/`m4.stage0p.evaluate`.
 """
 
 import json
@@ -158,20 +164,21 @@ def match_by_slot_type(ground_truth: list[dict], predicted: list[dict], *,
     return result
 
 
-async def seal_labels(conn, *, batch_id: str, actor_staff_id: int) -> dict:
-    """REV3 (T2-04): `conn` phai xac thuc bang role `alpha3s_m4_sample_reviewer_api`. Goi ham
-    SECURITY DEFINER `m4_stage0p_seal_labels` — ham DO tu kiem tra tat ca row da `label_status=
-    'labeled'` VA TU TINH `labels_sealed_hash` qua pgcrypto tren chinh du lieu trong bang (khong
-    con nhan hash Python truyen vao nhu REV2 — DB la nguon tin cay). Sau khi return, trigger DB
-    chan MOI sua doi them tren labeled_slots/label_status cua batch nay, bat ke role nao."""
-    result = await conn.fetchrow("SELECT * FROM m4_stage0p_seal_labels($1, $2)", batch_id, actor_staff_id)
+async def seal_labels(conn, *, batch_id: str) -> dict:
+    """REV3 (T2-04); REV5 (T4-04): `conn` phai xac thuc bang role `alpha3s_m4_sample_reviewer_api`
+    VA da `stage0p_control.pin_actor()` truoc do TREN CUNG connection (actor khong con la tham
+    so). Goi ham SECURITY DEFINER `m4_stage0p_seal_labels` — ham DO tu kiem tra tat ca row da
+    `label_status='labeled'` VA TU TINH `labels_sealed_hash` qua pgcrypto tren chinh du lieu
+    trong bang. Sau khi return, trigger DB chan MOI sua doi them tren labeled_slots/label_status
+    cua batch nay, bat ke role nao."""
+    result = await conn.fetchrow("SELECT * FROM m4_stage0p_seal_labels($1)", batch_id)
     return {"labels_sealed_hash": result["sealed_hash"], "sample_count": result["sample_count"]}
 
 
-async def complete_evaluation(conn, *, batch_id: str, actor_staff_id: int,
-                              expected_result_hash: str) -> dict:
-    """REV4 (T3-04): trang thai "eval xong" TACH BIET "prediction da ghi". `conn` phai xac thuc
-    bang role `alpha3s_m4_sample_evaluator`. `expected_result_hash` PHAI la
+async def complete_evaluation(conn, *, batch_id: str, expected_result_hash: str) -> dict:
+    """REV4 (T3-04); REV5 (T4-04): trang thai "eval xong" TACH BIET "prediction da ghi". `conn`
+    phai xac thuc bang role `alpha3s_m4_sample_evaluator` VA da `stage0p_control.pin_actor()`
+    truoc do TREN CUNG connection (actor khong con la tham so). `expected_result_hash` PHAI la
     `m4_selection_batches.result_hash` hien tai (doc truoc khi goi) — DB tu choi neu khong khop
     (chong stale/forged corpus reference). Goi ham SECURITY DEFINER
     `m4_stage0p_complete_evaluation` — ham DO kiem tra ATOMIC batch da sealed + da ghi prediction
@@ -179,8 +186,8 @@ async def complete_evaluation(conn, *, batch_id: str, actor_staff_id: int,
     con truyen metrics), roi TU TINH `evaluation_report_hash` (bind matching/aggregation version +
     result_hash + metrics). Tra ve ca `metrics` DB tinh duoc de caller/evidence xem lai."""
     row = await conn.fetchrow(
-        "SELECT * FROM m4_stage0p_complete_evaluation($1, $2, $3)",
-        batch_id, actor_staff_id, expected_result_hash,
+        "SELECT * FROM m4_stage0p_complete_evaluation($1, $2)",
+        batch_id, expected_result_hash,
     )
     metrics = row["metrics"]
     if isinstance(metrics, str):  # asyncpg tra jsonb la TEXT tho — parse tuong minh

@@ -21,6 +21,14 @@ REV 4 (CA Technical Review #3, T3-03): `write_predictions` gio con nhan them
 `p_current_normalization_version` — DB TU XAC MINH dieu kien "normalization_version_mismatch" la
 THAT (so voi gia tri nay) chu khong tin caller khai bao dung; reason exclusion cung phai nam
 trong allowlist DB-side.
+
+REV 5 (CA Technical Review #4, T4-02/T4-05): CA chi ro `p_current_normalization_version` REV4
+VAN la tham so caller tu khai — caller co the truyen gia tri gia de ep moi row thanh "mismatch".
+Sua: XOA HAN tham so nay — DB tu so sanh voi hang so HARDCODE trong than ham
+`m4_stage0p_write_predictions` (phai khop `NORMALIZATION_VERSION` duoi day, bump ca 2 noi khi
+doi). T4-05: nguong exclusion (>50% REV4, Dev tu chon, chua duyet) doi thanh doc tu bang
+`m4_stage0p_exclusion_gate` (2 dieu kien: ty le + so conversation toi thieu) — seed dung de xuat
+CA Review #4 (10%/200), CHUA co PO decision record chinh thuc.
 """
 
 import json
@@ -89,11 +97,11 @@ async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -
 
     try:
         write_row = await conn.fetchrow(
-            "SELECT * FROM m4_stage0p_write_predictions($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)",
+            "SELECT * FROM m4_stage0p_write_predictions($1, $2, $3::jsonb, $4::jsonb, $5, $6)",
             batch_id, expected_hash, json.dumps(predictions), json.dumps(exclusions),
-            DETECTOR_VERSION, evaluation_batch, NORMALIZATION_VERSION,
+            DETECTOR_VERSION, evaluation_batch,
         )
-    except Exception as e:  # noqa: BLE001 — boc loi DB (validation/coverage/immutability) ro rang
+    except Exception as e:  # noqa: BLE001 — boc loi DB (validation/coverage/immutability/gate) ro rang
         _log("m4_prediction_refused", batch_id=str(batch_id), error=str(e))
         raise PredictionNotAllowedError(str(e)) from e
 
@@ -101,5 +109,9 @@ async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -
     excluded = write_row["excluded_count"]
     result_hash = write_row["result_hash"]
     _log("m4_prediction_done", batch_id=str(batch_id), updated=updated,
-         skipped_version_mismatch=excluded, result_hash=result_hash)
-    return {"updated": updated, "skipped_version_mismatch": excluded, "result_hash": result_hash}
+         skipped_version_mismatch=excluded, result_hash=result_hash,
+         non_excluded_conversation_count=write_row["non_excluded_conversation_count"],
+         gate_version=write_row["gate_version"])
+    return {"updated": updated, "skipped_version_mismatch": excluded, "result_hash": result_hash,
+            "non_excluded_conversation_count": write_row["non_excluded_conversation_count"],
+            "gate_version": write_row["gate_version"]}

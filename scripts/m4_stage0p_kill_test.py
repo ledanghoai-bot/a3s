@@ -54,6 +54,7 @@ import asyncpg  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.services.pii import stage0p_sampling as s  # noqa: E402
 from app.services.pii.stage0p_control import (  # noqa: E402
+    pin_actor,
     read_capture_enabled,
     record_capture_approval,
     set_capture_enabled,
@@ -72,14 +73,22 @@ def check(cond: bool, label: str) -> None:
         _fail.append(label)
 
 
+async def _pin(conn, staff_id: int) -> None:
+    """T4-04: pin actor vao session (role alpha3s_m4_actor_binder), roi RESET ROLE — GUC session-
+    scoped sinh ton qua lan SET ROLE tiep theo cua caller."""
+    await conn.execute("SET ROLE alpha3s_m4_actor_binder")
+    await pin_actor(conn, staff_id=staff_id)
+    await conn.execute("RESET ROLE")
+
+
 async def _grant_approval(admin, *, approval_ref: str, staff_id: int, now: datetime.datetime) -> None:
     conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff_id)
     await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
     try:
         await record_capture_approval(
             conn, approval_ref=approval_ref, requested_enabled=True,
-            valid_from=now - datetime.timedelta(hours=1), valid_until=now + datetime.timedelta(hours=1),
-            recorded_by=staff_id)
+            valid_from=now - datetime.timedelta(hours=1), valid_until=now + datetime.timedelta(hours=1))
     finally:
         await conn.execute("RESET ROLE")
         await conn.close()
@@ -91,9 +100,13 @@ async def main() -> int:
 
     admin = await asyncpg.connect(DB_URL)
     await admin.execute("DELETE FROM m4_shadow_review_samples")
+    await admin.execute("DELETE FROM m4_stage0p_capture_progress")
     await admin.execute("DELETE FROM m4_selection_batches")
     await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref LIKE 'kill-test-%'")
     await admin.execute("DELETE FROM audit_log")
+    await admin.execute(
+        "DELETE FROM m4_stage0p_staff_permissions WHERE staff_id IN "
+        "(SELECT id FROM staff_users WHERE username LIKE 'm4-kill-test%')")
     await admin.execute("DELETE FROM staff_users WHERE username LIKE 'm4-kill-test%'")
     await admin.execute("UPDATE m4_stage0p_control SET capture_enabled=false WHERE id=1")
 
@@ -101,6 +114,10 @@ async def main() -> int:
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ('m4-kill-test-staff', 'x', 'x', true) RETURNING id"
     )
+    for perm in ("m4.stage0p.approve", "m4.stage0p.operate"):
+        await admin.execute(
+            "INSERT INTO m4_stage0p_staff_permissions (staff_id, permission, granted_by) "
+            "VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", staff["id"], perm)
     now = datetime.datetime.now(datetime.timezone.utc)
     await _grant_approval(admin, approval_ref="kill-test-approval", staff_id=staff["id"], now=now)
 
@@ -121,7 +138,15 @@ async def main() -> int:
     pending_conn = await asyncpg.connect(DB_URL)
     await pending_conn.execute("SET ROLE alpha3s_m4_pending_checker")
     cp_conn = await asyncpg.connect(DB_URL)
-    await cp_conn.execute("SET ROLE alpha3s_m4_control_plane")
+
+    async def _set_capture(*, enabled, approval_ref):
+        """T4-04: pin actor TRUOC (role alpha3s_m4_actor_binder), roi SET ROLE control_plane."""
+        await _pin(cp_conn, staff["id"])
+        await cp_conn.execute("SET ROLE alpha3s_m4_control_plane")
+        try:
+            return await set_capture_enabled(cp_conn, enabled=enabled, approval_ref=approval_ref)
+        finally:
+            await cp_conn.execute("RESET ROLE")
 
     window_start = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
     window_end = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
@@ -144,8 +169,7 @@ async def main() -> int:
           "khong chi 0 insert — chung minh content khong bao gio roi DB)")
 
     print("== BAT control that su (approval hop le) de chuan bi kich ban [2] ==")
-    await set_capture_enabled(cp_conn, enabled=True, actor_staff_id=staff["id"],
-                              approval_ref="kill-test-approval")
+    await _set_capture(enabled=True, approval_ref="kill-test-approval")
 
     eligible = await s.select_eligible_conversations(collector_conn, pending_conn,
                                                        window_start=window_start, window_end=window_end)
@@ -165,11 +189,13 @@ async def main() -> int:
                 if n >= 1:
                     break
                 await asyncio.sleep(0.001)
+            await _pin(cp_conn, staff["id"])  # session-scoped — phai commit truoc, TACH BIET transaction duoi day
+            await cp_conn.execute("SET ROLE alpha3s_m4_control_plane")
             async with cp_conn.transaction():
-                await set_capture_enabled(cp_conn, enabled=False, actor_staff_id=staff["id"],
-                                          approval_ref="kill-test-off-mid-run")
+                await set_capture_enabled(cp_conn, enabled=False, approval_ref="kill-test-off-mid-run")
                 row = await cp_conn.fetchrow("SELECT txid_current() AS txid")
                 off_txid_holder["txid"] = row["txid"]
+            await cp_conn.execute("RESET ROLE")
         finally:
             await watch_conn.close()
 
@@ -228,8 +254,7 @@ async def main() -> int:
         "algorithm_seed, locked_conversation_ids, purpose_code) VALUES (now()-interval '1 day', now(), "
         "1, 1, 'kill-test-hang', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL') RETURNING batch_id",
         conv_h["id"])
-    await set_capture_enabled(cp_conn, enabled=True, actor_staff_id=staff["id"],
-                              approval_ref="kill-test-approval")
+    await _set_capture(enabled=True, approval_ref="kill-test-approval")
 
     lock_holder = await asyncpg.connect(DB_URL)
     tr = lock_holder.transaction()
@@ -267,8 +292,7 @@ async def main() -> int:
     check(sample_count_after_hang == 0, "DB write hang -> 0 row sample trong bang (INSERT cung rollback theo)")
 
     t0 = time.monotonic()
-    await set_capture_enabled(cp_conn, enabled=False, actor_staff_id=staff["id"],
-                              approval_ref="kill-test-off-after-hang")
+    await _set_capture(enabled=False, approval_ref="kill-test-off-after-hang")
     elapsed_off = time.monotonic() - t0
     check(elapsed_off < 3.0,
           f"set_capture(OFF) SAU KHI DB write hang timeout -> thanh cong NHANH ({elapsed_off:.2f}s, "
@@ -283,9 +307,10 @@ async def main() -> int:
 
     t0 = time.monotonic()
     off_conn = await asyncpg.connect(DB_URL)
+    await _pin(off_conn, staff["id"])
     await off_conn.execute("SET ROLE alpha3s_m4_control_plane")
     off_after_death_row = await off_conn.fetchrow(
-        "SELECT * FROM m4_stage0p_set_capture($1,$2,$3)", False, staff["id"], "kill-test-off-after-death")
+        "SELECT * FROM m4_stage0p_set_capture($1,$2)", False, "kill-test-off-after-death")
     elapsed_death = time.monotonic() - t0
     await off_conn.execute("RESET ROLE")
     await off_conn.close()
@@ -324,6 +349,7 @@ async def main() -> int:
     check(final_state is False, "control ve OFF truoc khi script ket thuc")
 
     await admin.execute("DELETE FROM m4_shadow_review_samples")
+    await admin.execute("DELETE FROM m4_stage0p_capture_progress")
     await admin.execute("DELETE FROM m4_selection_batches")
     await admin.execute("DELETE FROM audit_log")
     await admin.execute("DELETE FROM messages")
@@ -331,6 +357,7 @@ async def main() -> int:
     await admin.execute("DELETE FROM conversations")
     await admin.execute("DELETE FROM customers")
     await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref LIKE 'kill-test-%'")
+    await admin.execute("DELETE FROM m4_stage0p_staff_permissions WHERE staff_id=$1", staff["id"])
     await admin.execute("DELETE FROM staff_users WHERE id=$1", staff["id"])
     await admin.close()
     await collector_conn.close()

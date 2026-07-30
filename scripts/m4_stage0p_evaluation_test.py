@@ -46,6 +46,7 @@ from app.services.pii.crypto import (  # noqa: E402
     decrypt_slot_value,
     encrypt_sample_value,
 )
+from app.services.pii.stage0p_control import pin_actor  # noqa: E402
 from app.services.pii.stage0p_evaluation import (  # noqa: E402
     complete_evaluation,
     seal_labels,
@@ -70,17 +71,50 @@ def check(cond: bool, label: str) -> None:
         _fail.append(label)
 
 
+async def _pin(conn, staff_id: int) -> None:
+    """T4-04: pin actor vao session (role alpha3s_m4_actor_binder), roi RESET ROLE."""
+    await conn.execute("SET ROLE alpha3s_m4_actor_binder")
+    await pin_actor(conn, staff_id=staff_id)
+    await conn.execute("RESET ROLE")
+
+
+PADDING_TEXT = "khong co gi dac biet o day ca"
+
+
+async def _add_padding_samples(admin, *, batch_id, seed, n, normalization_version="nfc-v1"):
+    """T4-05: gate mac dinh doi hoi >=200 conversation KHONG bi loai. Them n sample 'dem' (khong
+    PII — detector se tra predicted_slots=[]), moi sample 1 conversation_ref rieng, da labeled
+    (labeled_slots rong) — khong anh huong assertion metrics cua sample that (ca 2 phia gt/pred
+    deu rong cho moi slot_type, khong dong gop gi vao aggregation)."""
+    rows = []
+    for i in range(n):
+        sid = str(uuid.uuid4())
+        ref = f"{seed}-pad-{i}"
+        blob = encrypt_sample_value(PADDING_TEXT, customer_ref=ref, conversation_ref=ref, sample_id=sid)
+        rows.append((sid, ref, ref, blob, len(PADDING_TEXT), normalization_version, batch_id))
+    await admin.executemany(
+        "INSERT INTO m4_shadow_review_samples (sample_id,customer_ref,conversation_ref,"
+        "encrypted_message,canonical_text_len,expires_at,purpose_code,normalization_version,"
+        "label_status,labeled_slots,selection_batch) VALUES ($1,$2,$3,$4,$5,now()+interval '1 day',"
+        "'P12_PII_DETECTOR_EVAL',$6,'labeled','[]'::jsonb,$7)", rows)
+
+
 async def main() -> int:
     settings.m4_sample_key_b64 = base64.b64encode(os.urandom(32)).decode()
     settings.m4_slot_key_b64 = base64.b64encode(os.urandom(32)).decode()
     admin = await asyncpg.connect(DB_URL)
-    for tbl in ("m4_shadow_review_samples", "m4_selection_batches", "audit_log",
-               "messages", "orders", "conversations", "customers", "staff_users"):
+    await admin.execute("DELETE FROM m4_stage0p_staff_permissions")
+    for tbl in ("m4_shadow_review_samples", "m4_stage0p_capture_progress", "m4_selection_batches",
+               "audit_log", "messages", "orders", "conversations", "customers", "staff_users"):
         await admin.execute(f"DELETE FROM {tbl}")
 
     staff = await admin.fetchrow(
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ('m4-eval-test-staff', 'x', 'x', true) RETURNING id")
+    for perm in ("m4.stage0p.review", "m4.stage0p.evaluate"):
+        await admin.execute(
+            "INSERT INTO m4_stage0p_staff_permissions (staff_id, permission, granted_by) "
+            "VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", staff["id"], perm)
 
     cust = await admin.fetchrow("INSERT INTO customers (psid,name) VALUES ('eval-t','x') RETURNING id")
     conv = await admin.fetchrow("INSERT INTO conversations (customer_id) VALUES ($1) RETURNING id", cust["id"])
@@ -99,6 +133,9 @@ async def main() -> int:
         "canonical_text_len,expires_at,purpose_code,normalization_version,selection_batch) VALUES "
         "($1,$2,$3,$4,$5,now()+interval '1 day','P12_PII_DETECTOR_EVAL','nfc-v1',$6)",
         sample_id, str(cust["id"]), str(conv["id"]), blob, len(text), batch["batch_id"])
+    # T4-05: gate doi hoi >=200 conversation KHONG bi loai — them 199 sample "dem" (khong PII) de
+    # write_predictions tren batch nay sau do co the thanh cong (sample that + 199 dem = 200).
+    await _add_padding_samples(admin, batch_id=batch["batch_id"], seed="evalt", n=199)
 
     print("== [1] Domain/key separation: sample blob KHONG giai ma duoc bang ham slot ==")
     try:
@@ -149,17 +186,18 @@ async def main() -> int:
 
     print("== [6] seal_labels() qua DB — chong thien lech xac nhan + DB tu tinh hash (T2-04) ==")
     reviewer_conn = await asyncpg.connect(DB_URL)
+    await _pin(reviewer_conn, staff["id"])
     await reviewer_conn.execute("SET ROLE alpha3s_m4_sample_reviewer_api")
     try:
-        await seal_labels(reviewer_conn, batch_id=batch["batch_id"], actor_staff_id=staff["id"])
+        await seal_labels(reviewer_conn, batch_id=batch["batch_id"])
         check(False, "sample chua labeled -> seal_labels phai raise")
     except asyncpg.PostgresError:
         check(True, "sample chua labeled -> seal_labels tu choi dung")
     await admin.execute(
         "UPDATE m4_shadow_review_samples SET label_status='labeled', labeled_slots=$1::jsonb "
         "WHERE sample_id=$2", '[]', sample_id)
-    seal_result = await seal_labels(reviewer_conn, batch_id=batch["batch_id"], actor_staff_id=staff["id"])
-    check(seal_result["sample_count"] == 1, "sau khi labeled -> seal_labels thanh cong (sample_count=1)")
+    seal_result = await seal_labels(reviewer_conn, batch_id=batch["batch_id"])
+    check(seal_result["sample_count"] == 200, "sau khi labeled -> seal_labels thanh cong (sample_count=200, 1 that + 199 dem)")
     sealed_hash = seal_result["labels_sealed_hash"]
     check(bool(sealed_hash) and len(sealed_hash) == 64, "T2-04: DB tu tinh labels_sealed_hash (sha256 hex)")
     sealed_batch_row = await admin.fetchrow(
@@ -192,13 +230,19 @@ async def main() -> int:
         "($7,$2,$3,$8,$9,now()+interval '1 day','P12_PII_DETECTOR_EVAL','nfc-v1','labeled','[]'::jsonb,$6)",
         sample_id2, str(cust["id"]), str(conv["id"]), blob2, 12, batch2["batch_id"],
         sample_id2b, blob2b, 12)
+    # T4-05: gate doi hoi >=200 conversation KHONG bi loai — 1 sample bi loai (sample_id2) khong
+    # tinh vao non-excluded, nen can 200 sample KHAC (dung version) de dat nguong (199 dem +
+    # sample_id2b = 200 non-excluded; ty le loai 1/201 ~ 0.5%, duoi nguong 10%).
+    await _add_padding_samples(admin, batch_id=batch2["batch_id"], seed="evalt2", n=199)
     reviewer_conn2 = await asyncpg.connect(DB_URL)
+    await _pin(reviewer_conn2, staff["id"])
     await reviewer_conn2.execute("SET ROLE alpha3s_m4_sample_reviewer_api")
-    await seal_labels(reviewer_conn2, batch_id=batch2["batch_id"], actor_staff_id=staff["id"])
+    await seal_labels(reviewer_conn2, batch_id=batch2["batch_id"])
     await reviewer_conn2.close()
     pred_result = await run_prediction_writer(pw_conn, batch_id=batch2["batch_id"], evaluation_batch="ev-1")
     check(pred_result["skipped_version_mismatch"] == 1, "row normalization_version cu bi loai (exclusion)")
-    check(pred_result["updated"] == 1, "row con lai (khop version hien hanh) duoc cham diem binh thuong")
+    check(pred_result["updated"] == 200,
+          "200 row con lai (khop version hien hanh: 1 that + 199 dem) duoc cham diem binh thuong")
     excl_row = await admin.fetchrow(
         "SELECT prediction_excluded_reason, predicted_slots FROM m4_shadow_review_samples WHERE sample_id=$1",
         sample_id2)
@@ -208,7 +252,8 @@ async def main() -> int:
 
     print("== write_predictions THANH CONG tren batch1 (da sealed o buoc [6]) — qua fetch_sealed_message ==")
     pred_result_1 = await run_prediction_writer(pw_conn, batch_id=batch["batch_id"], evaluation_batch="ev-main")
-    check(pred_result_1["updated"] == 1, "batch1 da sealed -> prediction ghi thanh cong (updated=1)")
+    check(pred_result_1["updated"] == 200,
+          "batch1 da sealed -> prediction ghi thanh cong (updated=200, 1 that + 199 dem)")
     result_hash_1 = pred_result_1["result_hash"]
     check(bool(result_hash_1) and len(result_hash_1) == 64, "T2-04: DB tu tinh result_hash (sha256 hex)")
     predicted_row = await admin.fetchrow(
@@ -230,9 +275,10 @@ async def main() -> int:
 
     print("== [10] REV4 T3-04/T2-06: complete_evaluation() — DB TU TINH metrics, evaluation_completed_at dung sau predict xong ==")
     evaluator_conn = await asyncpg.connect(DB_URL)
+    await _pin(evaluator_conn, staff["id"])
     await evaluator_conn.execute("SET ROLE alpha3s_m4_sample_evaluator")
     complete_result = await complete_evaluation(evaluator_conn, batch_id=batch["batch_id"],
-                                                actor_staff_id=staff["id"], expected_result_hash=result_hash_1)
+                                                expected_result_hash=result_hash_1)
     metrics = complete_result["metrics"]
     check("phone" in metrics,
           f"T3-04: complete_evaluation tra metrics DB TU TINH tu exact-span (khong con qua "
@@ -260,11 +306,12 @@ async def main() -> int:
     check(remaining == 0, "sample cua batch1 (da eval-completed) da bi xoa het")
     remaining2 = await admin.fetchval(
         "SELECT count(*) FROM m4_shadow_review_samples WHERE selection_batch=$1", batch2["batch_id"])
-    check(remaining2 == 2, "2 sample cua batch2 (CHUA eval-completed, chua het han) KHONG bi purge")
+    check(remaining2 == 201, "201 sample cua batch2 (CHUA eval-completed, chua het han) KHONG bi purge")
     await purge_conn.close()
 
-    for tbl in ("m4_shadow_review_samples", "m4_selection_batches", "audit_log",
-               "messages", "orders", "conversations", "customers", "staff_users"):
+    await admin.execute("DELETE FROM m4_stage0p_staff_permissions WHERE staff_id=$1", staff["id"])
+    for tbl in ("m4_shadow_review_samples", "m4_stage0p_capture_progress", "m4_selection_batches",
+               "audit_log", "messages", "orders", "conversations", "customers", "staff_users"):
         await admin.execute(f"DELETE FROM {tbl}")
     await admin.close()
 
