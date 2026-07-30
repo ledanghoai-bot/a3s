@@ -573,6 +573,32 @@ REVOKE ALL ON m4_stage0p_fetch_capability FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_fetch_capability FROM alpha3s_app;
 
 -- ===========================================================================
+-- 3b2. Bang m4_stage0p_transcript_signing_keys - REV10 T8-02 (MOI, CA Review #9 §4, Huong 3
+--      interim HMAC — DEV/TEST ONLY, PHAI nang cap len KMS/HSM asymmetric TRUOC production
+--      activation). Luu 1 BAN SAO khoa HMAC-SHA256 dung de verify signed capture transcript
+--      trong m4_stage0p_record_sample. SELECT CHI GRANT cho alpha3s_m4_definer ("DB verifier
+--      doc key qua restricted definer boundary" — CA yeu cau ro) - KHONG grant cho
+--      alpha3s_m4_sample_collector/alpha3s_app/bat ky role m4 nao khac; ham SECURITY DEFINER
+--      chay voi quyen owner (alpha3s_m4_definer) nen doc duoc bat ke role GOI ham la gi.
+--      Provisioning (INSERT key_version+hmac_key that) la thao tac NGOAI LUONG qua superuser/
+--      admin, CUNG mo hinh voi m4_stage0p_actor_credentials.pin_secret_hash (T5-01/T6-01) —
+--      KHONG qua bat ky role/ham duoc GRANT nao (tranh 1 role ung dung tro thanh key-provisioning
+--      authority).
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS m4_stage0p_transcript_signing_keys (
+  key_version TEXT PRIMARY KEY,
+  hmac_key    BYTEA NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  retired_at  TIMESTAMPTZ
+);
+
+COMMENT ON TABLE m4_stage0p_transcript_signing_keys IS
+  'REV10 T8-02: khoa HMAC-SHA256 xac minh signed capture transcript (Huong 3 interim, dev/test only). SELECT CHI cho alpha3s_m4_definer. Provisioning ngoai luong qua superuser, khong qua role/ham duoc GRANT nao.';
+
+REVOKE ALL ON m4_stage0p_transcript_signing_keys FROM PUBLIC;
+REVOKE ALL ON m4_stage0p_transcript_signing_keys FROM alpha3s_app;
+
+-- ===========================================================================
 -- 3c. Bang m4_stage0p_capture_progress - REV5 T4-03 (MOI). 1 row/candidate (conversation_id,
 --     message_id) cua 1 batch, seed 1 lan qua m4_stage0p_seed_capture_progress. State machine 5
 --     gia tri: pending -> committed | excluded | retryable_failed -> permanent_failed. peek doc
@@ -685,6 +711,8 @@ DROP FUNCTION IF EXISTS m4_stage0p_seal_labels(UUID, BIGINT);
 DROP FUNCTION IF EXISTS m4_stage0p_pin_actor(BIGINT);
 -- REV7 T6-02: record_sample REV5/REV6 (7 tham so, chua co p_canonical_text_digest).
 DROP FUNCTION IF EXISTS m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN);
+-- REV10 T8-02: record_sample REV7-9 (8 tham so, chua co transcript/signature/key_version).
+DROP FUNCTION IF EXISTS m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA);
 
 -- ===========================================================================
 -- 5a. m4_stage0p_peek_next_candidate - REV5 T4-03: doi chu ky con (batch_id) - doc tu
@@ -995,7 +1023,11 @@ REVOKE EXECUTE ON FUNCTION m4_stage0p_fetch_message_content(UUID, BIGINT, BIGINT
 -- ===========================================================================
 -- 5c. m4_stage0p_record_sample - REV5 T4-01: doi chieu capability row (DELETE...RETURNING, khong
 --     con set_config/current_setting GUC). REV5 T4-03: chuyen candidate progress -> 'committed'
---     TRONG CUNG transaction voi INSERT sample.
+--     TRONG CUNG transaction voi INSERT sample. REV10 T8-02 (CA Review #9 §4, Huong 3 interim):
+--     them 3 tham so transcript/signature/key_version - verify chu ky HMAC + doi chieu MOI truong
+--     trong transcript (identity/txid/digest/AEAD algorithm+key_version/AAD digest/thoi han) TRUOC
+--     khi tieu thu capability, chan ciphertext-thay-the (ma T6-02 don thuan khong chan duoc, vi
+--     T6-02 chi bind PLAINTEXT digest, khong bind CIPHERTEXT).
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION m4_stage0p_record_sample(
   p_batch_id UUID,
@@ -1007,7 +1039,12 @@ CREATE OR REPLACE FUNCTION m4_stage0p_record_sample(
   p_truncated BOOLEAN,
   -- REV7 T6-02: SHA-256 cua canonical text, tinh boi Python NGAY TRUOC luc encrypt (tren chinh
   -- van ban da encrypt) - phai khop CHINH XAC fetched_canonical_digest DB da tinh luc fetch.
-  p_canonical_text_digest BYTEA
+  p_canonical_text_digest BYTEA,
+  -- REV10 T8-02: transcript JSON canonical (sort_keys+compact), ky boi
+  -- app/services/pii/crypto.py:sign_capture() - xem docstring module do cho danh sach truong.
+  p_transcript BYTEA,
+  p_transcript_signature BYTEA,
+  p_key_version TEXT
 )
 RETURNS TABLE(captured_count INT)
 LANGUAGE plpgsql
@@ -1022,8 +1059,74 @@ DECLARE
   v_customer_id BIGINT;
   v_enabled BOOLEAN;
   v_capability RECORD;
+  v_key_material BYTEA;
+  v_transcript JSONB;
+  v_expected_sig BYTEA;
+  v_aad BYTEA;
 BEGIN
   PERFORM pg_advisory_xact_lock(4013003);
+
+  -- REV10 T8-02: verify chu ky + do tuoi TRUOC KHI tieu thu capability (row pin/capability giu
+  -- nguyen neu transcript sai - cho phep retry voi transcript dung, giu dung tinh than "hanh
+  -- dong THAT BAI vi ly do KHAC khong tieu thu resource" xuyen suot du an).
+  IF p_transcript IS NULL OR p_transcript_signature IS NULL OR p_key_version IS NULL THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: thieu transcript/signature/key_version (T8-02)';
+  END IF;
+
+  SELECT hmac_key INTO v_key_material
+    FROM public.m4_stage0p_transcript_signing_keys
+    WHERE key_version = p_key_version AND retired_at IS NULL;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: key_version % khong ton tai hoac da retire (T8-02)',
+      p_key_version;
+  END IF;
+
+  v_expected_sig := hmac(p_transcript, v_key_material, 'sha256');
+  IF v_expected_sig IS DISTINCT FROM p_transcript_signature THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: chu ky transcript khong hop le (T8-02)';
+  END IF;
+
+  BEGIN
+    v_transcript := convert_from(p_transcript, 'UTF8')::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript khong phai JSON hop le (T8-02)';
+  END;
+
+  IF (v_transcript->>'key_version') IS DISTINCT FROM p_key_version THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: key_version trong transcript khong khop tham so (T8-02)';
+  END IF;
+  IF (v_transcript->>'expires_at')::timestamptz < now() THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript da het han (T8-02)';
+  END IF;
+  -- T8-02: dung sai lech dong ho nho (5s) giua tien trinh ky (app container) va DB - clock skew
+  -- thuc te giua 2 container/host KHAC voi "transcript that su tu tuong lai" (vd gia mao issued_at
+  -- xa trong tuong lai de keo dai hieu luc) - phat hien qua evidence chay thuc te (khong phai gia
+  -- dinh ly thuyet).
+  IF (v_transcript->>'issued_at')::timestamptz > now() + interval '5 seconds' THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript issued_at trong tuong lai (T8-02)';
+  END IF;
+  IF (v_transcript->>'txid')::bigint <> txid_current() THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript khong thuoc CHINH transaction nay (replay/cross-transaction - T8-02)';
+  END IF;
+  IF (v_transcript->>'batch_id')::uuid <> p_batch_id
+     OR (v_transcript->>'conversation_id')::bigint <> p_conversation_id
+     OR (v_transcript->>'message_id')::bigint <> p_message_id
+     OR (v_transcript->>'sample_id')::uuid <> p_sample_id THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript khong khop identity cua request nay (cross-message/cross-batch/cross-sample - T8-02)';
+  END IF;
+  IF decode(v_transcript->>'ciphertext_digest', 'hex') <> digest(p_encrypted_message, 'sha256') THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: ciphertext_digest trong transcript khong khop ciphertext THAT SU gui len - tu choi (T8-02, chan ciphertext-thay-the)';
+  END IF;
+  IF decode(v_transcript->>'canonical_digest', 'hex') <> p_canonical_text_digest THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: canonical_digest trong transcript khong khop tham so (T8-02)';
+  END IF;
+  IF (v_transcript->>'canonical_len')::int <> p_canonical_text_len
+     OR (v_transcript->>'truncated')::boolean <> p_truncated THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: canonical_len/truncated trong transcript khong khop tham so (T8-02)';
+  END IF;
+  IF (v_transcript->>'aead_algorithm') <> 'AES-256-GCM' THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: aead_algorithm trong transcript khong duoc ho tro (T8-02)';
+  END IF;
 
   -- T4-01: tieu thu capability row DB-owned - chi ton tai neu fetch_message_content da thanh
   -- cong CHO DUNG (batch,conversation,message) TRONG CUNG transaction (txid_current() khop).
@@ -1078,6 +1181,11 @@ BEGIN
   IF NOT (p_conversation_id = ANY (v_batch.locked_conversation_ids)) THEN
     RAISE EXCEPTION 'm4_stage0p_record_sample: conversation_id % khong thuoc batch %', p_conversation_id, p_batch_id;
   END IF;
+  -- REV10 T8-02: purpose_code trong transcript phai khop CHINH batch dang xu ly (chi kiem duoc
+  -- sau khi da SELECT v_batch o tren).
+  IF (v_transcript->>'purpose_code') IS DISTINCT FROM v_batch.purpose_code THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: purpose_code trong transcript khong khop batch (T8-02)';
+  END IF;
 
   v_cap := v_batch.selected_count * 20;
   IF v_batch.captured_count >= v_cap THEN
@@ -1088,6 +1196,18 @@ BEGIN
   SELECT customer_id INTO v_customer_id FROM public.conversations WHERE id = p_conversation_id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'm4_stage0p_record_sample: conversation_id % khong ton tai', p_conversation_id;
+  END IF;
+
+  -- REV10 T8-02: doi chieu aad_digest trong transcript voi AAD DB TU TAI TAO (cung ky thuat
+  -- domain-tag + length-prefix cua app/services/pii/crypto.py:_sample_aad(), int4send() =
+  -- big-endian 4-byte, khop Python int.to_bytes(4,'big')) — xac nhan signer da dung DUNG
+  -- customer_ref/conversation_ref/sample_id THAT SU cua request nay, khong phai gia tri khac.
+  v_aad := 'a3s-m4-shadow-sample-aad-v1'::bytea
+    || int4send(octet_length(convert_to(v_customer_id::text, 'UTF8'))) || convert_to(v_customer_id::text, 'UTF8')
+    || int4send(octet_length(convert_to(p_conversation_id::text, 'UTF8'))) || convert_to(p_conversation_id::text, 'UTF8')
+    || int4send(octet_length(convert_to(p_sample_id::text, 'UTF8'))) || convert_to(p_sample_id::text, 'UTF8');
+  IF decode(v_transcript->>'aad_digest', 'hex') <> digest(v_aad, 'sha256') THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: aad_digest trong transcript khong khop AAD DB tu tai tao (T8-02)';
   END IF;
 
   INSERT INTO public.m4_shadow_review_samples
@@ -1122,9 +1242,9 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
+ALTER FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA, BYTEA, BYTEA, TEXT)
   OWNER TO alpha3s_m4_definer;
-REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
+REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA, BYTEA, BYTEA, TEXT)
   FROM PUBLIC;
 
 -- ===========================================================================
@@ -2205,6 +2325,7 @@ GRANT SELECT, INSERT ON public.m4_stage0p_capture_approval_revocations TO alpha3
 GRANT SELECT, INSERT ON public.m4_stage0p_normalization_approvals TO alpha3s_m4_definer;
 GRANT SELECT, INSERT ON public.m4_stage0p_normalization_approval_revocations TO alpha3s_m4_definer;
 GRANT SELECT, INSERT, DELETE ON public.m4_stage0p_fetch_capability TO alpha3s_m4_definer;
+GRANT SELECT ON public.m4_stage0p_transcript_signing_keys TO alpha3s_m4_definer;
 GRANT SELECT, INSERT, UPDATE ON public.m4_stage0p_capture_progress TO alpha3s_m4_definer;
 GRANT SELECT ON public.m4_stage0p_staff_permissions TO alpha3s_m4_definer;
 GRANT SELECT ON public.m4_stage0p_exclusion_gate TO alpha3s_m4_definer;
@@ -2268,7 +2389,7 @@ GRANT SELECT (batch_id) ON m4_selection_batches TO alpha3s_m4_sample_collector;
 GRANT INSERT ON m4_selection_batches TO alpha3s_m4_sample_collector;
 GRANT EXECUTE ON FUNCTION m4_stage0p_peek_next_candidate(UUID) TO alpha3s_m4_sample_collector;
 GRANT EXECUTE ON FUNCTION m4_stage0p_fetch_message_content(UUID, BIGINT, BIGINT) TO alpha3s_m4_sample_collector;
-GRANT EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
+GRANT EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA, BYTEA, BYTEA, TEXT)
   TO alpha3s_m4_sample_collector;
 GRANT EXECUTE ON FUNCTION m4_stage0p_close_collection(UUID) TO alpha3s_m4_sample_collector;
 GRANT EXECUTE ON FUNCTION m4_stage0p_seed_capture_progress(UUID) TO alpha3s_m4_sample_collector;
@@ -2361,10 +2482,11 @@ BEGIN
       m4_stage0p_fetch_capability, m4_stage0p_capture_progress, m4_stage0p_staff_permissions,
       m4_stage0p_exclusion_gate, m4_stage0p_actor_credentials, m4_stage0p_actor_session,
       m4_stage0p_normalization_registry, m4_stage0p_normalization_approvals,
-      m4_stage0p_normalization_approval_revocations FROM alpha3s_vendor_path;
+      m4_stage0p_normalization_approval_revocations, m4_stage0p_transcript_signing_keys
+      FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_peek_next_candidate(UUID) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_fetch_message_content(UUID, BIGINT, BIGINT) FROM alpha3s_vendor_path;
-    REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
+    REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA, BYTEA, BYTEA, TEXT)
       FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_close_collection(UUID) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_seed_capture_progress(UUID) FROM alpha3s_vendor_path;
@@ -2456,7 +2578,7 @@ BEGIN
     problems := problems || ' peek_execute_public'; END IF;
   IF has_function_privilege('public', 'm4_stage0p_fetch_message_content(uuid,bigint,bigint)', 'EXECUTE') THEN
     problems := problems || ' fetch_content_execute_public'; END IF;
-  IF has_function_privilege('public', 'm4_stage0p_record_sample(uuid,bigint,bigint,uuid,bytea,int,boolean,bytea)', 'EXECUTE') THEN
+  IF has_function_privilege('public', 'm4_stage0p_record_sample(uuid,bigint,bigint,uuid,bytea,int,boolean,bytea,bytea,bytea,text)', 'EXECUTE') THEN
     problems := problems || ' record_sample_execute_public'; END IF;
   IF has_function_privilege('public', 'm4_stage0p_close_collection(uuid)', 'EXECUTE') THEN
     problems := problems || ' close_collection_execute_public'; END IF;
@@ -2495,7 +2617,7 @@ BEGIN
        'm4_stage0p_fetch_message_content(uuid,bigint,bigint)', 'EXECUTE') THEN
     problems := problems || ' collector_no_execute_fetch_content'; END IF;
   IF NOT has_function_privilege('alpha3s_m4_sample_collector',
-       'm4_stage0p_record_sample(uuid,bigint,bigint,uuid,bytea,int,boolean,bytea)', 'EXECUTE') THEN
+       'm4_stage0p_record_sample(uuid,bigint,bigint,uuid,bytea,int,boolean,bytea,bytea,bytea,text)', 'EXECUTE') THEN
     problems := problems || ' collector_no_execute_record_sample'; END IF;
   IF NOT has_function_privilege('alpha3s_m4_sample_collector',
        'm4_stage0p_close_collection(uuid)', 'EXECUTE') THEN
@@ -2584,6 +2706,18 @@ BEGIN
     problems := problems || ' normalization_approvals_table_missing'; END IF;
   IF to_regclass('public.m4_stage0p_normalization_approval_revocations') IS NULL THEN
     problems := problems || ' normalization_approval_revocations_table_missing'; END IF;
+
+  -- REV10 T8-02: transcript signing key table - ton tai + SELECT CHI definer.
+  IF to_regclass('public.m4_stage0p_transcript_signing_keys') IS NULL THEN
+    problems := problems || ' transcript_signing_keys_table_missing'; END IF;
+  IF has_table_privilege('public','m4_stage0p_transcript_signing_keys','SELECT') THEN
+    problems := problems || ' public_can_select_transcript_signing_keys'; END IF;
+  IF has_table_privilege('alpha3s_m4_sample_collector','m4_stage0p_transcript_signing_keys','SELECT') THEN
+    problems := problems || ' collector_can_select_transcript_signing_keys'; END IF;
+  IF has_table_privilege('alpha3s_app','m4_stage0p_transcript_signing_keys','SELECT') THEN
+    problems := problems || ' app_can_select_transcript_signing_keys'; END IF;
+  IF NOT has_table_privilege('alpha3s_m4_definer','m4_stage0p_transcript_signing_keys','SELECT') THEN
+    problems := problems || ' definer_no_select_transcript_signing_keys'; END IF;
   IF has_function_privilege('public',
        'm4_stage0p_record_normalization_approval(text,text,timestamptz,timestamptz,text)', 'EXECUTE') THEN
     problems := problems || ' record_normalization_approval_execute_public'; END IF;
@@ -2696,6 +2830,8 @@ BEGIN
     IF has_function_privilege('alpha3s_vendor_path',
                               'm4_stage0p_revoke_normalization_approval(text,text)','EXECUTE') THEN
       problems := problems || ' vendor_can_execute_revoke_normalization_approval'; END IF;
+    IF has_table_privilege('alpha3s_vendor_path','m4_stage0p_transcript_signing_keys','SELECT') THEN
+      problems := problems || ' vendor_can_select_transcript_signing_keys'; END IF;
   END IF;
 
   IF has_table_privilege('public','m4_shadow_review_samples','SELECT') THEN

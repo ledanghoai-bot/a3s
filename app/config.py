@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     # giu de tuong thich neu can fallback/tai lieu — KHONG duoc dung lam kill switch that.
     m4_sample_key_b64: str = ""
     m4_stage0p_capture_enabled: bool = False
+    # REV10 F-M4-0P-T8-02 (CA Review #9 §4, Huong 3 interim — dev/test only, PHAI nang cap len
+    # KMS/HSM asymmetric TRUOC production activation): khoa HMAC-SHA256 (base64 32 byte) ky
+    # signed capture transcript trong app/services/pii/crypto.py:sign_capture(). RIENG voi
+    # m4_sample_key_b64 (ma hoa) — day la khoa KY, khong phai khoa MA HOA. KHONG duoc cap cho
+    # role DB `alpha3s_m4_sample_collector`/`alpha3s_app`, KHONG log, KHONG commit vao fixture.
+    m4_transcript_hmac_key_b64: str = ""
 
 
 settings = Settings()

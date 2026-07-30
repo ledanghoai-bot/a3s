@@ -1,46 +1,90 @@
-"""I-B M4 Stage 0P — real connection-pool integration cho pinned-actor lifecycle (F-M4-0P-T8-01).
+"""I-B M4 Stage 0P — real connection-pool integration cho pinned-actor lifecycle (F-M4-0P-T8-01,
+REV10 F-M4-0P-T9-01/T9-02).
 
 CA Technical Re-review #8 (F-M4-0P-T8-01): Correction #8 (T7-01) chi dong truong hop actor A
 HOAN TAT 1 hanh dong nghiep vu THANH CONG roi actor B muon lai CUNG connection (consume-on-use xoa
 row pin ngay sau thanh cong). Nhung Correction #8 tu ghi nhan 1 khoang cach con lai: neu actor A
 pin THANH CONG roi request bi huy/loi TRUOC khi lam hanh dong nghiep vu nao, row pin + session_nonce
-VAN CON. Toan bo evidence script trong repo (`m4_stage0p_*_test.py`) dung `asyncpg.connect()` MOI
-cho MOI thao tac — moi "connection" la 1 backend_pid MOI, nen kich ban "pool tra CUNG 1 connection
-vat ly cho actor B" chua bao gio duoc tai hien THAT SU. CA yeu cau tich hop 1 pool THAT
-(`asyncpg.create_pool`) va chung minh bang integration test THAT rang:
-  - pool checkout LUON bat dau tu trang thai unpinned (bat ke checkout truoc do ket thuc the nao);
-  - pool checkin/release UNPIN ke ca khi hanh dong nghiep vu raise exception hoac task bi cancel;
-  - actor B fail-closed (RAISE "chua pin actor") khi checkout lai CUNG connection vat ly ma actor A
-    da bo do (khong hoan tat hanh dong nao) truoc do.
+VAN CON. CA yeu cau tich hop 1 pool THAT (`asyncpg.create_pool`) va chung minh bang integration
+test THAT rang pool checkout luon bat dau unpinned, checkin/release unpin ke ca exception/cancel,
+va actor B fail-closed khi checkout lai CUNG connection ma actor A da bo do.
 
-Thiet ke: `pinned_actor_session()` la async context manager DUY NHAT dung de lam viec voi pool nay —
-KHONG expose pool.acquire()/release() truc tiep cho code nghiep vu, de connection KHONG THE "thoat"
-khoi wrapper trong luc con pin hieu luc (yeu cau CA §T8-01, gach dau dong 3). Ben trong:
-  1. acquire tu pool.
-  2. SET ROLE actor_binder, goi `m4_stage0p_unpin_actor()` NGAY LAP TUC (an toan, bo qua loi "chua
-     pin") TRUOC khi pin — luoi an toan chu dong: neu connection vat ly nay dang mang 1 pin BI BO
-     LAI tu lan checkout truoc (vi checkin/cleanup lan do that bai vi ly do nao khac), no bi xoa
-     O DAY, KHONG doi checkout tra ve boi cleanup cua nguoi dung truoc — dam bao invariant "checkout
-     luon bat dau unpinned" LA THAT (khong chi la loi hua tu phia release).
-  3. pin_actor that su, SET ROLE sang business_role, yield connection cho caller.
-  4. finally (boc `asyncio.shield` cho phan cleanup — dam bao chay het du outer task bi cancel giua
-     chung): RESET ROLE, SET ROLE actor_binder, unpin_actor (best-effort, nuot loi + log), RESET
-     ROLE, roi `pool.release()`.
+CA Technical Re-review #9 (F-M4-0P-T9-01, P1): thiet ke REV9 dung `asyncio.shield()` boc 1 lan goi
+cleanup MOI cho moi lan `__aexit__` chay — neu OUTER task nhan 1 lan cancel THEM trong luc dang
+`await asyncio.shield(_cleanup())`, chinh await do nem CancelledError NGAY (dung thiet ke cua
+`asyncio.shield` — no chi bao ve INNER task khoi bi huy boi chinh no bi huy, khong bao ve outer
+await khoi 1 lan cancel rieng nham vao outer) — trong khi cleanup task VAN chay nen. Nhanh
+`except CancelledError: pass` REV9 di thang toi `finally: pool.release(conn)`, tra connection ve
+pool TRUOC KHI cleanup that su xong — actor B ke tiep co the nhan connection dang con bi cleanup cu
+RESET ROLE/SET ROLE/unpin_actor() tren CHINH no, tao race giua 2 request.
 
-Con lai CHUA dong (ngoai pham vi T8-01, CA da ghi nhan la khoang cach kien truc rieng): `pin_secret`
-van la 1 credential tu tao (bespoke), KHONG phai identity authority production that su — Stage 0P
-hien khong co lop HTTP/JWT auth THAT de derive staff identity tu 1 authenticated application
-principal (CA da neu lai yeu cau nay o Correction #6/#7 va nhac lai o Review #8). Khi Stage 0P noi
-vao 1 service HTTP that, buoc pin phai lay staff_id tu principal DA XAC THUC boi lop do (vd JWT
-claim), khong phai tu tham so caller tu khai nhu hien tai — day la 1 architecture gap RIENG, T8-01
-khong giai quyet."""
+Sua REV10: `__aexit__` tao 1 `asyncio.Task` cleanup TUONG MINH (khong phai coroutine boc lai moi
+lan shield), roi LAP LAI `await asyncio.shield(cleanup_task)` cho toi khi `cleanup_task.done()` La
+THAT — moi lan CancelledError tu 1 lan cancel THEM chi lam vong lap thu lai (task cleanup goc VAN
+LA CUNG 1 task, khong bi huy, khong bi tao lai), khong bao gio roi vong lap som. Neu tong thoi gian
+cho vuot qua `_CLEANUP_MAX_WAIT_SECONDS` (backstop cho kich ban cleanup THAT SU treo — vd network
+partition giua chung), goi `conn.terminate()` (dong ket noi VAT LY NGAY LAP TUC, khac `close()`
+la dong "lich su") de buoc cleanup_task dang cho tren connection do phai ket thuc (moi await tren
+1 connection da terminate deu raise), roi discard (khong con connection do de release binh thuong
+nua — `pool.release()` van duoc goi de pool tu thay the, xem `_release_or_discard`). Neu cleanup
+task hoan tat nhung tu BAO LOI (SQL/network that bai giua chung — vd RESET ROLE hoac unpin_actor
+tu no RAISE thay vi chi log), connection cung bi terminate+discard thay vi release binh thuong —
+khong bao gio tra 1 connection co the con o trang thai session/role khong xac dinh ve pool cho
+request khac dung lai.
+
+Sua REV10 F-M4-0P-T9-02 (P1): `business_role` REV9 la 1 `str` bat ky, noi suy truc tiep vao
+`SET ROLE {business_role}` — khong allowlist, khong quote identifier, "goi wrapper" tro thanh
+role-selection authority (caller chon duoc BAT KY role M4 nao, ke ca role khong lien quan hanh
+dong dinh lam). Sua: `business_role` gio PHAI la 1 thanh vien enum `Stage0PBusinessRole` (khong
+con nhan chuoi tuy y — Python tu chan o compile-time/type-check, khong the "inject" 1 gia tri
+khong ton tai trong enum). Enum CHI liet ke DUNG 4 role DB THAT SU goi
+`m4_stage0p_require_pinned_actor()` ben trong (ra soat truc tiep `migrations/039_m4_stage0p.sql`
+— 8 loi goi, tat ca thuoc 4 role nay; `alpha3s_m4_sample_collector` KHONG nam trong danh sach vi
+`record_sample`/`fetch_message_content` khong doi hoi pinned actor, chi doi hoi capability
+one-time nonce T4-01 — dua no vao enum se ngam dinh sai rang no can pin). Gia tri enum van duoc
+quote identifier an toan (double-quote + escape) truoc khi dua vao `SET ROLE` — phong thu THEM
+(defense-in-depth) du ban than enum da loai tru injection tu nguon.
+
+Con lai CHUA dong (F-M4-0P-T9-03, P1 activation blocker — ngoai pham vi T8-01/T9-01/T9-02, CA da
+ghi nhan rieng o Review #9): `pin_secret`/`staff_id` van do caller truyen (bespoke credential),
+KHONG phai identity authority production that su — Stage 0P hien khong co lop HTTP/JWT auth THAT
+de derive staff identity tu 1 authenticated application principal. `pinned_actor_session()` PHAI
+nhan 1 verified principal context (khong phai raw staff_id/pin_secret tu request body) truoc khi
+duoc cap production-data-access/activation — CA yeu cau ro rang nay khong duoc coi la dong boi
+round nay, chi duoc phep giu nguyen trong pham vi synthetic dev/test."""
 
 import asyncio
+import enum
 import json
+import time
 
 import asyncpg
 
 from app.services.pii.stage0p_control import ActorNotPinnedError, pin_actor, unpin_actor
+
+# T9-01: backstop cho kich ban cleanup THAT SU treo (vd network partition giua chung) — binh
+# thuong cleanup hoan tat trong vai chuc ms (vai lenh RESET ROLE/SET ROLE/DELETE 1 row); day KHONG
+# phai latency ky vong, chi la tran tren cung truoc khi buoc terminate connection.
+_CLEANUP_MAX_WAIT_SECONDS = 10.0
+_CLEANUP_STATEMENT_TIMEOUT_SECONDS = 3.0
+
+
+class Stage0PBusinessRole(enum.Enum):
+    """T9-02: allowlist BAT BIEN cho `business_role` — CHI 4 gia tri nay, xac nhan bang cach ra
+    soat truc tiep moi loi goi `m4_stage0p_require_pinned_actor()` trong migration 039 (8 loi goi,
+    dung 4 role nay). Them 1 role M4 khac vao day PHAI di kem xac nhan lai rang ham nghiep vu
+    tuong ung THAT SU doi hoi pinned actor — khong duoc "them cho chac"."""
+
+    CONTROL_PLANE = "alpha3s_m4_control_plane"          # m4_stage0p_set_capture (m4.stage0p.operate)
+    APPROVAL_RECORDER = "alpha3s_m4_approval_recorder"  # record/revoke_approval, set_current_normalization_version, record/revoke_normalization_approval (m4.stage0p.approve)
+    SAMPLE_REVIEWER_API = "alpha3s_m4_sample_reviewer_api"  # m4_stage0p_seal_labels (m4.stage0p.review)
+    SAMPLE_EVALUATOR = "alpha3s_m4_sample_evaluator"        # m4_stage0p_complete_evaluation (m4.stage0p.evaluate)
+
+
+def _quote_role_ident(role_name: str) -> str:
+    """Quote 1 Postgres identifier an toan (double-quote + escape double-quote noi bo) — phong
+    thu THEM ben canh viec `role_name` chi co the den tu `Stage0PBusinessRole` (T9-02)."""
+    return '"' + role_name.replace('"', '""') + '"'
 
 
 def _log(event: str, **fields) -> None:
@@ -60,7 +104,12 @@ class _PinnedSession:
     """Trien khai async context manager cho `pinned_actor_session()` — xem module docstring cho
     thiet ke day du. Khong dung truc tiep tu ben ngoai module nay."""
 
-    def __init__(self, pool: asyncpg.Pool, *, staff_id: int, pin_secret: str, business_role: str):
+    def __init__(self, pool: asyncpg.Pool, *, staff_id: int, pin_secret: str,
+                business_role: Stage0PBusinessRole):
+        if not isinstance(business_role, Stage0PBusinessRole):
+            raise TypeError(
+                "pinned_actor_session: business_role phai la 1 thanh vien Stage0PBusinessRole "
+                f"(T9-02, khong con nhan str tuy y) — nhan duoc {business_role!r}")
         self._pool = pool
         self._staff_id = staff_id
         self._pin_secret = pin_secret
@@ -86,56 +135,100 @@ class _PinnedSession:
             self._conn = None
             raise
         await conn.execute("RESET ROLE")
-        await conn.execute(f"SET ROLE {self._business_role}")
+        # T9-02: gia tri enum + quote identifier an toan (2 lop, xem module docstring).
+        await conn.execute(f"SET ROLE {_quote_role_ident(self._business_role.value)}")
         return conn
 
     async def __aexit__(self, exc_type, exc, tb):
         conn = self._conn
         if conn is None:
             return False
-        # T8-01: cleanup PHAI hoan tat du __aexit__ dang chay vi outer task bi cancel — shield
-        # khoi 1 lan cancel THEM trong luc chinh cleanup nay dang cho await (khong shield duoc
-        # cancel da nem VAO __aexit__, chi shield cac await BEN TRONG khoi bi cancel THEM lan nua).
-        async def _cleanup():
+
+        cleanup_task = asyncio.ensure_future(_cleanup_connection(conn))
+        deadline = time.monotonic() + _CLEANUP_MAX_WAIT_SECONDS
+        terminated = False
+        # T9-01: LAP LAI shield tren CUNG 1 task cho toi khi no THAT SU done() — 1 lan cancel THEM
+        # nham vao outer task chi lam 1 vong lap thu lai (cleanup_task KHONG bi huy, KHONG bi tao
+        # lai), khong bao gio cho phep tien toi release() truoc khi cleanup that su ket thuc.
+        while not cleanup_task.done():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Backstop: cleanup khong hoan tat trong thoi gian cho phep du da lap lai nhieu
+                # lan - buoc ket thuc bang cach dong VAT LY connection NGAY (terminate, khac
+                # close() "lich su"), buoc moi await con lai cua cleanup_task tren connection do
+                # phai raise va ket thuc.
+                _log("m4_pool_cleanup_deadline_exceeded_terminating_connection")
+                conn.terminate()
+                terminated = True
+                break
             try:
-                await conn.execute("RESET ROLE")
-            except Exception as e:  # noqa: BLE001
-                _log("m4_pool_release_reset_role_failed", error_type=type(e).__name__)
-            try:
-                await conn.execute("SET ROLE alpha3s_m4_actor_binder")
-                await unpin_actor(conn)
-            except Exception as e:  # noqa: BLE001
-                _log("m4_pool_release_unpin_failed", error_type=type(e).__name__)
-            finally:
-                try:
-                    await conn.execute("RESET ROLE")
-                except Exception as e:  # noqa: BLE001
-                    _log("m4_pool_release_final_reset_role_failed", error_type=type(e).__name__)
-        try:
-            await asyncio.shield(_cleanup())
-        except asyncio.CancelledError:
-            # shield bi huy tu NGOAI (task cha bi huy them lan nua) - van cho _cleanup() tu hoan
-            # tat trong nen (best-effort), KHONG de connection roi ve pool ma chua kip thu unpin.
-            pass
-        finally:
-            await self._pool.release(conn)
-            self._conn = None
+                await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:  # noqa: BLE001 - cleanup_task tu raise, xu ly duoi day qua .exception()
+                _log("m4_pool_cleanup_task_raised", error_type=type(e).__name__)
+                break
+
+        cleanup_failed = terminated or cleanup_task.cancelled() or (
+            cleanup_task.done() and cleanup_task.exception() is not None)
+        if cleanup_failed and not terminated:
+            _log("m4_pool_cleanup_failed_terminating_connection")
+            conn.terminate()
+            terminated = True
+
+        await _release_or_discard(self._pool, conn, discard=terminated)
+        self._conn = None
         return False
 
 
+async def _cleanup_connection(conn) -> None:
+    """T9-01: 1 don vi cleanup DUY NHAT, chay nhu 1 Task tuong minh (khong phai coroutine tao lai
+    moi lan `__aexit__` lap) — moi lenh co timeout rieng (`_CLEANUP_STATEMENT_TIMEOUT_SECONDS`) de
+    tu no khong bao gio treo VO THOI HAN, danh backstop `_CLEANUP_MAX_WAIT_SECONDS` cua caller cho
+    truong hop hiem hon (vd connection object con "song" ve mat Python nhung socket that su da
+    chet theo kieu khong the phat hien qua 1 lenh timeout don le)."""
+    await conn.execute("RESET ROLE", timeout=_CLEANUP_STATEMENT_TIMEOUT_SECONDS)
+    await conn.execute("SET ROLE alpha3s_m4_actor_binder", timeout=_CLEANUP_STATEMENT_TIMEOUT_SECONDS)
+    await unpin_actor(conn)
+    await conn.execute("RESET ROLE", timeout=_CLEANUP_STATEMENT_TIMEOUT_SECONDS)
+
+
+async def _release_or_discard(pool: asyncpg.Pool, conn, *, discard: bool) -> None:
+    """T9-01: neu cleanup KHONG the xac nhan hoan tat sach (terminate/exception/cancel), discard
+    connection thay vi tra ve pool cho request khac tai su dung o 1 trang thai khong xac dinh —
+    dong VAT LY (`close()`, an toan goi lai du da `terminate()`) TRUOC khi `pool.release()`; asyncpg
+    tu phat hien connection da dong va thay the bang 1 connection MOI cho lan acquire tiep theo
+    thay vi tra lai chinh no."""
+    if discard:
+        try:
+            await conn.close(timeout=1.0)
+        except Exception as e:  # noqa: BLE001
+            _log("m4_pool_discard_close_failed", error_type=type(e).__name__)
+    await pool.release(conn)
+
+
 def pinned_actor_session(pool: asyncpg.Pool, *, staff_id: int, pin_secret: str,
-                         business_role: str) -> _PinnedSession:
+                         business_role: Stage0PBusinessRole) -> _PinnedSession:
     """Context manager DUY NHAT de lay 1 connection tu pool VA lam viec nhu 1 actor da pin, vd:
 
         async with pinned_actor_session(pool, staff_id=1, pin_secret="...",
-                                        business_role="alpha3s_m4_control_plane") as conn:
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
             await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", True, ref)
 
     Connection KHONG BAO GIO thoat khoi khoi `async with` trong luc pin con hieu luc — day la
     invariant CA yeu cau (T8-01, gach dau dong 3). Neu `pin_actor` that bai (staff sai/pin_secret
     sai/rate-limit), connection duoc tra ve pool NGAY (khong pin) va `ActorNotPinnedError` duoc
-    nem cho caller — xem `_PinnedSession.__aenter__`."""
+    nem cho caller — xem `_PinnedSession.__aenter__`. `business_role` PHAI la 1 thanh vien
+    `Stage0PBusinessRole` (T9-02) — truyen gia tri khac se `TypeError` NGAY, TRUOC khi bat ky cau
+    SQL nao duoc gui."""
     return _PinnedSession(pool, staff_id=staff_id, pin_secret=pin_secret, business_role=business_role)
 
 
-__all__ = ["create_stage0p_pool", "pinned_actor_session", "ActorNotPinnedError"]
+__all__ = [
+    "create_stage0p_pool",
+    "pinned_actor_session",
+    "ActorNotPinnedError",
+    "Stage0PBusinessRole",
+]

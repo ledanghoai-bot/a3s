@@ -33,6 +33,7 @@ Duyet DAY DU 15 role (9 role M4 + alpha3s_app + alpha3s_vendor_path + PUBLIC) x 
 import asyncio
 import datetime
 import hashlib
+import hmac as _hmac
 import json as _json
 import os
 import sys
@@ -45,8 +46,16 @@ sys.path.insert(0, str(ROOT))
 
 import asyncpg  # noqa: E402
 
+from app.services.pii.crypto import TRANSCRIPT_KEY_VERSION  # noqa: E402
+
 MAX_CHARS = 2000
 MAX_BYTES = 8000
+# REV10 T8-02: khoa HMAC RIENG cua chinh script nay (provision truc tiep vao
+# m4_stage0p_transcript_signing_keys qua admin - xem main()) - cho phep tung kich ban adversarial
+# tu xay 1 transcript hop le voi CHINH XAC cac gia tri (ke ca gia tri SAI dang test) ma khong can
+# di qua app/services/pii/crypto.py:sign_capture() (ham do luon tu encrypt, khong cho phep truyen
+# ciphertext gia lap tuy y nhu nhieu kich ban duoi day can).
+TRANSCRIPT_HMAC_KEY = os.urandom(32)
 
 
 def _canonical_digest(raw_content: str) -> bytes:
@@ -61,6 +70,79 @@ def _canonical_digest(raw_content: str) -> bytes:
     if len(encoded) > MAX_BYTES:
         text = encoded[:MAX_BYTES].decode("utf-8", errors="ignore")
     return hashlib.sha256(text.encode("utf-8")).digest()
+
+
+def _sample_aad(customer_ref: str, conversation_ref: str, sample_id: str) -> bytes:
+    """REV10 T8-02: replicate CHINH XAC app/services/pii/crypto.py:_sample_aad() (domain-tag +
+    length-prefix) — dung de tinh aad_digest cho transcript test tu xay."""
+    parts = (customer_ref.encode("utf-8"), conversation_ref.encode("utf-8"), sample_id.encode("utf-8"))
+    out = [b"a3s-m4-shadow-sample-aad-v1"]
+    for p in parts:
+        out.append(len(p).to_bytes(4, "big"))
+        out.append(p)
+    return b"".join(out)
+
+
+def _sign_test_transcript(*, batch_id, conversation_id, message_id, sample_id, txid,
+                          canonical_digest: bytes, canonical_len: int, truncated: bool,
+                          ciphertext: bytes, customer_ref: str, conversation_ref: str,
+                          purpose_code: str = "P12_PII_DETECTOR_EVAL",
+                          key_version: str = TRANSCRIPT_KEY_VERSION,
+                          aead_algorithm: str = "AES-256-GCM", ttl_seconds: int = 60,
+                          issued_at=None, hmac_key: bytes = TRANSCRIPT_HMAC_KEY,
+                          aad_digest: bytes | None = None) -> tuple[bytes, bytes]:
+    """REV10 T8-02: xay + ky 1 transcript THAT (cung thuat toan canonical JSON + HMAC-SHA256 voi
+    app/services/pii/crypto.py:sign_capture()), nhung nhan TRUC TIEP ciphertext/canonical_len/
+    truncated tu caller thay vi tu encrypt — cho phep moi kich ban adversarial trong file nay xay
+    1 transcript NOI BO NHAT QUAN voi cac tham so (ke ca gia tri SAI) no dang truyen cho
+    record_sample, de kiem tra dung logic downstream (T4-01/T5-02/T6-02) thay vi bi chan som boi
+    chinh lop xac minh transcript (T8-02). Tra ve (transcript_bytes, signature)."""
+    now = issued_at or datetime.datetime.now(datetime.timezone.utc)
+    if aad_digest is None:
+        aad_digest = hashlib.sha256(_sample_aad(customer_ref, conversation_ref, sample_id)).digest()
+    fields = {
+        "v": 1,
+        "batch_id": str(batch_id),
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "sample_id": sample_id,
+        "txid": txid,
+        "canonical_digest": canonical_digest.hex(),
+        "canonical_len": canonical_len,
+        "truncated": truncated,
+        "ciphertext_digest": hashlib.sha256(ciphertext).hexdigest(),
+        "aead_algorithm": aead_algorithm,
+        "key_version": key_version,
+        "aad_digest": aad_digest.hex(),
+        "purpose_code": purpose_code,
+        "issued_at": now.isoformat(),
+        "expires_at": (now + datetime.timedelta(seconds=ttl_seconds)).isoformat(),
+    }
+    transcript_bytes = _json.dumps(fields, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=True).encode("utf-8")
+    signature = _hmac.new(hmac_key, transcript_bytes, hashlib.sha256).digest()
+    return transcript_bytes, signature
+
+
+async def _record_sample_signed(conn, *, batch_id, conversation_id, message_id, sample_id,
+                                ciphertext: bytes, canonical_len: int, truncated: bool,
+                                canonical_digest: bytes, customer_ref: str, conversation_ref: str,
+                                **sign_overrides):
+    """REV10 T8-02: wrapper tien ich - tu doc txid_current() (PHAI CUNG transaction voi
+    fetch_message_content da goi truoc do), xay+ky transcript NHAT QUAN voi cac tham so truyen
+    vao (ke ca gia tri SAI qua sign_overrides), roi goi m4_stage0p_record_sample voi du 11 tham
+    so. Tra ve row ket qua (hoac nem asyncpg.PostgresError nhu binh thuong)."""
+    txid = await conn.fetchval("SELECT txid_current()")
+    transcript_bytes, signature = _sign_test_transcript(
+        batch_id=batch_id, conversation_id=conversation_id, message_id=message_id,
+        sample_id=sample_id, txid=txid, canonical_digest=canonical_digest,
+        canonical_len=canonical_len, truncated=truncated, ciphertext=ciphertext,
+        customer_ref=customer_ref, conversation_ref=conversation_ref, **sign_overrides)
+    key_version = sign_overrides.get("key_version", TRANSCRIPT_KEY_VERSION)
+    return await conn.fetchrow(
+        "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        batch_id, conversation_id, message_id, sample_id, ciphertext, canonical_len, truncated,
+        canonical_digest, transcript_bytes, signature, key_version)
 
 DB_URL = (os.environ.get("DATABASE_URL")
           or "postgresql://alpha3s:alpha3s@alpha3s-m4-db:5432/alpha3s").replace("+asyncpg", "")
@@ -108,7 +190,7 @@ ROLES = [
 FUNCTIONS = [
     ("m4_stage0p_peek_next_candidate", "uuid", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_fetch_message_content", "uuid,bigint,bigint", "alpha3s_m4_sample_collector"),
-    ("m4_stage0p_record_sample", "uuid,bigint,bigint,uuid,bytea,int,boolean,bytea", "alpha3s_m4_sample_collector"),
+    ("m4_stage0p_record_sample", "uuid,bigint,bigint,uuid,bytea,int,boolean,bytea,bytea,bytea,text", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_close_collection", "uuid", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_seed_capture_progress", "uuid", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_mark_candidate_outcome", "uuid,bigint,bigint,text,text", "alpha3s_m4_sample_collector"),
@@ -271,6 +353,12 @@ async def _make_large_batch(admin, *, seed: str, n: int) -> tuple:
 
 async def main() -> int:
     admin = await asyncpg.connect(DB_URL)
+    # REV10 T8-02: provision khoa HMAC transcript (xem TRANSCRIPT_HMAC_KEY o dau file) vao bang
+    # SELECT-chi-cho-definer, cho record_sample verify duoc chu ky cac transcript test tu ky.
+    await admin.execute(
+        "INSERT INTO m4_stage0p_transcript_signing_keys (key_version, hmac_key) VALUES ($1, $2) "
+        "ON CONFLICT (key_version) DO UPDATE SET hmac_key = EXCLUDED.hmac_key, retired_at = NULL",
+        TRANSCRIPT_KEY_VERSION, TRANSCRIPT_HMAC_KEY)
 
     staff = await admin.fetchrow(
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
@@ -476,6 +564,10 @@ async def main() -> int:
          "SELECT * FROM m4_stage0p_normalization_approvals", False),
         ("alpha3s_vendor_path", "normalization_approval_revocations", "SELECT",
          "SELECT * FROM m4_stage0p_normalization_approval_revocations", False),
+        ("alpha3s_vendor_path", "transcript_signing_keys", "SELECT",
+         "SELECT * FROM m4_stage0p_transcript_signing_keys", False),
+        ("alpha3s_m4_sample_collector", "transcript_signing_keys", "SELECT",
+         "SELECT * FROM m4_stage0p_transcript_signing_keys", False),
 
         ("public", "samples", "SELECT", "SELECT * FROM m4_shadow_review_samples", False),
         ("public", "control", "SELECT", "SELECT * FROM m4_stage0p_control", False),
@@ -490,6 +582,8 @@ async def main() -> int:
          "SELECT * FROM m4_stage0p_normalization_approvals", False),
         ("public", "normalization_approval_revocations", "SELECT",
          "SELECT * FROM m4_stage0p_normalization_approval_revocations", False),
+        ("public", "transcript_signing_keys", "SELECT",
+         "SELECT * FROM m4_stage0p_transcript_signing_keys", False),
     ]
 
     table_name_map = {
@@ -505,6 +599,7 @@ async def main() -> int:
         "normalization_registry": "m4_stage0p_normalization_registry",
         "normalization_approvals": "m4_stage0p_normalization_approvals",
         "normalization_approval_revocations": "m4_stage0p_normalization_approval_revocations",
+        "transcript_signing_keys": "m4_stage0p_transcript_signing_keys",
     }
 
     for role, table, action, sql, expected in matrix:
@@ -832,9 +927,14 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
-        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
-                            audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()),
-                            b"\x00" * 30, 1, False, hashlib.sha256(b"dummy").digest())
+        # REV10 T8-02: boc trong 1 transaction tuong minh de txid transcript khop txid_current()
+        # THAT SU dung luc record_sample chay (khac di, T8-02 se RAISE truoc khi cham toi T4-01).
+        async with conn.transaction():
+            await _record_sample_signed(
+                conn, batch_id=audit_batch["batch_id"], conversation_id=conv["id"],
+                message_id=msg["id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 30,
+                canonical_len=1, truncated=False, canonical_digest=hashlib.sha256(b"dummy").digest(),
+                customer_ref=str(cust["id"]), conversation_ref=str(conv["id"]))
         check(False, "record_sample doc lap (khong fetch truoc) -> phai RAISE (T4-01)")
     except asyncpg.PostgresError as e:
         check("khong co capability fetch hop le" in str(e), "record_sample doc lap -> RAISE dung (T4-01)")
@@ -850,9 +950,12 @@ async def main() -> int:
                                             audit_batch["batch_id"], conv["id"], msg["id"])
         check(fetched_cross["status"] == "ok", "fetch_message_content thanh cong (transaction A)")
     try:
-        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
-                            audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()),
-                            b"\x00" * 30, 1, False, hashlib.sha256(b"dummy").digest())
+        async with conn.transaction():
+            await _record_sample_signed(
+                conn, batch_id=audit_batch["batch_id"], conversation_id=conv["id"],
+                message_id=msg["id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 30,
+                canonical_len=1, truncated=False, canonical_digest=hashlib.sha256(b"dummy").digest(),
+                customer_ref=str(cust["id"]), conversation_ref=str(conv["id"]))
         check(False, "record_sample o transaction KHAC voi fetch -> phai RAISE (T4-01)")
     except asyncpg.PostgresError as e:
         check("khong co capability fetch hop le" in str(e),
@@ -874,11 +977,12 @@ async def main() -> int:
         # T6-02: canonical_text_len/digest gio PHAI khop CHINH XAC noi dung that ("tin nhan that",
         # 13 ky tu) — khong con "canonical_text_len=1 gia" nhu REV6 (chi kiem <=, gio la <>).
         real_digest = _canonical_digest("tin nhan that")
-        rec = await conn.fetchrow(
-            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
+        rec = await _record_sample_signed(
+            conn, batch_id=audit_batch["batch_id"], conversation_id=conv["id"], message_id=msg["id"],
+            sample_id=str(uuid.uuid4()),
             # T5-02: ciphertext PHAI >= canonical_text_len+30 (AEAD overhead) — 43 byte cho 13 ky tu.
-            audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()), b"\x00" * 43, 13,
-            False, real_digest)
+            ciphertext=b"\x00" * 43, canonical_len=13, truncated=False, canonical_digest=real_digest,
+            customer_ref=str(cust["id"]), conversation_ref=str(conv["id"]))
         check(rec["captured_count"] == 1,
               "T2-06/T4-01: record_sample (CUNG transaction voi fetch) -> captured_count tang DUNG 1")
     progress_after = await admin.fetchval(
@@ -900,10 +1004,14 @@ async def main() -> int:
         try:
             # T6-02: digest DUNG (noi dung that "tin nhan ngan") nhung canonical_text_len khai SAI
             # (5000, thuc te 13) — digest check PASS (doc lap voi do dai khai bao), roi moi den
-            # exact-length check RAISE.
-            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
-                                audit_batch["batch_id"], conv["id"], msg_a["id"], str(uuid.uuid4()),
-                                b"\x00" * 5000, 5000, False, _canonical_digest("tin nhan ngan"))
+            # exact-length check RAISE. REV10 T8-02: transcript tu ky NHAT QUAN voi canonical_len=
+            # 5000 (gia tri SAI dang test) + ciphertext 5000 byte tuong ung, nen lop T8-02 PASS,
+            # cho phep chay toi lop T5-02/T6-02 that su dang test o day.
+            await _record_sample_signed(
+                conn, batch_id=audit_batch["batch_id"], conversation_id=conv["id"],
+                message_id=msg_a["id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 5000,
+                canonical_len=5000, truncated=False, canonical_digest=_canonical_digest("tin nhan ngan"),
+                customer_ref=str(cust["id"]), conversation_ref=str(conv["id"]))
             check(False, "canonical_text_len (5000) khong khop do dai da fetch -> phai RAISE (T5-02)")
         except asyncpg.PostgresError as e:
             check("khong khop do dai da fetch" in str(e), "canonical_text_len khong khop do dai da fetch -> RAISE dung (T5-02/T6-02)")
@@ -929,9 +1037,11 @@ async def main() -> int:
         try:
             # T6-02: digest DUNG (canonical that = "a"*2000, dung nhu DB da tinh luc fetch) + do
             # dai dung (2000) nhung p_truncated=False la LOI DUY NHAT dang test.
-            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
-                                audit_batch["batch_id"], conv_long["id"], msg_b["id"], str(uuid.uuid4()),
-                                b"\x00" * 2030, 2000, False, _canonical_digest("a" * 2500))
+            await _record_sample_signed(
+                conn, batch_id=audit_batch["batch_id"], conversation_id=conv_long["id"],
+                message_id=msg_b["id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 2030,
+                canonical_len=2000, truncated=False, canonical_digest=_canonical_digest("a" * 2500),
+                customer_ref=str(cust["id"]), conversation_ref=str(conv_long["id"]))
             check(False, "p_truncated=false khi DB biet noi dung goc bi cat -> phai RAISE (T5-02)")
         except asyncpg.PostgresError as e:
             check("khong khop trang thai cat da fetch" in str(e),
@@ -950,10 +1060,15 @@ async def main() -> int:
                             audit_batch["batch_id"], conv["id"], msg_c["id"])
         try:
             # T6-02: digest+do dai (10, "tin nhan c") DUNG het — chi ciphertext 3000 byte la SAI
-            # (vuot xa AEAD overhead hop ly cho 10 ky tu, toi da 10*4+30=70 byte).
-            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
-                                audit_batch["batch_id"], conv["id"], msg_c["id"], str(uuid.uuid4()),
-                                b"\x00" * 3000, 10, False, _canonical_digest("tin nhan c"))
+            # (vuot xa AEAD overhead hop ly cho 10 ky tu, toi da 10*4+30=70 byte). REV10 T8-02:
+            # transcript tu ky NHAT QUAN voi CHINH 3000-byte ciphertext nay (ciphertext_digest
+            # khop) nen lop T8-02 PASS, cho phep chay toi AEAD-overhead-sanity check that su dang
+            # test o day.
+            await _record_sample_signed(
+                conn, batch_id=audit_batch["batch_id"], conversation_id=conv["id"],
+                message_id=msg_c["id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 3000,
+                canonical_len=10, truncated=False, canonical_digest=_canonical_digest("tin nhan c"),
+                customer_ref=str(cust["id"]), conversation_ref=str(conv["id"]))
             check(False, "ciphertext 3000 byte cho canonical_text_len=10 -> phai RAISE (T5-02)")
         except asyncpg.PostgresError as e:
             check("khong hop ly" in str(e), "ciphertext qua dai so canonical_text_len -> RAISE dung (T5-02)")
@@ -1095,9 +1210,11 @@ async def main() -> int:
         fetched3c = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
                                         batch3c["batch_id"], conv3c["id"], msgs3c[0]["id"])
         check(fetched3c["status"] == "ok", f"setup: fetch batch3c thanh cong (thuc te {dict(fetched3c)})")
-        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
-                            batch3c["batch_id"], conv3c["id"], msgs3c[0]["id"], str(uuid.uuid4()),
-                            b"\x00" * 60, 13, False, _canonical_digest("tin t603 so 0"))
+        await _record_sample_signed(
+            conn, batch_id=batch3c["batch_id"], conversation_id=conv3c["id"],
+            message_id=msgs3c[0]["id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 60,
+            canonical_len=13, truncated=False, canonical_digest=_canonical_digest("tin t603 so 0"),
+            customer_ref=str(cust3c["id"]), conversation_ref=str(conv3c["id"]))
     for m in msgs3c[1:]:
         await conn.fetchrow("SELECT * FROM m4_stage0p_mark_candidate_outcome($1,$2,$3,'pending_deletion',$4)",
                             batch3c["batch_id"], conv3c["id"], m["id"], "customer_in_pending_cache")
@@ -1178,9 +1295,11 @@ async def main() -> int:
     async with conn.transaction():
         await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
                             batch4["batch_id"], rows4[0]["conversation_id"], rows4[0]["message_id"])
-        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
-                            batch4["batch_id"], rows4[0]["conversation_id"], rows4[0]["message_id"],
-                            str(uuid.uuid4()), b"\x00" * 40, 5, False, _canonical_digest("tin 0"))
+        await _record_sample_signed(
+            conn, batch_id=batch4["batch_id"], conversation_id=rows4[0]["conversation_id"],
+            message_id=rows4[0]["message_id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 40,
+            canonical_len=5, truncated=False, canonical_digest=_canonical_digest("tin 0"),
+            customer_ref=str(cust4["id"]), conversation_ref=str(rows4[0]["conversation_id"]))
     await conn.fetchrow("SELECT * FROM m4_stage0p_mark_candidate_outcome($1,$2,$3,'pending_deletion',$4)",
                         batch4["batch_id"], rows4[1]["conversation_id"], rows4[1]["message_id"],
                         "customer_in_pending_cache")
@@ -1704,9 +1823,11 @@ async def main() -> int:
             forged_same_len = "noi dung gia mao roi"
             check(len(forged_same_len) == len("noi dung goc that su"),
                   "setup: chuoi gia mao CUNG do dai voi noi dung that (20 ky tu)")
-            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
-                                audit_batch["batch_id"], conv_d["id"], msg_d["id"], str(uuid.uuid4()),
-                                b"\x00" * 55, 20, False, _canonical_digest(forged_same_len))
+            await _record_sample_signed(
+                conn, batch_id=audit_batch["batch_id"], conversation_id=conv_d["id"],
+                message_id=msg_d["id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 55,
+                canonical_len=20, truncated=False, canonical_digest=_canonical_digest(forged_same_len),
+                customer_ref=str(cust_d["id"]), conversation_ref=str(conv_d["id"]))
             check(False, "digest cua noi dung KHAC (cung do dai) -> phai RAISE (T6-02)")
         except asyncpg.PostgresError as e:
             check("canonical_text_digest khong khop" in str(e),
@@ -1716,6 +1837,247 @@ async def main() -> int:
     off_conn_d = await asyncpg.connect(DB_URL)
     await _set_capture(off_conn_d, enabled=False, staff_id=staff["id"], approval_ref="perm-test-t602d-off")
     await off_conn_d.close()
+
+    print("== T8-02: signed capture transcript — 8 kich ban adversarial CA yeu cau (Review #9 §4) ==")
+    cust_t8 = await admin.fetchrow("INSERT INTO customers (psid,name) VALUES ('perm-t802','x') RETURNING id")
+    conv_t8 = await admin.fetchrow(
+        "INSERT INTO conversations (customer_id, created_at) VALUES ($1, now()) RETURNING id", cust_t8["id"])
+    conv_t8b = await admin.fetchrow(
+        "INSERT INTO conversations (customer_id, created_at) VALUES ($1, now()) RETURNING id", cust_t8["id"])
+    batch_t8 = await admin.fetchrow(
+        "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES "
+        "(now()-interval '1 day', now(), 2, 2, 'perm-test-t802', ARRAY[$1,$2]::bigint[], "
+        "'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv_t8["id"], conv_t8b["id"])
+    batch_t8b_other = await admin.fetchrow(
+        "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES "
+        "(now()-interval '1 day', now(), 1, 1, 'perm-test-t802-other', ARRAY[$1]::bigint[], "
+        "'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv_t8["id"])
+    msg_t8 = await admin.fetchrow(
+        "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer','noi dung t802') RETURNING id",
+        conv_t8["id"])
+    msg_t8b = await admin.fetchrow(
+        "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer','noi dung t802 khac') "
+        "RETURNING id", conv_t8b["id"])
+    on_conn_t8 = await asyncpg.connect(DB_URL)
+    await _set_capture(on_conn_t8, enabled=True, staff_id=staff["id"], approval_ref="perm-test-approval-ok")
+    await on_conn_t8.close()
+    seed_conn_t8 = await asyncpg.connect(DB_URL)
+    await seed_conn_t8.execute("SET ROLE alpha3s_m4_sample_collector")
+    await seed_conn_t8.fetchrow("SELECT * FROM m4_stage0p_seed_capture_progress($1)", batch_t8["batch_id"])
+    await seed_conn_t8.execute("RESET ROLE")
+    await seed_conn_t8.close()
+    t8_digest = _canonical_digest("noi dung t802")
+    t8_ct = b"\x00" * 43
+
+    async def _t8_expect_raise(label, needle, *, batch_id=None, conversation_id=None, message_id=None,
+                               sample_id=None, canonical_len=20, truncated=False, canonical_digest=None,
+                               ciphertext=None, customer_ref=None, conversation_ref=None,
+                               transcript_override=None, signature_override=None, **sign_overrides):
+        conn_t8 = await asyncpg.connect(DB_URL)
+        await conn_t8.execute("SET ROLE alpha3s_m4_sample_collector")
+        actual_sample_id = sample_id or str(uuid.uuid4())
+        try:
+            async with conn_t8.transaction():
+                await conn_t8.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                                       batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+                txid = await conn_t8.fetchval("SELECT txid_current()")
+                real_ciphertext = ciphertext if ciphertext is not None else t8_ct
+                if transcript_override is not None:
+                    transcript_bytes, signature = transcript_override, signature_override
+                else:
+                    transcript_bytes, signature = _sign_test_transcript(
+                        batch_id=batch_id or batch_t8["batch_id"],
+                        conversation_id=conversation_id if conversation_id is not None else conv_t8["id"],
+                        message_id=message_id if message_id is not None else msg_t8["id"],
+                        sample_id=actual_sample_id, txid=txid,
+                        canonical_digest=canonical_digest or t8_digest, canonical_len=canonical_len,
+                        truncated=truncated, ciphertext=real_ciphertext,
+                        customer_ref=customer_ref or str(cust_t8["id"]),
+                        conversation_ref=conversation_ref or str(conv_t8["id"]), **sign_overrides)
+                    if signature_override is not None:
+                        signature = signature_override
+                await conn_t8.fetchrow(
+                    "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                    batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], actual_sample_id,
+                    real_ciphertext, canonical_len, truncated, canonical_digest or t8_digest,
+                    transcript_bytes, signature, sign_overrides.get("key_version", TRANSCRIPT_KEY_VERSION))
+            check(False, f"{label} -> phai RAISE (T8-02)")
+        except asyncpg.PostgresError as e:
+            check(needle in str(e), f"{label} -> RAISE dung: {needle!r} (T8-02)")
+        finally:
+            await conn_t8.execute("RESET ROLE")
+            await conn_t8.close()
+
+    # [a] Thieu signature/transcript hoan toan.
+    conn_missing = await asyncpg.connect(DB_URL)
+    await conn_missing.execute("SET ROLE alpha3s_m4_sample_collector")
+    try:
+        async with conn_missing.transaction():
+            await conn_missing.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                                        batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+            await conn_missing.fetchrow(
+                "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], str(uuid.uuid4()), t8_ct, 13,
+                False, t8_digest, None, None, None)
+        check(False, "thieu transcript/signature -> phai RAISE (T8-02)")
+    except asyncpg.PostgresError as e:
+        check("thieu transcript/signature/key_version" in str(e),
+              "thieu transcript/signature -> RAISE dung (T8-02)")
+    finally:
+        await conn_missing.execute("RESET ROLE")
+        await conn_missing.close()
+
+    # [b] Signature sai (transcript hop le nhung chu ky bi sua 1 byte).
+    conn_badsig = await asyncpg.connect(DB_URL)
+    await conn_badsig.execute("SET ROLE alpha3s_m4_sample_collector")
+    try:
+        async with conn_badsig.transaction():
+            await conn_badsig.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                                       batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+            txid_bad = await conn_badsig.fetchval("SELECT txid_current()")
+            sample_id_bad = str(uuid.uuid4())
+            transcript_bad, sig_bad = _sign_test_transcript(
+                batch_id=batch_t8["batch_id"], conversation_id=conv_t8["id"], message_id=msg_t8["id"],
+                sample_id=sample_id_bad, txid=txid_bad, canonical_digest=t8_digest, canonical_len=13,
+                truncated=False, ciphertext=t8_ct, customer_ref=str(cust_t8["id"]),
+                conversation_ref=str(conv_t8["id"]))
+            corrupted_sig = bytes([sig_bad[0] ^ 0xFF]) + sig_bad[1:]
+            await conn_badsig.fetchrow(
+                "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], sample_id_bad, t8_ct, 13, False,
+                t8_digest, transcript_bad, corrupted_sig, TRANSCRIPT_KEY_VERSION)
+        check(False, "chu ky sai (1 byte) -> phai RAISE (T8-02)")
+    except asyncpg.PostgresError as e:
+        check("chu ky transcript khong hop le" in str(e), "chu ky sai -> RAISE dung (T8-02)")
+    finally:
+        await conn_badsig.execute("RESET ROLE")
+        await conn_badsig.close()
+
+    # [c] ciphertext-substitution: digest plaintext THAT nhung ciphertext GUI LEN khac voi
+    # ciphertext transcript da ky (chinh loi CA neu — T7-02/T8-02 goc).
+    conn_sub = await asyncpg.connect(DB_URL)
+    await conn_sub.execute("SET ROLE alpha3s_m4_sample_collector")
+    try:
+        async with conn_sub.transaction():
+            await conn_sub.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                                    batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+            txid_sub = await conn_sub.fetchval("SELECT txid_current()")
+            sample_id_sub = str(uuid.uuid4())
+            transcript_sub, sig_sub = _sign_test_transcript(
+                batch_id=batch_t8["batch_id"], conversation_id=conv_t8["id"], message_id=msg_t8["id"],
+                sample_id=sample_id_sub, txid=txid_sub, canonical_digest=t8_digest, canonical_len=13,
+                truncated=False, ciphertext=t8_ct, customer_ref=str(cust_t8["id"]),
+                conversation_ref=str(conv_t8["id"]))
+            substituted_ct = b"\x11" * 43  # ciphertext KHAC, cung do dai — hop le AEAD-overhead-sanity
+            await conn_sub.fetchrow(
+                "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], sample_id_sub, substituted_ct, 13,
+                False, t8_digest, transcript_sub, sig_sub, TRANSCRIPT_KEY_VERSION)
+        check(False, "ciphertext-substitution (cung do dai, chu ky transcript cua ciphertext GOC) "
+              "-> phai RAISE (T8-02)")
+    except asyncpg.PostgresError as e:
+        check("ciphertext_digest" in str(e), "ciphertext-substitution -> RAISE dung (T8-02, chinh "
+              "khoang cach CA neu o T7-02/T8-02 goc)")
+    finally:
+        await conn_sub.execute("RESET ROLE")
+        await conn_sub.close()
+
+    # [d] Replay: dung LAI CHINH transcript+signature da THANH CONG truoc do cho 1 message MOI.
+    conn_replay_setup = await asyncpg.connect(DB_URL)
+    await conn_replay_setup.execute("SET ROLE alpha3s_m4_sample_collector")
+    replay_transcript = replay_sig = None
+    async with conn_replay_setup.transaction():
+        await conn_replay_setup.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                                         batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+        txid_r = await conn_replay_setup.fetchval("SELECT txid_current()")
+        replay_sample_id = str(uuid.uuid4())
+        replay_transcript, replay_sig = _sign_test_transcript(
+            batch_id=batch_t8["batch_id"], conversation_id=conv_t8["id"], message_id=msg_t8["id"],
+            sample_id=replay_sample_id, txid=txid_r, canonical_digest=t8_digest, canonical_len=13,
+            truncated=False, ciphertext=t8_ct, customer_ref=str(cust_t8["id"]),
+            conversation_ref=str(conv_t8["id"]))
+        replay_rec = await conn_replay_setup.fetchrow(
+            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], replay_sample_id, t8_ct, 13, False,
+            t8_digest, replay_transcript, replay_sig, TRANSCRIPT_KEY_VERSION)
+    check(replay_rec["captured_count"] >= 1, "setup: lan dau dung transcript nay THANH CONG")
+    await conn_replay_setup.execute("RESET ROLE")
+    await conn_replay_setup.close()
+    conn_replay = await asyncpg.connect(DB_URL)
+    await conn_replay.execute("SET ROLE alpha3s_m4_sample_collector")
+    try:
+        async with conn_replay.transaction():
+            await conn_replay.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                                       batch_t8["batch_id"], conv_t8b["id"], msg_t8b["id"])
+            # Dung LAI (replay) DUNG transcript+signature cua lan truoc cho message KHAC — txid
+            # cua transaction nay KHAC txid da ky, nen T8-02 phai tu choi.
+            await conn_replay.fetchrow(
+                "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                batch_t8["batch_id"], conv_t8b["id"], msg_t8b["id"], replay_sample_id, t8_ct, 13, False,
+                t8_digest, replay_transcript, replay_sig, TRANSCRIPT_KEY_VERSION)
+        check(False, "replay transcript+signature cu cho request MOI -> phai RAISE (T8-02)")
+    except asyncpg.PostgresError as e:
+        check("khong thuoc CHINH transaction nay" in str(e) or "khong khop identity" in str(e),
+              "replay transcript cu -> RAISE dung (T8-02, txid/identity khong khop)")
+    finally:
+        await conn_replay.execute("RESET ROLE")
+        await conn_replay.close()
+
+    # [e] Transcript da het han (expires_at trong qua khu).
+    past = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=120)
+    await _t8_expect_raise("transcript het han (expires_at qua khu)", "transcript da het han",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           issued_at=past, ttl_seconds=1)
+
+    # [f] key_version khong ton tai trong m4_stage0p_transcript_signing_keys.
+    await _t8_expect_raise("key_version khong ton tai", "key_version",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           key_version="khong-ton-tai-v99")
+
+    # [g] cross-message: transcript ky cho message_id KHAC voi tham so record_sample thuc su gui.
+    await _t8_expect_raise("cross-message (transcript ky cho message KHAC)", "khong khop identity",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           message_id=msg_t8b["id"])
+
+    # [h] cross-batch: transcript ky cho batch_id KHAC.
+    await _t8_expect_raise("cross-batch (transcript ky cho batch KHAC)", "khong khop identity",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           batch_id=batch_t8b_other["batch_id"])
+
+    # [i] cross-sample: transcript ky cho sample_id KHAC voi p_sample_id THAT SU gui.
+    conn_xs = await asyncpg.connect(DB_URL)
+    await conn_xs.execute("SET ROLE alpha3s_m4_sample_collector")
+    try:
+        async with conn_xs.transaction():
+            await conn_xs.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                                   batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+            txid_xs = await conn_xs.fetchval("SELECT txid_current()")
+            transcript_xs, sig_xs = _sign_test_transcript(
+                batch_id=batch_t8["batch_id"], conversation_id=conv_t8["id"], message_id=msg_t8["id"],
+                sample_id=str(uuid.uuid4()),  # sample_id A - KHAC voi p_sample_id se gui duoi day
+                txid=txid_xs, canonical_digest=t8_digest, canonical_len=13, truncated=False,
+                ciphertext=t8_ct, customer_ref=str(cust_t8["id"]), conversation_ref=str(conv_t8["id"]))
+            await conn_xs.fetchrow(
+                "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], str(uuid.uuid4()),  # sample_id B
+                t8_ct, 13, False, t8_digest, transcript_xs, sig_xs, TRANSCRIPT_KEY_VERSION)
+        check(False, "cross-sample (transcript ky cho sample_id KHAC) -> phai RAISE (T8-02)")
+    except asyncpg.PostgresError as e:
+        check("khong khop identity" in str(e), "cross-sample -> RAISE dung (T8-02)")
+    finally:
+        await conn_xs.execute("RESET ROLE")
+        await conn_xs.close()
+
+    # [j] Modified AAD: transcript ky voi aad_digest cua 1 customer_ref KHAC (gia mao boi).
+    await _t8_expect_raise("modified AAD (aad_digest cua customer_ref khac)", "aad_digest",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           customer_ref=str(cust_t8["id"] + 999999))
+
+    off_conn_t8 = await asyncpg.connect(DB_URL)
+    await _set_capture(off_conn_t8, enabled=False, staff_id=staff["id"], approval_ref="perm-test-t802-off")
+    await off_conn_t8.close()
 
     print("== T7-01: pin la consume-on-use — actor B MUON connection cua actor A (khong pin lai) bi tu choi ==")
     conn = await asyncpg.connect(DB_URL)

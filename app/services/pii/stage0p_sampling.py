@@ -48,7 +48,7 @@ import json
 import random
 import uuid
 
-from app.services.pii.crypto import encrypt_sample_value
+from app.services.pii.crypto import sign_capture
 from app.services.pii.normalize import nfc
 from app.services.pii.stage0p_eligibility import is_pending_deletion
 
@@ -207,19 +207,29 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
         sample_id = str(uuid.uuid4())
         customer_ref = str(customer_id)
         conversation_ref = str(conversation_id)
-        blob = encrypt_sample_value(text, customer_ref=customer_ref,
-                                    conversation_ref=conversation_ref, sample_id=sample_id)
-        # REV7 T6-02: digest SHA-256 tinh NGAY TRUOC luc encrypt, tren CHINH van ban `text` da
+        # REV7 T6-02: digest SHA-256 tinh NGAY TRUOC luc encrypt, tren CHINH van ban `text` se
         # encrypt — DB doi chieu voi fetched_canonical_digest da tinh luc fetch (tren cung 1 thu tu
-        # nfc()+truncate()) de chan ciphertext-thay-the/canonical-length-khai-sai cung do dai.
+        # nfc()+truncate()) de chan canonical-length-khai-sai.
         canonical_digest = hashlib.sha256(text.encode("utf-8")).digest()
+        # REV10 T8-02 (CA Review #9 §4, Huong 3): txid_current() la "one-time capability nonce/
+        # transaction identity" dua vao transcript — CUNG gia tri fetch_message_content da dung
+        # noi bo (cung 1 transaction Python dang mo), record_sample doi chieu lai luc verify.
+        txid = await collector_conn.fetchval("SELECT txid_current()")
         # REV4 T3-01: khong con truyen customer_ref/conversation_ref/retention_days/
         # normalization_version — ham DB tu derive/doc lai (xem docstring module). Capability
         # token da duoc dat boi fetch_message_content o tren, trong CUNG transaction nay.
+        # REV10 T8-02: sign_capture() la boundary DUY NHAT lam ca encrypt LAN ky transcript —
+        # KHONG con goi encrypt_sample_value() rieng le (xem crypto.py docstring).
+        blob, transcript_bytes, signature, key_version = sign_capture(
+            text, batch_id=batch_id, conversation_id=conversation_id, message_id=message_id,
+            sample_id=sample_id, customer_ref=customer_ref, conversation_ref=conversation_ref,
+            canonical_digest=canonical_digest, canonical_len=len(text), truncated=was_truncated,
+            txid=txid, purpose_code=PURPOSE_CODE)
         await collector_conn.fetchrow(
-            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
+            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             batch_id, conversation_id, message_id, sample_id, blob, len(text), was_truncated,
-            canonical_digest, timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+            canonical_digest, transcript_bytes, signature, key_version,
+            timeout=DB_STATEMENT_TIMEOUT_SECONDS,
         )
         return {"status": "ok", "truncated": was_truncated}
 

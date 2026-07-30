@@ -53,6 +53,7 @@ import asyncpg  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.services.pii import stage0p_sampling as s  # noqa: E402
+from app.services.pii.crypto import TRANSCRIPT_KEY_VERSION  # noqa: E402
 from app.services.pii.stage0p_control import (  # noqa: E402
     pin_actor,
     read_capture_enabled,
@@ -109,9 +110,17 @@ async def _grant_approval(admin, *, approval_ref: str, staff_id: int, now: datet
 
 async def main() -> int:
     settings.m4_sample_key_b64 = base64.b64encode(os.urandom(32)).decode()
+    transcript_key = os.urandom(32)
+    settings.m4_transcript_hmac_key_b64 = base64.b64encode(transcript_key).decode()
     real_redis_url = settings.redis_url
 
     admin = await asyncpg.connect(DB_URL)
+    # REV10 T8-02: provision ban sao khoa HMAC ky transcript de DB verifier doi chieu duoc
+    # (SELECT chi GRANT cho alpha3s_m4_definer - xem migration 039 §3b2).
+    await admin.execute(
+        "INSERT INTO m4_stage0p_transcript_signing_keys (key_version, hmac_key) VALUES ($1, $2) "
+        "ON CONFLICT (key_version) DO UPDATE SET hmac_key = EXCLUDED.hmac_key, retired_at = NULL",
+        TRANSCRIPT_KEY_VERSION, transcript_key)
     await admin.execute("DELETE FROM m4_shadow_review_samples")
     await admin.execute("DELETE FROM m4_stage0p_capture_progress")
     await admin.execute("DELETE FROM m4_selection_batches")

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""I-B M4 Stage 0P — evidence: pool integration THAT cho pinned-actor lifecycle (F-M4-0P-T8-01).
+"""I-B M4 Stage 0P — evidence: pool integration THAT cho pinned-actor lifecycle (F-M4-0P-T8-01,
+REV10 F-M4-0P-T9-01/T9-02).
 
 Chay:
   docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@alpha3s-m4-db:5432/alpha3s \
@@ -29,6 +30,27 @@ checkout/checkin lien tiep (khong overlap), dung de chung minh:
       tiep, MO PHONG chinh loi CA neu trong Review #8): pin roi release ma KHONG unpin -> actor B
       checkout SAU DO (cung connection) KE THUA duoc pin cu — chung minh khoang cach la THAT va
       wrapper (khong phai TTL/thoi gian ngan cua test) la thu dong no lai.
+
+CA Technical Re-review #9 (F-M4-0P-T9-01, P1): thiet ke REV9 co the release() connection ve pool
+TRUOC KHI cleanup that su xong neu outer task nhan 1 lan cancel THEM trong luc dang cho
+`asyncio.shield()`. Sua REV10: `__aexit__` tao 1 Task cleanup tuong minh, LAP LAI shield cho toi
+khi task do THAT SU `done()`, co deadline backstop (`terminate()` + discard neu qua han). Kich ban
+moi:
+  [7] Cleanup THAT SU bi block (row lock tu 1 session KHAC tren CHINH row actor_session dang
+      unpin) + `cancel()` LAP LAI NHIEU LAN trong luc do -> connection KHONG duoc release som,
+      actor B (task rieng dang cho `pool.acquire()`) khong nhan duoc connection cho toi khi lock
+      duoc nha va cleanup THAT SU hoan tat.
+  [8] Cleanup THAT BAI (connection bi `pg_terminate_backend()` tu ben ngoai giua chung, mo phong
+      network partition/DB restart) -> discard (KHONG tra ve pool 1 connection co the o trang
+      thai khong xac dinh), pool tu tao connection MOI cho lan acquire tiep theo, fail closed.
+
+CA Technical Re-review #9 (F-M4-0P-T9-02, P1): `business_role` REV9 la 1 `str` bat ky, noi suy
+truc tiep vao `SET ROLE {business_role}` — khong allowlist, khong quote identifier. Sua REV10:
+`business_role` PHAI la 1 thanh vien `Stage0PBusinessRole` (enum, CHI 4 role THAT SU goi
+`require_pinned_actor()`). Kich ban moi:
+  [9] `business_role` truyen 1 chuoi (khong phai enum, kie ca chuoi dang SQL-injection) -> phai
+      `TypeError` NGAY tai `pinned_actor_session()`, TRUOC khi `pool.acquire()`/bat ky SQL nao
+      duoc gui.
 """
 
 import asyncio
@@ -47,6 +69,7 @@ from app.services.pii.stage0p_control import (  # noqa: E402
     set_capture_enabled,
 )
 from app.services.pii.stage0p_pool import (  # noqa: E402
+    Stage0PBusinessRole,
     create_stage0p_pool,
     pinned_actor_session,
 )
@@ -113,7 +136,7 @@ async def main() -> int:
 
     print("== [1] Happy path: pin + 1 hanh dong nghiep vu THANH CONG qua pinned_actor_session ==")
     async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
-                                    business_role=BUSINESS_ROLE) as conn:
+                                    business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
         pid_1 = await conn.fetchval("SELECT pg_backend_pid()")
         before = await set_capture_enabled(conn, enabled=False, approval_ref=None)
         check(before is False, "hanh dong nghiep vu qua wrapper thanh cong (set_capture OFF)")
@@ -123,7 +146,7 @@ async def main() -> int:
 
     print("== [2] Abandoned pin: pin THANH CONG nhung KHONG lam hanh dong nghiep vu nao ==")
     async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
-                                    business_role=BUSINESS_ROLE) as conn:
+                                    business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
         pid_2 = await conn.fetchval("SELECT pg_backend_pid()")
         # CO Y KHONG goi hanh dong nghiep vu nao - mo phong request bi bo do giua chung.
     owner_after_abandon = await _actor_session_owner(admin, pid_2)
@@ -131,7 +154,7 @@ async def main() -> int:
           "sau khi thoat wrapper (KHONG hanh dong nao) -> pin van bi XOA (T8-01 cleanup-on-release, "
           "khac voi T7-01 chi xoa khi THANH CONG)")
     async with pinned_actor_session(pool, staff_id=staff_b["id"], pin_secret=PIN_SECRET_B,
-                                    business_role=BUSINESS_ROLE) as conn_b:
+                                    business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn_b:
         pid_2b = await conn_b.fetchval("SELECT pg_backend_pid()")
         check(pid_2b == pid_2, "pool size=1 -> CUNG 1 connection vat ly duoc tai su dung (khong "
               "phai 2 connection khac nhau tinh co cung ket qua)")
@@ -145,7 +168,7 @@ async def main() -> int:
     pid_3 = None
     try:
         async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
-                                        business_role=BUSINESS_ROLE) as conn:
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
             pid_3 = await conn.fetchval("SELECT pg_backend_pid()")
             raise RuntimeError("mo phong loi nghiep vu TRUOC khi goi ham nao")
     except RuntimeError:
@@ -156,7 +179,7 @@ async def main() -> int:
     check(owner_after_exc is None,
           "sau exception (TRUOC hanh dong nghiep vu) -> cleanup van UNPIN (finally chay du loi)")
     async with pinned_actor_session(pool, staff_id=staff_b["id"], pin_secret=PIN_SECRET_B,
-                                    business_role=BUSINESS_ROLE) as conn_b:
+                                    business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn_b:
         pid_3b = await conn_b.fetchval("SELECT pg_backend_pid()")
         check(pid_3b == pid_3, "CUNG connection vat ly duoc tai su dung sau exception")
         owner_b3 = await _actor_session_owner(admin, pid_3b)
@@ -169,7 +192,7 @@ async def main() -> int:
     async def _long_running_actor_a():
         nonlocal pid_4
         async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
-                                        business_role=BUSINESS_ROLE) as conn:
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
             pid_4 = await conn.fetchval("SELECT pg_backend_pid()")
             entered.set()
             await asyncio.sleep(30)  # mo phong hanh dong nghiep vu dang "chay" khi bi cancel
@@ -186,7 +209,7 @@ async def main() -> int:
     check(owner_after_cancel is None,
           "sau khi task bi cancel() giua chung -> cleanup (asyncio.shield) van UNPIN thanh cong")
     async with pinned_actor_session(pool, staff_id=staff_b["id"], pin_secret=PIN_SECRET_B,
-                                    business_role=BUSINESS_ROLE) as conn_b:
+                                    business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn_b:
         pid_4b = await conn_b.fetchval("SELECT pg_backend_pid()")
         check(pid_4b == pid_4, "CUNG connection vat ly duoc tai su dung sau cancellation")
         owner_b4 = await _actor_session_owner(admin, pid_4b)
@@ -198,7 +221,7 @@ async def main() -> int:
         staff_cycle = staff_a if i % 2 == 0 else staff_b
         secret_cycle = PIN_SECRET_A if i % 2 == 0 else PIN_SECRET_B
         async with pinned_actor_session(pool, staff_id=staff_cycle["id"], pin_secret=secret_cycle,
-                                        business_role=BUSINESS_ROLE) as conn:
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
             pid_cycle = await conn.fetchval("SELECT pg_backend_pid()")
             owner_cycle = await _actor_session_owner(admin, pid_cycle)
             if owner_cycle != staff_cycle["id"]:
@@ -287,6 +310,134 @@ async def main() -> int:
     # doc lap voi viec GUC co bi 1 tang pool nao do tu reset hay khong (khac voi doi chung [6a]/
     # [6b] o tren, von CO Y bypass wrapper de do lech giua "chi dua vao GUC reset cua asyncpg" va
     # "wrapper tu xoa row"). Khong can lap lai rieng cho kich ban GUC-khong-bi-reset o day.
+
+    print("== [7] T9-01: cleanup THAT SU bi block (row lock session khac) + cancel() LAP LAI -> "
+          "connection KHONG duoc release som, khong ai ke thua ==")
+    pid_7 = None
+    entered_7 = asyncio.Event()
+    lock_held_7 = asyncio.Event()
+
+    async def _actor_a_abandon_7():
+        nonlocal pid_7
+        async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
+            pid_7 = await conn.fetchval("SELECT pg_backend_pid()")
+            entered_7.set()
+            await lock_held_7.wait()
+            # thoat block ngay sau day -> __aexit__/cleanup chay, luc nay lock DA duoc giu boi
+            # blocker_conn (xem duoi) nen unpin_actor() se BLOCK THAT SU tren DELETE.
+
+    task7 = asyncio.create_task(_actor_a_abandon_7())
+    await entered_7.wait()
+
+    blocker_conn = await asyncpg.connect(DB_URL)
+    blocker_tx = blocker_conn.transaction()
+    await blocker_tx.start()
+    await blocker_conn.fetchrow(
+        "SELECT * FROM m4_stage0p_actor_session WHERE backend_pid=$1 FOR UPDATE", pid_7)
+    lock_held_7.set()
+    await asyncio.sleep(0.1)  # cho task7 chac chan da vao __aexit__ va block that su tren DELETE
+
+    async def _actor_b_7():
+        async with pinned_actor_session(pool, staff_id=staff_b["id"], pin_secret=PIN_SECRET_B,
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn_b:
+            pid_inside = await conn_b.fetchval("SELECT pg_backend_pid()")
+            # Doc owner NGAY TRONG block (truoc khi wrapper tu unpin luc thoat) — doc SAU khi da
+            # thoat se luon thay None (da bi cleanup cua CHINH B xoa), khong phan anh dung trang
+            # thai tai thoi diem B THAT SU dang giu pin.
+            owner_inside = await _actor_session_owner(admin, pid_inside)
+            return pid_inside, owner_inside
+
+    task_b7 = asyncio.create_task(_actor_b_7())
+
+    # Cancel task7 NHIEU LAN trong luc cleanup dang THAT SU block (row lock) - T9-01 doi hoi dieu
+    # nay KHONG duoc lam release() chay som du bi cancel bao nhieu lan.
+    for _ in range(5):
+        await asyncio.sleep(0.05)
+        task7.cancel()
+
+    await asyncio.sleep(0.2)
+    check(not task_b7.done(),
+          "T9-01: sau nhieu lan cancel() TRONG LUC cleanup dang block that su (row lock) -> "
+          "connection VAN CHUA duoc release, actor B (task rieng doi pool.acquire()) VAN dang "
+          "cho, KHONG ke thua connection som")
+
+    await blocker_tx.rollback()
+    await blocker_conn.close()
+
+    # Ghi chu quan trong: CA HAI lan cancel() o tren deu roi VAO trong `__aexit__` (than block
+    # `async with` da ket thuc BINH THUONG truoc do, tu `lock_held_7.wait()` toi het block chi
+    # mat vai micro-giay, som hon lan cancel() dau tien 50ms) — day CHINH LA kich ban T9-01 dang
+    # bao ve: cleanup dang chay PHAI khong bi ngat boi cancel() lien tuc. Vi vay task7 hoan tat
+    # BINH THUONG (khong CancelledError) — hanh dong THAT (pin+xoa pin xong) da xong, chi
+    # bookkeeping cleanup noi bo bi tam hoan boi lock, khong phai 1 loi/callback bi mat.
+    task7_result = await task7
+    check(task7_result is None, "task7 hoan tat BINH THUONG sau khi cleanup THAT SU xong (khong "
+          "CancelledError) - cac lan cancel() lien tuc chi nham vao cleanup dang duoc BAO VE "
+          "(T9-01), khong nham vao than `async with` (da ket thuc truoc do)")
+
+    pid_7b, owner_7b = await task_b7
+    check(pid_7b == pid_7, "sau khi lock duoc nha va cleanup THAT SU hoan tat -> actor B moi nhan "
+          "duoc CUNG connection vat ly (khong som hon)")
+    check(owner_7b == staff_b["id"], "actor B la CHINH B sau khi cleanup that su hoan tat (T9-01)")
+
+    print("== [8] T9-01: cleanup THAT BAI (connection bi terminate tu ben ngoai giua chung) -> "
+          "discard, KHONG tra ve pool 1 connection khong xac dinh trang thai ==")
+    pid_8 = None
+    entered_8 = asyncio.Event()
+
+    async def _actor_a_die_8():
+        nonlocal pid_8
+        async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
+            pid_8 = await conn.fetchval("SELECT pg_backend_pid()")
+            entered_8.set()
+
+    task8 = asyncio.create_task(_actor_a_die_8())
+    await entered_8.wait()
+    # admin la superuser - pg_terminate_backend() duoc phep tren BAT KY backend nao, mo phong
+    # network partition/DB restart giua chung (connection "chet" tu ben ngoai, khong phai do
+    # code nghiep vu tu dong/loi).
+    await admin.fetchval("SELECT pg_terminate_backend($1)", pid_8)
+    await asyncio.sleep(0.2)  # cho Postgres THAT SU dong backend do
+
+    try:
+        await task8
+    except Exception:  # noqa: BLE001 - khong quan tam exception type chinh xac, chi can no ket thuc
+        pass
+
+    async with pinned_actor_session(pool, staff_id=staff_b["id"], pin_secret=PIN_SECRET_B,
+                                    business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn_b:
+        pid_8b = await conn_b.fetchval("SELECT pg_backend_pid()")
+        check(pid_8b != pid_8, "sau khi connection cu 'chet' giua chung (cleanup that bai) -> pool "
+              "tu tao connection MOI (backend_pid khac), khong co gang tai su dung connection da "
+              "chet (T9-01, discard-on-cleanup-failure)")
+        ok8 = await set_capture_enabled(conn_b, enabled=False, approval_ref=None)
+        check(ok8 is False, "actor B tren connection MOI hoat dong binh thuong sau su co")
+
+    print("== [9] T9-02: business_role phai la Stage0PBusinessRole - tu choi TRUOC khi gui SQL ==")
+    try:
+        async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
+                                        business_role="alpha3s_m4_control_plane"):
+            check(False, "business_role dang str (khong phai enum) -> phai TypeError NGAY, khong "
+                  "duoc vao toi ham nghiep vu")
+    except TypeError as e:
+        check("Stage0PBusinessRole" in str(e),
+              "business_role sai kieu -> TypeError dung, tu choi TRUOC khi gui SQL (T9-02)")
+
+    try:
+        async with pinned_actor_session(
+                pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
+                business_role='alpha3s_m4_definer"; DROP TABLE staff_users; --'):
+            check(False, "chuoi dang SQL-injection -> phai TypeError NGAY (T9-02)")
+    except TypeError:
+        check(True, "chuoi dang SQL-injection cho business_role -> tu choi boi KIEU DU LIEU "
+              "TRUOC khi cham toi SQL nao (T9-02)")
+
+    check(not hasattr(Stage0PBusinessRole, "SAMPLE_COLLECTOR"),
+          "T9-02: Stage0PBusinessRole KHONG liet ke alpha3s_m4_sample_collector - ham nghiep vu "
+          "cua no (fetch_message_content/record_sample) khong goi require_pinned_actor(), dua no "
+          "vao allowlist se ngam dinh SAI rang no can pin (cross-role escalation surface)")
 
     await pool.close()
 
