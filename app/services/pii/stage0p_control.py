@@ -31,11 +31,19 @@ con EXECUTE 2 ham nay (ca hai tu xac thuc actor + audit BEN TRONG).
 REV 5 (CA Technical Review #4, T4-04): CA chi ro `p_actor_staff_id` REV4 la tham so caller TU
 KHAI — 1 nguoi giu chung 1 role DB co the mao danh BAT KY staff active nao. Sua: XOA HAN tham so
 actor khoi `set_capture_enabled()`/`record_capture_approval()`/`revoke_capture_approval()` — actor
-phai duoc "pin" vao session TRUOC (ham moi `pin_actor()`, goi tren connection da `SET ROLE
-alpha3s_m4_actor_binder` — role RIENG, tach biet HOAN TOAN moi role nghiep vu khac). Sau khi pin,
-GUC `alpha3s.m4_actor_staff_id` (session-scoped, KHONG phai LOCAL) sinh ton qua moi lan `SET ROLE`
-tiep theo tren CUNG connection — cac ham nghiep vu tu doc actor tu day + kiem QUYEN CU THE
-(`m4.stage0p.approve`/`operate`/`review`/`evaluate`) qua `m4_stage0p_require_pinned_actor()`.
+phai duoc "pin" vao session TRUOC qua ham moi `pin_actor()`.
+
+REV 6 (CA Technical Review #5, T5-01): CA chi ro `pin_actor()` REV5 VAN co lo hong CUNG LOP voi
+T4-01 — GUC session (`set_config`/`current_setting`) la session variable THUONG, BAT KY session
+nao cung tu ghi duoc bat ke co EXECUTE `pin_actor` hay khong (restrict EXECUTE tren `pin_actor`
+KHONG bao ve duoc GUC). Sua: `pin_actor()` gio ghi vao bang `m4_stage0p_actor_session`, khoa boi
+`pg_backend_pid()` (Postgres tu cap cho CHINH session goi, khong the gia mao trong CUNG session).
+Them: `pin_actor()` REV5 chi kiem staff active — CHUA kiem caller co DUNG LA staff do. Sua them:
+`pin_actor(staff_id, pin_secret)` doi hoi `pin_secret` khop voi gia tri rieng cua staff do trong
+bang `m4_stage0p_actor_credentials` (cap ngoai luong, KHONG qua `pin_actor`) — chan "binder tu
+chon tuy y bat ky staff active nao". Cac ham nghiep vu tu doc actor tu bang session (khoa boi
+`pg_backend_pid()` cua CHINH chung) + kiem QUYEN CU THE (`m4.stage0p.approve`/`operate`/`review`/
+`evaluate`) qua `m4_stage0p_require_pinned_actor()`.
 
 `read_capture_enabled()` van la 1 SELECT doc-tuoi don gian, dung cho hien thi trang thai /
 logging — KHONG dung ket qua nay lam co so quyet dinh doc plaintext (quyet dinh THAT nam ben
@@ -53,19 +61,24 @@ class ControlChangeRejectedError(Exception):
 
 
 class ActorNotPinnedError(Exception):
-    """m4_stage0p_pin_actor tu choi (staff_id khong ton tai/khong active), hoac 1 ham nghiep vu
-    tu choi vi session chua pin actor / actor khong co quyen cu the (T4-04)."""
+    """m4_stage0p_pin_actor tu choi (staff_id khong ton tai/khong active, hoac pin_secret khong
+    khop — T5-01), hoac 1 ham nghiep vu tu choi vi session chua pin actor / actor khong co quyen
+    cu the."""
 
 
-async def pin_actor(conn, *, staff_id: int) -> int:
-    """REV5 T4-04: pin 1 staff_id vao session TRUOC khi goi bat ky ham nghiep vu M4 nao con lai
+async def pin_actor(conn, *, staff_id: int, pin_secret: str) -> int:
+    """REV6 T5-01: pin 1 staff_id vao session TRUOC khi goi bat ky ham nghiep vu M4 nao con lai
     (set_capture/record_approval/revoke_approval/seal_labels/complete_evaluation — tat ca gio doc
     actor tu day, KHONG con nhan actor tu tham so). `conn` PHAI xac thuc bang role RIENG
     `alpha3s_m4_actor_binder` (tach biet moi role nghiep vu — dai dien lop da xac thuc staff
-    truoc do, vd HTTP session/JWT). Hieu luc session-scoped (`set_config(...,false)`) — sinh ton
-    qua moi lan `SET ROLE` tiep theo tren CUNG connection, cho toi khi connection dong."""
+    truoc do, vd HTTP session/JWT). `pin_secret` PHAI khop gia tri rieng cua staff do trong bang
+    `m4_stage0p_actor_credentials` (cap ngoai luong, xem Known Limitations trong Correction #5 —
+    provisioning that su la quyet dinh van hanh) — khong chi can biet staff_id la du. Hieu luc
+    khoa boi `pg_backend_pid()` cua CHINH connection nay — sinh ton qua moi lan `SET ROLE` tiep
+    theo TREN CUNG connection, cho toi khi connection dong (khac han GUC REV5 — bang nay KHONG
+    GRANT cho role m4 nao, khong the caller tu ghi truc tiep)."""
     try:
-        row = await conn.fetchrow("SELECT * FROM m4_stage0p_pin_actor($1)", staff_id)
+        row = await conn.fetchrow("SELECT * FROM m4_stage0p_pin_actor($1, $2)", staff_id, pin_secret)
     except Exception as e:  # noqa: BLE001
         _log("m4_actor_pin_rejected", staff_id=staff_id, error=str(e))
         raise ActorNotPinnedError(str(e)) from e

@@ -59,10 +59,21 @@ def check(cond: bool, label: str) -> None:
         _fail.append(label)
 
 
+PIN_SECRET = "sampling-test-pin-secret"
+
+
+async def _provision_pin_secret(admin, *, staff_id, pin_secret=PIN_SECRET) -> None:
+    """T5-01: cap pin_secret NGOAI LUONG (khong qua pin_actor) — mo phong buoc provisioning."""
+    await admin.execute(
+        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret, provisioned_by) "
+        "VALUES ($1,$2,$1) ON CONFLICT (staff_id) DO UPDATE SET pin_secret=$2", staff_id, pin_secret)
+
+
 async def _pin(conn, staff_id: int) -> None:
-    """T4-04: pin actor vao session (role alpha3s_m4_actor_binder), roi RESET ROLE."""
+    """T5-01: pin actor vao session (role alpha3s_m4_actor_binder), roi RESET ROLE — khoa boi
+    pg_backend_pid() cua CHINH connection nay."""
     await conn.execute("SET ROLE alpha3s_m4_actor_binder")
-    await pin_actor(conn, staff_id=staff_id)
+    await pin_actor(conn, staff_id=staff_id, pin_secret=PIN_SECRET)
     await conn.execute("RESET ROLE")
 
 
@@ -79,6 +90,15 @@ async def main() -> int:
     admin = await asyncpg.connect(DB_URL)
     await _reset(admin)
     await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref='CAP-G'")
+    await admin.execute(
+        "DELETE FROM m4_stage0p_staff_permissions WHERE staff_id IN "
+        "(SELECT id FROM staff_users WHERE username='m4-sampling-test-staff')")
+    await admin.execute(
+        "DELETE FROM m4_stage0p_actor_session WHERE staff_id IN "
+        "(SELECT id FROM staff_users WHERE username='m4-sampling-test-staff')")
+    await admin.execute(
+        "DELETE FROM m4_stage0p_actor_credentials WHERE staff_id IN "
+        "(SELECT id FROM staff_users WHERE username='m4-sampling-test-staff')")
     await admin.execute("DELETE FROM staff_users WHERE username='m4-sampling-test-staff'")
 
     print("== [A] Multi-byte UTF-8 truncation ==")
@@ -207,6 +227,7 @@ async def main() -> int:
         await admin.execute(
             "INSERT INTO m4_stage0p_staff_permissions (staff_id, permission, granted_by) "
             "VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", staff_g["id"], perm)
+    await _provision_pin_secret(admin, staff_id=staff_g["id"])
     approval_conn = await asyncpg.connect(DB_URL)
     await _pin(approval_conn, staff_g["id"])
     await approval_conn.execute("SET ROLE alpha3s_m4_approval_recorder")
@@ -256,6 +277,8 @@ async def main() -> int:
     await admin.execute("DELETE FROM audit_log WHERE actor_staff_id=$1", staff_g["id"])
     await admin.execute("DELETE FROM m4_stage0p_capture_approvals WHERE approval_ref='CAP-G'")
     await admin.execute("DELETE FROM m4_stage0p_staff_permissions WHERE staff_id=$1", staff_g["id"])
+    await admin.execute("DELETE FROM m4_stage0p_actor_session WHERE staff_id=$1", staff_g["id"])
+    await admin.execute("DELETE FROM m4_stage0p_actor_credentials WHERE staff_id=$1", staff_g["id"])
     await admin.execute("DELETE FROM staff_users WHERE id=$1", staff_g["id"])
 
     print("== [H] DSR retry/idempotency ==")

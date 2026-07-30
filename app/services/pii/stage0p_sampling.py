@@ -58,7 +58,9 @@ MAX_BYTES = 8000
 SELECTION_SEED_LABEL = "m4-stage0p-v1"
 RETENTION_DAYS = 45
 PURPOSE_CODE = "P12_PII_DETECTOR_EVAL"
-NORMALIZATION_VERSION = "nfc-v1"
+# REV6 T5-04: KHONG con hang so o day — nguon THAT DUY NHAT la bang DB
+# m4_stage0p_normalization_registry (tranh "hardcode kep" REV5 doi hoi con nguoi bump ca DB lan
+# Python). Xem `get_current_normalization_version()` duoi day.
 # Rieng voi LOCK_KEY 4013001 cua scripts/migrate.py va 4013003 (control fence, xem migration 039
 # §5) — 3 namespace doc lap, khong dung tranh nhau.
 ADVISORY_LOCK_KEY = 4013002
@@ -142,11 +144,22 @@ def select_sample(eligible: list[dict], cap: int = MAX_CONVERSATIONS) -> list[di
     return chosen
 
 
+async def get_current_normalization_version(conn) -> str:
+    """REV6 T5-04: doc normalization version hien hanh tu bang DB
+    `m4_stage0p_normalization_registry` — nguon THAT DUY NHAT (khong con hardcode song song o
+    Python). `conn` can SELECT tren bang nay (da GRANT cho collector/prediction_writer)."""
+    version = await conn.fetchval("SELECT current_version FROM m4_stage0p_normalization_registry WHERE id=1")
+    if not version:
+        raise RuntimeError("m4_stage0p_normalization_registry: chua thiet lap current_version")
+    return version
+
+
 async def lock_batch(conn, *, window_start, window_end, eligible_count,
                      selected: list[dict]) -> str:
     """Pha 1d: khoa batch. TU THOI DIEM NAY collector CHI biet batch_id, khong tu do truy van
     conversation_id (F-M4-0P-02A/02B)."""
     conversation_ids = [s["conversation_id"] for s in selected]
+    normalization_version = await get_current_normalization_version(conn)
     row = await conn.fetchrow(
         """
         INSERT INTO m4_selection_batches
@@ -156,7 +169,7 @@ async def lock_batch(conn, *, window_start, window_end, eligible_count,
         RETURNING batch_id
         """,
         window_start, window_end, eligible_count, len(conversation_ids), SELECTION_SEED_LABEL,
-        conversation_ids, PURPOSE_CODE, RETENTION_DAYS, NORMALIZATION_VERSION,
+        conversation_ids, PURPOSE_CODE, RETENTION_DAYS, normalization_version,
     )
     _log("m4_batch_locked", batch_id=str(row["batch_id"]), selected_count=len(conversation_ids))
     return row["batch_id"]

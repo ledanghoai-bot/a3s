@@ -25,10 +25,15 @@ trong allowlist DB-side.
 REV 5 (CA Technical Review #4, T4-02/T4-05): CA chi ro `p_current_normalization_version` REV4
 VAN la tham so caller tu khai — caller co the truyen gia tri gia de ep moi row thanh "mismatch".
 Sua: XOA HAN tham so nay — DB tu so sanh voi hang so HARDCODE trong than ham
-`m4_stage0p_write_predictions` (phai khop `NORMALIZATION_VERSION` duoi day, bump ca 2 noi khi
-doi). T4-05: nguong exclusion (>50% REV4, Dev tu chon, chua duyet) doi thanh doc tu bang
-`m4_stage0p_exclusion_gate` (2 dieu kien: ty le + so conversation toi thieu) — seed dung de xuat
-CA Review #4 (10%/200), CHUA co PO decision record chinh thuc.
+`m4_stage0p_write_predictions`. T4-05: nguong exclusion (>50% REV4, Dev tu chon, chua duyet) doi
+thanh doc tu bang `m4_stage0p_exclusion_gate` (2 dieu kien: ty le + so conversation toi thieu) —
+seed dung de xuat CA Review #4 (10%/200), CHUA co PO decision record chinh thuc.
+
+REV 6 (CA Technical Review #5, T5-04, P2): hang so HARDCODE REV5 van ton tai o CA 2 NOI (DB
+literal + Python `NORMALIZATION_VERSION`) — khong phai 1 nguon that su, doi hoi con nguoi "bump ca
+2 noi". Sua: XOA HAN module constant — pre-filter duoi day doc `current_version` tu bang DB
+`m4_stage0p_normalization_registry` (nguon THAT DUY NHAT, cung bang ma `m4_stage0p_write_
+predictions` doc — xem `stage0p_sampling.get_current_normalization_version()`).
 """
 
 import json
@@ -36,7 +41,7 @@ import json
 from app.services.pii.crypto import decrypt_sample_value
 from app.services.pii.detector import detect
 from app.services.pii.stage0p_evaluation import span_to_dict
-from app.services.pii.stage0p_sampling import NORMALIZATION_VERSION
+from app.services.pii.stage0p_sampling import get_current_normalization_version
 from app.services.pii.taxonomy import DETECTOR_VERSION
 
 
@@ -61,6 +66,8 @@ async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -
         raise PredictionNotAllowedError(f"batch {batch_id} chua sealed hoac khong ton tai")
     expected_hash = batch_row["labels_sealed_hash"]
 
+    current_normalization_version = await get_current_normalization_version(conn)
+
     predictions: list[dict] = []
     exclusions: list[dict] = []
     after_sample_id = None
@@ -77,7 +84,7 @@ async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -
             break
         after_sample_id = row["sample_id"]
 
-        if row["normalization_version"] != NORMALIZATION_VERSION:
+        if row["normalization_version"] != current_normalization_version:
             exclusions.append({"sample_id": str(row["sample_id"]), "reason": "normalization_version_mismatch"})
             _log("m4_prediction_skip_version_mismatch", sample_id=str(row["sample_id"]))
             continue

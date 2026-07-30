@@ -71,10 +71,21 @@ def check(cond: bool, label: str) -> None:
         _fail.append(label)
 
 
+PIN_SECRET = "eval-test-pin-secret"
+
+
+async def _provision_pin_secret(admin, *, staff_id, pin_secret=PIN_SECRET) -> None:
+    """T5-01: cap pin_secret NGOAI LUONG (khong qua pin_actor) — mo phong buoc provisioning."""
+    await admin.execute(
+        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret, provisioned_by) "
+        "VALUES ($1,$2,$1) ON CONFLICT (staff_id) DO UPDATE SET pin_secret=$2", staff_id, pin_secret)
+
+
 async def _pin(conn, staff_id: int) -> None:
-    """T4-04: pin actor vao session (role alpha3s_m4_actor_binder), roi RESET ROLE."""
+    """T5-01: pin actor vao session (role alpha3s_m4_actor_binder), roi RESET ROLE — khoa boi
+    pg_backend_pid() cua CHINH connection nay."""
     await conn.execute("SET ROLE alpha3s_m4_actor_binder")
-    await pin_actor(conn, staff_id=staff_id)
+    await pin_actor(conn, staff_id=staff_id, pin_secret=PIN_SECRET)
     await conn.execute("RESET ROLE")
 
 
@@ -104,6 +115,8 @@ async def main() -> int:
     settings.m4_slot_key_b64 = base64.b64encode(os.urandom(32)).decode()
     admin = await asyncpg.connect(DB_URL)
     await admin.execute("DELETE FROM m4_stage0p_staff_permissions")
+    await admin.execute("DELETE FROM m4_stage0p_actor_session")
+    await admin.execute("DELETE FROM m4_stage0p_actor_credentials")
     for tbl in ("m4_shadow_review_samples", "m4_stage0p_capture_progress", "m4_selection_batches",
                "audit_log", "messages", "orders", "conversations", "customers", "staff_users"):
         await admin.execute(f"DELETE FROM {tbl}")
@@ -115,6 +128,7 @@ async def main() -> int:
         await admin.execute(
             "INSERT INTO m4_stage0p_staff_permissions (staff_id, permission, granted_by) "
             "VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", staff["id"], perm)
+    await _provision_pin_secret(admin, staff_id=staff["id"])
 
     cust = await admin.fetchrow("INSERT INTO customers (psid,name) VALUES ('eval-t','x') RETURNING id")
     conv = await admin.fetchrow("INSERT INTO conversations (customer_id) VALUES ($1) RETURNING id", cust["id"])
@@ -310,6 +324,8 @@ async def main() -> int:
     await purge_conn.close()
 
     await admin.execute("DELETE FROM m4_stage0p_staff_permissions WHERE staff_id=$1", staff["id"])
+    await admin.execute("DELETE FROM m4_stage0p_actor_session WHERE staff_id=$1", staff["id"])
+    await admin.execute("DELETE FROM m4_stage0p_actor_credentials WHERE staff_id=$1", staff["id"])
     for tbl in ("m4_shadow_review_samples", "m4_stage0p_capture_progress", "m4_selection_batches",
                "audit_log", "messages", "orders", "conversations", "customers", "staff_users"):
         await admin.execute(f"DELETE FROM {tbl}")
