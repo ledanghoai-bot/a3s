@@ -63,10 +63,13 @@ PIN_SECRET = "sampling-test-pin-secret"
 
 
 async def _provision_pin_secret(admin, *, staff_id, pin_secret=PIN_SECRET) -> None:
-    """T5-01: cap pin_secret NGOAI LUONG (khong qua pin_actor) — mo phong buoc provisioning."""
+    """T5-01/T6-01: cap pin_secret NGOAI LUONG (khong qua pin_actor) — mo phong buoc
+    provisioning. pin_secret_hash — KHONG con luu plaintext (T6-01)."""
     await admin.execute(
-        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret, provisioned_by) "
-        "VALUES ($1,$2,$1) ON CONFLICT (staff_id) DO UPDATE SET pin_secret=$2", staff_id, pin_secret)
+        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret_hash, provisioned_by) "
+        "VALUES ($1, crypt($2, gen_salt('bf')), $1) "
+        "ON CONFLICT (staff_id) DO UPDATE SET pin_secret_hash=crypt($2, gen_salt('bf')), "
+        "failed_attempts=0, locked_until=NULL", staff_id, pin_secret)
 
 
 async def _pin(conn, staff_id: int) -> None:
@@ -128,8 +131,8 @@ async def main() -> int:
     conv = await admin.fetchrow("INSERT INTO conversations (customer_id) VALUES ($1) RETURNING id", cust["id"])
     batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start,window_end,eligible_count,selected_count,"
-        "algorithm_seed,locked_conversation_ids,purpose_code) VALUES (now()-interval '1 day',now(),"
-        "1,1,'capb',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL') RETURNING batch_id", conv["id"])
+        "algorithm_seed,locked_conversation_ids,purpose_code, normalization_version) VALUES (now()-interval '1 day',now(),"
+        "1,1,'capb',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv["id"])
     oversized_blob = b"\x00" * 9000  # co y vuot 8045
     try:
         await admin.execute(
@@ -162,8 +165,8 @@ async def main() -> int:
         conv["id"])
     batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start,window_end,eligible_count,selected_count,"
-        "algorithm_seed,locked_conversation_ids,purpose_code) VALUES (now()-interval '1 day',now(),"
-        "1,1,'capd',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL') RETURNING batch_id", conv["id"])
+        "algorithm_seed,locked_conversation_ids,purpose_code, normalization_version) VALUES (now()-interval '1 day',now(),"
+        "1,1,'capd',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv["id"])
     conn1 = await asyncpg.connect(DB_URL)
     await conn1.execute("SET ROLE alpha3s_m4_sample_collector")
     conn2 = await asyncpg.connect(DB_URL)
@@ -218,8 +221,8 @@ async def main() -> int:
             convG["id"], f"tin {i}")
     batchG = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start,window_end,eligible_count,selected_count,"
-        "algorithm_seed,locked_conversation_ids,purpose_code) VALUES (now()-interval '1 day',now(),"
-        "1,1,'capg',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL') RETURNING batch_id", convG["id"])
+        "algorithm_seed,locked_conversation_ids,purpose_code, normalization_version) VALUES (now()-interval '1 day',now(),"
+        "1,1,'capg',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", convG["id"])
     staff_g = await admin.fetchrow(
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ('m4-sampling-test-staff', 'x', 'x', true) RETURNING id")
@@ -293,8 +296,8 @@ async def main() -> int:
     convI = await admin.fetchrow("INSERT INTO conversations (customer_id) VALUES ($1) RETURNING id", custI["id"])
     batchI = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start,window_end,eligible_count,selected_count,"
-        "algorithm_seed,locked_conversation_ids,purpose_code) VALUES (now()-interval '1 day',now(),"
-        "1,1,'capi',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL') RETURNING batch_id", convI["id"])
+        "algorithm_seed,locked_conversation_ids,purpose_code, normalization_version) VALUES (now()-interval '1 day',now(),"
+        "1,1,'capi',ARRAY[$1]::bigint[],'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", convI["id"])
     from app.services.pii.crypto import encrypt_sample_value as enc
     blobI = enc("noi dung", customer_ref=str(custI["id"]), conversation_ref=str(convI["id"]), sample_id="i1")
     await admin.execute(
@@ -320,8 +323,8 @@ async def main() -> int:
     convB = await admin.fetchrow("INSERT INTO conversations (customer_id) VALUES ($1) RETURNING id", custB["id"])
     batchJ = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start,window_end,eligible_count,selected_count,"
-        "algorithm_seed,locked_conversation_ids,purpose_code) VALUES (now()-interval '1 day',now(),"
-        "2,2,'capj',ARRAY[$1,$2]::bigint[],'P12_PII_DETECTOR_EVAL') RETURNING batch_id",
+        "algorithm_seed,locked_conversation_ids,purpose_code, normalization_version) VALUES (now()-interval '1 day',now(),"
+        "2,2,'capj',ARRAY[$1,$2]::bigint[],'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id",
         convA["id"], convB["id"])
     blobA = enc("cua A", customer_ref=str(custA["id"]), conversation_ref=str(convA["id"]), sample_id="jA")
     blobB = enc("cua B", customer_ref=str(custB["id"]), conversation_ref=str(convB["id"]), sample_id="jB")

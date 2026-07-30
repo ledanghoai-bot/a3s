@@ -77,10 +77,13 @@ PIN_SECRET = "kill-test-pin-secret"
 
 
 async def _provision_pin_secret(admin, *, staff_id, pin_secret=PIN_SECRET) -> None:
-    """T5-01: cap pin_secret NGOAI LUONG (khong qua pin_actor) — mo phong buoc provisioning."""
+    """T5-01/T6-01: cap pin_secret NGOAI LUONG (khong qua pin_actor) — mo phong buoc
+    provisioning. pin_secret_hash — KHONG con luu plaintext (T6-01)."""
     await admin.execute(
-        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret, provisioned_by) "
-        "VALUES ($1,$2,$1) ON CONFLICT (staff_id) DO UPDATE SET pin_secret=$2", staff_id, pin_secret)
+        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret_hash, provisioned_by) "
+        "VALUES ($1, crypt($2, gen_salt('bf')), $1) "
+        "ON CONFLICT (staff_id) DO UPDATE SET pin_secret_hash=crypt($2, gen_salt('bf')), "
+        "failed_attempts=0, locked_until=NULL", staff_id, pin_secret)
 
 
 async def _pin(conn, staff_id: int) -> None:
@@ -268,8 +271,8 @@ async def main() -> int:
         conv_h["id"])
     hang_batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
-        "algorithm_seed, locked_conversation_ids, purpose_code) VALUES (now()-interval '1 day', now(), "
-        "1, 1, 'kill-test-hang', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL') RETURNING batch_id",
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES (now()-interval '1 day', now(), "
+        "1, 1, 'kill-test-hang', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id",
         conv_h["id"])
     await _set_capture(enabled=True, approval_ref="kill-test-approval")
 

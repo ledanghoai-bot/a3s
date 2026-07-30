@@ -1,5 +1,5 @@
--- Migration 039: M4 Stage 0P schema — Trusted PII Path production-shadow governance
--- (A3S-PHASE1B-M4-SPEC-001 v1.1.0 §6/§7; A3S-PHASE1B-M4-STAGE-0P-DESIGN-ACCEPTANCE-VI accepted
+-- Migration 039: M4 Stage 0P schema - Trusted PII Path production-shadow governance
+-- (A3S-PHASE1B-M4-SPEC-001 v1.1.0 Â§6/Â§7; A3S-PHASE1B-M4-STAGE-0P-DESIGN-ACCEPTANCE-VI accepted
 -- head d2a63c5, package v4.0.0). Theo dung 5 finding CLOSED AT DESIGN LEVEL (F-M4-0P-01..05).
 --
 -- REV 2 (Technical Correction #1, CA Technical Review #1 e10af661): sua 6 finding T1-01..T1-06.
@@ -11,17 +11,61 @@
 -- PHASE1B-M4-STAGE-0P-TECHNICAL-REVIEW-5-VI): sua 3 finding P1 + 1 P2 T5-01..T5-04. File nay
 -- CHINH SUA TRUC TIEP (khong tao migration 040) vi 039 chua tung apply vao baseline da accept/
 -- chia se.
+-- REV 7 (Correction #6, CA Technical Review #6 62b47b7, doc
+-- PHASE1B-M4-STAGE-0P-TECHNICAL-REVIEW-6-VI): sua 3 P1 + 1 P2 T6-01..T6-04 - CA khong chap nhan
+-- REV6 la du, chi ro 4 khoang cach cu the con lai:
+--   T6-01: actor_session REV6 chi khoa boi backend_pid DON - PID CO THE bi tai su dung sau khi
+--          backend cu chet (session moi vo tinh "ke thua" pin cu); khong co expiry/TTL; pin_secret
+--          luu PLAINTEXT. Sua: them cot session_nonce (UUID ngau nhien pin_actor dat DONG THOI
+--          vao row VA vao 1 GUC session-scoped cua chinh connection - backend MOI luon co GUC
+--          rong nen phat hien duoc PID-tai-su-dung MA KHONG can doc pg_stat_activity.backend_start,
+--          cot nay bi Postgres NULL hoa cho role khong dac quyen nhu alpha3s_m4_definer - phat
+--          hien qua evidence thuc te, xem bug tu phat hien); them expires_at (TTL 15 phut, khong
+--          con "pin vinh vien"); pin_secret chuyen sang pin_secret_hash (pgcrypto crypt()/gen_salt('bf'),
+--          KHONG CON PLAINTEXT); them rate-limit (failed_attempts/locked_until, khoa 15 phut sau 5
+--          lan sai); ham moi m4_stage0p_unpin_actor() (tu xoa session, "logout" tuong minh). Gioi
+--          han con lai (khai bao minh bach): Stage 0P CHUA co tang HTTP auth/identity-provider that
+--          - pin_secret van la 1 bespoke shared credential, khong phai binding tu authenticated
+--          application principal that su; day la quyet dinh kien truc can CA/PO xac nhan truoc
+--          activation (khong phai thu Dev tu dong o tang DB).
+--   T6-02: record_sample REV6 chi kiem do dai/truncation HEURISTIC - ciphertext KHAC nhung CUNG do
+--          dai van qua duoc. Sua: fetch_message_content TU TINH digest SHA-256 tren dung van ban
+--          canonical (NFC-normalize + truncate 2 buoc GIONG HET logic Python _truncate(nfc(...)))
+--          luc fetch, luu vao fetch_capability.fetched_canonical_digest; record_sample doi hoi
+--          p_canonical_text_digest (Python tinh NGAY TRUOC luc encrypt, tren chinh van ban da
+--          encrypt) khop CHINH XAC - chan duoc ciphertext-thay-the/canonical-length-khai-sai/
+--          truncated-gia (digest sai la sai ngay, khong con "trong khoang hop ly"). Gioi han con
+--          lai: DB van KHONG co khoa giai ma nen khong xac minh duoc ciphertext GIAI MA RA dung
+--          plaintext do - digest chi chung minh caller SO HUU dung canonical text goc, ket hop AAD
+--          (da co tu truoc) la rang buoc gan nhat co the dat duoc ma khong doi kien truc "plaintext
+--          khong bao gio roi Python process".
+--   T6-03: close_collection REV6 dung NGUONG TY LE (exclusion_gate, chua duoc PO duyet) de CHO PHEP
+--          batch co permanent_failed di tiep - CA noi ro khong duoc dung de xuat chua duyet theo
+--          huong "cho phep". Sua: BO HAN dung ty le cho permanent_failed - batch co BAT KY
+--          permanent_failed nao (>0) deu RAISE INSUFFICIENT_DATA VO DIEU KIEN cho toi khi co PO
+--          decision record that su (chinh sach danh dau ro capture_gate_policy = 'zero_tolerance_
+--          pending_po_decision_v1', luu tren batch + dua vao hash chain). Them: tu choi dong corpus
+--          RONG (0 candidate committed).
+--   T6-04 (P2): normalization_registry REV6 la singleton (1 row, UPDATE tai cho) - van la 1 nguon
+--          MUTABLE khong co lich su/immutable, va m4_selection_batches.normalization_version van
+--          con DEFAULT 'nfc-v1' (nguon hardcode thu 2 tiem an khi INSERT khong chi dinh cot). Sua:
+--          registry doi thanh bang APPEND-ONLY (PK=version, cot is_current - CHI is_current duoc
+--          UPDATE, moi truong khac bat bien qua trigger guard, khong bao gio DELETE); ham moi
+--          m4_stage0p_set_current_normalization_version(version, approval_ref) doi version hien
+--          hanh (doi hoi pinned actor + quyen m4.stage0p.approve, ghi audit). Bo DEFAULT tren
+--          m4_selection_batches.normalization_version + them FK toi registry(version) (khong con
+--          insert duoc version khong ton tai/khong biet).
 --
 -- REV6 tom tat 4 sua doi (T5-01..04):
---   T5-01: CA chi ro pin_actor REV5 (T4-04) VAN co lo hong CUNG LOP voi T4-01 — GUC
+--   T5-01: CA chi ro pin_actor REV5 (T4-04) VAN co lo hong CUNG LOP voi T4-01 - GUC
 --          alpha3s.m4_actor_staff_id la session variable THUONG, BAT KY session nao cung tu
 --          set_config duoc bat ke co EXECUTE pin_actor hay khong (restrict EXECUTE tren pin_actor
 --          khong bao ve duoc GUC). Sua: bang moi m4_stage0p_actor_session, khoa boi
---          pg_backend_pid() (Postgres tu cap cho CHINH session goi, khong the gia mao — khac han
+--          pg_backend_pid() (Postgres tu cap cho CHINH session goi, khong the gia mao - khac han
 --          GUC ma bat ky ai cung tu ghi duoc) thay vi set_config. Them: pin_actor REV4 chi kiem
---          staff active — CHUA kiem caller co DUNG LA staff do — sua them bang moi
+--          staff active - CHUA kiem caller co DUNG LA staff do - sua them bang moi
 --          m4_stage0p_actor_credentials (pin_secret rieng tung staff, cap ngoai luong qua
---          provisioning rieng) — pin_actor(staff_id, pin_secret) doi hoi secret khop.
+--          provisioning rieng) - pin_actor(staff_id, pin_secret) doi hoi secret khop.
 --   T5-02: capability row T4-01 chi chung minh THU TU goi (da fetch dung message), CHUA chung
 --          minh p_encrypted_message/p_canonical_text_len/p_truncated do caller truyen THAT SU
 --          xuat phat tu noi dung da fetch. Sua: capability row them fetched_char_len/
@@ -29,37 +73,37 @@
 --          canonical_text_len <= fetched_char_len, truncated=true bat buoc neu DB da biet noi
 --          dung goc vuot 2000 ky tu, VA sanity ciphertext byte-length so canonical_text_len (AEAD
 --          overhead co dinh 30 byte). Rang buoc ve NOI DUNG ciphertext (chong "substituted-
---          ciphertext" cung do dai) VAN CON MO — DB khong co khoa giai ma (thiet ke co y, xem
+--          ciphertext" cung do dai) VAN CON MO - DB khong co khoa giai ma (thiet ke co y, xem
 --          Known Limitations).
---   T5-03: permanent_failed la trang thai terminal nhung close_collection KHONG kiem ty le —
+--   T5-03: permanent_failed la trang thai terminal nhung close_collection KHONG kiem ty le -
 --          batch co the dong du nhieu candidate that bai capture that su. Sua: close_collection
 --          them dieu kien tu bang m4_stage0p_exclusion_gate (dung chung nguong voi T4-05,
 --          permanent_failed/tong candidate); luu capture_excluded_count/
 --          capture_permanent_failed_count tren batch row. mark_candidate_outcome them allowlist
 --          cho p_reason (4 gia tri THAT dang dung trong stage0p_sampling.py, khong con free text).
---   T5-04 (P2): normalization version van hardcode O CA 2 NOI (DB literal + Python constant) —
+--   T5-04 (P2): normalization version van hardcode O CA 2 NOI (DB literal + Python constant) -
 --          khong phai 1 nguon that su. Sua: bang moi m4_stage0p_normalization_registry (singleton)
---          — write_predictions doc tu day thay hardcode; Python (lock_batch + prediction pre-
+--          - write_predictions doc tu day thay hardcode; Python (lock_batch + prediction pre-
 --          filter) cung doc tu day thay module constant.
 --
--- ⚠️ EXPAND-ONLY, dev/test scope theo CA Design Acceptance §4: duoc phep tao migration/role/
+-- âš ï¸ EXPAND-ONLY, dev/test scope theo CA Design Acceptance Â§4: duoc phep tao migration/role/
 -- function tren branch M4 voi du lieu synthetic/test. KHONG duoc doc/copy production data,
 -- KHONG cap role/credential production, KHONG dat control row ON, KHONG bat capture that.
 --
 -- REV5 tom tat 5 sua doi (T4-01..05):
---   T4-01: capability "token" REV4 la custom GUC (set_config/current_setting) — CA chi ro day
+--   T4-01: capability "token" REV4 la custom GUC (set_config/current_setting) - CA chi ro day
 --          KHONG phai secret/privileged storage, caller co the tu set_config roi goi record_sample
 --          doc lap. Sua: bang moi m4_stage0p_fetch_capability (khong GRANT cho bat ky role m4 nao)
---          — fetch_message_content INSERT 1 row (batch,conversation,message,txid_current()) khi
+--          - fetch_message_content INSERT 1 row (batch,conversation,message,txid_current()) khi
 --          thanh cong; record_sample DELETE...RETURNING dung row do TRONG CUNG transaction (txid
---          khop) — day la bang chung DB-owned, khong the gia mao vi caller khong co INSERT/SELECT/
+--          khop) - day la bang chung DB-owned, khong the gia mao vi caller khong co INSERT/SELECT/
 --          DELETE truc tiep tren bang nay va txid_current() khong the tu chon.
---   T4-02: "current normalization version" van la tham so caller truyen — caller co the khai gia
---          de ep moi row thanh "mismatch". Sua: XOA p_current_normalization_version — DB tu so
+--   T4-02: "current normalization version" van la tham so caller truyen - caller co the khai gia
+--          de ep moi row thanh "mismatch". Sua: XOA p_current_normalization_version - DB tu so
 --          sanh voi hang so HARDCODE trong than ham (cung quy uoc voi MATCHING_RULE_VERSION/
---          AGGREGATION_VERSION da co trong complete_evaluation — phai khop
+--          AGGREGATION_VERSION da co trong complete_evaluation - phai khop
 --          app/services/pii/stage0p_sampling.py:NORMALIZATION_VERSION, bump ca 2 noi khi doi).
---   T4-03: collector bo qua candidate khi fence timeout (continue) — het danh sach roi dong
+--   T4-03: collector bo qua candidate khi fence timeout (continue) - het danh sach roi dong
 --          collection du candidate do CHUA BAO GIO dat trang thai terminal nao. Sua: bang moi
 --          m4_stage0p_capture_progress (1 row/candidate, seed 1 lan luc bat dau collector qua ham
 --          moi seed_capture_progress) voi state machine 5 gia tri (pending/committed/excluded/
@@ -67,15 +111,15 @@
 --          cursor). record_sample chuyen committed TRONG CUNG transaction voi INSERT sample. Ham
 --          moi mark_candidate_outcome chuyen retryable_failed/permanent_failed (fence timeout, toi
 --          da 3 lan thu) hoac excluded (pending-deletion). close_collection TU CHOI neu con row
---          pending/retryable_failed — chi dong khi MOI candidate da terminal.
---   T4-04: p_actor_staff_id la tham so caller tu khai — 1 nguoi giu chung 1 role DB co the mao
+--          pending/retryable_failed - chi dong khi MOI candidate da terminal.
+--   T4-04: p_actor_staff_id la tham so caller tu khai - 1 nguoi giu chung 1 role DB co the mao
 --          danh BAT KY staff active nao. Sua: bo p_actor_staff_id khoi ca 5 ham (set_capture/
---          record_approval/revoke_approval/seal_labels/complete_evaluation) — actor phai duoc
+--          record_approval/revoke_approval/seal_labels/complete_evaluation) - actor phai duoc
 --          "pin" TRUOC vao session qua ham moi m4_stage0p_pin_actor (session-scoped set_config,
---          EXECUTE chi cap cho role moi alpha3s_m4_actor_binder — tach biet moi role nghiep vu).
+--          EXECUTE chi cap cho role moi alpha3s_m4_actor_binder - tach biet moi role nghiep vu).
 --          Ham noi bo m4_stage0p_require_pinned_actor(permission) doc actor da pin, kiem active +
 --          kiem QUYEN CU THE trong bang moi m4_stage0p_staff_permissions
---          (m4.stage0p.approve/operate/review/evaluate — tach biet theo tung ham).
+--          (m4.stage0p.approve/operate/review/evaluate - tach biet theo tung ham).
 --   T4-05: nguong exclusion >50% REV4 la Dev tu chon, chua duoc duyet. Sua: bang moi
 --          m4_stage0p_exclusion_gate (singleton, seed dung DUNG de xuat CA Review #4:
 --          max_exclusion_rate=10%, min_non_excluded_conversations=200, gate_version danh dau ro
@@ -87,33 +131,33 @@
 -- + 4 bang MOI: m4_stage0p_fetch_capability (T4-01), m4_stage0p_capture_progress (T4-03),
 -- m4_stage0p_staff_permissions (T4-04), m4_stage0p_exclusion_gate (T4-05).
 --
--- 9 role least-privilege (REV5 them alpha3s_m4_actor_binder — T4-04): alpha3s_m4_sample_collector
+-- 9 role least-privilege (REV5 them alpha3s_m4_actor_binder - T4-04): alpha3s_m4_sample_collector
 -- (them EXECUTE seed_capture_progress/mark_candidate_outcome; peek doi chu ky 1 tham so),
 -- alpha3s_m4_sample_reviewer_api (seal_labels doi chu ky, khong con actor param),
 -- alpha3s_m4_sample_evaluator (complete_evaluation doi chu ky), alpha3s_m4_prediction_writer
 -- (write_predictions doi chu ky, bot 1 tham so), alpha3s_m4_sample_purge, alpha3s_m4_control_plane
 -- (set_capture doi chu ky), alpha3s_m4_pending_checker, alpha3s_m4_approval_recorder
--- (record_approval/revoke_approval doi chu ky), alpha3s_m4_actor_binder (MOI — CHI EXECUTE
+-- (record_approval/revoke_approval doi chu ky), alpha3s_m4_actor_binder (MOI - CHI EXECUTE
 -- pin_actor).
 --
 -- Ham SECURITY DEFINER (owner alpha3s_m4_definer, non-superuser), REV5:
---   m4_stage0p_peek_next_candidate       — doi chu ky: (batch_id) — doc tu capture_progress (T4-03)
---   m4_stage0p_fetch_message_content     — doi: INSERT capability row thay set_config (T4-01)
---   m4_stage0p_seed_capture_progress     — MOI: seed toan bo candidate 1 lan (T4-03)
---   m4_stage0p_mark_candidate_outcome    — MOI: chuyen retryable/permanent_failed/excluded (T4-03)
---   m4_stage0p_close_collection          — them: tu choi neu con row pending/retryable (T4-03)
---   m4_stage0p_record_sample             — doi: doi chieu capability row (DELETE), khong con GUC (T4-01)
---   m4_stage0p_pin_actor                 — MOI: pin actor vao session (T4-04)
---   m4_stage0p_require_pinned_actor      — MOI (noi bo): doc actor da pin + kiem quyen (T4-04)
---   m4_stage0p_set_capture               — doi chu ky: bo p_actor_staff_id (T4-04)
---   m4_stage0p_seal_labels                — doi chu ky: bo p_actor_staff_id (T4-04)
---   m4_stage0p_fetch_sealed_message       — khong doi
---   m4_stage0p_write_predictions          — doi: bo p_current_normalization_version (T4-02); gate
+--   m4_stage0p_peek_next_candidate       - doi chu ky: (batch_id) - doc tu capture_progress (T4-03)
+--   m4_stage0p_fetch_message_content     - doi: INSERT capability row thay set_config (T4-01)
+--   m4_stage0p_seed_capture_progress     - MOI: seed toan bo candidate 1 lan (T4-03)
+--   m4_stage0p_mark_candidate_outcome    - MOI: chuyen retryable/permanent_failed/excluded (T4-03)
+--   m4_stage0p_close_collection          - them: tu choi neu con row pending/retryable (T4-03)
+--   m4_stage0p_record_sample             - doi: doi chieu capability row (DELETE), khong con GUC (T4-01)
+--   m4_stage0p_pin_actor                 - MOI: pin actor vao session (T4-04)
+--   m4_stage0p_require_pinned_actor      - MOI (noi bo): doc actor da pin + kiem quyen (T4-04)
+--   m4_stage0p_set_capture               - doi chu ky: bo p_actor_staff_id (T4-04)
+--   m4_stage0p_seal_labels                - doi chu ky: bo p_actor_staff_id (T4-04)
+--   m4_stage0p_fetch_sealed_message       - khong doi
+--   m4_stage0p_write_predictions          - doi: bo p_current_normalization_version (T4-02); gate
 --                                            tu bang exclusion_gate thay hardcode 50% (T4-05)
---   m4_stage0p_complete_evaluation        — doi chu ky: bo p_actor_staff_id (T4-04)
---   m4_stage0p_record_approval            — doi chu ky: bo p_actor_staff_id (T4-04)
---   m4_stage0p_revoke_approval            — doi chu ky: bo p_actor_staff_id (T4-04)
---   m4_stage0p_block_label_after_seal     — trigger, khong doi
+--   m4_stage0p_complete_evaluation        - doi chu ky: bo p_actor_staff_id (T4-04)
+--   m4_stage0p_record_approval            - doi chu ky: bo p_actor_staff_id (T4-04)
+--   m4_stage0p_revoke_approval            - doi chu ky: bo p_actor_staff_id (T4-04)
+--   m4_stage0p_block_label_after_seal     - trigger, khong doi
 --
 -- Advisory lock key 4013003 (STAGE0P CONTROL FENCE) khong doi tu REV2/REV3/REV4.
 --
@@ -131,7 +175,7 @@ END $$;
 
 -- Bug tim thay REV6 (fresh-DB reset regression, khong phai T5 finding): "REVOKE ALL FROM PUBLIC"
 -- tren schema public (migration 024) khien KHONG role m4 nao (ke ca definer) co USAGE tren
--- schema public tren 1 DB that su sach — moi ham SECURITY DEFINER m4 khong the duoc RESOLVE boi
+-- schema public tren 1 DB that su sach - moi ham SECURITY DEFINER m4 khong the duoc RESOLVE boi
 -- caller (loi "function ... does not exist", khong phai loi quyen EXECUTE). Chua tung lo ra vi
 -- dev lap chua tung reset DB tu dau thuc su. Cap USAGE tuong minh o day (schema-level, khong
 -- thay the cho grant bang/ham rieng le da co).
@@ -140,7 +184,7 @@ GRANT USAGE ON SCHEMA public TO alpha3s_m4_definer;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ===========================================================================
--- 2. Bang m4_stage0p_control — kill switch DONG. Singleton row.
+-- 2. Bang m4_stage0p_control - kill switch DONG. Singleton row.
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_stage0p_control (
   id               SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -152,15 +196,15 @@ INSERT INTO m4_stage0p_control (id, capture_enabled) VALUES (1, FALSE)
   ON CONFLICT (id) DO NOTHING;
 
 COMMENT ON TABLE m4_stage0p_control IS
-  'M4 Stage 0P kill switch DONG — doc tuoi bang SELECT truoc MOI don vi ghi. Doi CHI qua ham m4_stage0p_set_capture (fence advisory lock 4013003). Nguon tham quyen ON/OFF that: audit_log qua ham nay.';
+  'M4 Stage 0P kill switch DONG - doc tuoi bang SELECT truoc MOI don vi ghi. Doi CHI qua ham m4_stage0p_set_capture (fence advisory lock 4013003). Nguon tham quyen ON/OFF that: audit_log qua ham nay.';
 
 REVOKE ALL ON m4_stage0p_control FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_control FROM alpha3s_app;
 
 -- ===========================================================================
--- 2b. Bang m4_stage0p_capture_approvals — approval record cho phep bat capture (T2-05).
---     Bo cot `status` (T3-05) — row nay BAT BIEN 1 lan ghi qua m4_stage0p_record_approval. Thu
---     hoi la 1 SU KIEN rieng — xem m4_stage0p_capture_approval_revocations duoi day.
+-- 2b. Bang m4_stage0p_capture_approvals - approval record cho phep bat capture (T2-05).
+--     Bo cot `status` (T3-05) - row nay BAT BIEN 1 lan ghi qua m4_stage0p_record_approval. Thu
+--     hoi la 1 SU KIEN rieng - xem m4_stage0p_capture_approval_revocations duoi day.
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_stage0p_capture_approvals (
   approval_ref      TEXT PRIMARY KEY,
@@ -181,7 +225,7 @@ REVOKE ALL ON m4_stage0p_capture_approvals FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_capture_approvals FROM alpha3s_app;
 
 -- ===========================================================================
--- 2c. Bang m4_stage0p_capture_approval_revocations — revocation event RIENG, tach biet approval
+-- 2c. Bang m4_stage0p_capture_approval_revocations - revocation event RIENG, tach biet approval
 --     record goc (immutable). append-only, 1 revocation/approval_ref (PK).
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_stage0p_capture_approval_revocations (
@@ -198,8 +242,8 @@ REVOKE ALL ON m4_stage0p_capture_approval_revocations FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_capture_approval_revocations FROM alpha3s_app;
 
 -- ===========================================================================
--- 2d. Bang m4_stage0p_staff_permissions — REV5 T4-04 (MOI): quyen CU THE tren tung staff, tach
---     biet theo hanh dong (chong 1 role DB dung chung mao danh BAT KY staff active nao — CA yeu
+-- 2d. Bang m4_stage0p_staff_permissions - REV5 T4-04 (MOI): quyen CU THE tren tung staff, tach
+--     biet theo hanh dong (chong 1 role DB dung chung mao danh BAT KY staff active nao - CA yeu
 --     cau ro "approval recorder va control operator phai la principals/permissions tach biet").
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_stage0p_staff_permissions (
@@ -212,15 +256,15 @@ CREATE TABLE IF NOT EXISTS m4_stage0p_staff_permissions (
 );
 
 COMMENT ON TABLE m4_stage0p_staff_permissions IS
-  'REV5 T4-04: quyen Stage 0P cu the theo staff — doi chieu boi m4_stage0p_require_pinned_actor SAU khi actor da pin (m4_stage0p_pin_actor). KHONG co role m4 nao duoc GRANT truc tiep tren bang nay (chi doc noi bo qua ham).';
+  'REV5 T4-04: quyen Stage 0P cu the theo staff - doi chieu boi m4_stage0p_require_pinned_actor SAU khi actor da pin (m4_stage0p_pin_actor). KHONG co role m4 nao duoc GRANT truc tiep tren bang nay (chi doc noi bo qua ham).';
 
 REVOKE ALL ON m4_stage0p_staff_permissions FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_staff_permissions FROM alpha3s_app;
 
 -- ===========================================================================
--- 2e. Bang m4_stage0p_exclusion_gate — REV5 T4-05 (MOI): nguong loai-tru CU THE, co the doi qua
+-- 2e. Bang m4_stage0p_exclusion_gate - REV5 T4-05 (MOI): nguong loai-tru CU THE, co the doi qua
 --     migration/quyet dinh moi (khong hardcode trong than ham). Seed DUNG de xuat CA Technical
---     Review #4 (F-M4-0P-T4-05) — CHUA co PO decision record chinh thuc, ap dung nhu technical
+--     Review #4 (F-M4-0P-T4-05) - CHUA co PO decision record chinh thuc, ap dung nhu technical
 --     default fail-closed cho Stage 0P dau tien.
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_stage0p_exclusion_gate (
@@ -234,69 +278,132 @@ CREATE TABLE IF NOT EXISTS m4_stage0p_exclusion_gate (
 INSERT INTO m4_stage0p_exclusion_gate
   (id, max_exclusion_rate, min_non_excluded_conversations, gate_version, note)
 VALUES (1, 0.10, 200, 'ca-review-4-proposed-v1',
-        'De xuat CA Technical Review #4 (F-M4-0P-T4-05) — CHUA co PO decision record chinh thuc; ap dung nhu technical default fail-closed cho Stage 0P dau tien, ra soat lai truoc activation')
+        'De xuat CA Technical Review #4 (F-M4-0P-T4-05) - CHUA co PO decision record chinh thuc; ap dung nhu technical default fail-closed cho Stage 0P dau tien, ra soat lai truoc activation')
 ON CONFLICT (id) DO NOTHING;
 
 COMMENT ON TABLE m4_stage0p_exclusion_gate IS
-  'REV5 T4-05: nguong exclusion CU THE (khong hardcode trong ham) — doi qua migration/quyet dinh PO/CA moi, khong qua tham so caller.';
+  'REV5 T4-05: nguong exclusion CU THE (khong hardcode trong ham) - doi qua migration/quyet dinh PO/CA moi, khong qua tham so caller.';
 
 REVOKE ALL ON m4_stage0p_exclusion_gate FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_exclusion_gate FROM alpha3s_app;
 
 -- ===========================================================================
--- 2f. Bang m4_stage0p_actor_credentials / m4_stage0p_actor_session — REV6 T5-01 (MOI).
+-- 2f. Bang m4_stage0p_actor_credentials / m4_stage0p_actor_session - REV6 T5-01 (MOI).
 --     actor_credentials: pin_secret RIENG tung staff (cap ngoai luong qua provisioning rieng,
---     KHONG qua pin_actor) — pin_actor doi hoi secret khop truoc khi pin, chan "binder tu chon
---     tuy y bat ky staff active nao". actor_session: khoa boi pg_backend_pid() — gia tri Postgres
+--     KHONG qua pin_actor) - pin_actor doi hoi secret khop truoc khi pin, chan "binder tu chon
+--     tuy y bat ky staff active nao". actor_session: khoa boi pg_backend_pid() - gia tri Postgres
 --     TU CAP cho CHINH session dang goi, KHONG the gia mao (khac han custom GUC REV5 ma BAT KY
 --     session nao cung tu set_config duoc bat ke co EXECUTE pin_actor hay khong). KHONG GRANT ca
---     2 bang nay cho role m4 nao — chi definer doc/ghi (chay ben trong ham).
+--     2 bang nay cho role m4 nao - chi definer doc/ghi (chay ben trong ham).
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_stage0p_actor_credentials (
-  staff_id        BIGINT PRIMARY KEY REFERENCES staff_users(id),
-  pin_secret      TEXT NOT NULL,
-  provisioned_by  BIGINT NOT NULL REFERENCES staff_users(id),
-  provisioned_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  staff_id         BIGINT PRIMARY KEY REFERENCES staff_users(id),
+  -- REV7 T6-01: HASH (pgcrypto crypt()/gen_salt('bf')) - KHONG CON PLAINTEXT (giong quy uoc
+  -- staff_users.password_hash da co san trong he thong).
+  pin_secret_hash  TEXT NOT NULL,
+  failed_attempts  INT NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
+  locked_until     TIMESTAMPTZ,
+  provisioned_by   BIGINT NOT NULL REFERENCES staff_users(id),
+  provisioned_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 COMMENT ON TABLE m4_stage0p_actor_credentials IS
-  'REV6 T5-01: pin_secret rieng tung staff — provisioning THAT (ai tao secret, phat cho staff bang kenh nao) la quyet dinh van hanh thuoc giai doan production-activation, ngoai pham vi Stage 0P dev/test. KHONG GRANT cho role m4 nao.';
+  'REV7 T6-01: pin_secret_hash (khong con plaintext) rieng tung staff - provisioning THAT (ai tao secret, phat cho staff bang kenh nao) la quyet dinh van hanh thuoc giai doan production-activation, ngoai pham vi Stage 0P dev/test. failed_attempts/locked_until: rate-limit chong brute-force. KHONG GRANT cho role m4 nao.';
 
 REVOKE ALL ON m4_stage0p_actor_credentials FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_actor_credentials FROM alpha3s_app;
 
 CREATE TABLE IF NOT EXISTS m4_stage0p_actor_session (
-  backend_pid  INT PRIMARY KEY,
-  staff_id     BIGINT NOT NULL REFERENCES staff_users(id),
-  pinned_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  backend_pid    INT PRIMARY KEY,
+  -- REV7 T6-01: UUID ngau nhien (gen_random_uuid()) sinh boi CHINH pin_actor, dat DONG THOI vao
+  -- 1) row nay VA 2) GUC session-scoped (set_config(...,false), KHONG phai LOCAL) cua CHINH
+  -- connection dang goi. Khac han GUC REV5 (T5-01) — nonce nay KHONG BAO GIO mang DANH TINH actor
+  -- (chi la 1 gia tri ngau nhien doi chung), va KHONG bao gio duoc tra ve cho caller/SELECT duoc
+  -- tu bang (khong GRANT cho role nao) nen khong the bi "doan" hay doc lai tu 1 session khac.
+  -- 1 backend MOI (du OS co the cap lai CHINH so PID cu cho 1 ket noi hoan toan moi sau khi
+  -- backend cu chet) LUON bat dau voi GUC tuy chinh RONG — session_nonce so khop that bai ngay,
+  -- phat hien duoc PID-reuse-sau-khi-chet MA KHONG can doc pg_stat_activity (cot nhay cam nhu
+  -- backend_start bi NULL hoa cho role khong dac quyen — xem bug tu phat hien trong Correction #6).
+  session_nonce  UUID NOT NULL,
+  staff_id       BIGINT NOT NULL REFERENCES staff_users(id),
+  pinned_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- REV7 T6-01: TTL bat buoc - khong con "pin vinh vien" (chong connection-pool tai su dung pin
+  -- cu cho 1 request/nguoi dung khac).
+  expires_at     TIMESTAMPTZ NOT NULL
 );
 
 COMMENT ON TABLE m4_stage0p_actor_session IS
-  'REV6 T5-01: actor da pin cho 1 session, khoa boi pg_backend_pid() (Postgres tu cap, khong the gia mao trong CUNG session — thay the custom GUC REV5). Luu y: PID co the bi tai su dung SAU KHI 1 backend chet (residual staleness risk ly thuyet) — xem Known Limitations. KHONG GRANT cho role m4 nao.';
+  'REV7 T6-01: actor da pin cho 1 session, khoa boi (backend_pid, session_nonce) - session_nonce la UUID ngau nhien dat dong thoi vao row VA vao 1 GUC session-scoped cua chinh connection do pin_actor, chi require_pinned_actor tren CHINH connection do moi doi chieu khop duoc (khong ai doc lai tu ben ngoai) - phat hien PID tai su dung sau khi backend cu chet (backend moi luon co GUC rong). expires_at bat buoc - pin tu dong het han. KHONG GRANT cho role m4 nao.';
 
 REVOKE ALL ON m4_stage0p_actor_session FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_actor_session FROM alpha3s_app;
 
 -- ===========================================================================
--- 2g. Bang m4_stage0p_normalization_registry — REV6 T5-04 (P2, MOI). Nguon THAT DUY NHAT cho
---     "normalization version hien hanh" — thay the hardcode kep (DB literal + Python constant
---     rieng, doi hoi con nguoi "bump ca 2 noi"). write_predictions VA Python (lock_batch, pre-
---     filter prediction writer) deu doc tu day.
+-- 2g. Bang m4_stage0p_normalization_registry - REV6 T5-04 (P2), REV7 T6-04: doi tu singleton
+--     MUTABLE (1 row, UPDATE tai cho - CA chi ro day van la 1 nguon hardcode "mem" khong co lich
+--     su/immutable) sang APPEND-ONLY (PK=version, cot is_current la DUY NHAT duoc phep UPDATE qua
+--     trigger guard, khong bao gio DELETE). write_predictions VA Python (lock_batch, pre-filter
+--     prediction writer) deu doc row co is_current=true. Doi version qua ham
+--     m4_stage0p_set_current_normalization_version (doi hoi pinned actor + quyen
+--     m4.stage0p.approve, ghi audit) - khong con UPDATE truc tiep.
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_stage0p_normalization_registry (
-  id               SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-  current_version  TEXT NOT NULL,
-  set_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+  version       TEXT PRIMARY KEY,
+  is_current    BOOLEAN NOT NULL DEFAULT FALSE,
+  -- ON DELETE SET NULL: day la cot audit-trail (ai duyet), khong phai bat bien nghiep vu — registry
+  -- entry (lich su version) van PHAI ton tai vinh vien (append-only) du staff duyet co bi xoa sau
+  -- do (vd offboard); khong nen de 1 FK audit chan viec xoa staff_users.
+  approved_by   BIGINT REFERENCES staff_users(id) ON DELETE SET NULL,
+  approval_ref  TEXT,
+  effective_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-INSERT INTO m4_stage0p_normalization_registry (id, current_version)
-VALUES (1, 'nfc-v1')
-ON CONFLICT (id) DO NOTHING;
+CREATE UNIQUE INDEX IF NOT EXISTS m4_normreg_one_current
+  ON m4_stage0p_normalization_registry ((is_current))
+  WHERE is_current;
+
+INSERT INTO m4_stage0p_normalization_registry (version, is_current, approved_by, approval_ref)
+VALUES ('nfc-v1', TRUE, NULL, NULL)
+ON CONFLICT (version) DO NOTHING;
 
 COMMENT ON TABLE m4_stage0p_normalization_registry IS
-  'REV6 T5-04: nguon THAT DUY NHAT cho normalization version hien hanh — doi qua migration moi, khong con hardcode song song o 2 noi.';
+  'REV7 T6-04: nguon THAT DUY NHAT cho normalization version hien hanh, APPEND-ONLY (lich su bat bien qua trigger guard) - doi qua m4_stage0p_set_current_normalization_version, khong con UPDATE truc tiep hay hardcode song song o 2 noi. approved_by/approval_ref NULL cho row seed migration (chua co quyet dinh PO/CA chinh thuc - xem note bang exclusion_gate).';
 
 REVOKE ALL ON m4_stage0p_normalization_registry FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_normalization_registry FROM alpha3s_app;
+
+CREATE OR REPLACE FUNCTION m4_stage0p_normalization_registry_guard()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'm4_stage0p_normalization_registry: khong duoc XOA entry (append-only, T6-04)';
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    -- approved_by duoc phep chuyen ve NULL (CHI ve NULL) - day la duong ON DELETE SET NULL cua FK
+    -- toi staff_users (audit-trail, khong phai bat bien nghiep vu) khi staff bi xoa; MOI thay doi
+    -- khac tren approved_by (vd doi sang 1 staff_id khac) van bi chan.
+    IF NEW.version IS DISTINCT FROM OLD.version
+       OR (NEW.approved_by IS DISTINCT FROM OLD.approved_by AND NEW.approved_by IS NOT NULL)
+       OR NEW.approval_ref IS DISTINCT FROM OLD.approval_ref
+       OR NEW.effective_at IS DISTINCT FROM OLD.effective_at
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+      RAISE EXCEPTION 'm4_stage0p_normalization_registry: chi duoc doi is_current (hoac approved_by ve NULL qua ON DELETE SET NULL) sau khi tao - moi truong khac bat bien (T6-04)';
+    END IF;
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+ALTER FUNCTION m4_stage0p_normalization_registry_guard() OWNER TO alpha3s_m4_definer;
+
+DROP TRIGGER IF EXISTS m4_normalization_registry_guard ON m4_stage0p_normalization_registry;
+CREATE TRIGGER m4_normalization_registry_guard
+  BEFORE UPDATE OR DELETE ON m4_stage0p_normalization_registry
+  FOR EACH ROW EXECUTE FUNCTION m4_stage0p_normalization_registry_guard();
 
 -- ===========================================================================
 -- 3. Bang m4_selection_batches.
@@ -317,7 +424,10 @@ CREATE TABLE IF NOT EXISTS m4_selection_batches (
                                                'evaluation_completed')),
   captured_count          INT NOT NULL DEFAULT 0 CHECK (captured_count >= 0),
   retention_days          INT NOT NULL DEFAULT 45 CHECK (retention_days > 0),
-  normalization_version   TEXT NOT NULL DEFAULT 'nfc-v1',
+  -- REV7 T6-04: BO DEFAULT - Python (lock_batch, T5-04) da tu doc + truyen tuong minh tu
+  -- registry; DEFAULT ngam la 1 nguon hardcode thu 2 tiem an neu 1 INSERT nao do quen chi dinh
+  -- cot nay. FK toi registry(version) o duoi dam bao khong the insert 1 version khong ton tai.
+  normalization_version   TEXT NOT NULL,
   collection_closed_at    TIMESTAMPTZ,
   labels_sealed_at        TIMESTAMPTZ,
   labels_sealed_by        BIGINT REFERENCES staff_users(id),
@@ -325,12 +435,16 @@ CREATE TABLE IF NOT EXISTS m4_selection_batches (
   predictions_written_at  TIMESTAMPTZ,
   result_hash             TEXT,
   -- REV5 T4-05: dau vet minh bach nguong da ap dung luc ghi predictions (khong bat buoc trong
-  -- hash chain — xem ghi chu §5g — chi de audit/report doc lai duoc).
+  -- hash chain - xem ghi chu Â§5g - chi de audit/report doc lai duoc).
   exclusion_gate_version  TEXT,
   -- REV6 T5-03: dau vet minh bach so candidate capture-level bi loai/that bai vinh vien, luu tai
   -- thoi diem close_collection.
   capture_excluded_count           INT,
   capture_permanent_failed_count   INT,
+  -- REV7 T6-03: chinh sach gate da ap dung luc close_collection - dau vet minh bach, dua vao hash
+  -- chain (Â§5h v3). Gia tri duy nhat hien tai: zero-tolerance (batch nao co permanent_failed deu
+  -- bi tu choi dong) cho toi khi co PO decision record that su cho phep 1 chinh sach khac.
+  capture_gate_policy              TEXT,
   evaluation_completed_at   TIMESTAMPTZ,
   evaluation_completed_by   BIGINT REFERENCES staff_users(id),
   evaluation_report_hash    TEXT,
@@ -338,44 +452,53 @@ CREATE TABLE IF NOT EXISTS m4_selection_batches (
   CONSTRAINT m4_batch_count_valid CHECK (selected_count <= eligible_count AND selected_count <= 260),
   CONSTRAINT m4_batch_seal_needs_close CHECK (labels_sealed_at IS NULL OR collection_closed_at IS NOT NULL),
   CONSTRAINT m4_batch_predictions_need_seal CHECK (predictions_written_at IS NULL OR labels_sealed_at IS NOT NULL),
-  CONSTRAINT m4_batch_eval_needs_predictions CHECK (evaluation_completed_at IS NULL OR predictions_written_at IS NOT NULL)
+  CONSTRAINT m4_batch_eval_needs_predictions CHECK (evaluation_completed_at IS NULL OR predictions_written_at IS NOT NULL),
+  CONSTRAINT m4_batch_normalization_version_fk FOREIGN KEY (normalization_version)
+    REFERENCES m4_stage0p_normalization_registry(version)
 );
 
 COMMENT ON TABLE m4_selection_batches IS
-  'M4 Stage 0P — khoa tap conversation_id da chon. status la state machine DB-enforced day du (locked->collecting->collection_closed->labels_sealed->predictions_written->evaluation_completed).';
+  'M4 Stage 0P - khoa tap conversation_id da chon. status la state machine DB-enforced day du (locked->collecting->collection_closed->labels_sealed->predictions_written->evaluation_completed).';
 
 REVOKE ALL ON m4_selection_batches FROM PUBLIC;
 REVOKE ALL ON m4_selection_batches FROM alpha3s_app;
 
 -- ===========================================================================
--- 3b. Bang m4_stage0p_fetch_capability — REV5 T4-01 (MOI, thay the custom GUC REV4). KHONG
---     GRANT cho bat ky role m4 nao — CHI alpha3s_m4_definer (chay ben trong ham) duoc dung. 1 row
---     = 1 lan fetch_message_content thanh cong TRONG 1 transaction cu the (txid_current() —
+-- 3b. Bang m4_stage0p_fetch_capability - REV5 T4-01 (MOI, thay the custom GUC REV4). KHONG
+--     GRANT cho bat ky role m4 nao - CHI alpha3s_m4_definer (chay ben trong ham) duoc dung. 1 row
+--     = 1 lan fetch_message_content thanh cong TRONG 1 transaction cu the (txid_current() -
 --     caller khong the tu chon gia tri nay). record_sample tieu thu (DELETE...RETURNING) row
---     nay trong CUNG transaction — day la bang chung DB-owned, khong the gia mao.
+--     nay trong CUNG transaction - day la bang chung DB-owned, khong the gia mao.
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_stage0p_fetch_capability (
   batch_id        UUID NOT NULL,
   conversation_id BIGINT NOT NULL,
   message_id      BIGINT NOT NULL,
   txid            BIGINT NOT NULL,
-  -- REV6 T5-02: do dai/trang thai cat DB TU TINH luc fetch — record_sample doi chieu
+  -- REV6 T5-02: do dai/trang thai cat DB TU TINH luc fetch - record_sample doi chieu
   -- canonical_text_len/truncated caller khai bao voi 2 cot nay (khong the ket luan dung
   -- ciphertext, nhung chan duoc "wrong-length"/"wrong-truncation" ro rang).
   fetched_char_len       INT NOT NULL,
   fetched_char_truncated BOOLEAN NOT NULL,
+  -- REV7 T6-02: SHA-256 (pgcrypto digest()) tren dung van ban canonical DB TU TINH (NFC-normalize
+  -- + truncate 2 buoc - GIONG HET thu tu Python _truncate(nfc(...)) ap dung, xem
+  -- m4_stage0p_fetch_message_content). record_sample doi hoi p_canonical_text_digest (Python tinh
+  -- NGAY TRUOC luc encrypt tren chinh van ban da encrypt) khop CHINH XAC gia tri nay - chan duoc
+  -- ciphertext-thay-the/canonical-length-khai-sai cung do dai (T5-02 chi kiem do dai, khong kiem
+  -- NOI DUNG).
+  fetched_canonical_digest BYTEA NOT NULL,
   issued_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (batch_id, conversation_id, message_id, txid)
 );
 
 COMMENT ON TABLE m4_stage0p_fetch_capability IS
-  'REV5 T4-01: capability row DB-owned (khong phai GUC) — chi definer INSERT (fetch_message_content) va DELETE (record_sample, cung transaction, txid_current() khop). Khong GRANT cho role m4 nao.';
+  'REV5 T4-01: capability row DB-owned (khong phai GUC) - chi definer INSERT (fetch_message_content) va DELETE (record_sample, cung transaction, txid_current() khop). Khong GRANT cho role m4 nao.';
 
 REVOKE ALL ON m4_stage0p_fetch_capability FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_fetch_capability FROM alpha3s_app;
 
 -- ===========================================================================
--- 3c. Bang m4_stage0p_capture_progress — REV5 T4-03 (MOI). 1 row/candidate (conversation_id,
+-- 3c. Bang m4_stage0p_capture_progress - REV5 T4-03 (MOI). 1 row/candidate (conversation_id,
 --     message_id) cua 1 batch, seed 1 lan qua m4_stage0p_seed_capture_progress. State machine 5
 --     gia tri: pending -> committed | excluded | retryable_failed -> permanent_failed. peek doc
 --     tu bang nay (khong con truyen cursor). close_collection tu choi neu con row
@@ -397,13 +520,13 @@ CREATE INDEX IF NOT EXISTS m4_capture_progress_pending_idx
   ON m4_stage0p_capture_progress (batch_id, status);
 
 COMMENT ON TABLE m4_stage0p_capture_progress IS
-  'REV5 T4-03: state machine per-candidate — moi candidate PHAI dat trang thai terminal (committed/excluded/permanent_failed) truoc khi close_collection duoc phep.';
+  'REV5 T4-03: state machine per-candidate - moi candidate PHAI dat trang thai terminal (committed/excluded/permanent_failed) truoc khi close_collection duoc phep.';
 
 REVOKE ALL ON m4_stage0p_capture_progress FROM PUBLIC;
 REVOKE ALL ON m4_stage0p_capture_progress FROM alpha3s_app;
 
 -- ===========================================================================
--- 4. Bang m4_shadow_review_samples — sample zone.
+-- 4. Bang m4_shadow_review_samples - sample zone.
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS m4_shadow_review_samples (
   sample_id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -442,7 +565,7 @@ COMMENT ON COLUMN m4_shadow_review_samples.encrypted_message IS
 REVOKE ALL ON m4_shadow_review_samples FROM PUBLIC;
 REVOKE ALL ON m4_shadow_review_samples FROM alpha3s_app;
 
--- Trigger bat bien ground truth sau seal — PHAI SECURITY DEFINER.
+-- Trigger bat bien ground truth sau seal - PHAI SECURITY DEFINER.
 CREATE OR REPLACE FUNCTION m4_stage0p_block_label_after_seal()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -485,9 +608,11 @@ DROP FUNCTION IF EXISTS m4_stage0p_record_approval(TEXT, BOOLEAN, TIMESTAMPTZ, T
 DROP FUNCTION IF EXISTS m4_stage0p_revoke_approval(TEXT, BIGINT, TEXT);
 DROP FUNCTION IF EXISTS m4_stage0p_seal_labels(UUID, BIGINT);
 DROP FUNCTION IF EXISTS m4_stage0p_pin_actor(BIGINT);
+-- REV7 T6-02: record_sample REV5/REV6 (7 tham so, chua co p_canonical_text_digest).
+DROP FUNCTION IF EXISTS m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN);
 
 -- ===========================================================================
--- 5a. m4_stage0p_peek_next_candidate — REV5 T4-03: doi chu ky con (batch_id) — doc tu
+-- 5a. m4_stage0p_peek_next_candidate - REV5 T4-03: doi chu ky con (batch_id) - doc tu
 --     m4_stage0p_capture_progress (khong con cursor after_conversation_id/after_message_id;
 --     bang progress LA cursor/trang thai).
 -- ===========================================================================
@@ -508,7 +633,7 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_peek_next_candidate: batch_id khong ton tai';
   END IF;
   IF v_batch.status NOT IN ('locked', 'collecting') THEN
-    RAISE EXCEPTION 'm4_stage0p_peek_next_candidate: batch % khong con o trang thai collecting (status=%) — T3-02',
+    RAISE EXCEPTION 'm4_stage0p_peek_next_candidate: batch % khong con o trang thai collecting (status=%) - T3-02',
       p_batch_id, v_batch.status;
   END IF;
   IF v_batch.purpose_code <> 'P12_PII_DETECTOR_EVAL' THEN
@@ -537,9 +662,9 @@ ALTER FUNCTION m4_stage0p_peek_next_candidate(UUID) OWNER TO alpha3s_m4_definer;
 REVOKE EXECUTE ON FUNCTION m4_stage0p_peek_next_candidate(UUID) FROM PUBLIC;
 
 -- ===========================================================================
--- 5a2. m4_stage0p_seed_capture_progress — REV5 T4-03 (MOI). Goi 1 LAN khi collector bat dau
---      (truoc vong lap peek) — vet toan bo candidate hop le cua batch vao m4_stage0p_capture_progress
---      trang thai 'pending'. Idempotent (ON CONFLICT DO NOTHING) — resume 1 batch da seed truoc
+-- 5a2. m4_stage0p_seed_capture_progress - REV5 T4-03 (MOI). Goi 1 LAN khi collector bat dau
+--      (truoc vong lap peek) - vet toan bo candidate hop le cua batch vao m4_stage0p_capture_progress
+--      trang thai 'pending'. Idempotent (ON CONFLICT DO NOTHING) - resume 1 batch da seed truoc
 --      do (vd sau khi bi control OFF giua chung) khong tao trung row.
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION m4_stage0p_seed_capture_progress(p_batch_id UUID)
@@ -582,10 +707,10 @@ ALTER FUNCTION m4_stage0p_seed_capture_progress(UUID) OWNER TO alpha3s_m4_define
 REVOKE EXECUTE ON FUNCTION m4_stage0p_seed_capture_progress(UUID) FROM PUBLIC;
 
 -- ===========================================================================
--- 5a3. m4_stage0p_mark_candidate_outcome — REV5 T4-03 (MOI). Collector goi khi 1 candidate KHONG
+-- 5a3. m4_stage0p_mark_candidate_outcome - REV5 T4-03 (MOI). Collector goi khi 1 candidate KHONG
 --      dat 'ok' qua fenced unit: 'fence_timeout' (tang attempt_count, >=3 lan -> permanent_failed,
 --      con lai -> retryable_failed, van con trong tap peek chon lai) hoac 'pending_deletion'
---      (-> excluded, terminal ngay, khong retry — DSR la tham quyen cuoi).
+--      (-> excluded, terminal ngay, khong retry - DSR la tham quyen cuoi).
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION m4_stage0p_mark_candidate_outcome(
   p_batch_id UUID,
@@ -609,7 +734,7 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_mark_candidate_outcome: outcome khong hop le: %', p_outcome;
   END IF;
   -- T5-03: reason PHAI nam trong allowlist DB-side (4 gia tri THAT dang dung trong
-  -- stage0p_sampling.py:run_collector) — khong con free text tuy y.
+  -- stage0p_sampling.py:run_collector) - khong con free text tuy y.
   IF p_reason IS NOT NULL AND NOT (p_reason = ANY (ARRAY[
       'asyncio_wait_for_timeout', 'customer_in_pending_cache',
       'pending_check_before_fence', 'pending_recheck_inside_fence'])) THEN
@@ -624,7 +749,7 @@ BEGIN
       p_conversation_id, p_message_id, p_batch_id;
   END IF;
   IF v_row.status NOT IN ('pending', 'retryable_failed') THEN
-    RAISE EXCEPTION 'm4_stage0p_mark_candidate_outcome: candidate (%,%) da o trang thai terminal (%) — khong the danh dau lai',
+    RAISE EXCEPTION 'm4_stage0p_mark_candidate_outcome: candidate (%,%) da o trang thai terminal (%) - khong the danh dau lai',
       p_conversation_id, p_message_id, v_row.status;
   END IF;
 
@@ -656,10 +781,10 @@ ALTER FUNCTION m4_stage0p_mark_candidate_outcome(UUID, BIGINT, BIGINT, TEXT, TEX
 REVOKE EXECUTE ON FUNCTION m4_stage0p_mark_candidate_outcome(UUID, BIGINT, BIGINT, TEXT, TEXT) FROM PUBLIC;
 
 -- ===========================================================================
--- 5b. m4_stage0p_fetch_message_content — fenced. REV5 T4-01: khi thanh cong ('ok'), INSERT 1
---     row vao m4_stage0p_fetch_capability (khong con set_config GUC — CA chi ro GUC khong phai
+-- 5b. m4_stage0p_fetch_message_content - fenced. REV5 T4-01: khi thanh cong ('ok'), INSERT 1
+--     row vao m4_stage0p_fetch_capability (khong con set_config GUC - CA chi ro GUC khong phai
 --     secret/privileged storage, caller co the tu forge). Bang capability KHONG GRANT cho role
---     nao khac ngoai definer — day la bang chung DB-owned that su.
+--     nao khac ngoai definer - day la bang chung DB-owned that su.
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION m4_stage0p_fetch_message_content(
   p_batch_id UUID,
@@ -677,6 +802,16 @@ DECLARE
   v_row RECORD;
   v_audit_id BIGINT;
   v_cap INT;
+  -- T6-02: bien tinh canonical text - PHAI theo DUNG thu tu Python _truncate(nfc(...)) ap dung
+  -- tren chinh 'left(v_row.content, 2000)' se duoc RETURN QUERY o duoi (Python nhan gia tri nay,
+  -- roi tu nfc()+truncate - DB phai lam LAI y het de digest khop).
+  v_received      TEXT;
+  v_nfc           TEXT;
+  v_char_trunc    BOOLEAN;
+  v_bytes         BYTEA;
+  v_byte_trunc    BOOLEAN;
+  v_canon         TEXT;
+  v_cutlen        INT;
 BEGIN
   PERFORM pg_advisory_xact_lock(4013003);
 
@@ -691,7 +826,7 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_fetch_message_content: batch_id khong ton tai';
   END IF;
   IF v_batch.status NOT IN ('locked', 'collecting') THEN
-    RAISE EXCEPTION 'm4_stage0p_fetch_message_content: batch % khong con o trang thai collecting (status=%) — T3-02',
+    RAISE EXCEPTION 'm4_stage0p_fetch_message_content: batch % khong con o trang thai collecting (status=%) - T3-02',
       p_batch_id, v_batch.status;
   END IF;
   IF v_batch.purpose_code <> 'P12_PII_DETECTOR_EVAL' THEN
@@ -729,16 +864,53 @@ BEGIN
           p_batch_id::text, jsonb_build_object('conversation_id', p_conversation_id, 'message_id', p_message_id))
   RETURNING id INTO v_audit_id;
 
-  -- T4-01: capability row DB-owned — chi definer INSERT duoc (khong GRANT cho role nao khac);
-  -- txid_current() khong the caller tu chon. T5-02: luu them do dai/trang thai cat DB TU TINH —
-  -- record_sample se doi chieu caller khai bao voi 2 gia tri nay.
-  INSERT INTO public.m4_stage0p_fetch_capability
-    (batch_id, conversation_id, message_id, txid, fetched_char_len, fetched_char_truncated)
-  VALUES (p_batch_id, p_conversation_id, p_message_id, txid_current(),
-          least(char_length(v_row.content), 2000), (char_length(v_row.content) > 2000));
+  -- T6-02: tinh canonical text DB-side, DUNG thu tu Python se ap dung tren gia tri RETURN QUERY o
+  -- duoi (v_received = 'left(content,2000)' - Python nhan CHINH gia tri nay lam fetched["content"]):
+  --   (1) raw-truncate 2000 ky tu (giong het RETURN QUERY duoi);
+  --   (2) NFC-normalize (Python: nfc());
+  --   (3) neu NFC lam vuot lai 2000 ky tu (hiem, mot so chuoi ket hop co the mo rong) thi cat lai
+  --       (Python _truncate() kiem tra lai sau nfc());
+  --   (4) byte-truncate UTF-8-an-toan ve <=8000 byte (giong het Python _truncate() buoc 2 - dung
+  --       vong lap lui dan tung byte cho toi khi convert_from() khong loi, tuong duong
+  --       bytes.decode('utf-8', errors='ignore') cua Python tren 1 chuoi bi cat giua ky tu).
+  v_received := left(v_row.content, 2000);
+  v_char_trunc := char_length(v_row.content) > 2000;
+  v_nfc := normalize(v_received, NFC);
+  IF char_length(v_nfc) > 2000 THEN
+    v_nfc := left(v_nfc, 2000);
+    v_char_trunc := TRUE;
+  END IF;
+  v_bytes := convert_to(v_nfc, 'UTF8');
+  v_byte_trunc := octet_length(v_bytes) > 8000;
+  IF v_byte_trunc THEN
+    v_cutlen := 8000;
+    LOOP
+      BEGIN
+        v_canon := convert_from(substr(v_bytes, 1, v_cutlen), 'UTF8');
+        EXIT;
+      EXCEPTION WHEN OTHERS THEN
+        v_cutlen := v_cutlen - 1;
+        IF v_cutlen <= 0 THEN
+          v_canon := '';
+          EXIT;
+        END IF;
+      END;
+    END LOOP;
+  ELSE
+    v_canon := v_nfc;
+  END IF;
 
-  RETURN QUERY SELECT 'ok'::TEXT, left(v_row.content, 2000), (char_length(v_row.content) > 2000),
-                      v_row.created_at;
+  -- T4-01: capability row DB-owned - chi definer INSERT duoc (khong GRANT cho role nao khac);
+  -- txid_current() khong the caller tu chon. T5-02: luu do dai/trang thai cat DB TU TINH (nay tinh
+  -- tren CHINH canonical text, khong con tren raw content - chinh xac hon). T6-02: luu them digest
+  -- SHA-256 cua canonical text - record_sample doi chieu.
+  INSERT INTO public.m4_stage0p_fetch_capability
+    (batch_id, conversation_id, message_id, txid, fetched_char_len, fetched_char_truncated,
+     fetched_canonical_digest)
+  VALUES (p_batch_id, p_conversation_id, p_message_id, txid_current(),
+          char_length(v_canon), (v_char_trunc OR v_byte_trunc), digest(v_canon, 'sha256'));
+
+  RETURN QUERY SELECT 'ok'::TEXT, v_received, v_char_trunc, v_row.created_at;
 END;
 $$;
 
@@ -746,7 +918,7 @@ ALTER FUNCTION m4_stage0p_fetch_message_content(UUID, BIGINT, BIGINT) OWNER TO a
 REVOKE EXECUTE ON FUNCTION m4_stage0p_fetch_message_content(UUID, BIGINT, BIGINT) FROM PUBLIC;
 
 -- ===========================================================================
--- 5c. m4_stage0p_record_sample — REV5 T4-01: doi chieu capability row (DELETE...RETURNING, khong
+-- 5c. m4_stage0p_record_sample - REV5 T4-01: doi chieu capability row (DELETE...RETURNING, khong
 --     con set_config/current_setting GUC). REV5 T4-03: chuyen candidate progress -> 'committed'
 --     TRONG CUNG transaction voi INSERT sample.
 -- ===========================================================================
@@ -757,7 +929,10 @@ CREATE OR REPLACE FUNCTION m4_stage0p_record_sample(
   p_sample_id UUID,
   p_encrypted_message BYTEA,
   p_canonical_text_len INT,
-  p_truncated BOOLEAN
+  p_truncated BOOLEAN,
+  -- REV7 T6-02: SHA-256 cua canonical text, tinh boi Python NGAY TRUOC luc encrypt (tren chinh
+  -- van ban da encrypt) - phai khop CHINH XAC fetched_canonical_digest DB da tinh luc fetch.
+  p_canonical_text_digest BYTEA
 )
 RETURNS TABLE(captured_count INT)
 LANGUAGE plpgsql
@@ -775,40 +950,46 @@ DECLARE
 BEGIN
   PERFORM pg_advisory_xact_lock(4013003);
 
-  -- T4-01: tieu thu capability row DB-owned — chi ton tai neu fetch_message_content da thanh
+  -- T4-01: tieu thu capability row DB-owned - chi ton tai neu fetch_message_content da thanh
   -- cong CHO DUNG (batch,conversation,message) TRONG CUNG transaction (txid_current() khop).
   -- Caller khong co INSERT/SELECT/DELETE truc tiep tren bang nay nen khong the gia mao.
   DELETE FROM public.m4_stage0p_fetch_capability
     WHERE batch_id = p_batch_id AND conversation_id = p_conversation_id AND message_id = p_message_id
       AND txid = txid_current()
-    RETURNING fetched_char_len, fetched_char_truncated INTO v_capability;
+    RETURNING fetched_char_len, fetched_char_truncated, fetched_canonical_digest INTO v_capability;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'm4_stage0p_record_sample: khong co capability fetch hop le cho message (%,%) trong CUNG transaction — tu choi (T4-01)',
+    RAISE EXCEPTION 'm4_stage0p_record_sample: khong co capability fetch hop le cho message (%,%) trong CUNG transaction - tu choi (T4-01)',
       p_conversation_id, p_message_id;
   END IF;
 
-  -- T5-02: doi chieu do dai/trang thai cat caller khai bao voi gia tri DB TU TINH luc fetch —
-  -- khong the ket luan dung NOI DUNG ciphertext (DB khong co khoa giai ma), nhung chan duoc
-  -- "wrong-length"/"wrong-truncation" ro rang (caller khai canonical_text_len lon hon that,
-  -- hoac giau viec noi dung goc da bi cat).
-  IF p_canonical_text_len <= 0 OR p_canonical_text_len > v_capability.fetched_char_len THEN
-    RAISE EXCEPTION 'm4_stage0p_record_sample: canonical_text_len (%) vuot qua do dai da fetch (%) — tu choi (T5-02)',
+  -- T6-02: doi chieu digest canonical text - day la RANG BUOC CHINH, thay the cho "trong khoang
+  -- hop ly" REV6 (T5-02). Digest sai = KHAC noi dung (ciphertext-thay-the/canonical-length-khai-
+  -- sai/truncated-gia deu tao ra digest khac) - tu choi ngay, khong con "gan dung la duoc".
+  IF p_canonical_text_digest IS NULL OR p_canonical_text_digest <> v_capability.fetched_canonical_digest THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: canonical_text_digest khong khop noi dung da fetch - tu choi (T6-02)';
+  END IF;
+  -- Digest da chung minh dung canonical text -> do dai/trang thai cat gio la BAT BUOC KHOP CHINH
+  -- XAC (khong con chi la "trong khoang", vi chi co DUY NHAT 1 canonical text dung cho 1 fetch).
+  IF p_canonical_text_len <> v_capability.fetched_char_len THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: canonical_text_len (%) khong khop do dai da fetch (%) - tu choi (T5-02/T6-02)',
       p_canonical_text_len, v_capability.fetched_char_len;
   END IF;
-  IF v_capability.fetched_char_truncated AND NOT p_truncated THEN
-    RAISE EXCEPTION 'm4_stage0p_record_sample: noi dung goc da biet la bi cat (>2000 ky tu) nhung p_truncated=false — tu choi (T5-02)';
+  IF p_truncated <> v_capability.fetched_char_truncated THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: truncated (%) khong khop trang thai cat da fetch (%) - tu choi (T5-02/T6-02)',
+      p_truncated, v_capability.fetched_char_truncated;
   END IF;
   -- AEAD overhead co dinh 30 byte (version 2 + nonce 12 + tag 16); phan ciphertext con lai PHAI
-  -- nam trong khoang [1, 4] byte/ky tu UTF-8 hop le cho canonical_text_len da khai.
+  -- nam trong khoang [1, 4] byte/ky tu UTF-8 hop le cho canonical_text_len da khai. Van giu (defense-
+  -- in-depth, khong thay the digest) - bat gross mismatch do dai ciphertext som, thong bao ro hon.
   IF octet_length(p_encrypted_message) < p_canonical_text_len + 30
      OR octet_length(p_encrypted_message) > p_canonical_text_len * 4 + 30 THEN
-    RAISE EXCEPTION 'm4_stage0p_record_sample: do dai ciphertext (%) khong hop ly so canonical_text_len (%) — tu choi (T5-02)',
+    RAISE EXCEPTION 'm4_stage0p_record_sample: do dai ciphertext (%) khong hop ly so canonical_text_len (%) - tu choi (T5-02)',
       octet_length(p_encrypted_message), p_canonical_text_len;
   END IF;
 
   SELECT capture_enabled INTO v_enabled FROM public.m4_stage0p_control WHERE id = 1;
   IF v_enabled IS NOT TRUE THEN
-    RAISE EXCEPTION 'm4_stage0p_record_sample: control da tat — tu choi ghi (T3-01)';
+    RAISE EXCEPTION 'm4_stage0p_record_sample: control da tat - tu choi ghi (T3-01)';
   END IF;
 
   SELECT * INTO v_batch FROM public.m4_selection_batches WHERE batch_id = p_batch_id FOR UPDATE;
@@ -816,7 +997,7 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_record_sample: batch_id khong ton tai';
   END IF;
   IF v_batch.status NOT IN ('locked', 'collecting') THEN
-    RAISE EXCEPTION 'm4_stage0p_record_sample: batch % khong con o trang thai collecting (status=%) — T3-02',
+    RAISE EXCEPTION 'm4_stage0p_record_sample: batch % khong con o trang thai collecting (status=%) - T3-02',
       p_batch_id, v_batch.status;
   END IF;
   IF NOT (p_conversation_id = ANY (v_batch.locked_conversation_ids)) THEN
@@ -847,7 +1028,7 @@ BEGIN
     WHERE batch_id = p_batch_id AND conversation_id = p_conversation_id AND message_id = p_message_id
       AND status IN ('pending', 'retryable_failed');
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'm4_stage0p_record_sample: candidate (%,%) khong o trang thai cho phep ghi (chua duoc seed hoac da terminal) — T4-03',
+    RAISE EXCEPTION 'm4_stage0p_record_sample: candidate (%,%) khong o trang thai cho phep ghi (chua duoc seed hoac da terminal) - T4-03',
       p_conversation_id, p_message_id;
   END IF;
 
@@ -866,17 +1047,17 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN)
+ALTER FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
   OWNER TO alpha3s_m4_definer;
-REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN)
+REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
   FROM PUBLIC;
 
 -- ===========================================================================
--- 5c2. m4_stage0p_close_collection — REV5 T4-03: them dieu kien BAT BUOC — KHONG con row
+-- 5c2. m4_stage0p_close_collection - REV5 T4-03: them dieu kien BAT BUOC - KHONG con row
 --      pending/retryable_failed nao trong capture_progress cua batch. Doi chieu 3 chieu:
 --      captured_count (cot dem) == so row sample thuc te == so row 'committed' trong progress.
 --      REV6 T5-03: them gate ty le permanent_failed (dung chung nguong voi
---      m4_stage0p_exclusion_gate, T4-05) — batch KHONG duoc dong neu qua nhieu candidate that
+--      m4_stage0p_exclusion_gate, T4-05) - batch KHONG duoc dong neu qua nhieu candidate that
 --      bai capture vinh vien; luu capture_excluded_count/capture_permanent_failed_count tren
 --      batch row lam bang chung closure.
 -- ===========================================================================
@@ -888,7 +1069,6 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE
   v_batch RECORD;
-  v_gate RECORD;
   v_actual_count INT;
   v_committed_count INT;
   v_non_terminal INT;
@@ -896,6 +1076,10 @@ DECLARE
   v_capture_excluded INT;
   v_capture_permanent_failed INT;
   v_audit_id BIGINT;
+  -- REV7 T6-03: CA chi ro khong duoc dung nguong CHUA duyet (exclusion_gate, van la CA-proposed,
+  -- xem T4-05) de CHO PHEP batch di tiep - chinh sach duy nhat hop le hien tai la zero-tolerance
+  -- VO DIEU KIEN cho toi khi co 1 PO decision record that su.
+  v_gate_policy CONSTANT TEXT := 'zero_tolerance_pending_po_decision_v1';
 BEGIN
   SELECT * INTO v_batch FROM public.m4_selection_batches WHERE batch_id = p_batch_id FOR UPDATE;
   IF NOT FOUND THEN
@@ -909,7 +1093,7 @@ BEGIN
   SELECT count(*) INTO v_non_terminal FROM public.m4_stage0p_capture_progress AS cp
     WHERE cp.batch_id = p_batch_id AND cp.status IN ('pending', 'retryable_failed');
   IF v_non_terminal > 0 THEN
-    RAISE EXCEPTION 'm4_stage0p_close_collection: batch % con % candidate CHUA o trang thai terminal (pending/retryable_failed) — T4-03',
+    RAISE EXCEPTION 'm4_stage0p_close_collection: batch % con % candidate CHUA o trang thai terminal (pending/retryable_failed) - T4-03',
       p_batch_id, v_non_terminal;
   END IF;
 
@@ -917,38 +1101,45 @@ BEGIN
   SELECT count(*) FILTER (WHERE cp.status = 'committed') INTO v_committed_count
     FROM public.m4_stage0p_capture_progress AS cp WHERE cp.batch_id = p_batch_id;
   IF v_actual_count <> v_batch.captured_count OR v_actual_count <> v_committed_count THEN
-    RAISE EXCEPTION 'm4_stage0p_close_collection: captured_count (%) / sample row thuc te (%) / progress committed (%) khong khop nhau — tu choi dong',
+    RAISE EXCEPTION 'm4_stage0p_close_collection: captured_count (%) / sample row thuc te (%) / progress committed (%) khong khop nhau - tu choi dong',
       v_batch.captured_count, v_actual_count, v_committed_count;
   END IF;
 
-  -- T5-03: gate ty le permanent_failed — dung chung nguong voi m4_stage0p_exclusion_gate (T4-05).
   SELECT count(*), count(*) FILTER (WHERE cp.status = 'excluded'),
          count(*) FILTER (WHERE cp.status = 'permanent_failed')
     INTO v_total_candidates, v_capture_excluded, v_capture_permanent_failed
     FROM public.m4_stage0p_capture_progress AS cp WHERE cp.batch_id = p_batch_id;
 
-  SELECT eg.max_exclusion_rate, eg.gate_version INTO v_gate
-    FROM public.m4_stage0p_exclusion_gate AS eg WHERE eg.id = 1;
-  IF v_gate IS NULL THEN
-    RAISE EXCEPTION 'm4_stage0p_close_collection: exclusion gate config chua duoc thiet lap — tu choi dong (fail-closed, T5-03)';
+  -- REV7 T6-03: BAT KY permanent_failed nao (>0) deu tu choi dong VO DIEU KIEN - REV6 dung ty le
+  -- so voi m4_stage0p_exclusion_gate (van la de xuat CA Review #4, CHUA co PO decision record) de
+  -- CHO PHEP mot vai permanent_failed di tiep; CA Review #6 chi ro day KHONG duoc chap nhan lam
+  -- can cu "cho phep" khi chua duoc PO duyet chinh thuc. Kiem TRUOC empty-corpus (duoi) vi day la
+  -- chan doan cu the hon khi ca 2 dieu kien cung dung.
+  IF v_capture_permanent_failed > 0 THEN
+    RAISE EXCEPTION 'm4_stage0p_close_collection: batch % co % candidate permanent_failed (/%tong) - CHUA co PO decision record duyet nguong cho phep permanent failure, tu choi dong VO DIEU KIEN (INSUFFICIENT_DATA, chinh sach=%, T6-03)',
+      p_batch_id, v_capture_permanent_failed, v_total_candidates, v_gate_policy;
   END IF;
-  IF v_total_candidates > 0
-     AND v_capture_permanent_failed::numeric / v_total_candidates > v_gate.max_exclusion_rate THEN
-    RAISE EXCEPTION 'm4_stage0p_close_collection: ty le permanent_failed (%/%) vuot nguong % (gate_version=%) — INSUFFICIENT_DATA, tu choi dong (T5-03)',
-      v_capture_permanent_failed, v_total_candidates, v_gate.max_exclusion_rate, v_gate.gate_version;
+
+  -- REV7 T6-03: corpus RONG (0 candidate committed) - sanity co ban, khong phai nguong governance
+  -- (khac han nguong 200-conversation cua write_predictions, van la de xuat CA chua duoc PO duyet).
+  IF v_committed_count = 0 THEN
+    RAISE EXCEPTION 'm4_stage0p_close_collection: batch % khong co candidate nao committed (corpus rong) - tu choi dong (T6-03)',
+      p_batch_id;
   END IF;
 
   UPDATE public.m4_selection_batches
     SET status = 'collection_closed', collection_closed_at = now(),
         capture_excluded_count = v_capture_excluded,
-        capture_permanent_failed_count = v_capture_permanent_failed
+        capture_permanent_failed_count = v_capture_permanent_failed,
+        capture_gate_policy = v_gate_policy
     WHERE batch_id = p_batch_id;
 
   INSERT INTO public.audit_log (actor_type, actor_ref, action, entity_type, entity_id, after)
   VALUES ('system', 'm4_stage0p_collector', 'm4_collection_closed', 'm4_selection_batch',
           p_batch_id::text, jsonb_build_object('captured_count', v_actual_count,
                                                 'capture_excluded_count', v_capture_excluded,
-                                                'capture_permanent_failed_count', v_capture_permanent_failed))
+                                                'capture_permanent_failed_count', v_capture_permanent_failed,
+                                                'capture_gate_policy', v_gate_policy))
   RETURNING id INTO v_audit_id;
 
   RETURN QUERY SELECT 'collection_closed'::TEXT, v_actual_count;
@@ -959,46 +1150,85 @@ ALTER FUNCTION m4_stage0p_close_collection(UUID) OWNER TO alpha3s_m4_definer;
 REVOKE EXECUTE ON FUNCTION m4_stage0p_close_collection(UUID) FROM PUBLIC;
 
 -- ===========================================================================
--- 5d. m4_stage0p_pin_actor / m4_stage0p_require_pinned_actor — REV6 T5-01: CA chi ro pin_actor
---     REV5 (T4-04) VAN co lo hong CUNG LOP voi T4-01 — GUC
+-- 5d. m4_stage0p_pin_actor / m4_stage0p_require_pinned_actor - REV6 T5-01: CA chi ro pin_actor
+--     REV5 (T4-04) VAN co lo hong CUNG LOP voi T4-01 - GUC
 --     alpha3s.m4_actor_staff_id la session variable THUONG, BAT KY session nao cung tu
 --     set_config duoc bat ke co EXECUTE pin_actor hay khong (restrict EXECUTE tren pin_actor
---     KHONG bao ve duoc GUC — day la 2 co che khac nhau, EXECUTE grant chi kiem soat AI GOI DUOC
+--     KHONG bao ve duoc GUC - day la 2 co che khac nhau, EXECUTE grant chi kiem soat AI GOI DUOC
 --     HAM, khong kiem soat AI GHI DUOC 1 session variable). Sua: bang m4_stage0p_actor_session
---     khoa boi pg_backend_pid() (Postgres tu cap cho CHINH session dang goi — khong the gia mao
+--     khoa boi pg_backend_pid() (Postgres tu cap cho CHINH session dang goi - khong the gia mao
 --     trong CUNG session, khac han GUC ma bat ky ai cung tu ghi duoc). Them: pin_actor REV5 chi
---     kiem staff active, KHONG kiem caller co DUNG LA staff do — sua them bang moi
---     m4_stage0p_actor_credentials (pin_secret rieng tung staff) — pin_actor(staff_id,pin_secret)
+--     kiem staff active, KHONG kiem caller co DUNG LA staff do - sua them bang moi
+--     m4_stage0p_actor_credentials (pin_secret rieng tung staff) - pin_actor(staff_id,pin_secret)
 --     doi hoi secret khop, chan "binder tu chon tuy y bat ky staff active nao".
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION m4_stage0p_pin_actor(p_staff_id BIGINT, p_pin_secret TEXT)
-RETURNS TABLE(pinned_staff_id BIGINT)
+RETURNS TABLE(pinned_staff_id BIGINT, expires_at TIMESTAMPTZ)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
-DECLARE v_audit_id BIGINT; v_stored_secret TEXT;
+DECLARE
+  v_audit_id BIGINT;
+  v_cred RECORD;
+  v_nonce UUID;
+  v_expires TIMESTAMPTZ;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.staff_users WHERE id = p_staff_id AND is_active = TRUE) THEN
     RAISE EXCEPTION 'm4_stage0p_pin_actor: staff_id khong ton tai hoac khong active';
   END IF;
 
-  SELECT pin_secret INTO v_stored_secret FROM public.m4_stage0p_actor_credentials
-    WHERE staff_id = p_staff_id;
-  IF v_stored_secret IS NULL OR p_pin_secret IS NULL OR v_stored_secret <> p_pin_secret THEN
-    RAISE EXCEPTION 'm4_stage0p_pin_actor: pin_secret khong khop cho staff_id % (T5-01)', p_staff_id;
+  SELECT * INTO v_cred FROM public.m4_stage0p_actor_credentials
+    WHERE staff_id = p_staff_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'm4_stage0p_pin_actor: chua duoc provisioning pin_secret cho staff_id % (T6-01)', p_staff_id;
+  END IF;
+  -- T6-01: rate-limit chong brute-force pin_secret. KHONG RAISE tai day/duoi — PL/pgSQL KHONG co
+  -- autonomous transaction: neu RAISE, UPDATE failed_attempts se bi ROLLBACK CUNG VOI TOAN BO
+  -- statement (da xac nhan bang thu nghiem thuc te — 1 lop bug moi tu phat hien round nay, xem
+  -- Correction #6 §3), khien counter khong bao gio thuc su tang. Thay vao do: COMMIT UPDATE roi
+  -- RETURN QUERY 1 hang "that bai" (pinned_staff_id=NULL) — Python wrapper (pin_actor()) tu RAISE
+  -- ActorNotPinnedError dua tren gia tri tra ve, KHONG dua vao loi DB.
+  IF v_cred.locked_until IS NOT NULL AND now() < v_cred.locked_until THEN
+    RETURN QUERY SELECT NULL::BIGINT, NULL::TIMESTAMPTZ;
+    RETURN;
   END IF;
 
-  -- T5-01: khoa boi pg_backend_pid() — Postgres tu cap cho CHINH session goi, khong the gia mao.
-  INSERT INTO public.m4_stage0p_actor_session (backend_pid, staff_id, pinned_at)
-  VALUES (pg_backend_pid(), p_staff_id, now())
-  ON CONFLICT (backend_pid) DO UPDATE SET staff_id = EXCLUDED.staff_id, pinned_at = now();
+  -- T6-01: pin_secret luu HASH (pgcrypto crypt/gen_salt('bf')) - khong con so sanh plaintext.
+  IF p_pin_secret IS NULL OR v_cred.pin_secret_hash <> crypt(p_pin_secret, v_cred.pin_secret_hash) THEN
+    UPDATE public.m4_stage0p_actor_credentials
+      SET failed_attempts = failed_attempts + 1,
+          locked_until = CASE WHEN failed_attempts + 1 >= 5 THEN now() + interval '15 minutes'
+                               ELSE locked_until END
+      WHERE staff_id = p_staff_id;
+    RETURN QUERY SELECT NULL::BIGINT, NULL::TIMESTAMPTZ;
+    RETURN;
+  END IF;
+
+  UPDATE public.m4_stage0p_actor_credentials
+    SET failed_attempts = 0, locked_until = NULL WHERE staff_id = p_staff_id;
+
+  -- T6-01: sinh 1 UUID ngau nhien, dat DONG THOI vao row (session_nonce) VA vao 1 GUC session-
+  -- scoped cua CHINH connection dang goi (set_config(...,false) - KHONG phai LOCAL, sinh ton qua
+  -- transaction boundary nhung MAT khi backend dong/chet - khac han GUC REV5 T5-01, gia tri nay
+  -- KHONG BAO GIO mang danh tinh actor, chi la 1 nonce doi chung ngau nhien khong ai doan duoc).
+  v_nonce := gen_random_uuid();
+  v_expires := now() + interval '15 minutes';
+  PERFORM set_config('alpha3s.m4_session_nonce', v_nonce::text, false);
+
+  INSERT INTO public.m4_stage0p_actor_session
+    (backend_pid, session_nonce, staff_id, pinned_at, expires_at)
+  VALUES (pg_backend_pid(), v_nonce, p_staff_id, now(), v_expires)
+  ON CONFLICT (backend_pid) DO UPDATE
+    SET session_nonce = EXCLUDED.session_nonce, staff_id = EXCLUDED.staff_id,
+        pinned_at = now(), expires_at = EXCLUDED.expires_at;
 
   INSERT INTO public.audit_log (actor_type, actor_staff_id, action, entity_type, entity_id, after)
-  VALUES ('staff', p_staff_id, 'm4_stage0p_pin_actor', 'staff_users', p_staff_id::text, '{}'::jsonb)
+  VALUES ('staff', p_staff_id, 'm4_stage0p_pin_actor', 'staff_users', p_staff_id::text,
+          jsonb_build_object('expires_at', v_expires))
   RETURNING id INTO v_audit_id;
 
-  RETURN QUERY SELECT p_staff_id;
+  RETURN QUERY SELECT p_staff_id, v_expires;
 END;
 $$;
 
@@ -1011,14 +1241,38 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
-DECLARE v_actor_id BIGINT;
+DECLARE
+  v_actor_id BIGINT;
+  v_session RECORD;
+  v_current_nonce TEXT;
 BEGIN
-  -- T5-01: doc tu bang khoa boi pg_backend_pid() cua CHINH session nay (khong con GUC).
-  SELECT staff_id INTO v_actor_id FROM public.m4_stage0p_actor_session
-    WHERE backend_pid = pg_backend_pid();
-  IF v_actor_id IS NULL THEN
-    RAISE EXCEPTION 'm4_stage0p_require_pinned_actor: chua pin actor cho session nay — goi m4_stage0p_pin_actor truoc (T5-01)';
+  SELECT * INTO v_session FROM public.m4_stage0p_actor_session WHERE backend_pid = pg_backend_pid();
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'm4_stage0p_require_pinned_actor: chua pin actor cho session nay - goi m4_stage0p_pin_actor truoc (T5-01/T6-01)';
   END IF;
+
+  -- T6-01: PID co the bi He dieu hanh TAI SU DUNG cho 1 ket noi HOAN TOAN MOI sau khi backend cu
+  -- da chet - 1 backend MOI LUON bat dau voi GUC tuy chinh RONG (session_nonce khong sinh ton qua
+  -- 1 ket noi/backend process moi, chi sinh ton trong CUNG 1 session con song), nen doi chieu GUC
+  -- hien tai voi session_nonce da luu luc pin phat hien chinh xac truong hop nay ma KHONG can doc
+  -- pg_stat_activity (cot backend_start bi Postgres NULL hoa cho role khong dac quyen nhu
+  -- alpha3s_m4_definer - xem bug tu phat hien Correction #6). Khac nhau = row cu la STALE -> tu
+  -- choi. KHONG DELETE row tai day (PL/pgSQL khong co autonomous transaction — DELETE se bi
+  -- ROLLBACK cung voi RAISE ngay sau, thanh vo tac dung — da xac nhan bang thu nghiem thuc te,
+  -- xem Correction #6 §3); khong sao ve mat bao mat vi kiem tra nay danh gia LAI TU DAU moi lan
+  -- goi, du row cu con ton tai — pin lai (ON CONFLICT DO UPDATE trong pin_actor) se tu ghi de.
+  v_current_nonce := current_setting('alpha3s.m4_session_nonce', true);
+  IF v_current_nonce IS NULL OR v_current_nonce IS DISTINCT FROM v_session.session_nonce::text THEN
+    RAISE EXCEPTION 'm4_stage0p_require_pinned_actor: pin session STALE (session_nonce khong khop - backend_pid co the da bi tai su dung tu 1 ket noi da chet) - tu choi, pin lai (T6-01)';
+  END IF;
+
+  -- T6-01: TTL bat buoc - pin qua han khong con hieu luc, du backend_pid van con song (chong
+  -- connection-pool tai su dung pin cu cho 1 request/nguoi dung khac).
+  IF now() > v_session.expires_at THEN
+    RAISE EXCEPTION 'm4_stage0p_require_pinned_actor: pin da het han (expires_at=%) - tu choi, pin lai (T6-01)', v_session.expires_at;
+  END IF;
+
+  v_actor_id := v_session.staff_id;
   IF NOT EXISTS (SELECT 1 FROM public.staff_users WHERE id = v_actor_id AND is_active = TRUE) THEN
     RAISE EXCEPTION 'm4_stage0p_require_pinned_actor: actor da pin (%) khong con active', v_actor_id;
   END IF;
@@ -1035,8 +1289,69 @@ $$;
 ALTER FUNCTION m4_stage0p_require_pinned_actor(TEXT) OWNER TO alpha3s_m4_definer;
 REVOKE EXECUTE ON FUNCTION m4_stage0p_require_pinned_actor(TEXT) FROM PUBLIC;
 
+-- T6-01: "logout" tuong minh - tu xoa pin cua CHINH session dang goi (khong doi hoi permission,
+-- chi tac dong toi row cua chinh backend_pid nay). Bo sung expiry lam lop phong thu thu 2.
+CREATE OR REPLACE FUNCTION m4_stage0p_unpin_actor()
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  DELETE FROM public.m4_stage0p_actor_session WHERE backend_pid = pg_backend_pid();
+END;
+$$;
+
+ALTER FUNCTION m4_stage0p_unpin_actor() OWNER TO alpha3s_m4_definer;
+REVOKE EXECUTE ON FUNCTION m4_stage0p_unpin_actor() FROM PUBLIC;
+
 -- ===========================================================================
--- 5e. m4_stage0p_set_capture — REV5 T4-04: bo p_actor_staff_id, doc actor qua
+-- 5d2. m4_stage0p_set_current_normalization_version - REV7 T6-04 (MOI). Duy nhat cach doi
+--      "normalization version hien hanh" - doi hoi pinned actor + quyen m4.stage0p.approve, ghi
+--      audit. Version MOI hoan toan (khong tao lai 1 version da dung - lich su bat bien).
+-- ===========================================================================
+CREATE OR REPLACE FUNCTION m4_stage0p_set_current_normalization_version(
+  p_version TEXT, p_approval_ref TEXT
+)
+RETURNS TABLE(version TEXT, effective_at TIMESTAMPTZ)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE v_actor_id BIGINT; v_now TIMESTAMPTZ := now(); v_audit_id BIGINT;
+BEGIN
+  v_actor_id := m4_stage0p_require_pinned_actor('m4.stage0p.approve');
+
+  IF p_version IS NULL OR length(btrim(p_version)) = 0 THEN
+    RAISE EXCEPTION 'm4_stage0p_set_current_normalization_version: version khong duoc rong';
+  END IF;
+  IF p_approval_ref IS NULL OR length(btrim(p_approval_ref)) = 0 THEN
+    RAISE EXCEPTION 'm4_stage0p_set_current_normalization_version: approval_ref khong duoc rong (T6-04)';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.m4_stage0p_normalization_registry AS nr WHERE nr.version = p_version) THEN
+    RAISE EXCEPTION 'm4_stage0p_set_current_normalization_version: version % da ton tai (lich su bat bien, khong tao lai - T6-04)', p_version;
+  END IF;
+
+  UPDATE public.m4_stage0p_normalization_registry SET is_current = FALSE WHERE is_current = TRUE;
+  INSERT INTO public.m4_stage0p_normalization_registry
+    (version, is_current, approved_by, approval_ref, effective_at)
+  VALUES (p_version, TRUE, v_actor_id, p_approval_ref, v_now);
+
+  INSERT INTO public.audit_log (actor_type, actor_staff_id, action, entity_type, entity_id, after)
+  VALUES ('staff', v_actor_id, 'm4_stage0p_normalization_version_changed',
+          'm4_stage0p_normalization_registry', p_version,
+          jsonb_build_object('approval_ref', p_approval_ref))
+  RETURNING id INTO v_audit_id;
+
+  RETURN QUERY SELECT p_version, v_now;
+END;
+$$;
+
+ALTER FUNCTION m4_stage0p_set_current_normalization_version(TEXT, TEXT) OWNER TO alpha3s_m4_definer;
+REVOKE EXECUTE ON FUNCTION m4_stage0p_set_current_normalization_version(TEXT, TEXT) FROM PUBLIC;
+
+-- ===========================================================================
+-- 5e. m4_stage0p_set_capture - REV5 T4-04: bo p_actor_staff_id, doc actor qua
 --     require_pinned_actor('m4.stage0p.operate'). T3-05 (khong doi): kiem KHONG bi revoke.
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION m4_stage0p_set_capture(
@@ -1101,7 +1416,7 @@ ALTER FUNCTION m4_stage0p_set_capture(BOOLEAN, TEXT) OWNER TO alpha3s_m4_definer
 REVOKE EXECUTE ON FUNCTION m4_stage0p_set_capture(BOOLEAN, TEXT) FROM PUBLIC;
 
 -- ===========================================================================
--- 5f. m4_stage0p_record_approval / m4_stage0p_revoke_approval — REV5 T4-04: bo p_actor_staff_id,
+-- 5f. m4_stage0p_record_approval / m4_stage0p_revoke_approval - REV5 T4-04: bo p_actor_staff_id,
 --     doc actor qua require_pinned_actor('m4.stage0p.approve').
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION m4_stage0p_record_approval(
@@ -1186,7 +1501,7 @@ ALTER FUNCTION m4_stage0p_revoke_approval(TEXT, TEXT) OWNER TO alpha3s_m4_define
 REVOKE EXECUTE ON FUNCTION m4_stage0p_revoke_approval(TEXT, TEXT) FROM PUBLIC;
 
 -- ===========================================================================
--- 5g. m4_stage0p_seal_labels — REV5 T4-04: bo p_actor_staff_id, doc actor qua
+-- 5g. m4_stage0p_seal_labels - REV5 T4-04: bo p_actor_staff_id, doc actor qua
 --     require_pinned_actor('m4.stage0p.review'). T3-02/T3-06 (khong doi): doi hoi
 --     status='collection_closed'; hash v2 bind them batch_id/normalization_version/truncated/
 --     canonical_text_len.
@@ -1214,7 +1529,7 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_seal_labels: batch_id khong ton tai';
   END IF;
   IF v_batch.status <> 'collection_closed' THEN
-    RAISE EXCEPTION 'm4_stage0p_seal_labels: batch % phai o trang thai collection_closed truoc khi seal (status hien tai=%) — T3-02',
+    RAISE EXCEPTION 'm4_stage0p_seal_labels: batch % phai o trang thai collection_closed truoc khi seal (status hien tai=%) - T3-02',
       p_batch_id, v_batch.status;
   END IF;
 
@@ -1229,8 +1544,14 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_seal_labels: batch % con % sample unlabeled', p_batch_id, v_unlabeled;
   END IF;
 
+  -- REV7 T6-03: bump v2->v3 - them capture_excluded_count/capture_permanent_failed_count/
+  -- capture_gate_policy (moi tu close_collection, chua tung nam trong hash chain) de "bind counts,
+  -- gate version va quyet dinh closure vao tamper-evident evidence/hash" (yeu cau CA Review #6).
   SELECT encode(digest(
-    'm4-stage0p-label-hash-v2|' || p_batch_id::text || '|' ||
+    'm4-stage0p-label-hash-v3|' || p_batch_id::text || '|' ||
+    'capture_excluded=' || coalesce(v_batch.capture_excluded_count::text, 'null') || '|' ||
+    'capture_permanent_failed=' || coalesce(v_batch.capture_permanent_failed_count::text, 'null') || '|' ||
+    'capture_gate_policy=' || coalesce(v_batch.capture_gate_policy, 'null') || '|' ||
     string_agg(
       sample_id::text || ':' || normalization_version || ':' || truncated::text || ':' ||
       canonical_text_len::text || ':' || coalesce(labeled_slots::text, 'null'),
@@ -1257,7 +1578,7 @@ ALTER FUNCTION m4_stage0p_seal_labels(UUID) OWNER TO alpha3s_m4_definer;
 REVOKE EXECUTE ON FUNCTION m4_stage0p_seal_labels(UUID) FROM PUBLIC;
 
 -- ===========================================================================
--- 5h. m4_stage0p_fetch_sealed_message — khong doi.
+-- 5h. m4_stage0p_fetch_sealed_message - khong doi.
 -- ===========================================================================
 CREATE OR REPLACE FUNCTION m4_stage0p_fetch_sealed_message(
   p_batch_id UUID,
@@ -1279,7 +1600,7 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_fetch_sealed_message: batch_id khong ton tai';
   END IF;
   IF v_sealed IS NULL THEN
-    RAISE EXCEPTION 'm4_stage0p_fetch_sealed_message: batch % chua sealed — KHONG duoc doc raw content', p_batch_id;
+    RAISE EXCEPTION 'm4_stage0p_fetch_sealed_message: batch % chua sealed - KHONG duoc doc raw content', p_batch_id;
   END IF;
 
   SELECT s.sample_id, s.encrypted_message, s.customer_ref, s.conversation_ref, s.canonical_text_len,
@@ -1311,12 +1632,12 @@ ALTER FUNCTION m4_stage0p_fetch_sealed_message(UUID, UUID) OWNER TO alpha3s_m4_d
 REVOKE EXECUTE ON FUNCTION m4_stage0p_fetch_sealed_message(UUID, UUID) FROM PUBLIC;
 
 -- ===========================================================================
--- 5i. m4_stage0p_write_predictions — REV5:
---     - T4-02: XOA p_current_normalization_version — DB tu so sanh voi hang so HARDCODE
+-- 5i. m4_stage0p_write_predictions - REV5:
+--     - T4-02: XOA p_current_normalization_version - DB tu so sanh voi hang so HARDCODE
 --       v_current_normalization_version (PHAI khop app/services/pii/stage0p_sampling.py:
---       NORMALIZATION_VERSION, bump ca 2 noi khi doi — cung quy uoc voi MATCHING_RULE_VERSION/
+--       NORMALIZATION_VERSION, bump ca 2 noi khi doi - cung quy uoc voi MATCHING_RULE_VERSION/
 --       AGGREGATION_VERSION trong complete_evaluation).
---     - T4-05: tran exclusion doc tu bang m4_stage0p_exclusion_gate (khong hardcode 50%) — 2 dieu
+--     - T4-05: tran exclusion doc tu bang m4_stage0p_exclusion_gate (khong hardcode 50%) - 2 dieu
 --       kien: ty le exclusion <= max_exclusion_rate VA so conversation KHONG bi loai >=
 --       min_non_excluded_conversations. Tra them non_excluded_conversation_count/gate_version.
 -- ===========================================================================
@@ -1361,7 +1682,7 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_write_predictions: batch_id khong ton tai';
   END IF;
   IF v_batch.status <> 'labels_sealed' THEN
-    RAISE EXCEPTION 'm4_stage0p_write_predictions: batch % phai o trang thai labels_sealed (status hien tai=%) — T3-02',
+    RAISE EXCEPTION 'm4_stage0p_write_predictions: batch % phai o trang thai labels_sealed (status hien tai=%) - T3-02',
       p_batch_id, v_batch.status;
   END IF;
   IF v_batch.labels_sealed_hash IS DISTINCT FROM p_expected_labels_sealed_hash THEN
@@ -1371,14 +1692,15 @@ BEGIN
   SELECT eg.max_exclusion_rate, eg.min_non_excluded_conversations, eg.gate_version
     INTO v_gate FROM public.m4_stage0p_exclusion_gate AS eg WHERE eg.id = 1;
   IF v_gate IS NULL THEN
-    RAISE EXCEPTION 'm4_stage0p_write_predictions: exclusion gate config chua duoc thiet lap — tu choi ghi (fail-closed, T4-05)';
+    RAISE EXCEPTION 'm4_stage0p_write_predictions: exclusion gate config chua duoc thiet lap - tu choi ghi (fail-closed, T4-05)';
   END IF;
 
   -- T5-04: doc tu bang registry (nguon THAT DUY NHAT) thay hardcode literal.
-  SELECT nr.current_version INTO v_current_normalization_version
-    FROM public.m4_stage0p_normalization_registry AS nr WHERE nr.id = 1;
+  -- REV7 T6-04: registry gio la versioned/append-only - doc row is_current=true thay vi id=1.
+  SELECT nr.version INTO v_current_normalization_version
+    FROM public.m4_stage0p_normalization_registry AS nr WHERE nr.is_current;
   IF v_current_normalization_version IS NULL THEN
-    RAISE EXCEPTION 'm4_stage0p_write_predictions: normalization registry chua duoc thiet lap — tu choi ghi (fail-closed, T5-04)';
+    RAISE EXCEPTION 'm4_stage0p_write_predictions: normalization registry chua duoc thiet lap - tu choi ghi (fail-closed, T5-04)';
   END IF;
 
   IF jsonb_typeof(p_predictions) <> 'array' THEN
@@ -1488,7 +1810,7 @@ BEGIN
     END IF;
     -- T4-02: so sanh voi hang so HARDCODE (khong con nhan tu tham so caller).
     IF v_item ->> 'reason' = 'normalization_version_mismatch' AND v_row_norm_version = v_current_normalization_version THEN
-      RAISE EXCEPTION 'm4_stage0p_write_predictions: exclusion normalization_version_mismatch SAI cho sample % (normalization_version thuc te (%) khop voi hien hanh (%)) — T3-03/T4-02',
+      RAISE EXCEPTION 'm4_stage0p_write_predictions: exclusion normalization_version_mismatch SAI cho sample % (normalization_version thuc te (%) khop voi hien hanh (%)) - T3-03/T4-02',
         v_sample_id, v_row_norm_version, v_current_normalization_version;
     END IF;
 
@@ -1508,7 +1830,7 @@ BEGIN
   -- T4-05: 2 dieu kien tu bang exclusion_gate (khong hardcode).
   IF array_length(v_all_ids, 1) > 0
      AND coalesce(array_length(v_excl_ids, 1), 0)::numeric / array_length(v_all_ids, 1) > v_gate.max_exclusion_rate THEN
-    RAISE EXCEPTION 'm4_stage0p_write_predictions: ty le exclusion (%/%) vuot nguong % (gate_version=%) — INSUFFICIENT_DATA (T4-05)',
+    RAISE EXCEPTION 'm4_stage0p_write_predictions: ty le exclusion (%/%) vuot nguong % (gate_version=%) - INSUFFICIENT_DATA (T4-05)',
       coalesce(array_length(v_excl_ids, 1), 0), array_length(v_all_ids, 1), v_gate.max_exclusion_rate, v_gate.gate_version;
   END IF;
 
@@ -1516,7 +1838,7 @@ BEGIN
     FROM public.m4_shadow_review_samples
     WHERE selection_batch = p_batch_id AND sample_id = ANY (v_pred_ids);
   IF v_non_excluded_conv_count < v_gate.min_non_excluded_conversations THEN
-    RAISE EXCEPTION 'm4_stage0p_write_predictions: so conversation khong bi loai (%) duoi nguong toi thieu % (gate_version=%) — INSUFFICIENT_DATA (T4-05)',
+    RAISE EXCEPTION 'm4_stage0p_write_predictions: so conversation khong bi loai (%) duoi nguong toi thieu % (gate_version=%) - INSUFFICIENT_DATA (T4-05)',
       v_non_excluded_conv_count, v_gate.min_non_excluded_conversations, v_gate.gate_version;
   END IF;
 
@@ -1573,7 +1895,7 @@ ALTER FUNCTION m4_stage0p_write_predictions(UUID, TEXT, JSONB, JSONB, TEXT, TEXT
 REVOKE EXECUTE ON FUNCTION m4_stage0p_write_predictions(UUID, TEXT, JSONB, JSONB, TEXT, TEXT) FROM PUBLIC;
 
 -- ===========================================================================
--- 5j. m4_stage0p_complete_evaluation — REV5 T4-04: bo p_actor_staff_id, doc actor qua
+-- 5j. m4_stage0p_complete_evaluation - REV5 T4-04: bo p_actor_staff_id, doc actor qua
 --     require_pinned_actor('m4.stage0p.evaluate'). T3-04 (khong doi): DB TU TINH exact-span
 --     metrics.
 -- ===========================================================================
@@ -1602,7 +1924,7 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_complete_evaluation: batch_id khong ton tai';
   END IF;
   IF v_batch.status <> 'predictions_written' THEN
-    RAISE EXCEPTION 'm4_stage0p_complete_evaluation: batch % phai o trang thai predictions_written (status hien tai=%) — T3-02',
+    RAISE EXCEPTION 'm4_stage0p_complete_evaluation: batch % phai o trang thai predictions_written (status hien tai=%) - T3-02',
       p_batch_id, v_batch.status;
   END IF;
   IF v_batch.result_hash IS DISTINCT FROM p_expected_result_hash THEN
@@ -1687,15 +2009,19 @@ GRANT SELECT, INSERT, DELETE ON public.m4_stage0p_fetch_capability TO alpha3s_m4
 GRANT SELECT, INSERT, UPDATE ON public.m4_stage0p_capture_progress TO alpha3s_m4_definer;
 GRANT SELECT ON public.m4_stage0p_staff_permissions TO alpha3s_m4_definer;
 GRANT SELECT ON public.m4_stage0p_exclusion_gate TO alpha3s_m4_definer;
-GRANT SELECT ON public.m4_stage0p_actor_credentials TO alpha3s_m4_definer;
-GRANT SELECT, INSERT, UPDATE ON public.m4_stage0p_actor_session TO alpha3s_m4_definer;
-GRANT SELECT ON public.m4_stage0p_normalization_registry TO alpha3s_m4_definer;
+-- T6-01: SELECT ... FOR UPDATE + UPDATE (failed_attempts/locked_until) tren credentials.
+GRANT SELECT, UPDATE ON public.m4_stage0p_actor_credentials TO alpha3s_m4_definer;
+-- T6-01: DELETE them (unpin_actor + tu don stale/expired row trong require_pinned_actor).
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.m4_stage0p_actor_session TO alpha3s_m4_definer;
+-- T6-04: INSERT/UPDATE them (set_current_normalization_version - INSERT version moi + UPDATE
+-- is_current tren row cu).
+GRANT SELECT, INSERT, UPDATE ON public.m4_stage0p_normalization_registry TO alpha3s_m4_definer;
 GRANT SELECT (id, is_active) ON public.staff_users TO alpha3s_m4_definer;
 GRANT INSERT, UPDATE, SELECT (id) ON public.audit_log TO alpha3s_m4_definer;
 GRANT USAGE ON SEQUENCE audit_log_id_seq TO alpha3s_m4_definer;
 
 -- ===========================================================================
--- 6. 9 role least-privilege (REV5 them alpha3s_m4_actor_binder — T4-04).
+-- 6. 9 role least-privilege (REV5 them alpha3s_m4_actor_binder - T4-04).
 -- ===========================================================================
 DO $$
 BEGIN
@@ -1728,7 +2054,7 @@ BEGIN
   END IF;
 END $$;
 
--- Cung bug tren (fresh-DB reset regression) — 9 role nghiep vu cung khong co USAGE tren schema
+-- Cung bug tren (fresh-DB reset regression) - 9 role nghiep vu cung khong co USAGE tren schema
 -- public tren 1 DB sach, nen KHONG the resolve duoc bat ky ham m4 nao caller can goi truc tiep.
 GRANT USAGE ON SCHEMA public TO alpha3s_m4_sample_collector, alpha3s_m4_sample_reviewer_api,
   alpha3s_m4_sample_evaluator, alpha3s_m4_prediction_writer, alpha3s_m4_sample_purge,
@@ -1743,7 +2069,7 @@ GRANT SELECT (batch_id) ON m4_selection_batches TO alpha3s_m4_sample_collector;
 GRANT INSERT ON m4_selection_batches TO alpha3s_m4_sample_collector;
 GRANT EXECUTE ON FUNCTION m4_stage0p_peek_next_candidate(UUID) TO alpha3s_m4_sample_collector;
 GRANT EXECUTE ON FUNCTION m4_stage0p_fetch_message_content(UUID, BIGINT, BIGINT) TO alpha3s_m4_sample_collector;
-GRANT EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN)
+GRANT EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
   TO alpha3s_m4_sample_collector;
 GRANT EXECUTE ON FUNCTION m4_stage0p_close_collection(UUID) TO alpha3s_m4_sample_collector;
 GRANT EXECUTE ON FUNCTION m4_stage0p_seed_capture_progress(UUID) TO alpha3s_m4_sample_collector;
@@ -1763,7 +2089,7 @@ GRANT INSERT ON audit_log TO alpha3s_m4_sample_reviewer_api;
 GRANT USAGE ON SEQUENCE audit_log_id_seq TO alpha3s_m4_sample_reviewer_api;
 
 -- 6c. evaluator: SELECT chi cot nhan/du doan + metadata, KHONG noi dung/dinh danh. EXECUTE
--- complete_evaluation (REV5: 2 tham so — khong con actor).
+-- complete_evaluation (REV5: 2 tham so - khong con actor).
 GRANT SELECT (sample_id, label_status, labeled_slots, predicted_slots, prediction_excluded_reason,
               canonical_text_len, normalization_version, detector_version, evaluation_batch,
               selection_batch, truncated)
@@ -1776,7 +2102,7 @@ GRANT INSERT ON audit_log TO alpha3s_m4_sample_evaluator;
 GRANT USAGE ON SEQUENCE audit_log_id_seq TO alpha3s_m4_sample_evaluator;
 
 -- 6d. prediction_writer: KHONG SELECT truc tiep tren cot noi dung; CHI EXECUTE fetch_sealed_message
--- + write_predictions (REV5: 6 tham so — bo p_current_normalization_version, T4-02).
+-- + write_predictions (REV5: 6 tham so - bo p_current_normalization_version, T4-02).
 GRANT SELECT (batch_id, labels_sealed_hash) ON m4_selection_batches TO alpha3s_m4_prediction_writer;
 GRANT EXECUTE ON FUNCTION m4_stage0p_fetch_sealed_message(UUID, UUID) TO alpha3s_m4_prediction_writer;
 GRANT EXECUTE ON FUNCTION m4_stage0p_write_predictions(UUID, TEXT, JSONB, JSONB, TEXT, TEXT)
@@ -1800,15 +2126,20 @@ GRANT INSERT ON audit_log TO alpha3s_m4_pending_checker;
 GRANT USAGE ON SEQUENCE audit_log_id_seq TO alpha3s_m4_pending_checker;
 
 -- 6h. approval_recorder: KHONG INSERT/SELECT bang truc tiep; CHI EXECUTE record_approval +
--- revoke_approval (REV5: 5/2 tham so — bo p_actor_staff_id, T4-04).
+-- revoke_approval (REV5: 5/2 tham so - bo p_actor_staff_id, T4-04) + set_current_normalization_
+-- version (REV7 T6-04, MOI - cung doi hoi quyen m4.stage0p.approve nen dat chung role).
 GRANT EXECUTE ON FUNCTION m4_stage0p_record_approval(TEXT, BOOLEAN, TIMESTAMPTZ, TIMESTAMPTZ, TEXT)
   TO alpha3s_m4_approval_recorder;
 GRANT EXECUTE ON FUNCTION m4_stage0p_revoke_approval(TEXT, TEXT) TO alpha3s_m4_approval_recorder;
+GRANT EXECUTE ON FUNCTION m4_stage0p_set_current_normalization_version(TEXT, TEXT)
+  TO alpha3s_m4_approval_recorder;
 
--- 6i. actor_binder — REV5 T4-04 (MOI): role RIENG, CHI EXECUTE pin_actor. Dai dien lop trung
--- gian DA xac thuc staff (vd HTTP session/JWT) truoc khi goi vao Stage 0P — tach biet HOAN TOAN
--- moi role nghiep vu khac (mot holder cua alpha3s_m4_approval_recorder KHONG the tu pin actor).
+-- 6i. actor_binder - REV5 T4-04 (MOI): role RIENG, CHI EXECUTE pin_actor + unpin_actor (REV7
+-- T6-01, MOI). Dai dien lop trung gian DA xac thuc staff (vd HTTP session/JWT) truoc khi goi vao
+-- Stage 0P - tach biet HOAN TOAN moi role nghiep vu khac (mot holder cua
+-- alpha3s_m4_approval_recorder KHONG the tu pin actor).
 GRANT EXECUTE ON FUNCTION m4_stage0p_pin_actor(BIGINT, TEXT) TO alpha3s_m4_actor_binder;
+GRANT EXECUTE ON FUNCTION m4_stage0p_unpin_actor() TO alpha3s_m4_actor_binder;
 
 -- 6j. DSR: process_deletion() qua runtime alpha3s_app.
 GRANT DELETE ON m4_shadow_review_samples TO alpha3s_app;
@@ -1825,12 +2156,14 @@ BEGIN
       m4_stage0p_normalization_registry FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_peek_next_candidate(UUID) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_fetch_message_content(UUID, BIGINT, BIGINT) FROM alpha3s_vendor_path;
-    REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN)
+    REVOKE EXECUTE ON FUNCTION m4_stage0p_record_sample(UUID, BIGINT, BIGINT, UUID, BYTEA, INT, BOOLEAN, BYTEA)
       FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_close_collection(UUID) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_seed_capture_progress(UUID) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_mark_candidate_outcome(UUID, BIGINT, BIGINT, TEXT, TEXT) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_pin_actor(BIGINT, TEXT) FROM alpha3s_vendor_path;
+    REVOKE EXECUTE ON FUNCTION m4_stage0p_unpin_actor() FROM alpha3s_vendor_path;
+    REVOKE EXECUTE ON FUNCTION m4_stage0p_set_current_normalization_version(TEXT, TEXT) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_set_capture(BOOLEAN, TEXT) FROM alpha3s_vendor_path;
     REVOKE EXECUTE ON FUNCTION m4_stage0p_record_approval(TEXT, BOOLEAN, TIMESTAMPTZ, TIMESTAMPTZ, TEXT)
       FROM alpha3s_vendor_path;
@@ -1843,7 +2176,7 @@ BEGIN
 END $$;
 
 -- ===========================================================================
--- 7. Postcondition fail-closed — REV5: chung minh T4-01..05 (cong voi toan bo bat bien
+-- 7. Postcondition fail-closed - REV5: chung minh T4-01..05 (cong voi toan bo bat bien
 --    REV2/REV3/REV4 truoc do)
 -- ===========================================================================
 DO $$
@@ -1879,8 +2212,13 @@ BEGIN
     problems := problems || ' control_not_default_off'; END IF;
   IF (SELECT count(*) FROM m4_stage0p_exclusion_gate) <> 1 THEN
     problems := problems || ' exclusion_gate_not_singleton'; END IF;
-  IF (SELECT count(*) FROM m4_stage0p_normalization_registry) <> 1 THEN
-    problems := problems || ' normalization_registry_not_singleton'; END IF;
+  IF (SELECT count(*) FROM m4_stage0p_normalization_registry WHERE is_current) <> 1 THEN
+    problems := problems || ' normalization_registry_no_single_current'; END IF;
+  IF to_regclass('public.m4_stage0p_normalization_registry') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'm4_normalization_registry_guard') THEN
+    problems := problems || ' normalization_registry_guard_trigger_missing'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'm4_batch_normalization_version_fk') THEN
+    problems := problems || ' batch_normalization_version_fk_missing'; END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='alpha3s_m4_definer'
                  AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb) THEN
@@ -1906,7 +2244,7 @@ BEGIN
     problems := problems || ' peek_execute_public'; END IF;
   IF has_function_privilege('public', 'm4_stage0p_fetch_message_content(uuid,bigint,bigint)', 'EXECUTE') THEN
     problems := problems || ' fetch_content_execute_public'; END IF;
-  IF has_function_privilege('public', 'm4_stage0p_record_sample(uuid,bigint,bigint,uuid,bytea,int,boolean)', 'EXECUTE') THEN
+  IF has_function_privilege('public', 'm4_stage0p_record_sample(uuid,bigint,bigint,uuid,bytea,int,boolean,bytea)', 'EXECUTE') THEN
     problems := problems || ' record_sample_execute_public'; END IF;
   IF has_function_privilege('public', 'm4_stage0p_close_collection(uuid)', 'EXECUTE') THEN
     problems := problems || ' close_collection_execute_public'; END IF;
@@ -1940,7 +2278,7 @@ BEGIN
        'm4_stage0p_fetch_message_content(uuid,bigint,bigint)', 'EXECUTE') THEN
     problems := problems || ' collector_no_execute_fetch_content'; END IF;
   IF NOT has_function_privilege('alpha3s_m4_sample_collector',
-       'm4_stage0p_record_sample(uuid,bigint,bigint,uuid,bytea,int,boolean)', 'EXECUTE') THEN
+       'm4_stage0p_record_sample(uuid,bigint,bigint,uuid,bytea,int,boolean,bytea)', 'EXECUTE') THEN
     problems := problems || ' collector_no_execute_record_sample'; END IF;
   IF NOT has_function_privilege('alpha3s_m4_sample_collector',
        'm4_stage0p_close_collection(uuid)', 'EXECUTE') THEN
@@ -2000,6 +2338,38 @@ BEGIN
     problems := problems || ' actor_binder_can_select_actor_credentials'; END IF;
   IF has_table_privilege('alpha3s_m4_actor_binder','m4_stage0p_actor_session','SELECT') THEN
     problems := problems || ' actor_binder_can_select_actor_session'; END IF;
+
+  -- REV7 T6-01: pin_secret KHONG con plaintext; unpin_actor CHI actor_binder EXECUTE duoc.
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name='m4_stage0p_actor_credentials' AND column_name='pin_secret') THEN
+    problems := problems || ' actor_credentials_still_has_plaintext_pin_secret_column'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='m4_stage0p_actor_credentials' AND column_name='pin_secret_hash') THEN
+    problems := problems || ' actor_credentials_missing_pin_secret_hash_column'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='m4_stage0p_actor_session' AND column_name='session_nonce') THEN
+    problems := problems || ' actor_session_missing_session_nonce_column'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='m4_stage0p_actor_session' AND column_name='expires_at') THEN
+    problems := problems || ' actor_session_missing_expires_at_column'; END IF;
+  IF has_function_privilege('public', 'm4_stage0p_unpin_actor()', 'EXECUTE') THEN
+    problems := problems || ' unpin_actor_execute_public'; END IF;
+  IF NOT has_function_privilege('alpha3s_m4_actor_binder', 'm4_stage0p_unpin_actor()', 'EXECUTE') THEN
+    problems := problems || ' actor_binder_no_execute_unpin'; END IF;
+  IF has_function_privilege('public', 'm4_stage0p_set_current_normalization_version(text,text)', 'EXECUTE') THEN
+    problems := problems || ' set_current_normalization_version_execute_public'; END IF;
+  IF NOT has_function_privilege('alpha3s_m4_approval_recorder',
+       'm4_stage0p_set_current_normalization_version(text,text)', 'EXECUTE') THEN
+    problems := problems || ' approval_recorder_no_execute_set_normalization_version'; END IF;
+
+  -- REV7 T6-02: fetch_capability co digest; REV7 T6-03: batch co capture_gate_policy.
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='m4_stage0p_fetch_capability' AND column_name='fetched_canonical_digest') THEN
+    problems := problems || ' fetch_capability_missing_canonical_digest_column'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='m4_selection_batches' AND column_name='capture_gate_policy') THEN
+    problems := problems || ' batch_missing_capture_gate_policy_column'; END IF;
+
   IF NOT has_column_privilege('alpha3s_m4_pending_checker','public.customers','psid','SELECT') THEN
     problems := problems || ' pending_checker_no_psid'; END IF;
 
@@ -2080,6 +2450,11 @@ BEGIN
       problems := problems || ' vendor_can_execute_fetch'; END IF;
     IF has_function_privilege('alpha3s_vendor_path', 'm4_stage0p_pin_actor(bigint,text)','EXECUTE') THEN
       problems := problems || ' vendor_can_execute_pin_actor'; END IF;
+    IF has_function_privilege('alpha3s_vendor_path', 'm4_stage0p_unpin_actor()','EXECUTE') THEN
+      problems := problems || ' vendor_can_execute_unpin_actor'; END IF;
+    IF has_function_privilege('alpha3s_vendor_path',
+                              'm4_stage0p_set_current_normalization_version(text,text)','EXECUTE') THEN
+      problems := problems || ' vendor_can_execute_set_normalization_version'; END IF;
   END IF;
 
   IF has_table_privilege('public','m4_shadow_review_samples','SELECT') THEN
@@ -2131,7 +2506,7 @@ BEGIN
     problems := problems || ' capture_progress_state_machine_incomplete'; END IF;
 
   -- REV5 T4-05: gate config phai la de xuat 10%/200 (chua PO chinh thuc, nhung phai la gia tri
-  -- CA de xuat — khong duoc am tham quay lai 50% cu).
+  -- CA de xuat - khong duoc am tham quay lai 50% cu).
   IF NOT EXISTS (
     SELECT 1 FROM m4_stage0p_exclusion_gate
     WHERE id = 1 AND max_exclusion_rate = 0.10 AND min_non_excluded_conversations = 200
@@ -2139,5 +2514,5 @@ BEGIN
     problems := problems || ' exclusion_gate_not_ca_proposed_default'; END IF;
 
   IF problems <> '' THEN
-    RAISE EXCEPTION '039 postcondition FAIL —%', problems; END IF;
+    RAISE EXCEPTION '039 postcondition FAIL -%', problems; END IF;
 END $$;

@@ -145,12 +145,15 @@ def select_sample(eligible: list[dict], cap: int = MAX_CONVERSATIONS) -> list[di
 
 
 async def get_current_normalization_version(conn) -> str:
-    """REV6 T5-04: doc normalization version hien hanh tu bang DB
+    """REV6 T5-04, REV7 T6-04: doc normalization version hien hanh tu bang DB
     `m4_stage0p_normalization_registry` — nguon THAT DUY NHAT (khong con hardcode song song o
-    Python). `conn` can SELECT tren bang nay (da GRANT cho collector/prediction_writer)."""
-    version = await conn.fetchval("SELECT current_version FROM m4_stage0p_normalization_registry WHERE id=1")
+    Python). REV7: bang gio la versioned/append-only (PK=version, cot is_current), doc row
+    is_current=true thay vi row id=1 singleton REV6. `conn` can SELECT tren bang nay (da GRANT cho
+    collector/prediction_writer)."""
+    version = await conn.fetchval(
+        "SELECT version FROM m4_stage0p_normalization_registry WHERE is_current")
     if not version:
-        raise RuntimeError("m4_stage0p_normalization_registry: chua thiet lap current_version")
+        raise RuntimeError("m4_stage0p_normalization_registry: chua co entry is_current")
     return version
 
 
@@ -206,13 +209,17 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
         conversation_ref = str(conversation_id)
         blob = encrypt_sample_value(text, customer_ref=customer_ref,
                                     conversation_ref=conversation_ref, sample_id=sample_id)
+        # REV7 T6-02: digest SHA-256 tinh NGAY TRUOC luc encrypt, tren CHINH van ban `text` da
+        # encrypt — DB doi chieu voi fetched_canonical_digest da tinh luc fetch (tren cung 1 thu tu
+        # nfc()+truncate()) de chan ciphertext-thay-the/canonical-length-khai-sai cung do dai.
+        canonical_digest = hashlib.sha256(text.encode("utf-8")).digest()
         # REV4 T3-01: khong con truyen customer_ref/conversation_ref/retention_days/
         # normalization_version — ham DB tu derive/doc lai (xem docstring module). Capability
         # token da duoc dat boi fetch_message_content o tren, trong CUNG transaction nay.
         await collector_conn.fetchrow(
-            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7)",
+            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
             batch_id, conversation_id, message_id, sample_id, blob, len(text), was_truncated,
-            timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+            canonical_digest, timeout=DB_STATEMENT_TIMEOUT_SECONDS,
         )
         return {"status": "ok", "truncated": was_truncated}
 

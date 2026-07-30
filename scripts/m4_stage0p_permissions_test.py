@@ -32,9 +32,11 @@ Duyet DAY DU 15 role (9 role M4 + alpha3s_app + alpha3s_vendor_path + PUBLIC) x 
 
 import asyncio
 import datetime
+import hashlib
 import json as _json
 import os
 import sys
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -42,6 +44,23 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import asyncpg  # noqa: E402
+
+MAX_CHARS = 2000
+MAX_BYTES = 8000
+
+
+def _canonical_digest(raw_content: str) -> bytes:
+    """T6-02: replicate CHINH XAC thu tu Python _truncate(nfc(...)) (stage0p_sampling.py) tren
+    `left(raw_content, 2000)` (gia tri fetch_message_content tra ve) de tinh digest DUNG nhu DB —
+    dung cho cac kich ban goi record_sample TRUC TIEP (khong qua run_collector) trong file nay."""
+    received = raw_content[:MAX_CHARS]
+    text = unicodedata.normalize("NFC", received)
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+    encoded = text.encode("utf-8")
+    if len(encoded) > MAX_BYTES:
+        text = encoded[:MAX_BYTES].decode("utf-8", errors="ignore")
+    return hashlib.sha256(text.encode("utf-8")).digest()
 
 DB_URL = (os.environ.get("DATABASE_URL")
           or "postgresql://alpha3s:alpha3s@alpha3s-m4-db:5432/alpha3s").replace("+asyncpg", "")
@@ -89,7 +108,7 @@ ROLES = [
 FUNCTIONS = [
     ("m4_stage0p_peek_next_candidate", "uuid", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_fetch_message_content", "uuid,bigint,bigint", "alpha3s_m4_sample_collector"),
-    ("m4_stage0p_record_sample", "uuid,bigint,bigint,uuid,bytea,int,boolean", "alpha3s_m4_sample_collector"),
+    ("m4_stage0p_record_sample", "uuid,bigint,bigint,uuid,bytea,int,boolean,bytea", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_close_collection", "uuid", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_seed_capture_progress", "uuid", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_mark_candidate_outcome", "uuid,bigint,bigint,text,text", "alpha3s_m4_sample_collector"),
@@ -102,6 +121,8 @@ FUNCTIONS = [
     ("m4_stage0p_fetch_sealed_message", "uuid,uuid", "alpha3s_m4_prediction_writer"),
     ("m4_stage0p_write_predictions", "uuid,text,jsonb,jsonb,text,text", "alpha3s_m4_prediction_writer"),
     ("m4_stage0p_complete_evaluation", "uuid,text", "alpha3s_m4_sample_evaluator"),
+    ("m4_stage0p_unpin_actor", "", "alpha3s_m4_actor_binder"),
+    ("m4_stage0p_set_current_normalization_version", "text,text", "alpha3s_m4_approval_recorder"),
 ]
 
 PERMISSIONS = ["m4.stage0p.approve", "m4.stage0p.operate", "m4.stage0p.review", "m4.stage0p.evaluate"]
@@ -109,11 +130,14 @@ PIN_SECRET = "perm-test-pin-secret"
 
 
 async def _provision_pin_secret(admin, *, staff_id, pin_secret=PIN_SECRET, provisioned_by=None):
-    """T5-01: cap pin_secret NGOAI LUONG (khong qua pin_actor) — mo phong buoc provisioning
-    thuoc quyet dinh van hanh, o day dung 1 admin connection truc tiep de chuan bi tien de test."""
+    """T5-01/T6-01: cap pin_secret NGOAI LUONG (khong qua pin_actor) — mo phong buoc provisioning
+    thuoc quyet dinh van hanh. pin_secret_hash dung pgcrypto crypt()/gen_salt('bf') — KHONG con
+    luu plaintext (T6-01)."""
     await admin.execute(
-        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret, provisioned_by) "
-        "VALUES ($1,$2,$3) ON CONFLICT (staff_id) DO UPDATE SET pin_secret=$2",
+        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret_hash, provisioned_by) "
+        "VALUES ($1, crypt($2, gen_salt('bf')), $3) "
+        "ON CONFLICT (staff_id) DO UPDATE SET pin_secret_hash=crypt($2, gen_salt('bf')), "
+        "failed_attempts=0, locked_until=NULL",
         staff_id, pin_secret, provisioned_by or staff_id)
 
 
@@ -185,8 +209,8 @@ async def _make_collection_closed_batch(admin, *, seed: str, samples: list[tuple
     `samples`: [(sample_id, customer_ref, canonical_text_len)]."""
     batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
-        "algorithm_seed, locked_conversation_ids, purpose_code, status, captured_count, collection_closed_at) "
-        "VALUES (now()-interval '1 day', now(), $1, $1, $2, ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', "
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version, status, captured_count, collection_closed_at) "
+        "VALUES (now()-interval '1 day', now(), $1, $1, $2, ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1', "
         "'collection_closed', $1, now()) RETURNING batch_id",
         len(samples), seed)
     for sample_id, customer_ref, canonical_len in samples:
@@ -205,8 +229,8 @@ async def _make_large_batch(admin, *, seed: str, n: int) -> tuple:
     da labeled (labeled_slots rong) + sealed-ready (status='collection_closed')."""
     batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
-        "algorithm_seed, locked_conversation_ids, purpose_code, status, captured_count, collection_closed_at) "
-        "VALUES (now()-interval '1 day', now(), $1, $1, $2, ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', "
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version, status, captured_count, collection_closed_at) "
+        "VALUES (now()-interval '1 day', now(), $1, $1, $2, ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1', "
         "'collection_closed', $1, now()) RETURNING batch_id", n, seed)
     sample_ids = [str(uuid.uuid4()) for _ in range(n)]
     refs = [f"{seed}-{i}" for i in range(n)]
@@ -234,9 +258,9 @@ async def main() -> int:
 
     batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, "
-        "selected_count, algorithm_seed, locked_conversation_ids, purpose_code) "
+        "selected_count, algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) "
         "VALUES (now()-interval '1 day', now(), 0, 0, 'perm-test', ARRAY[]::bigint[], "
-        "'P12_PII_DETECTOR_EVAL') RETURNING batch_id"
+        "'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id"
     )
     sample_id = str(uuid.uuid4())
     await admin.execute(
@@ -385,7 +409,7 @@ async def main() -> int:
         ("alpha3s_m4_control_plane", "actor_credentials", "SELECT (phai DENY — T5-01)",
          "SELECT * FROM m4_stage0p_actor_credentials", False),
         ("alpha3s_m4_prediction_writer", "normalization_registry", "UPDATE (phai DENY — T5-04)",
-         "UPDATE m4_stage0p_normalization_registry SET current_version='forged-version'", False),
+         "UPDATE m4_stage0p_normalization_registry SET is_current=false", False),
         ("public", "actor_credentials", "SELECT", "SELECT * FROM m4_stage0p_actor_credentials", False),
         ("public", "actor_session", "SELECT", "SELECT * FROM m4_stage0p_actor_session", False),
         ("public", "normalization_registry", "SELECT", "SELECT * FROM m4_stage0p_normalization_registry", False),
@@ -516,11 +540,14 @@ async def main() -> int:
     print("== T5-01: pin_actor tu choi pin_secret sai/khong ton tai (binder KHONG the tu chon tuy y staff) ==")
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_actor_binder")
-    try:
-        await conn.fetchrow("SELECT * FROM m4_stage0p_pin_actor($1,$2)", staff["id"], "sai-secret-hoan-toan")
-        check(False, "pin_actor voi pin_secret sai -> phai RAISE (T5-01)")
-    except asyncpg.PostgresError as e:
-        check("khong khop" in str(e), "pin_actor voi pin_secret sai -> RAISE dung (T5-01)")
+    # T6-01: pin_secret sai KHONG con RAISE (xem docstring migration — PL/pgSQL khong co autonomous
+    # transaction, RAISE se lam mat UPDATE failed_attempts) — DB tra ve pinned_staff_id=NULL.
+    wrong_row = await conn.fetchrow("SELECT * FROM m4_stage0p_pin_actor($1,$2)", staff["id"], "sai-secret-hoan-toan")
+    check(wrong_row["pinned_staff_id"] is None, "pin_actor voi pin_secret sai -> pinned_staff_id=NULL (T5-01/T6-01)")
+    # don sach ngay de khong anh huong failed_attempts cua staff["id"] cho cac test rate-limit rieng ve sau.
+    await admin.execute(
+        "UPDATE m4_stage0p_actor_credentials SET failed_attempts=0, locked_until=NULL WHERE staff_id=$1",
+        staff["id"])
     staff_no_secret = await admin.fetchrow(
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ('m4-perm-test-nosecret', 'x', 'x', true) RETURNING id")
@@ -528,7 +555,7 @@ async def main() -> int:
         await conn.fetchrow("SELECT * FROM m4_stage0p_pin_actor($1,$2)", staff_no_secret["id"], PIN_SECRET)
         check(False, "pin_actor cho staff CHUA duoc provision pin_secret -> phai RAISE (T5-01, binder khong the tu chon tuy y)")
     except asyncpg.PostgresError as e:
-        check("khong khop" in str(e), "pin_actor cho staff chua provision -> RAISE dung (T5-01)")
+        check("chua duoc provisioning" in str(e), "pin_actor cho staff chua provision -> RAISE dung (T5-01/T6-01)")
     finally:
         await conn.execute("RESET ROLE")
         await conn.close()
@@ -677,9 +704,9 @@ async def main() -> int:
 
     closed_batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, "
-        "selected_count, algorithm_seed, locked_conversation_ids, purpose_code, status, "
+        "selected_count, algorithm_seed, locked_conversation_ids, purpose_code, normalization_version, status, "
         "collection_closed_at) VALUES (now()-interval '1 day', now(), 0, 0, 'perm-test-2', "
-        "ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', 'collection_closed', now()) RETURNING batch_id"
+        "ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1', 'collection_closed', now()) RETURNING batch_id"
     )
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
@@ -711,8 +738,8 @@ async def main() -> int:
     await off_conn.close()
     fresh_batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
-        "algorithm_seed, locked_conversation_ids, purpose_code) VALUES (now()-interval '1 day', now(), "
-        "0, 0, 'perm-test-2b', ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL') RETURNING batch_id"
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES (now()-interval '1 day', now(), "
+        "0, 0, 'perm-test-2b', ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id"
     )
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
@@ -737,9 +764,9 @@ async def main() -> int:
         conv["id"])
     audit_batch = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, "
-        "selected_count, algorithm_seed, locked_conversation_ids, purpose_code) "
+        "selected_count, algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) "
         "VALUES (now()-interval '1 day', now(), 1, 1, 'perm-test-audit', ARRAY[$1]::bigint[], "
-        "'P12_PII_DETECTOR_EVAL') RETURNING batch_id", conv["id"]
+        "'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv["id"]
     )
     seed_conn = await asyncpg.connect(DB_URL)
     await seed_conn.execute("SET ROLE alpha3s_m4_sample_collector")
@@ -771,9 +798,9 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
-        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7)",
+        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
                             audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()),
-                            b"\x00" * 30, 1, False)
+                            b"\x00" * 30, 1, False, hashlib.sha256(b"dummy").digest())
         check(False, "record_sample doc lap (khong fetch truoc) -> phai RAISE (T4-01)")
     except asyncpg.PostgresError as e:
         check("khong co capability fetch hop le" in str(e), "record_sample doc lap -> RAISE dung (T4-01)")
@@ -789,9 +816,9 @@ async def main() -> int:
                                             audit_batch["batch_id"], conv["id"], msg["id"])
         check(fetched_cross["status"] == "ok", "fetch_message_content thanh cong (transaction A)")
     try:
-        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7)",
+        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
                             audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()),
-                            b"\x00" * 30, 1, False)
+                            b"\x00" * 30, 1, False, hashlib.sha256(b"dummy").digest())
         check(False, "record_sample o transaction KHAC voi fetch -> phai RAISE (T4-01)")
     except asyncpg.PostgresError as e:
         check("khong co capability fetch hop le" in str(e),
@@ -810,10 +837,14 @@ async def main() -> int:
         count_mid = await admin.fetchval(
             "SELECT captured_count FROM m4_selection_batches WHERE batch_id=$1", audit_batch["batch_id"])
         check(count_mid == 0, "T2-06: fetch content thanh cong nhung CHUA record_sample -> captured_count VAN la 0")
+        # T6-02: canonical_text_len/digest gio PHAI khop CHINH XAC noi dung that ("tin nhan that",
+        # 13 ky tu) — khong con "canonical_text_len=1 gia" nhu REV6 (chi kiem <=, gio la <>).
+        real_digest = _canonical_digest("tin nhan that")
         rec = await conn.fetchrow(
-            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7)",
-            # T5-02: ciphertext PHAI >= canonical_text_len+30 (AEAD overhead) — 31 byte cho 1 ky tu.
-            audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()), b"\x00" * 31, 1, False)
+            "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
+            # T5-02: ciphertext PHAI >= canonical_text_len+30 (AEAD overhead) — 43 byte cho 13 ky tu.
+            audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()), b"\x00" * 43, 13,
+            False, real_digest)
         check(rec["captured_count"] == 1,
               "T2-06/T4-01: record_sample (CUNG transaction voi fetch) -> captured_count tang DUNG 1")
     progress_after = await admin.fetchval(
@@ -833,12 +864,15 @@ async def main() -> int:
         await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
                             audit_batch["batch_id"], conv["id"], msg_a["id"])
         try:
-            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7)",
+            # T6-02: digest DUNG (noi dung that "tin nhan ngan") nhung canonical_text_len khai SAI
+            # (5000, thuc te 13) — digest check PASS (doc lap voi do dai khai bao), roi moi den
+            # exact-length check RAISE.
+            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
                                 audit_batch["batch_id"], conv["id"], msg_a["id"], str(uuid.uuid4()),
-                                b"\x00" * 5000, 5000, False)
-            check(False, "canonical_text_len (5000) vuot qua do dai da fetch -> phai RAISE (T5-02)")
+                                b"\x00" * 5000, 5000, False, _canonical_digest("tin nhan ngan"))
+            check(False, "canonical_text_len (5000) khong khop do dai da fetch -> phai RAISE (T5-02)")
         except asyncpg.PostgresError as e:
-            check("vuot qua do dai da fetch" in str(e), "canonical_text_len vuot qua do dai da fetch -> RAISE dung (T5-02)")
+            check("khong khop do dai da fetch" in str(e), "canonical_text_len khong khop do dai da fetch -> RAISE dung (T5-02/T6-02)")
     await conn.execute("RESET ROLE")
     await conn.close()
 
@@ -859,12 +893,15 @@ async def main() -> int:
                                            audit_batch["batch_id"], conv_long["id"], msg_b["id"])
         check(fetched_long["char_truncated"] is True, "setup: noi dung 2500 ky tu -> DB bao char_truncated=true")
         try:
-            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7)",
+            # T6-02: digest DUNG (canonical that = "a"*2000, dung nhu DB da tinh luc fetch) + do
+            # dai dung (2000) nhung p_truncated=False la LOI DUY NHAT dang test.
+            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
                                 audit_batch["batch_id"], conv_long["id"], msg_b["id"], str(uuid.uuid4()),
-                                b"\x00" * 2030, 2000, False)
+                                b"\x00" * 2030, 2000, False, _canonical_digest("a" * 2500))
             check(False, "p_truncated=false khi DB biet noi dung goc bi cat -> phai RAISE (T5-02)")
         except asyncpg.PostgresError as e:
-            check("da biet la bi cat" in str(e), "p_truncated=false che giau truncation -> RAISE dung (T5-02)")
+            check("khong khop trang thai cat da fetch" in str(e),
+                  "p_truncated=false che giau truncation -> RAISE dung (T5-02/T6-02)")
     await conn.execute("RESET ROLE")
     await conn.close()
 
@@ -878,11 +915,12 @@ async def main() -> int:
         await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
                             audit_batch["batch_id"], conv["id"], msg_c["id"])
         try:
-            # canonical_text_len=1 nhung ciphertext 3000 byte — vuot xa AEAD overhead hop ly.
-            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7)",
+            # T6-02: digest+do dai (10, "tin nhan c") DUNG het — chi ciphertext 3000 byte la SAI
+            # (vuot xa AEAD overhead hop ly cho 10 ky tu, toi da 10*4+30=70 byte).
+            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
                                 audit_batch["batch_id"], conv["id"], msg_c["id"], str(uuid.uuid4()),
-                                b"\x00" * 3000, 1, False)
-            check(False, "ciphertext 3000 byte cho canonical_text_len=1 -> phai RAISE (T5-02)")
+                                b"\x00" * 3000, 10, False, _canonical_digest("tin nhan c"))
+            check(False, "ciphertext 3000 byte cho canonical_text_len=10 -> phai RAISE (T5-02)")
         except asyncpg.PostgresError as e:
             check("khong hop ly" in str(e), "ciphertext qua dai so canonical_text_len -> RAISE dung (T5-02)")
     await conn.execute("RESET ROLE")
@@ -901,8 +939,8 @@ async def main() -> int:
         conv3["id"])
     batch3 = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
-        "algorithm_seed, locked_conversation_ids, purpose_code) VALUES (now()-interval '1 day', now(), "
-        "1, 1, 'perm-test-403', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL') RETURNING batch_id", conv3["id"])
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES (now()-interval '1 day', now(), "
+        "1, 1, 'perm-test-403', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv3["id"])
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     seed3 = await conn.fetchrow("SELECT * FROM m4_stage0p_seed_capture_progress($1)", batch3["batch_id"])
@@ -958,7 +996,7 @@ async def main() -> int:
     await conn.execute("RESET ROLE")
     await conn.close()
 
-    print("== T5-03: close_collection THANH CONG khi ty le permanent_failed duoi nguong (1/20 = 5% <= 10%) ==")
+    print("== T6-03: close_collection TU CHOI VO DIEU KIEN du chi 1/20 = 5% permanent_failed (khong con dung ty le) ==")
     cust3b = await admin.fetchrow("INSERT INTO customers (psid,name) VALUES ('perm-t503','x') RETURNING id")
     conv3b = await admin.fetchrow(
         "INSERT INTO conversations (customer_id, created_at) VALUES ($1, now()) RETURNING id", cust3b["id"])
@@ -968,8 +1006,8 @@ async def main() -> int:
             conv3b["id"], f"tin t503 so {i}")
     batch3b = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
-        "algorithm_seed, locked_conversation_ids, purpose_code) VALUES (now()-interval '1 day', now(), "
-        "1, 1, 'perm-test-503', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL') RETURNING batch_id", conv3b["id"])
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES (now()-interval '1 day', now(), "
+        "1, 1, 'perm-test-503', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv3b["id"])
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     seed3b = await conn.fetchrow("SELECT * FROM m4_stage0p_seed_capture_progress($1)", batch3b["batch_id"])
@@ -977,8 +1015,10 @@ async def main() -> int:
     rows3b = await admin.fetch(
         "SELECT conversation_id, message_id FROM m4_stage0p_capture_progress WHERE batch_id=$1 ORDER BY message_id",
         batch3b["batch_id"])
-    # 1 candidate permanent_failed (3 lan fence_timeout), 19 con lai excluded (terminal, khong tinh
-    # vao permanent_failed) — ty le permanent_failed = 1/20 = 5%, duoi nguong 10%.
+    # T6-03: 1 candidate permanent_failed (3 lan fence_timeout), 19 con lai excluded — ty le CHI
+    # 5%, nhung REV7 KHONG con dung nguong ty le (CA Review #6 chi ro nguong exclusion_gate van la
+    # de xuat CA chua duyet, khong duoc dung de "cho phep" permanent_failed di tiep) -> PHAI RAISE
+    # VO DIEU KIEN, khac han REV6 (tung THANH CONG o kich ban y het nay).
     for _ in range(3):
         await conn.fetchrow("SELECT * FROM m4_stage0p_mark_candidate_outcome($1,$2,$3,'fence_timeout',$4)",
                             batch3b["batch_id"], rows3b[0]["conversation_id"], rows3b[0]["message_id"],
@@ -987,14 +1027,83 @@ async def main() -> int:
         await conn.fetchrow("SELECT * FROM m4_stage0p_mark_candidate_outcome($1,$2,$3,'pending_deletion',$4)",
                             batch3b["batch_id"], r["conversation_id"], r["message_id"],
                             "customer_in_pending_cache")
-    close3b = await conn.fetchrow("SELECT * FROM m4_stage0p_close_collection($1)", batch3b["batch_id"])
-    check(close3b["status"] == "collection_closed",
-          "close_collection THANH CONG khi ty le permanent_failed 5% (1/20) duoi nguong 10% (T5-03)")
-    batch3b_row = await admin.fetchrow(
-        "SELECT capture_excluded_count, capture_permanent_failed_count FROM m4_selection_batches WHERE batch_id=$1",
-        batch3b["batch_id"])
-    check(batch3b_row["capture_excluded_count"] == 19 and batch3b_row["capture_permanent_failed_count"] == 1,
-          f"T5-03: capture_excluded_count/capture_permanent_failed_count luu dung tren batch row (thuc te {dict(batch3b_row)})")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_close_collection($1)", batch3b["batch_id"])
+        check(False, "close_collection voi 1/20 (5%) permanent_failed -> phai RAISE VO DIEU KIEN (T6-03)")
+    except asyncpg.PostgresError as e:
+        check("INSUFFICIENT_DATA" in str(e) and "permanent_failed" in str(e),
+              "close_collection tu choi VO DIEU KIEN du ty le thap (5%) -> RAISE dung (T6-03)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
+    print("== T6-03: close_collection THANH CONG khi 0 permanent_failed (chi excluded+committed) — luu capture_gate_policy ==")
+    cust3c = await admin.fetchrow("INSERT INTO customers (psid,name) VALUES ('perm-t603','x') RETURNING id")
+    conv3c = await admin.fetchrow(
+        "INSERT INTO conversations (customer_id, created_at) VALUES ($1, now()) RETURNING id", cust3c["id"])
+    msgs3c = []
+    for i in range(3):
+        m = await admin.fetchrow(
+            "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer',$2) RETURNING id",
+            conv3c["id"], f"tin t603 so {i}")
+        msgs3c.append(m)
+    batch3c = await admin.fetchrow(
+        "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES (now()-interval '1 day', now(), "
+        "1, 1, 'perm-test-603', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv3c["id"])
+    on_conn3c = await asyncpg.connect(DB_URL)
+    await _set_capture(on_conn3c, enabled=True, staff_id=staff["id"], approval_ref="perm-test-approval-ok")
+    await on_conn3c.close()
+    conn = await asyncpg.connect(DB_URL)
+    await conn.execute("SET ROLE alpha3s_m4_sample_collector")
+    seed3c = await conn.fetchrow("SELECT * FROM m4_stage0p_seed_capture_progress($1)", batch3c["batch_id"])
+    check(seed3c["candidate_count"] == 3, "seed_capture_progress vet dung 3 candidate")
+    async with conn.transaction():
+        fetched3c = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                                        batch3c["batch_id"], conv3c["id"], msgs3c[0]["id"])
+        check(fetched3c["status"] == "ok", f"setup: fetch batch3c thanh cong (thuc te {dict(fetched3c)})")
+        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
+                            batch3c["batch_id"], conv3c["id"], msgs3c[0]["id"], str(uuid.uuid4()),
+                            b"\x00" * 60, 13, False, _canonical_digest("tin t603 so 0"))
+    for m in msgs3c[1:]:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_mark_candidate_outcome($1,$2,$3,'pending_deletion',$4)",
+                            batch3c["batch_id"], conv3c["id"], m["id"], "customer_in_pending_cache")
+    close3c = await conn.fetchrow("SELECT * FROM m4_stage0p_close_collection($1)", batch3c["batch_id"])
+    check(close3c["status"] == "collection_closed",
+          "close_collection THANH CONG khi 0 permanent_failed (1 committed + 2 excluded, T6-03)")
+    batch3c_row = await admin.fetchrow(
+        "SELECT capture_excluded_count, capture_permanent_failed_count, capture_gate_policy "
+        "FROM m4_selection_batches WHERE batch_id=$1", batch3c["batch_id"])
+    check(batch3c_row["capture_excluded_count"] == 2 and batch3c_row["capture_permanent_failed_count"] == 0,
+          f"T6-03: capture_excluded_count/capture_permanent_failed_count luu dung tren batch row (thuc te {dict(batch3c_row)})")
+    check(batch3c_row["capture_gate_policy"] == "zero_tolerance_pending_po_decision_v1",
+          f"T6-03: capture_gate_policy luu dung tren batch row (thuc te {batch3c_row['capture_gate_policy']})")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+    off_conn3c = await asyncpg.connect(DB_URL)
+    await _set_capture(off_conn3c, enabled=False, staff_id=staff["id"], approval_ref="perm-test-t603-off")
+    await off_conn3c.close()
+
+    print("== T6-03: close_collection TU CHOI corpus RONG (0 candidate committed, khong permanent_failed) ==")
+    cust3d = await admin.fetchrow("INSERT INTO customers (psid,name) VALUES ('perm-t603d','x') RETURNING id")
+    conv3d = await admin.fetchrow(
+        "INSERT INTO conversations (customer_id, created_at) VALUES ($1, now()) RETURNING id", cust3d["id"])
+    msg3d = await admin.fetchrow(
+        "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer','tin t603d') RETURNING id",
+        conv3d["id"])
+    batch3d = await admin.fetchrow(
+        "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES (now()-interval '1 day', now(), "
+        "1, 1, 'perm-test-603d', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv3d["id"])
+    conn = await asyncpg.connect(DB_URL)
+    await conn.execute("SET ROLE alpha3s_m4_sample_collector")
+    await conn.fetchrow("SELECT * FROM m4_stage0p_seed_capture_progress($1)", batch3d["batch_id"])
+    await conn.fetchrow("SELECT * FROM m4_stage0p_mark_candidate_outcome($1,$2,$3,'pending_deletion',$4)",
+                        batch3d["batch_id"], conv3d["id"], msg3d["id"], "customer_in_pending_cache")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_close_collection($1)", batch3d["batch_id"])
+        check(False, "close_collection voi corpus rong (0 committed) -> phai RAISE (T6-03)")
+    except asyncpg.PostgresError as e:
+        check("corpus rong" in str(e), "close_collection tu choi corpus rong -> RAISE dung (T6-03)")
     await conn.execute("RESET ROLE")
     await conn.close()
 
@@ -1008,8 +1117,8 @@ async def main() -> int:
             conv4["id"], f"tin {i}")
     batch4 = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
-        "algorithm_seed, locked_conversation_ids, purpose_code) VALUES (now()-interval '1 day', now(), "
-        "1, 1, 'perm-test-403b', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL') RETURNING batch_id", conv4["id"])
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES (now()-interval '1 day', now(), "
+        "1, 1, 'perm-test-403b', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id", conv4["id"])
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     seed4 = await conn.fetchrow("SELECT * FROM m4_stage0p_seed_capture_progress($1)", batch4["batch_id"])
@@ -1021,25 +1130,40 @@ async def main() -> int:
         check("CHUA o trang thai terminal" in str(e), "close_collection voi candidate pending -> RAISE dung (T4-03)")
     await conn.execute("RESET ROLE")
     await conn.close()
-    # danh dau ca 2 candidate excluded (terminal) qua mark_candidate_outcome — chuan bi cho close thanh cong.
+    # T6-03: dat 1 candidate terminal qua excluded, 1 candidate qua record_sample THAT (committed)
+    # — corpus KHONG con rong (khac REV6, ca 2 candidate deu excluded van THANH CONG duoc; REV7
+    # doi hoi >=1 committed).
     rows4 = await admin.fetch(
-        "SELECT conversation_id, message_id FROM m4_stage0p_capture_progress WHERE batch_id=$1", batch4["batch_id"])
+        "SELECT conversation_id, message_id FROM m4_stage0p_capture_progress WHERE batch_id=$1 ORDER BY message_id",
+        batch4["batch_id"])
+    on_conn4 = await asyncpg.connect(DB_URL)
+    await _set_capture(on_conn4, enabled=True, staff_id=staff["id"], approval_ref="perm-test-approval-ok")
+    await on_conn4.close()
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
-    for r in rows4:
-        await conn.fetchrow("SELECT * FROM m4_stage0p_mark_candidate_outcome($1,$2,$3,'pending_deletion',$4)",
-                            batch4["batch_id"], r["conversation_id"], r["message_id"], "customer_in_pending_cache")
+    async with conn.transaction():
+        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                            batch4["batch_id"], rows4[0]["conversation_id"], rows4[0]["message_id"])
+        await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
+                            batch4["batch_id"], rows4[0]["conversation_id"], rows4[0]["message_id"],
+                            str(uuid.uuid4()), b"\x00" * 40, 5, False, _canonical_digest("tin 0"))
+    await conn.fetchrow("SELECT * FROM m4_stage0p_mark_candidate_outcome($1,$2,$3,'pending_deletion',$4)",
+                        batch4["batch_id"], rows4[1]["conversation_id"], rows4[1]["message_id"],
+                        "customer_in_pending_cache")
     close4 = await conn.fetchrow("SELECT * FROM m4_stage0p_close_collection($1)", batch4["batch_id"])
     check(close4["status"] == "collection_closed",
-          "close_collection THANH CONG sau khi MOI candidate dat terminal (excluded) — T4-03")
+          "close_collection THANH CONG sau khi MOI candidate dat terminal (1 committed + 1 excluded) — T4-03/T6-03")
     await conn.execute("RESET ROLE")
     await conn.close()
+    off_conn4 = await asyncpg.connect(DB_URL)
+    await _set_capture(off_conn4, enabled=False, staff_id=staff["id"], approval_ref="perm-test-t403-off")
+    await off_conn4.close()
 
     print("== T4-03: close_collection tu choi neu captured_count/row-thuc-te/progress-committed lech nhau ==")
     batch5 = await admin.fetchrow(
         "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, selected_count, "
-        "algorithm_seed, locked_conversation_ids, purpose_code, captured_count, status) VALUES "
-        "(now()-interval '1 day', now(), 1, 1, 'perm-test-305', ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', "
+        "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version, captured_count, status) VALUES "
+        "(now()-interval '1 day', now(), 1, 1, 'perm-test-305', ARRAY[]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1', "
         "5, 'collecting') RETURNING batch_id")
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
@@ -1236,11 +1360,11 @@ async def main() -> int:
               _json.dumps([{"sample_id": adv_sample, "reason": "normalization_version_mismatch"}]),
               "1 sample vua predict vua exclude")
 
-    print("== T5-04: normalization registry la nguon THAT DUY NHAT (khong con hardcode kep) ==")
+    print("== T5-04/T6-04: normalization registry la nguon THAT DUY NHAT (append-only, versioned) ==")
     registry_row = await admin.fetchrow(
-        "SELECT current_version FROM m4_stage0p_normalization_registry WHERE id=1")
-    check(registry_row["current_version"] == "nfc-v1",
-          f"registry seed dung 'nfc-v1' (thuc te {registry_row['current_version']})")
+        "SELECT version FROM m4_stage0p_normalization_registry WHERE is_current")
+    check(registry_row["version"] == "nfc-v1",
+          f"registry seed dung 'nfc-v1' (thuc te {registry_row['version']})")
 
     print("== T2-03: write_predictions THANH CONG voi payload hop le + phu dung coverage (200 conv) ==")
     conn = await asyncpg.connect(DB_URL)
@@ -1375,6 +1499,179 @@ async def main() -> int:
         check("predictions_written" in str(e), "complete_evaluation voi batch chua ghi prediction -> RAISE dung (T3-02)")
     finally:
         await conn.close()
+
+    print("== T6-01: pin_actor rate-limit — 5 lan sai lien tiep -> khoa 15 phut, dung ca khi bien secret DUNG sau do ==")
+    conn = await asyncpg.connect(DB_URL)
+    await conn.execute("SET ROLE alpha3s_m4_actor_binder")
+    for i in range(5):
+        row_i = await conn.fetchrow("SELECT * FROM m4_stage0p_pin_actor($1,$2)", staff["id"], f"sai-lan-{i}")
+        check(row_i["pinned_staff_id"] is None, f"lan sai thu {i + 1} -> pinned_staff_id=NULL")
+    cred_row = await admin.fetchrow(
+        "SELECT failed_attempts, locked_until FROM m4_stage0p_actor_credentials WHERE staff_id=$1", staff["id"])
+    check(cred_row["failed_attempts"] == 5 and cred_row["locked_until"] is not None,
+          f"sau 5 lan sai -> failed_attempts=5 + locked_until dat (thuc te {dict(cred_row)})")
+    locked_row = await conn.fetchrow("SELECT * FROM m4_stage0p_pin_actor($1,$2)", staff["id"], PIN_SECRET)
+    check(locked_row["pinned_staff_id"] is None,
+          "pin_actor tu choi du secret DUNG vi dang bi rate-limit-khoa -> pinned_staff_id=NULL (T6-01)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+    # don sach de khong anh huong cac test con lai dung staff["id"].
+    await admin.execute(
+        "UPDATE m4_stage0p_actor_credentials SET failed_attempts=0, locked_until=NULL WHERE staff_id=$1",
+        staff["id"])
+
+    print("== T6-01: pin het han (expires_at qua khu) -> tu choi + tu xoa session row (khong con STALE mai) ==")
+    conn = await asyncpg.connect(DB_URL)
+    conn_pid_a = await conn.fetchval("SELECT pg_backend_pid()")
+    await _pin(conn, staff["id"])
+    await admin.execute(
+        "UPDATE m4_stage0p_actor_session SET expires_at = now() - interval '1 second' WHERE backend_pid=$1",
+        conn_pid_a)
+    await conn.execute("SET ROLE alpha3s_m4_control_plane")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", False, None)
+        check(False, "goi ham nghiep vu voi pin DA HET HAN -> phai RAISE (T6-01)")
+    except asyncpg.PostgresError as e:
+        check("het han" in str(e), "pin het han -> RAISE dung (T6-01)")
+    await conn.execute("RESET ROLE")
+    # T6-01: KHONG con tu xoa row (PL/pgSQL khong co autonomous transaction — DELETE truoc RAISE se
+    # bi rollback cung, vo tac dung — xem docstring migration); kiem tra LAI danh gia moi lan goi
+    # nen an toan du row cu con ton tai. Pin lai (ON CONFLICT) ghi de row cu, xac nhan duoi day.
+    await _pin(conn, staff["id"])
+    row_after_repin = await admin.fetchval(
+        "SELECT expires_at > now() FROM m4_stage0p_actor_session WHERE backend_pid=$1", conn_pid_a)
+    check(row_after_repin is True, "pin lai SAU khi het han -> row cu bi ghi de dung (expires_at moi, T6-01)")
+    await conn.close()
+
+    print("== T6-01: session_nonce khong khop (mo phong backend_pid bi tai su dung tu 1 ket noi da chet) -> tu choi ==")
+    conn = await asyncpg.connect(DB_URL)
+    conn_pid_b = await conn.fetchval("SELECT pg_backend_pid()")
+    await _pin(conn, staff["id"])
+    # Mo phong: row hien tai dai dien cho 1 lan pin cua 1 backend DA CHET ma OS vo tinh cap lai
+    # CHINH backend_pid nay cho ket noi HIEN TAI (conn) — GUC session-scoped cua conn van con gia
+    # tri THAT (con dang song, khong the bi xoa tu ben ngoai), nhung row trong bang bi doi session_
+    # nonce khac (mo phong "day la row cua 1 pin CU, khong phai cua conn dang goi").
+    await admin.execute(
+        "UPDATE m4_stage0p_actor_session SET session_nonce = gen_random_uuid() WHERE backend_pid=$1", conn_pid_b)
+    await conn.execute("SET ROLE alpha3s_m4_control_plane")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", False, None)
+        check(False, "session_nonce khong khop -> phai RAISE (T6-01)")
+    except asyncpg.PostgresError as e:
+        check("STALE" in str(e) and "session_nonce" in str(e),
+              "session_nonce khong khop (PID tai su dung mo phong) -> RAISE dung (T6-01)")
+    await conn.execute("RESET ROLE")
+    # T6-01: KHONG con tu xoa row (cung ly do nhu tren) — pin lai ghi de dung, xac nhan an toan.
+    await _pin(conn, staff["id"])
+    row_after_repin2 = await admin.fetchval(
+        "SELECT session_nonce FROM m4_stage0p_actor_session WHERE backend_pid=$1", conn_pid_b)
+    check(row_after_repin2 is not None, "pin lai SAU session_nonce khong khop -> row cu bi ghi de dung (T6-01)")
+    await conn.close()
+
+    print("== T6-01: unpin_actor() — 'logout' tuong minh, sau do goi ham nghiep vu bi tu choi ngay ==")
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_control_plane")
+    ok_before_unpin = await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", False, None)
+    check(ok_before_unpin is not None, "set_capture thanh cong TRUOC unpin (dung actor da pin)")
+    await conn.execute("RESET ROLE")
+    await conn.execute("SET ROLE alpha3s_m4_actor_binder")
+    await conn.execute("SELECT m4_stage0p_unpin_actor()")
+    await conn.execute("RESET ROLE")
+    await conn.execute("SET ROLE alpha3s_m4_control_plane")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", True, "khong-quan-trong")
+        check(False, "goi ham nghiep vu SAU unpin_actor() -> phai RAISE (T6-01)")
+    except asyncpg.PostgresError as e:
+        check("chua pin actor" in str(e), "sau unpin_actor() -> tu choi dung (T6-01, 'logout' co hieu luc)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
+    print("== T6-02: record_sample tu choi digest KHONG khop (noi dung KHAC, cung do dai/truncated khai bao dung) ==")
+    on_conn_d = await asyncpg.connect(DB_URL)
+    await _set_capture(on_conn_d, enabled=True, staff_id=staff["id"], approval_ref="perm-test-approval-ok")
+    await on_conn_d.close()
+    cust_d = await admin.fetchrow("INSERT INTO customers (psid,name) VALUES ('perm-t602d','x') RETURNING id")
+    conv_d = await admin.fetchrow(
+        "INSERT INTO conversations (customer_id, created_at) VALUES ($1, now()) RETURNING id", cust_d["id"])
+    await admin.execute(
+        "UPDATE m4_selection_batches SET locked_conversation_ids = locked_conversation_ids || ARRAY[$1::bigint] "
+        "WHERE batch_id=$2", conv_d["id"], audit_batch["batch_id"])
+    msg_d = await admin.fetchrow(
+        "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer','noi dung goc that su') RETURNING id",
+        conv_d["id"])
+    conn = await asyncpg.connect(DB_URL)
+    await conn.execute("SET ROLE alpha3s_m4_sample_collector")
+    async with conn.transaction():
+        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
+                            audit_batch["batch_id"], conv_d["id"], msg_d["id"])
+        try:
+            # canonical_text_len=20/truncated=False DUNG het (khop dung "noi dung goc that su"),
+            # nhung digest la cua 1 chuoi KHAC CO CUNG DO DAI (20 ky tu) — day chinh la kich ban CA
+            # neu ro trong F-M4-0P-T6-02: "ciphertext substitution... cung length van qua duoc".
+            forged_same_len = "noi dung gia mao roi"
+            check(len(forged_same_len) == len("noi dung goc that su"),
+                  "setup: chuoi gia mao CUNG do dai voi noi dung that (20 ky tu)")
+            await conn.fetchrow("SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8)",
+                                audit_batch["batch_id"], conv_d["id"], msg_d["id"], str(uuid.uuid4()),
+                                b"\x00" * 55, 20, False, _canonical_digest(forged_same_len))
+            check(False, "digest cua noi dung KHAC (cung do dai) -> phai RAISE (T6-02)")
+        except asyncpg.PostgresError as e:
+            check("canonical_text_digest khong khop" in str(e),
+                  "digest khong khop noi dung da fetch (cung do dai) -> RAISE dung (T6-02)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+    off_conn_d = await asyncpg.connect(DB_URL)
+    await _set_capture(off_conn_d, enabled=False, staff_id=staff["id"], approval_ref="perm-test-t602d-off")
+    await off_conn_d.close()
+
+    print("== T6-04: normalization_registry APPEND-ONLY — UPDATE/DELETE truc tiep tren entry bi trigger chan ==")
+    try:
+        await admin.execute("UPDATE m4_stage0p_normalization_registry SET version='hacked' WHERE version='nfc-v1'")
+        check(False, "UPDATE version tren registry entry -> phai bi trigger chan")
+    except asyncpg.PostgresError as e:
+        check("bat bien" in str(e), "UPDATE version bi trigger chan -> RAISE dung (T6-04)")
+    try:
+        await admin.execute("DELETE FROM m4_stage0p_normalization_registry WHERE version='nfc-v1'")
+        check(False, "DELETE registry entry -> phai bi trigger chan")
+    except asyncpg.PostgresError as e:
+        check("append-only" in str(e), "DELETE registry entry bi trigger chan -> RAISE dung (T6-04)")
+
+    print("== T6-04: set_current_normalization_version — doi hoi pinned actor + quyen approve; version trung -> RAISE ==")
+    conn = await asyncpg.connect(DB_URL)
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
+                            "nfc-v2-test", "PO-DECISION-001")
+        check(False, "set_current_normalization_version MA CHUA pin -> phai RAISE")
+    except asyncpg.PostgresError as e:
+        check("chua pin actor" in str(e), "set_current_normalization_version chua pin -> RAISE dung (T6-04)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    new_reg = await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
+                                  "nfc-v2-test", "PO-DECISION-001")
+    check(new_reg["version"] == "nfc-v2-test", "set_current_normalization_version thanh cong -> version moi tra ve dung")
+    cur_row = await admin.fetchrow(
+        "SELECT version FROM m4_stage0p_normalization_registry WHERE is_current")
+    check(cur_row["version"] == "nfc-v2-test", "registry is_current chuyen dung sang version moi")
+    old_row = await admin.fetchrow(
+        "SELECT is_current FROM m4_stage0p_normalization_registry WHERE version='nfc-v1'")
+    check(old_row["is_current"] is False, "version cu 'nfc-v1' van con (lich su bat bien), chi is_current=false")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
+                            "nfc-v2-test", "PO-DECISION-002")
+        check(False, "set_current_normalization_version voi version DA TON TAI -> phai RAISE (T6-04)")
+    except asyncpg.PostgresError as e:
+        check("da ton tai" in str(e), "set_current_normalization_version version trung -> RAISE dung (T6-04)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+    # khoi phuc registry ve 'nfc-v1' de khong anh huong gia tri seed mac dinh cho cac lan chay khac.
+    await admin.execute("UPDATE m4_stage0p_normalization_registry SET is_current=false WHERE version='nfc-v2-test'")
+    await admin.execute("UPDATE m4_stage0p_normalization_registry SET is_current=true WHERE version='nfc-v1'")
 
     print("== Xac nhan control da ve OFF (bat buoc truoc khi ket thuc script) ==")
     final_state = await admin.fetchval("SELECT capture_enabled FROM m4_stage0p_control WHERE id=1")

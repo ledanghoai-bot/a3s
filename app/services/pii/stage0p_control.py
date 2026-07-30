@@ -61,29 +61,50 @@ class ControlChangeRejectedError(Exception):
 
 
 class ActorNotPinnedError(Exception):
-    """m4_stage0p_pin_actor tu choi (staff_id khong ton tai/khong active, hoac pin_secret khong
-    khop — T5-01), hoac 1 ham nghiep vu tu choi vi session chua pin actor / actor khong co quyen
-    cu the."""
+    """m4_stage0p_pin_actor tu choi (staff_id khong ton tai/khong active, pin_secret khong khop,
+    hoac staff dang bi rate-limit-khoa sau qua nhieu lan sai — T5-01/T6-01), hoac 1 ham nghiep vu
+    tu choi vi session chua pin actor / pin da het han / pin STALE (backend_pid tai su dung) /
+    actor khong co quyen cu the."""
 
 
 async def pin_actor(conn, *, staff_id: int, pin_secret: str) -> int:
-    """REV6 T5-01: pin 1 staff_id vao session TRUOC khi goi bat ky ham nghiep vu M4 nao con lai
+    """REV7 T6-01: pin 1 staff_id vao session TRUOC khi goi bat ky ham nghiep vu M4 nao con lai
     (set_capture/record_approval/revoke_approval/seal_labels/complete_evaluation — tat ca gio doc
     actor tu day, KHONG con nhan actor tu tham so). `conn` PHAI xac thuc bang role RIENG
     `alpha3s_m4_actor_binder` (tach biet moi role nghiep vu — dai dien lop da xac thuc staff
-    truoc do, vd HTTP session/JWT). `pin_secret` PHAI khop gia tri rieng cua staff do trong bang
-    `m4_stage0p_actor_credentials` (cap ngoai luong, xem Known Limitations trong Correction #5 —
-    provisioning that su la quyet dinh van hanh) — khong chi can biet staff_id la du. Hieu luc
-    khoa boi `pg_backend_pid()` cua CHINH connection nay — sinh ton qua moi lan `SET ROLE` tiep
-    theo TREN CUNG connection, cho toi khi connection dong (khac han GUC REV5 — bang nay KHONG
-    GRANT cho role m4 nao, khong the caller tu ghi truc tiep)."""
+    truoc do, vd HTTP session/JWT). `pin_secret` PHAI khop HASH rieng cua staff do trong bang
+    `m4_stage0p_actor_credentials` (cap ngoai luong, xem Known Limitations trong Correction #6 —
+    provisioning that su la quyet dinh van hanh) — khong chi can biet staff_id la du; sai qua 5
+    lan lien tiep se khoa 15 phut (rate-limit). Hieu luc khoa boi CAP (`pg_backend_pid()`,
+    `session_nonce` — UUID ngau nhien dat dong thoi vao 1 GUC session-scoped cua CHINH connection
+    nay) — sinh ton qua moi lan `SET ROLE` tiep theo TREN CUNG connection, nhung TU DONG HET HAN
+    sau 15 phut (TTL, khong con "pin vinh vien" nhu REV6) va tu phat hien neu backend_pid bi He
+    dieu hanh tai su dung cho 1 ket noi MOI sau khi ket noi cu chet (ket noi moi luon co GUC rong,
+    session_nonce khong khop). Goi `unpin_actor()` de "logout" tuong minh truoc khi tra connection
+    ve pool/dong."""
     try:
         row = await conn.fetchrow("SELECT * FROM m4_stage0p_pin_actor($1, $2)", staff_id, pin_secret)
     except Exception as e:  # noqa: BLE001
         _log("m4_actor_pin_rejected", staff_id=staff_id, error=str(e))
         raise ActorNotPinnedError(str(e)) from e
-    _log("m4_actor_pinned", staff_id=staff_id)
+    # T6-01: pin_secret sai/dang bi rate-limit-khoa KHONG con RAISE tu DB (PL/pgSQL khong co
+    # autonomous transaction — RAISE se ROLLBACK ca UPDATE failed_attempts vua ghi, xem docstring
+    # migration). DB tra ve pinned_staff_id=NULL (da COMMIT counter) — Python tu raise o day.
+    if row["pinned_staff_id"] is None:
+        _log("m4_actor_pin_rejected", staff_id=staff_id, error="pin_secret khong khop hoac dang bi khoa")
+        raise ActorNotPinnedError(
+            f"m4_stage0p_pin_actor: pin_secret khong khop hoac staff_id {staff_id} dang bi khoa "
+            "do qua nhieu lan sai (T5-01/T6-01)")
+    _log("m4_actor_pinned", staff_id=staff_id, expires_at=row["expires_at"].isoformat())
     return row["pinned_staff_id"]
+
+
+async def unpin_actor(conn) -> None:
+    """REV7 T6-01 (moi): xoa pin cua CHINH session nay ngay ('logout' tuong minh) — lop phong thu
+    thu 2 ben canh TTL tu dong; goi truoc khi tra connection ve pool hoac dong, chong 1 request/
+    nguoi dung sau tren CUNG connection vo tinh ke thua pin cu."""
+    await conn.execute("SELECT m4_stage0p_unpin_actor()")
+    _log("m4_actor_unpinned")
 
 
 def _log(event: str, **fields) -> None:
