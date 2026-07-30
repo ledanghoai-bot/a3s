@@ -1479,6 +1479,56 @@ async def main() -> int:
         await conn.execute("RESET ROLE")
         await conn.close()
 
+    print("== T7-03: registry doi SAU khi batch lock/seal, TRUOC prediction — batch cu van dung theo version DA KHOA ==")
+    pinned_batch, pinned_ids = await _make_large_batch(admin, seed="perm-t703-pinned", n=200)
+    conn = await asyncpg.connect(DB_URL)
+    pinned_seal = await _seal_labels(conn, staff_id=staff["id"], batch_id=pinned_batch)
+    await conn.close()
+    # Doi "current" TOAN CUC sang 1 version MOI HOAN TOAN — batch pinned_batch van khoa 'nfc-v1'
+    # tu luc _make_large_batch tao (khong doi). Neu write_predictions con doc "current" toan cuc
+    # (loi REV7 CA chi ra), toan bo 200 sample se bi loai NHAM vi "mismatch" — phai KHONG xay ra.
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
+    new_current = await conn.fetchrow(
+        "SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
+        "nfc-v703-test", "PO-DECISION-T703")
+    check(new_current["version"] == "nfc-v703-test", "setup: doi 'current' toan cuc sang version MOI (T7-03)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+    conn = await asyncpg.connect(DB_URL)
+    await conn.execute("SET ROLE alpha3s_m4_prediction_writer")
+    try:
+        pinned_preds = _json.dumps([{"sample_id": sid, "predicted_slots": []} for sid in pinned_ids])
+        pinned_result = await conn.fetchrow(
+            "SELECT * FROM m4_stage0p_write_predictions($1,$2,$3::jsonb,$4::jsonb,$5,$6)",
+            pinned_batch, pinned_seal["sealed_hash"], pinned_preds, "[]", "m4d-0.1.0", "perm-t703-pinned")
+        check(pinned_result["updated_count"] == 200,
+              f"batch cu (khoa 'nfc-v1') van xu ly DUNG 200 sample du 'current' toan cuc da doi (thuc te {pinned_result['updated_count']})")
+        check(pinned_result["non_excluded_conversation_count"] == 200,
+              "T7-03: KHONG sample nao bi loai nham vi mismatch — dung version DA KHOA cua batch, khong phai 'current' toan cuc")
+    finally:
+        await conn.execute("RESET ROLE")
+        await conn.close()
+    # batch MOI (lock SAU khi doi current) phai dung version MOI, khong phai 'nfc-v1' cu.
+    # _make_large_batch (helper T4-05) luon hardcode 'nfc-v1' (khong doc registry) nen KHONG dung
+    # duoc o day — kiem tra qua lock_batch() THAT (Python) thay vi helper SQL truc tiep.
+    from app.services.pii.stage0p_sampling import lock_batch as _lock_batch_fn
+    lb_conn = await asyncpg.connect(DB_URL)
+    await lb_conn.execute("SET ROLE alpha3s_m4_sample_collector")
+    new_batch_id_via_python = await _lock_batch_fn(
+        lb_conn, window_start=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1),
+        window_end=datetime.datetime.now(datetime.timezone.utc), eligible_count=0, selected=[])
+    await lb_conn.execute("RESET ROLE")
+    await lb_conn.close()
+    new_batch_version = await admin.fetchval(
+        "SELECT normalization_version FROM m4_selection_batches WHERE batch_id=$1", new_batch_id_via_python)
+    check(new_batch_version == "nfc-v703-test",
+          f"batch MOI (lock() SAU khi doi current) dung version MOI 'nfc-v703-test' (thuc te {new_batch_version})")
+    # khoi phuc registry ve 'nfc-v1' de khong anh huong cac lan chay khac.
+    await admin.execute("UPDATE m4_stage0p_normalization_registry SET is_current=false WHERE version='nfc-v703-test'")
+    await admin.execute("UPDATE m4_stage0p_normalization_registry SET is_current=true WHERE version='nfc-v1'")
+
     print("== T1-06: complete_evaluation tu choi neu con sample chua predicted/excluded ==")
     empty_seal_batch = await _make_collection_closed_batch(admin, seed="perm-test-eval2",
                                                             samples=[(str(uuid.uuid4()), "997", 1)])
@@ -1625,6 +1675,43 @@ async def main() -> int:
     await _set_capture(off_conn_d, enabled=False, staff_id=staff["id"], approval_ref="perm-test-t602d-off")
     await off_conn_d.close()
 
+    print("== T7-01: pin la consume-on-use — actor B MUON connection cua actor A (khong pin lai) bi tu choi ==")
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_control_plane")
+    action_a = await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", False, None)
+    check(action_a is not None, "actor A (da pin) thanh cong hanh dong nghiep vu dau tien")
+    await conn.execute("RESET ROLE")
+    # T7-01: KHONG pin lai — mo phong 1 connection-pool tra CHINH connection nay cho 1 request/
+    # actor B KHAC. CA Review #7 chi ro day la khoang cach REV7 (session_nonce+TTL) chua dong: row/
+    # backend_pid/GUC deu con nguyen neu KHONG tieu thu pin sau khi dung. Sua T7-01: consume-on-use
+    # — hanh dong THANH CONG o tren da TIEU THU pin, nen goi tiep theo PHAI bi tu choi ngay.
+    await conn.execute("SET ROLE alpha3s_m4_control_plane")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", True, "perm-test-approval-ok")
+        check(False, "actor B muon connection cua A (khong pin lai) -> phai RAISE (T7-01)")
+    except asyncpg.PostgresError as e:
+        check("chua pin actor" in str(e),
+              "actor B muon connection cua A sau 1 hanh dong THANH CONG -> tu choi dung (T7-01, consume-on-use)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
+    print("== T7-01: hanh dong THAT BAI (ly do KHAC) KHONG tieu thu pin — retry hop le voi CUNG pin van thanh cong ==")
+    conn = await asyncpg.connect(DB_URL)
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_control_plane")
+    try:
+        await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", True, "khong-ton-tai-retry-test")
+        check(False, "set_capture(ON) voi approval khong ton tai -> phai RAISE (setup)")
+    except asyncpg.PostgresError as e:
+        check("approval" in str(e).lower() or "khong ton tai" in str(e) or "khong hop le" in str(e),
+              "set_capture(ON) that bai vi approval khong ton tai (KHONG phai vi actor) - setup dung")
+    retry_ok = await conn.fetchrow("SELECT * FROM m4_stage0p_set_capture($1,$2)", False, None)
+    check(retry_ok is not None,
+          "retry SAU 1 lan that bai (ly do KHAC actor) van dung DUOC CUNG pin (T7-01, chi hanh dong THANH CONG moi tieu thu)")
+    await conn.execute("RESET ROLE")
+    await conn.close()
+
     print("== T6-04: normalization_registry APPEND-ONLY — UPDATE/DELETE truc tiep tren entry bi trigger chan ==")
     try:
         await admin.execute("UPDATE m4_stage0p_normalization_registry SET version='hacked' WHERE version='nfc-v1'")
@@ -1661,6 +1748,11 @@ async def main() -> int:
     old_row = await admin.fetchrow(
         "SELECT is_current FROM m4_stage0p_normalization_registry WHERE version='nfc-v1'")
     check(old_row["is_current"] is False, "version cu 'nfc-v1' van con (lich su bat bien), chi is_current=false")
+    # REV8 T7-01: pin la consume-on-use — lan goi THANH CONG o tren da tieu thu pin, phai pin LAI
+    # truoc khi goi tiep (khong con "1 pin dung nhieu lan" nhu REV7).
+    await conn.execute("RESET ROLE")
+    await _pin(conn, staff["id"])
+    await conn.execute("SET ROLE alpha3s_m4_approval_recorder")
     try:
         await conn.fetchrow("SELECT * FROM m4_stage0p_set_current_normalization_version($1,$2)",
                             "nfc-v2-test", "PO-DECISION-002")

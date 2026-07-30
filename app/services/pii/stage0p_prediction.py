@@ -34,6 +34,15 @@ literal + Python `NORMALIZATION_VERSION`) — khong phai 1 nguon that su, doi ho
 2 noi". Sua: XOA HAN module constant — pre-filter duoi day doc `current_version` tu bang DB
 `m4_stage0p_normalization_registry` (nguon THAT DUY NHAT, cung bang ma `m4_stage0p_write_
 predictions` doc — xem `stage0p_sampling.get_current_normalization_version()`).
+
+REV 8 (CA Technical Review #7, T7-03, P2): pre-filter REV6 doc "current" TOAN CUC tu registry —
+SAI authority cho 1 batch DANG CHAY neu registry doi SAU khi batch lock/capture nhung TRUOC
+prediction (batch hop le theo version DA KHOA co the bi loai hang loat mot cach sai lech). Sua:
+doc `normalization_version` da khoa TREN CHINH batch row (tu luc `lock_batch`, FK dam bao luon
+ton tai trong registry) thay vi goi lai `get_current_normalization_version()` — "current" toan
+cuc gio CHI con quyet dinh version cho batch MOI (xem `stage0p_sampling.lock_batch`), khong phai
+authority cho batch dang chay. `m4_stage0p_write_predictions` (DB) sua tuong tu, doc
+`v_batch.normalization_version` thay vi row `is_current=true`.
 """
 
 import json
@@ -41,7 +50,6 @@ import json
 from app.services.pii.crypto import decrypt_sample_value
 from app.services.pii.detector import detect
 from app.services.pii.stage0p_evaluation import span_to_dict
-from app.services.pii.stage0p_sampling import get_current_normalization_version
 from app.services.pii.taxonomy import DETECTOR_VERSION
 
 
@@ -61,12 +69,17 @@ async def run_prediction_writer(conn, *, batch_id: str, evaluation_batch: str) -
     decrypt + chay detector trong bo nho, roi ghi TAT CA (predictions + exclusions) qua 1 loi
     goi `m4_stage0p_write_predictions`. Tra {updated, skipped_version_mismatch, result_hash}."""
     batch_row = await conn.fetchrow(
-        "SELECT labels_sealed_hash FROM m4_selection_batches WHERE batch_id = $1", batch_id)
+        "SELECT labels_sealed_hash, normalization_version FROM m4_selection_batches WHERE batch_id = $1",
+        batch_id)
     if batch_row is None or batch_row["labels_sealed_hash"] is None:
         raise PredictionNotAllowedError(f"batch {batch_id} chua sealed hoac khong ton tai")
     expected_hash = batch_row["labels_sealed_hash"]
 
-    current_normalization_version = await get_current_normalization_version(conn)
+    # REV8 T7-03: dung version DA KHOA cua CHINH batch (tu luc lock_batch), khong con doc "current"
+    # toan cuc — CA chi ro registry co the doi SAU khi batch lock/capture nhung TRUOC prediction,
+    # luc do "current" toan cuc KHONG con la authority dung cho batch DANG CHAY nay (DB-side cung
+    # sua tuong tu trong m4_stage0p_write_predictions, xem migration 039 REV8).
+    current_normalization_version = batch_row["normalization_version"]
 
     predictions: list[dict] = []
     exclusions: list[dict] = []

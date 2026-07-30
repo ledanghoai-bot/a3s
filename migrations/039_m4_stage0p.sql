@@ -56,6 +56,41 @@
 --          m4_selection_batches.normalization_version + them FK toi registry(version) (khong con
 --          insert duoc version khong ton tai/khong biet).
 --
+-- REV 8 (Correction #8, CA Technical Review #7 d05d9fb, doc
+-- PHASE1B-M4-STAGE-0P-TECHNICAL-REVIEW-7-VI): T6-03 CLOSED AT CODE-DESIGN LEVEL (khong sua lai).
+-- Sua 2 P1 + 1 P2 T7-01..T7-03:
+--   T7-01: session_nonce+TTL (REV7) chan duoc PID-tai-su-dung-sau-khi-chet, nhung CA chi ro
+--          CHUA chan duoc 1 connection POOL tai su dung CHINH connection CON SONG cho 1 request/
+--          actor KHAC — row/backend_pid/GUC nonce deu con nguyen, request sau "ke thua" pin cua
+--          request truoc trong toi da 15 phut. Sua: require_pinned_actor TIEU THU (DELETE) row
+--          pin ngay khi validate THANH CONG — 1 pin = dung duoc CHO DUNG 1 hanh dong nghiep vu
+--          (consume-on-use). Vi PL/pgSQL khong co autonomous transaction (xem REV7 §3), DELETE
+--          nay CHI thuc su COMMIT neu ca ham nghiep vu bao quanh THANH CONG toi cung — 1 hanh
+--          dong THAT BAI (vi ly do khac) khong tieu thu pin, dung ngu nghia "retry hop le voi
+--          CUNG pin" can co. Gioi han con lai (khai bao minh bach, CHUA dong duoc o tang DB don
+--          thuan): pin da tao nhung CHUA TUNG duoc dung THANH CONG (vd bi ngat quang truoc khi
+--          goi ham nghiep vu dau tien, hoac trUOc khi goi unpin_actor()) van con hieu luc cho toi
+--          khi TTL het han hoac connection dong that su — day la khoang cach CA neu ro can tich
+--          hop tang connection-pool that (pool checkin hook goi unpin_actor()) o giai doan
+--          production-activation, ngoai kha nang 1 migration DB co the tu dong.
+--   T7-02: record_sample REV7 doi hoi digest CHINH XAC cua canonical plaintext, nhung DB van
+--          KHONG co khoa giai ma nen KHONG xac minh duoc ciphertext caller gui THAT SU giai ma ra
+--          dung plaintext mang digest do — 1 caller da qua duoc fetch_message_content (biet dung
+--          canonical text, co du AAD fields hop le) VAN co the gui 1 ciphertext hop le nhung khac
+--          (vd tu encrypt lai voi nonce khac) ma DB khong phat hien duoc. CA chi ro KHONG duoc
+--          them heuristic nua — hoac dong that su (DB tham gia encrypt trong 1 trusted boundary,
+--          doi kien truc "plaintext khong bao gio roi Python process"), hoac trinh CA/PO 1
+--          architecture decision. Round nay KHONG sua T7-02 bang code — xem §7 doc Correction #8
+--          (architecture decision request, 2 phuong an + de xuat, cho CA/PO quyet dinh).
+--   T7-03 (P2): write_predictions doc row is_current=true (registry TOAN CUC) lam authority cho
+--          normalization_version — SAI neu registry doi SAU khi batch lock/capture nhung TRUOC
+--          prediction (batch hop le theo version DA KHOA co the bi loai hang loat sai lech). Sua:
+--          doc v_batch.normalization_version (da khoa tu luc lock_batch, FK dam bao luon ton tai)
+--          thay vi doc lai "current" toan cuc — "current" gio CHI quyet dinh version cho batch
+--          MOI. Python (run_prediction_writer) sua tuong tu. Them: pg_advisory_xact_lock serialize
+--          m4_stage0p_set_current_normalization_version (chong race 2 giao dich doi version dong
+--          thoi).
+--
 -- REV6 tom tat 4 sua doi (T5-01..04):
 --   T5-01: CA chi ro pin_actor REV5 (T4-04) VAN co lo hong CUNG LOP voi T4-01 - GUC
 --          alpha3s.m4_actor_staff_id la session variable THUONG, BAT KY session nao cung tu
@@ -1282,6 +1317,18 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'm4_stage0p_require_pinned_actor: actor % khong co quyen % (T5-01)', v_actor_id, p_permission;
   END IF;
+
+  -- REV8 T7-01: TIEU THU pin ngay khi validate THANH CONG (consume-on-use, 1 pin = DUNG DUOC
+  -- CHO DUNG 1 hanh dong nghiep vu) - dong khoang cach CA Review #7 chi ro: connection-pool tai
+  -- su dung CHINH connection cu (khac PID-reuse T6-01 da dong) van con nguyen row/backend_pid/GUC,
+  -- khien 1 request/actor SAU co the "ke thua" pin cua request/actor TRUOC trong toi da 15 phut.
+  -- DELETE tai day CHI thuc su COMMIT neu toan bo ham nghiep vu goi ham nay (set_capture/
+  -- record_approval/.../set_current_normalization_version) THANH CONG toi cung - neu ham nghiep
+  -- vu that bai vi 1 ly do KHAC sau buoc nay, DELETE bi rollback CUNG VOI loi do (dung y - retry
+  -- hop le voi CUNG pin khong nen bi chan bat 1 hanh dong THAT SU chua bao gio xay ra); chi hanh
+  -- dong THANH CONG moi tieu thu pin, dung ngu nghia can co.
+  DELETE FROM public.m4_stage0p_actor_session WHERE backend_pid = pg_backend_pid();
+
   RETURN v_actor_id;
 END;
 $$;
@@ -1321,6 +1368,12 @@ AS $$
 DECLARE v_actor_id BIGINT; v_now TIMESTAMPTZ := now(); v_audit_id BIGINT;
 BEGIN
   v_actor_id := m4_stage0p_require_pinned_actor('m4.stage0p.approve');
+
+  -- REV8 T7-03: serialize registry transition - 2 lenh doi version dong thoi khong duoc dam bao
+  -- thu tu boi chi rieng row-lock UPDATE/INSERT ben duoi (2 transaction cung doc is_current=true
+  -- TRUOC khi 1 ben UPDATE co the tao race dieu kien is_current gia dinh sai). Khoa xact-scoped
+  -- theo ten ham, tu nha khi transaction ket thuc.
+  PERFORM pg_advisory_xact_lock(hashtext('m4_stage0p_normalization_registry'));
 
   IF p_version IS NULL OR length(btrim(p_version)) = 0 THEN
     RAISE EXCEPTION 'm4_stage0p_set_current_normalization_version: version khong duoc rong';
@@ -1695,13 +1748,13 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_write_predictions: exclusion gate config chua duoc thiet lap - tu choi ghi (fail-closed, T4-05)';
   END IF;
 
-  -- T5-04: doc tu bang registry (nguon THAT DUY NHAT) thay hardcode literal.
-  -- REV7 T6-04: registry gio la versioned/append-only - doc row is_current=true thay vi id=1.
-  SELECT nr.version INTO v_current_normalization_version
-    FROM public.m4_stage0p_normalization_registry AS nr WHERE nr.is_current;
-  IF v_current_normalization_version IS NULL THEN
-    RAISE EXCEPTION 'm4_stage0p_write_predictions: normalization registry chua duoc thiet lap - tu choi ghi (fail-closed, T5-04)';
-  END IF;
+  -- REV8 T7-03: CA chi ro doc row is_current=true (REV7 T6-04) la SAI authority cho 1 batch DANG
+  -- CHAY - neu registry doi SAU khi batch lock/capture nhung TRUOC prediction, 1 batch hop le
+  -- theo version DA KHOA co the bi xem la mismatch hang loat mot cach sai lech. v_batch.
+  -- normalization_version (da khoa tu luc lock_batch, FK dam bao luon ton tai trong registry) moi
+  -- la expected version DUNG cho CHINH batch nay - "current" toan cuc chi nen quyet dinh version
+  -- cho batch MOI (xem stage0p_sampling.py:lock_batch), khong phai authority cho batch dang chay.
+  v_current_normalization_version := v_batch.normalization_version;
 
   IF jsonb_typeof(p_predictions) <> 'array' THEN
     RAISE EXCEPTION 'm4_stage0p_write_predictions: predictions phai la JSON array';
@@ -2103,7 +2156,10 @@ GRANT USAGE ON SEQUENCE audit_log_id_seq TO alpha3s_m4_sample_evaluator;
 
 -- 6d. prediction_writer: KHONG SELECT truc tiep tren cot noi dung; CHI EXECUTE fetch_sealed_message
 -- + write_predictions (REV5: 6 tham so - bo p_current_normalization_version, T4-02).
-GRANT SELECT (batch_id, labels_sealed_hash) ON m4_selection_batches TO alpha3s_m4_prediction_writer;
+-- REV8 T7-03: them normalization_version - run_prediction_writer gio doc version DA KHOA cua
+-- CHINH batch (khong con goi get_current_normalization_version() toan cuc, xem stage0p_prediction.py).
+GRANT SELECT (batch_id, labels_sealed_hash, normalization_version) ON m4_selection_batches
+  TO alpha3s_m4_prediction_writer;
 GRANT EXECUTE ON FUNCTION m4_stage0p_fetch_sealed_message(UUID, UUID) TO alpha3s_m4_prediction_writer;
 GRANT EXECUTE ON FUNCTION m4_stage0p_write_predictions(UUID, TEXT, JSONB, JSONB, TEXT, TEXT)
   TO alpha3s_m4_prediction_writer;

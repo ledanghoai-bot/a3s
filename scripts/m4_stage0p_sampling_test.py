@@ -252,12 +252,20 @@ async def main() -> int:
     async def _mark_pending_mid_run():
         watch = await asyncpg.connect(DB_URL)
         try:
-            for _ in range(500):
+            # Doi it nhat 1 sample COMMIT that su truoc khi dat co pending — cho toi da 10s (thay
+            # 500ms REV7 tro xuong, qua sat trong moi truong container co the cham hon). Neu vong
+            # lap KHONG BAO GIO thay n>=1, co pending van duoc dat sau do (fallback), nhung luc do
+            # scenario nen bao that bai ro rang thay vi im lang dua vao may man timing.
+            for _ in range(5000):
                 n = await watch.fetchval(
                     "SELECT count(*) FROM m4_shadow_review_samples WHERE selection_batch=$1", batchG["batch_id"])
                 if n >= 1:
                     break
-                await asyncio.sleep(0.001)
+                await asyncio.sleep(0.002)
+            else:
+                raise AssertionError(
+                    "setup [G]: khong sample nao commit trong 10s — moi truong qua cham hoac loi that, "
+                    "khong phai timing binh thuong")
             import redis.asyncio as aioredis
             r = await aioredis.from_url(settings.redis_url, decode_responses=True)
             await r.set("del_pending:cap-g", "1", ex=900)  # psid literal (xem INSERT customers o tren)
