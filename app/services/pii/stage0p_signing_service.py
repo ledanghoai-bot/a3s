@@ -108,7 +108,64 @@ coordinator cap 1 authorization ngan han):
     khi token con hieu luc TTL.
   - Ket hop: 3 lop doc lap (peer-UID T11-02/T12-01, chu ky authorization T12-02, DB verify transcript
     T8-02/T10-04) — 1 process CUNG UID voi signer nhung KHONG co token hop le van khong ky duoc gi;
-    1 token hop le nhung sai UID cung bi chan truoc khi doc frame."""
+    1 token hop le nhung sai UID cung bi chan truoc khi doc frame.
+
+CA Technical Re-review #13 (T12-01 CLOSED AT DEV/TEST CODE-DESIGN LEVEL; F-M4-0P-T13-01/T13-02,
+P1; F-M4-0P-T13-03, P2): REV13 payload chi gom
+`batch_id|conversation_id|message_id|sample_id|purpose_code|txid|issued|expires` — CHUA buoc
+canonical digest cua noi dung THAT, CHUA buoc customer_ref/conversation_ref (dung trong AAD/
+transcript), CHUA co domain/operation tag, va noi chuoi bang '|' KHONG unambiguous (khong length-
+prefixed). CA: "một authorized collector process có thể fetch message/token hợp lệ, thay
+raw_content hoặc AAD-related fields và vẫn yêu cầu signer tạo ciphertext/signature" — signing-
+oracle gap T12-02 nham toi VAN CON TON TAI. Dong thoi `_replay_seen` REV13 la dictionary TRONG BO
+NHO CUA 1 TIEN TRINH — restart signer xoa toan bo state, 2 signer instance co 2 cache doc lap —
+KHONG phai one-time semantics THAT SU.
+
+Sua REV14 — dong ca 3 finding:
+
+T13-01 (buoc authorization voi content digest + toan bo output-affecting input):
+  - `m4_stage0p_fetch_message_content()` (migration) gio TU DERIVE `customer_id` tu CHINH
+    `m4_stage0p_capture_progress` (KHONG con nhan tu caller — 1 diem caller-tu-khai nua bi loai bo,
+    dung nguyen tac T4-04/T5-01/T9-02), TU TINH `canonical_digest_hex` tu CHINH canonical text
+    (`v_canon`) no vua tinh cho `fetched_canonical_digest` (T4-01/T6-02) — CUNG 1 gia tri, khong
+    tinh lai rieng. Payload gio la 14 truong (domain tag co dinh
+    `m4-stage0p-sign-capture-v1` + batch/conversation/message/sample identity + customer_ref +
+    conversation_ref + purpose_code + txid + canonical_digest_hex + char_truncated + nonce +
+    issued/expires), noi bang LENGTH-PREFIX (`<so-byte>:<gia-tri>` noi tiep, khong dung dau phan
+    cach `|`) — loai bo hoan toan kha nang 1 truong chua ky tu dac biet lam lech ranh gioi cac
+    truong khac.
+  - Signer (`_verify_signing_authorization`) gio nhan THEM `canonical_digest_hex`/`char_truncated`
+    do CHINH no tu tinh (SAU KHI da canonicalize `raw_content` — thu tu bat buoc: canonicalize
+    TRUOC, verify authorization SAU, ky SAU CUNG) — tai dung CHINH XAC thuat toan length-prefix
+    phia DB de doi chieu chu ky. `conversation_ref` dung trong ma hoa/AAD KHONG con lay tu
+    `req["conversation_ref"]` (truong caller tu khai, khong doc lap voi conversation_id) — signer
+    TU DERIVE `str(conversation_id)` (da la 1 truong duoc bind qua chu ky) thay vi tin 1 truong
+    rieng co the bi tach roi khoi conversation_id that.
+  - Bat ky truong nao (raw_content, customer_ref, db_char_truncated, ...) bi sai lech so voi luc
+    DB ky deu lam HMAC khong khop — tu choi TRUOC khi ma hoa/ky, dong dung "signing-oracle" gap.
+
+T13-02 (chong replay BEN VUNG/DUNG CHUNG moi signer instance, ton tai qua restart):
+  - Token gio mang 1 `nonce` ngau nhien (`gen_random_uuid()`, 128-bit) — buoc VAO payload (chong
+    gia mao) VA dua RIENG vao token (ngoai payload, cung vi tri voi issued/expires) de signer dung
+    lam khoa tieu thu.
+  - Thay `_replay_seen` (dict trong-bo-nho) bang Redis `SET NX PX` (`_consume_nonce_once()`) — TTL
+    Redis = thoi gian con lai cua token + bien an toan, tu don khi token that su het han. Dung
+    CHUNG `settings.redis_url` (CUNG instance Redis moi collector/pending-check khac dang dung,
+    KHONG phai secret — chi la ha tang dung chung) — nen state chong replay giờ BEN VUNG qua
+    restart signer VA dung CHUNG giua NHIEU signer instance (khong con moi process 1 cache rieng).
+    Redis loi/timeout -> FAIL CLOSED (tu choi, khong tien toi ky) — dung nguyen tac fail-closed da
+    dung xuyen suot Stage 0P (`stage0p_eligibility.py:is_pending_deletion`).
+  - Thu tu bat buoc: verify chu ky+digest TRUOC (khong tac dung phu) -> tieu thu nonce qua Redis
+    (atomic, CHI SAU KHI da xac nhan token hop le) -> ky/ma hoa SAU CUNG. Neu signer chet SAU khi
+    tieu thu nonce nhung TRUOC khi tra ket qua ve collector, nonce do vinh vien mat hieu luc (dung
+    y "one-time") — collector PHAI fetch capability+token MOI (khong the retry voi token cu), dung
+    tinh than consume-on-use da dung nhieu lan (T4-01/T7-01) trong du an nay.
+
+T13-03 (P2, request-rate/admission budget):
+  - `asyncio.Semaphore(_MAX_CONCURRENT_REQUESTS)` REV13 CHI gioi han so request DONG THOI, khong
+    gioi han TOC DO request TUAN TU. Them `_check_rate_limit()` — fixed-window (10s, toi da 40
+    request/cua so) TRUOC KHI xu ly 1 ket noi da qua peer-UID check — vuot han bi tu choi ngay
+    (`m4_signing_rate_limited`), tu phuc hoi khi cua so lan sau bat dau."""
 
 import asyncio
 import base64
@@ -123,6 +180,8 @@ import sys
 import time
 from functools import partial
 
+import redis.asyncio as aioredis
+
 from app.config import settings
 from app.services.pii.canonicalize import canonicalize
 from app.services.pii.crypto import SlotCryptoError, _load_key, sign_capture
@@ -135,21 +194,33 @@ _MAX_CONCURRENT_REQUESTS = 8
 _REQUEST_TIMEOUT_SECONDS = 5.0
 _PEERCRED_STRUCT = struct.Struct("3i")  # pid, uid, gid (Linux SO_PEERCRED)
 
+# T13-03: fixed-window admission budget - AP DUNG SAU peer-UID check (chi tinh traffic tu peer da
+# xac thuc). 40/10s rong hon han 20 request DONG THOI cua kich ban [7] hien co (khong pha vo
+# evidence cu) nhung van la 1 TRAN THAT, co the vuot va tu phuc hoi khi cua so lan sau bat dau.
+_RATE_LIMIT_WINDOW_SECONDS = 10.0
+_RATE_LIMIT_MAX_REQUESTS = 40
+
 # T12-02: PHAI khop CHINH XAC key_version DB dung khi ky (migration 039 provisioning) - khong ho
 # tro nhieu key_version dong thoi (dung mo hinh don-khoa-hoat-dong nhu m4_transcript_hmac_key_b64).
 _SIGNING_AUTH_KEY_VERSION = "m4-signing-auth-v1"
 _SIGNING_AUTH_MAX_TTL_SECONDS = 30
 _SIGNING_AUTH_CLOCK_SKEW_SECONDS = 5
-# T12-02: cua so giu dau vet chong replay - RONG HON han TTL+skew toi da (30+5=35s) de dam bao 1
-# token het han ROI van con nam trong cache du lau de bat duoc lan replay MUON.
-_REPLAY_CACHE_WINDOW_SECONDS = 180
+# T13-01: domain/operation tag co dinh - truong DAU TIEN trong payload length-prefix, phan biet
+# muc dich token nay voi bat ky loai authorization nao khac co the ton tai trong tuong lai.
+_AUTH_DOMAIN_TAG = "m4-stage0p-sign-capture-v1"
+# T13-02: Redis SET NX PX dung cho tieu thu nonce 1 lan - CHUNG cho moi signer instance, ton tai
+# qua restart (khac han _replay_seen trong-bo-nho REV13 da bi CA tu choi).
+_NONCE_KEY_PREFIX = "m4-signing-nonce:"
+_NONCE_REDIS_TIMEOUT_SECONDS = 3.0
+_NONCE_TTL_BUFFER_SECONDS = 30
 
 
 class SigningAuthorizationError(Exception):
-    """Signing authorization thieu/sai dinh dang/chu ky khong khop/het han/da bi replay (T12-02)."""
+    """Signing authorization thieu/sai dinh dang/chu ky khong khop/het han/da bi replay (T12-02/
+    T13-01/T13-02)."""
 
 
-_replay_seen: dict[tuple[str, str], float] = {}
+_rate_limit_timestamps: list[float] = []
 
 
 def _log(event: str, **fields) -> None:
@@ -170,24 +241,37 @@ async def _write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
     await writer.drain()
 
 
-def _prune_replay_cache(now_mono: float) -> None:
-    expired = [k for k, expiry in _replay_seen.items() if expiry <= now_mono]
-    for k in expired:
-        del _replay_seen[k]
+def _lenpfx_join(*fields: str) -> bytes:
+    """T13-01: ma hoa canonical KHONG mo ho — moi truong tien to boi do dai byte cua chinh no
+    (`<so-byte>:<gia-tri>`) roi noi tiep, KHONG dung ky tu phan cach nao ca — loai bo hoan toan
+    kha nang 1 gia tri truong CHUA 1 ky tu "phan cach" nao do lam lech ranh gioi cac truong con
+    lai. PHAI khop CHINH XAC thuat toan PL/pgSQL phia migration 039 (vong lap qua ARRAY, noi
+    `octet_length(field)::text || ':' || field`)."""
+    out = bytearray()
+    for f in fields:
+        b = f.encode("utf-8")
+        out += str(len(b)).encode("ascii") + b":" + b
+    return bytes(out)
 
 
-def _verify_signing_authorization(token: str, req: dict) -> None:
-    """T12-02: xac minh 1 signing authorization DB da ky trong CUNG transaction voi capability
-    T4-01 (`m4_stage0p_fetch_message_content`). CHI tin CAC TRUONG lay tu `req` (batch_id/
-    conversation_id/message_id/sample_id/purpose_code/txid) — token CHI dong vai chu ky tren CHINH
-    cac gia tri do, khong phai nguon THAY THE cho chung. Bat ky truong nao trong `req` bi sua doi so
-    voi luc DB ky se lam HMAC khong khop."""
+def _verify_signing_authorization(token: str, req: dict, *, canonical_digest_hex: str,
+                                  char_truncated: bool) -> tuple[str, int]:
+    """T12-02/T13-01: xac minh 1 signing authorization DB da ky trong CUNG transaction voi
+    capability T4-01 (`m4_stage0p_fetch_message_content`). PHAI goi SAU KHI da tu canonicalize
+    `raw_content` va tu tinh `canonical_digest_hex`/`char_truncated` — token gio buoc CA 2 gia tri
+    nay (T13-01, dong "signing-oracle" gap: doi noi dung/AAD-affecting field ma khong sua token se
+    lam HMAC khong khop). `conversation_ref` dung trong payload la `str(conversation_id)` (DA duoc
+    bind qua chinh conversation_id) — KHONG doc tu `req["conversation_ref"]` (truong caller tu
+    khai, co the bi tach roi khoi conversation_id that). Tra ve `(nonce, expires_epoch)` — caller
+    (`_handle_request`) PHAI tu tieu thu nonce qua Redis (T13-02) TRUOC khi ky/ma hoa."""
     parts = token.split("|")
-    if len(parts) != 4:
+    if len(parts) != 5:
         raise SigningAuthorizationError("signing_authorization dinh dang khong hop le")
-    key_version, issued_s, expires_s, sig_hex = parts
+    key_version, issued_s, expires_s, nonce, sig_hex = parts
     if key_version != _SIGNING_AUTH_KEY_VERSION:
         raise SigningAuthorizationError("signing_authorization key_version khong duoc ho tro")
+    if not nonce:
+        raise SigningAuthorizationError("signing_authorization thieu nonce")
     try:
         issued_epoch = int(issued_s)
         expires_epoch = int(expires_s)
@@ -206,29 +290,51 @@ def _verify_signing_authorization(token: str, req: dict) -> None:
         raise SigningAuthorizationError("signing_authorization issued_epoch trong tuong lai")
 
     verify_key = _load_key(settings.m4_signing_auth_verify_key_b64, "m4_signing_auth_verify_key_b64")
-    payload = "|".join([
-        str(req["batch_id"]), str(req["conversation_id"]), str(req["message_id"]),
-        str(req["sample_id"]), str(req["purpose_code"]), str(req["txid"]),
-        str(issued_epoch), str(expires_epoch),
-    ]).encode("utf-8")
+    conversation_id_str = str(req["conversation_id"])
+    payload = _lenpfx_join(
+        _AUTH_DOMAIN_TAG, str(req["batch_id"]), conversation_id_str, str(req["message_id"]),
+        str(req["sample_id"]), str(req["customer_ref"]), conversation_id_str,
+        str(req["purpose_code"]), str(req["txid"]), canonical_digest_hex,
+        "1" if char_truncated else "0", nonce, str(issued_epoch), str(expires_epoch),
+    )
     expected_sig = hmac.new(verify_key, payload, hashlib.sha256).digest()
     if not hmac.compare_digest(expected_sig, sig):
-        raise SigningAuthorizationError("signing_authorization chu ky khong khop (request bi sua "
-                                        "doi hoac khong xuat phat tu 1 fetch_message_content that)")
-
-    replay_key = (str(req["txid"]), str(req["sample_id"]))
-    now_mono = time.monotonic()
-    _prune_replay_cache(now_mono)
-    if replay_key in _replay_seen:
-        raise SigningAuthorizationError("signing_authorization da duoc su dung (replay)")
-    _replay_seen[replay_key] = now_mono + _REPLAY_CACHE_WINDOW_SECONDS
+        raise SigningAuthorizationError("signing_authorization chu ky khong khop (noi dung/request "
+                                        "bi sua doi hoac khong xuat phat tu 1 fetch_message_content that)")
+    return nonce, expires_epoch
 
 
-def _handle_request(req: dict) -> dict:
+async def _consume_nonce_once(nonce: str, *, expires_epoch: int) -> None:
+    """T13-02: tieu thu nonce ATOMIC qua Redis `SET NX PX` — dung CHUNG cho MOI signer instance
+    (khong con la cache trong-bo-nho rieng tung tien trinh nhu REV13/T12-02), TON TAI QUA process
+    restart (Redis la tien trinh RIENG). Redis loi/timeout -> FAIL CLOSED (tu choi request, KHONG
+    tien toi ky) — dung nguyen tac fail-closed da dung xuyen suot Stage 0P cho moi kiem tra phu
+    thuoc Redis (xem `stage0p_eligibility.py:is_pending_deletion`)."""
+    ttl_seconds = max(1, expires_epoch - int(time.time())) + _NONCE_TTL_BUFFER_SECONDS
+    key = _NONCE_KEY_PREFIX + nonce
+    try:
+        redis = await aioredis.from_url(settings.redis_url, decode_responses=True,
+                                        socket_timeout=_NONCE_REDIS_TIMEOUT_SECONDS,
+                                        socket_connect_timeout=_NONCE_REDIS_TIMEOUT_SECONDS)
+        try:
+            ok = await asyncio.wait_for(
+                redis.set(key, "1", nx=True, ex=ttl_seconds), timeout=_NONCE_REDIS_TIMEOUT_SECONDS)
+        finally:
+            await redis.aclose()
+    except Exception as e:  # noqa: BLE001 - Redis loi/hang/timeout -> fail closed
+        _log("m4_signing_nonce_consume_redis_error", error_type=type(e).__name__)
+        raise SigningAuthorizationError(
+            "khong the xac minh one-time nonce (Redis loi/timeout) - tu choi (fail closed)") from e
+    if not ok:
+        raise SigningAuthorizationError("signing_authorization da duoc su dung (replay, Redis)")
+
+
+async def _handle_request(req: dict) -> dict:
     """REV11 T10-01: canonicalize + tu tinh digest/length/truncated TU raw_content — KHONG nhan
     bat ky gia tri nao trong so do tu `req` nhu authority (chi nhan raw_content + identity).
-    REV13 T12-02: xac minh signing_authorization TRUOC KHI lam bat ky viec ma hoa/ky nao."""
-    _verify_signing_authorization(req["signing_authorization"], req)
+    REV14 T13-01/T13-02: thu tu BAT BUOC — canonicalize TRUOC (de co canonical_digest_hex/
+    char_truncated that su) -> verify chu ky authorization (doi chieu CA 2 gia tri vua tinh) ->
+    tieu thu nonce qua Redis (atomic, 1 lan) -> CHI SAU DO moi ky/ma hoa."""
     raw_content = req["raw_content"]
     canonical_text, was_truncated = canonicalize(raw_content)
     # DB-computed flag (noi dung GOC dai hon 2000 ky tu TRUOC khi cat ve raw_content) - KHONG the
@@ -236,15 +342,24 @@ def _handle_request(req: dict) -> dict:
     # "authority" ve digest/length như CA lo ngai) roi OR vao ket qua tu-canonicalize cua chinh
     # service - van la service quyet dinh gia tri CUOI CUNG, khong phai collector.
     was_truncated = was_truncated or bool(req.get("db_char_truncated", False))
+    canonical_digest_hex = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+
+    nonce, expires_epoch = _verify_signing_authorization(
+        req["signing_authorization"], req,
+        canonical_digest_hex=canonical_digest_hex, char_truncated=was_truncated)
+    await _consume_nonce_once(nonce, expires_epoch=expires_epoch)
+
+    # T13-01: conversation_ref dung trong ma hoa/AAD TU DERIVE tu conversation_id (da duoc bind qua
+    # chu ky) - KHONG doc tu req["conversation_ref"] (truong caller tu khai rieng biet).
+    conversation_ref = str(req["conversation_id"])
     blob, transcript_bytes, signature, key_version = sign_capture(
         canonical_text,
         batch_id=req["batch_id"], conversation_id=req["conversation_id"],
         message_id=req["message_id"], sample_id=req["sample_id"],
-        customer_ref=req["customer_ref"], conversation_ref=req["conversation_ref"],
+        customer_ref=req["customer_ref"], conversation_ref=conversation_ref,
         canonical_len=len(canonical_text), truncated=was_truncated,
         txid=req["txid"], purpose_code=req["purpose_code"],
     )
-    canonical_digest_hex = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
     return {
         "ok": True,
         "ciphertext_b64": base64.b64encode(blob).decode("ascii"),
@@ -255,6 +370,20 @@ def _handle_request(req: dict) -> dict:
         "truncated": was_truncated,
         "canonical_digest_hex": canonical_digest_hex,
     }
+
+
+def _check_rate_limit(now_mono: float) -> bool:
+    """T13-03: fixed-window admission budget — True neu request duoc phep tien hanh (va tu ghi
+    nhan luc do vao cua so). Danh cho traffic DA qua peer-UID check (T11-02/T12-01) — chi tinh
+    ngan sach cho peer da xac thuc, khong lien quan gioi han concurrency (`_MAX_CONCURRENT_REQUESTS`,
+    von chi gioi han so request DANG XU LY DONG THOI, khong gioi han TOC DO request tuan tu)."""
+    global _rate_limit_timestamps
+    cutoff = now_mono - _RATE_LIMIT_WINDOW_SECONDS
+    _rate_limit_timestamps = [t for t in _rate_limit_timestamps if t > cutoff]
+    if len(_rate_limit_timestamps) >= _RATE_LIMIT_MAX_REQUESTS:
+        return False
+    _rate_limit_timestamps.append(now_mono)
+    return True
 
 
 def _validate_socket_directory(socket_path: str, *, shared_gid: int | None = None) -> None:
@@ -339,7 +468,7 @@ async def _handle_conn_authorized(reader: asyncio.StreamReader, writer: asyncio.
     raw_req = await _read_frame(reader)
     req = json.loads(raw_req.decode("utf-8"))
     try:
-        resp = _handle_request(req)
+        resp = await _handle_request(req)
     except (SlotCryptoError, SigningAuthorizationError, KeyError, ValueError, TypeError) as e:
         # T11-03: chi log error_type/thong diep KHONG chua plaintext - khong bao gio raw_content.
         _log("m4_signing_request_rejected", error_type=type(e).__name__)
@@ -355,6 +484,11 @@ async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             # T11-02: tu choi TRUOC KHI doc bat ky frame nao - khong bao gio cham toi noi dung
             # cua 1 peer chua xac thuc. Chi log uid (count-worthy), khong log raw content (T11-03).
             _log("m4_signing_peer_rejected", peer_uid=peer_uid)
+            return
+        if not _check_rate_limit(time.monotonic()):
+            # T13-03: ngan sach admission vuot han - tu choi NGAY, khong doc frame (cung tinh than
+            # fail-closed-truoc-frame nhu peer-UID check).
+            _log("m4_signing_rate_limited")
             return
         async with semaphore:  # T11-02: gioi han so request dong thoi (chong flood)
             try:
@@ -414,6 +548,10 @@ def main() -> int:
     settings.m4_sample_key_b64 = sample_key_b64
     settings.m4_transcript_hmac_key_b64 = hmac_key_b64
     settings.m4_signing_auth_verify_key_b64 = auth_verify_key_b64
+    # T13-02: Redis dung cho tieu thu nonce 1-lan (_consume_nonce_once) - KHONG phai secret, chi la
+    # ha tang dung chung (cung instance moi collector/pending-check khac) - doc tu moi truong CUA
+    # CHINH tien trinh nay, mac dinh ve gia tri chung cua settings neu khong ghi de.
+    settings.redis_url = os.environ.get("REDIS_URL", settings.redis_url)
     shared_gid_s = os.environ.get("STAGE0P_SIGNING_SHARED_GID")
     shared_gid = int(shared_gid_s) if shared_gid_s else None
     try:

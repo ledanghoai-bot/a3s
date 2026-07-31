@@ -300,6 +300,12 @@ async def main() -> int:
         "algorithm_seed, locked_conversation_ids, purpose_code, normalization_version) VALUES (now()-interval '1 day', now(), "
         "1, 1, 'kill-test-hang', ARRAY[$1]::bigint[], 'P12_PII_DETECTOR_EVAL', 'nfc-v1') RETURNING batch_id",
         conv_h["id"])
+    # T13-01: fetch_message_content gio TU DERIVE customer_id tu m4_stage0p_capture_progress (khong
+    # con nhan tu caller) - kich ban nay goi _run_fenced_unit TRUC TIEP (bo qua seed_capture_progress/
+    # run_collector), nen phai tu seed 1 row cho dung (batch,conversation,message) truoc.
+    await admin.execute(
+        "INSERT INTO m4_stage0p_capture_progress (batch_id, conversation_id, message_id, customer_id) "
+        "VALUES ($1,$2,$3,$4)", hang_batch["batch_id"], conv_h["id"], msg_h["id"], cust_h["id"])
     await _set_capture(enabled=True, approval_ref="kill-test-approval")
 
     lock_holder = await asyncpg.connect(DB_URL)

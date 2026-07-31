@@ -1026,6 +1026,12 @@ async def main() -> int:
     msg_a = await admin.fetchrow(
         "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer','tin nhan ngan') RETURNING id",
         conv["id"])
+    # T13-01 (Correction #14): msg_a duoc tao SAU khi audit_batch da seed_capture_progress() (line
+    # ~932) - candidate nay chua co trong bang m4_stage0p_capture_progress. fetch_message_content()
+    # gio DERIVE customer_id tu bang do, seed thu cong 1 dong truoc khi fetch.
+    await admin.execute(
+        "INSERT INTO m4_stage0p_capture_progress (batch_id, conversation_id, message_id, customer_id) "
+        "VALUES ($1,$2,$3,$4)", audit_batch["batch_id"], conv["id"], msg_a["id"], cust["id"])
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
@@ -1058,6 +1064,10 @@ async def main() -> int:
     msg_b = await admin.fetchrow(
         "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer',$2) RETURNING id",
         conv_long["id"], long_content)
+    # T13-01 (Correction #14): conv_long/msg_b moi, chua qua seed_capture_progress() - seed thu cong.
+    await admin.execute(
+        "INSERT INTO m4_stage0p_capture_progress (batch_id, conversation_id, message_id, customer_id) "
+        "VALUES ($1,$2,$3,$4)", audit_batch["batch_id"], conv_long["id"], msg_b["id"], cust["id"])
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
@@ -1083,6 +1093,10 @@ async def main() -> int:
     msg_c = await admin.fetchrow(
         "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer','tin nhan c') RETURNING id",
         conv["id"])
+    # T13-01 (Correction #14): msg_c moi (sau lan seed_capture_progress duy nhat cua audit_batch).
+    await admin.execute(
+        "INSERT INTO m4_stage0p_capture_progress (batch_id, conversation_id, message_id, customer_id) "
+        "VALUES ($1,$2,$3,$4)", audit_batch["batch_id"], conv["id"], msg_c["id"], cust["id"])
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
@@ -1841,6 +1855,10 @@ async def main() -> int:
     msg_d = await admin.fetchrow(
         "INSERT INTO messages (conversation_id, role, content) VALUES ($1,'customer','noi dung goc that su') RETURNING id",
         conv_d["id"])
+    # T13-01 (Correction #14): conv_d/msg_d moi, chua qua seed_capture_progress() - seed thu cong.
+    await admin.execute(
+        "INSERT INTO m4_stage0p_capture_progress (batch_id, conversation_id, message_id, customer_id) "
+        "VALUES ($1,$2,$3,$4)", audit_batch["batch_id"], conv_d["id"], msg_d["id"], cust_d["id"])
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():

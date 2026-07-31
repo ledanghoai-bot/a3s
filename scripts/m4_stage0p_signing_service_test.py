@@ -1,40 +1,33 @@
 #!/usr/bin/env python
 """I-B M4 Stage 0P — evidence: access-control + request-authorization hardening cua signing
-service THAT (F-M4-0P-T11-02/T11-03 REV12, F-M4-0P-T12-01/T12-02 REV13).
+service THAT (F-M4-0P-T11-02/T11-03 REV12, F-M4-0P-T12-01/T12-02 REV13, F-M4-0P-T13-01/T13-02/
+T13-03 REV14).
 
 Chay:
   docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@alpha3s-m4-db:5432/alpha3s \
+      -e REDIS_URL=redis://alpha3s-m4-redis:6379/0 \
       alpha3s-m4-test python scripts/m4_stage0p_signing_service_test.py
 
-CA Technical Re-review #12 (F-M4-0P-T12-01, P1): REV12 `allowed_uid` mac dinh `os.getuid()` cua
-CHINH tien trinh signing service — vi collector va service REV12 chay CUNG uid trong mo hinh dev/
-test 1 host, "peer uid khop allowed_uid" luon DUNG cho BAT KY tien trinh nao chay cung uid do
-(khong rieng collector). Test "wrong peer UID" REV12 chi doi gia tri EXPECTED sai roi ket noi tu
-CUNG 1 principal — khong chung minh co 2 principal THAT.
+CA Technical Re-review #13 (T12-01 CLOSED AT DEV/TEST CODE-DESIGN LEVEL; F-M4-0P-T13-01/T13-02,
+P1; F-M4-0P-T13-03, P2): REV13 payload chi gom
+`batch_id|conversation_id|message_id|sample_id|purpose_code|txid|issued|expires` — CHUA buoc
+canonical digest cua noi dung THAT, CHUA buoc customer_ref/conversation_ref (dung trong AAD/
+transcript), CHUA co domain/operation tag, noi bang dau '|' KHONG unambiguous. `_replay_seen`
+REV13 la dictionary TRONG BO NHO CUA 1 TIEN TRINH — restart signer xoa toan bo state, 2 signer
+instance co 2 cache doc lap. Semaphore chi gioi han concurrency, khong gioi han TOC DO request.
 
-Sua REV13: kich ban [2] duoi day dung 3 UID HE DIEU HANH THAT KHAC NHAU (`ensure_service_accounts()`
-— `m4-signer`/`m4-collector` cung 1 group chia se, `m4-other` KHONG thuoc group do), spawn signing
-service THAT SU duoi UID `m4-signer` (tham so `run_as_uid`), va goi `request_signature()` TU 1
-TIEN TRINH CON THAT chay duoi UID `m4-collector` (thanh cong) / `m4-other` (bi tu choi TRUOC khi
-frame duoc doc) — khong chi mo phong bang cach doi gia tri expected trong CUNG 1 tien trinh.
-
-CA Technical Re-review #12 (F-M4-0P-T12-02, P1): sau khi qua UID check, REV12 signer chap nhan
-request chua batch_id/message identity/purpose_code/txid/raw content do caller TU KHAI BAO — khong
-co one-time authorization/policy chung minh request thuoc 1 capture capability hop le.
-
-Sua REV13: `m4_stage0p_fetch_message_content()` (migration) tu ky 1 "signing authorization" HMAC
-ngan han (30s) buoc vao (batch_id, conversation_id, message_id, sample_id, purpose_code, txid) —
-signer tu xac minh chu ky nay (`M4_SIGNING_AUTH_VERIFY_KEY_B64`) truoc khi dong y ky/ma hoa. Kich
-ban [9]-[14] duoi day mo phong CAC LOAI SAI KHAC NHAU cua token nay (tampered field/het han/TTL vuot/
-key_version sai/dinh dang sai/replay) — TAT CA phai bi tu choi TRUOC khi ky/ma hoa bat ky noi dung
-nao. Vi day la kiem tra o TANG SIGNING SERVICE (khong phai DB), cac kich ban nay tu xay token bang
-CHINH `auth_verify_key` da cap cho 1 instance service cu the (mo phong DB tu ky) — dung thuat toan
-GIONG HET migration 039 §5b (payload pipe-joined 8 truong + HMAC-SHA256, xem
-`stage0p_signing_service.py:_verify_signing_authorization()`).
+Sua REV14 (xem `stage0p_signing_service.py` docstring cho chi tiet day du thiet ke):
+  - T13-01: payload gio 14 truong (domain tag + identity + customer_ref/conversation_ref +
+    canonical_digest_hex + char_truncated + nonce + issued/expires), noi bang LENGTH-PREFIX
+    (khong con dau '|'). Signer tu canonicalize raw_content TRUOC, tu tinh digest, ROI moi doi
+    chieu chu ky — bat ky sai lech noi dung/customer_ref/truncation-claim deu bi tu choi.
+  - T13-02: token mang 1 nonce ngau nhien, tieu thu qua Redis `SET NX PX` (dung CHUNG moi signer
+    instance, ton tai qua restart) thay `_replay_seen` trong-bo-nho.
+  - T13-03: fixed-window admission budget (10s/40 request) AP DUNG SAU peer-UID check.
 
 Script nay test TRUC TIEP tang signing service (khong qua collector/DB — `m4_stage0p_kill_test.py`/
-`m4_stage0p_sampling_test.py` da chung minh round-trip THAT qua collector that su VOI token DB THAT
-ky, script nay tap trung vao lop access-control + xac minh token adversarial):
+`m4_stage0p_sampling_test.py` da chung minh round-trip THAT qua collector that su VOI token DB
+THAT ky/Redis THAT, script nay tap trung vao lop access-control + xac minh token adversarial):
 
   [1] Happy path: request hop le (peer duoc phep, signing_authorization dung) -> phan hoi thanh
       cong, giai ma lai dung plaintext goc, digest khop sha256(canonical text).
@@ -46,12 +39,22 @@ ky, script nay tap trung vao lop access-control + xac minh token adversarial):
   [6] Frame gui "cham" kieu slow-loris -> server dong ket noi trong khoang thoi gian BI CHAN.
   [7] Request flood: N request dong thoi tu peer hop le -> TAT CA thanh cong dung, khong tron lan.
   [8] Request thieu truong bat buoc -> phan hoi loi KHONG chua noi dung/plaintext.
-  [9] T12-02: signing_authorization ky cho sample_id KHAC (tampered field) -> chu ky khong khop.
-  [10] T12-02: signing_authorization da het han (expires_epoch trong qua khu) -> tu choi.
-  [11] T12-02: TTL vuot qua muc cho phep (30s) -> tu choi.
-  [12] T12-02: key_version khong duoc ho tro -> tu choi.
-  [13] T12-02: dinh dang token sai (thieu phan) -> tu choi.
-  [14] T12-02: replay — dung LAI CHINH XAC 1 token da dung thanh cong -> lan 2 bi tu choi."""
+  [9] T12-02: sample_id trong request khac voi luc ky (tampered field) -> chu ky khong khop.
+  [10] T13-01: raw_content bi thay the SAU KHI token da ky cho noi dung KHAC -> digest khong khop.
+  [11] T13-01: customer_ref bi thay the (dung trong AAD/transcript) -> chu ky khong khop.
+  [12] T13-01: db_char_truncated claim bi thay doi -> chu ky khong khop.
+  [13] T12-02: signing_authorization da het han -> tu choi.
+  [14] T12-02: TTL vuot qua muc cho phep (30s) -> tu choi.
+  [15] T12-02: key_version khong duoc ho tro -> tu choi.
+  [16] T13-01: dinh dang token sai (thieu phan, gio la 5 phan) -> tu choi.
+  [17] T13-02: replay — dung LAI CHINH XAC 1 token da dung thanh cong (CUNG 1 signer instance,
+       Redis THAT) -> lan 2 bi tu choi.
+  [18] T13-02: replay SAU KHI signer instance RESTART (tien trinh MOI, CUNG Redis+auth key) —
+       token da dung TRUOC restart van bi tu choi (state Redis TON TAI qua restart).
+  [19] T13-02: 2 signer instance KHAC NHAU (socket khac, CUNG Redis+auth key) nhan CUNG 1 token
+       DONG THOI -> DUNG 1 thanh cong (Redis SET NX PX dung CHUNG giua cac instance).
+  [20] T13-03: burst vuot ngan sach rate-limit -> mot phan bi tu choi TRUOC khi doc frame (khong
+       co response), tu phuc hoi co kiem soat sau khi cua so lan sau bat dau."""
 
 import asyncio
 import base64
@@ -61,6 +64,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,8 +86,12 @@ from app.services.pii.stage0p_signing_client import request_signature  # noqa: E
 _fail: list[str] = []
 
 _AUTH_KEY_VERSION = "m4-signing-auth-v1"
+_AUTH_DOMAIN_TAG = "m4-stage0p-sign-capture-v1"
 _DEFAULT_BATCH_ID = "11111111-1111-1111-1111-111111111111"
 _DEFAULT_PURPOSE = "m4-stage0p-training-sample-v1"
+# T13-03: PHAI khop CHINH XAC _RATE_LIMIT_WINDOW_SECONDS trong stage0p_signing_service.py - test
+# nay chay o TIEN TRINH KHAC nen khong import truc tiep duoc hang so cua service.
+_RATE_LIMIT_WINDOW_SECONDS_REF = 10.0
 
 
 def check(cond: bool, label: str) -> None:
@@ -92,39 +100,62 @@ def check(cond: bool, label: str) -> None:
         _fail.append(label)
 
 
+def _lenpfx_join(*fields) -> bytes:
+    """PHAI khop CHINH XAC thuat toan `stage0p_signing_service.py:_lenpfx_join()` / migration 039
+    (`m4_stage0p_fetch_message_content`, vong lap ARRAY) — moi truong tien to boi do dai byte cua
+    chinh no, noi tiep khong dau phan cach."""
+    out = bytearray()
+    for f in fields:
+        b = str(f).encode("utf-8")
+        out += str(len(b)).encode("ascii") + b":" + b
+    return bytes(out)
+
+
 def _sign_test_authorization(auth_key: bytes, *, batch_id: str, conversation_id: int,
-                             message_id: int, sample_id: str, purpose_code: str, txid: int,
-                             issued_epoch: int | None = None, expires_epoch: int | None = None,
-                             key_version: str = _AUTH_KEY_VERSION, ttl_seconds: int = 30) -> str:
+                             message_id: int, sample_id: str, customer_ref: str, purpose_code: str,
+                             txid: int, canonical_digest_hex: str, char_truncated: bool,
+                             nonce: str | None = None, issued_epoch: int | None = None,
+                             expires_epoch: int | None = None, key_version: str = _AUTH_KEY_VERSION,
+                             ttl_seconds: int = 30) -> str:
     """Mo phong `m4_stage0p_fetch_message_content()` tu ky 1 signing authorization (migration 039
-    §5b) — dung CHINH XAC thuat toan payload pipe-joined 8 truong + HMAC-SHA256 ma
-    `stage0p_signing_service.py:_verify_signing_authorization()` doi chieu lai."""
+    §5b, REV14 T13-01/T13-02) — dung CHINH XAC thuat toan payload length-prefix 14 truong +
+    HMAC-SHA256 ma `stage0p_signing_service.py:_verify_signing_authorization()` doi chieu lai."""
     now_epoch = int(time.time())
     issued_epoch = now_epoch if issued_epoch is None else issued_epoch
     expires_epoch = (issued_epoch + ttl_seconds) if expires_epoch is None else expires_epoch
-    payload = "|".join([
-        str(batch_id), str(conversation_id), str(message_id), str(sample_id), str(purpose_code),
-        str(txid), str(issued_epoch), str(expires_epoch),
-    ]).encode("utf-8")
+    nonce = nonce or str(uuid.uuid4())
+    conversation_id_str = str(conversation_id)
+    payload = _lenpfx_join(
+        _AUTH_DOMAIN_TAG, str(batch_id), conversation_id_str, str(message_id), str(sample_id),
+        str(customer_ref), conversation_id_str, str(purpose_code), str(txid), canonical_digest_hex,
+        ("1" if char_truncated else "0"), nonce, str(issued_epoch), str(expires_epoch),
+    )
     sig = hmac_module.new(auth_key, payload, hashlib.sha256).digest()
-    return f"{key_version}|{issued_epoch}|{expires_epoch}|{sig.hex()}"
+    return f"{key_version}|{issued_epoch}|{expires_epoch}|{nonce}|{sig.hex()}"
 
 
 def _build_request(auth_key: bytes, *, sample_id: str, raw_content: str, message_id: int = 1,
                    batch_id: str = _DEFAULT_BATCH_ID, conversation_id: int = 1,
-                   purpose_code: str = _DEFAULT_PURPOSE, txid: int = 1,
-                   auth_overrides: dict | None = None) -> dict:
+                   customer_ref: str = "cust-1", purpose_code: str = _DEFAULT_PURPOSE, txid: int = 1,
+                   db_char_truncated: bool = False, auth_overrides: dict | None = None) -> dict:
     """Xay 1 request DAY DU (bao gom signing_authorization dung, tru khi `auth_overrides` co y lam
-    sai lech mot phan) — dung cho ca happy-path lan cac kich ban adversarial T12-02."""
+    sai lech mot phan) — dung cho ca happy-path lan cac kich ban adversarial. `canonical_digest_hex`
+    ky trong token tu tinh TU CHINH `raw_content` duoc truyen (khop dung thuat toan signer se tu
+    lam) — cac kich ban T13-01 muon gia mao NOI DUNG phai sua `req["raw_content"]` SAU KHI ham nay
+    tra ve (token van con ky cho noi dung GOC), khong truyen thang noi dung gia vao day."""
+    canonical_text, _t = canonicalize(raw_content)
+    canonical_digest_hex = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
     auth_kwargs = dict(batch_id=batch_id, conversation_id=conversation_id, message_id=message_id,
-                       sample_id=sample_id, purpose_code=purpose_code, txid=txid)
+                       sample_id=sample_id, customer_ref=customer_ref, purpose_code=purpose_code,
+                       txid=txid, canonical_digest_hex=canonical_digest_hex,
+                       char_truncated=db_char_truncated)
     auth_kwargs.update(auth_overrides or {})
     token = _sign_test_authorization(auth_key, **auth_kwargs)
     return {
         "batch_id": batch_id, "conversation_id": conversation_id, "message_id": message_id,
-        "sample_id": sample_id, "raw_content": raw_content, "customer_ref": "cust-1",
-        "conversation_ref": "conv-1", "purpose_code": purpose_code, "txid": txid,
-        "signing_authorization": token, "db_char_truncated": False,
+        "sample_id": sample_id, "raw_content": raw_content, "customer_ref": customer_ref,
+        "conversation_ref": str(conversation_id), "purpose_code": purpose_code, "txid": txid,
+        "signing_authorization": token, "db_char_truncated": db_char_truncated,
     }
 
 
@@ -150,9 +181,15 @@ async def _raw_read_response(reader: asyncio.StreamReader, timeout: float = 3.0)
 
 
 async def _raw_request(socket_path: str, req: dict, *, timeout: float = 3.0) -> dict | None:
+    """Tra ve None neu ket noi bi dong TRUOC KHI gui xong request (vd rate-limit T13-03 dong
+    ket noi ngay sau accept, co the roi vao dung luc client dang ghi) — CUNG 1 y nghia voi "khong
+    co response" tu `_raw_read_response`, khong phai loi test."""
     reader, writer = await asyncio.open_unix_connection(path=socket_path)
     try:
-        await _raw_send_request(writer, req)
+        try:
+            await _raw_send_request(writer, req)
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            return None
         return await _raw_read_response(reader, timeout=timeout)
     finally:
         writer.close()
@@ -182,19 +219,20 @@ async def main() -> int:
     proc_1, sample_key_1, _hmac_key_1, auth_key_1 = await start_signing_service(
         socket_path=socket_1, allowed_uid=os.getuid())
     try:
+        req_1 = _build_request(auth_key_1, sample_id="sample-1",
+                               raw_content="Xin chao, day la tin nhan test.")
         result = await request_signature(
-            socket_1, batch_id=_DEFAULT_BATCH_ID, conversation_id=1, message_id=1,
-            sample_id="sample-1", raw_content="Xin chao, day la tin nhan test.",
-            customer_ref="cust-1", conversation_ref="conv-1", purpose_code=_DEFAULT_PURPOSE,
-            txid=1, signing_authorization=_sign_test_authorization(
-                auth_key_1, batch_id=_DEFAULT_BATCH_ID, conversation_id=1, message_id=1,
-                sample_id="sample-1", purpose_code=_DEFAULT_PURPOSE, txid=1))
+            socket_1, batch_id=req_1["batch_id"], conversation_id=req_1["conversation_id"],
+            message_id=req_1["message_id"], sample_id=req_1["sample_id"],
+            raw_content=req_1["raw_content"], customer_ref=req_1["customer_ref"],
+            conversation_ref=req_1["conversation_ref"], purpose_code=req_1["purpose_code"],
+            txid=req_1["txid"], signing_authorization=req_1["signing_authorization"])
         canonical_text, _truncated = canonicalize("Xin chao, day la tin nhan test.")
         check(result.canonical_digest == hashlib.sha256(canonical_text.encode("utf-8")).digest(),
               "[1] digest tra ve khop sha256(canonical_text) tu chinh service tu tinh")
         settings.m4_sample_key_b64 = base64.b64encode(sample_key_1).decode()
         decrypted = decrypt_sample_value(result.ciphertext, customer_ref="cust-1",
-                                         conversation_ref="conv-1", sample_id="sample-1")
+                                         conversation_ref="1", sample_id="sample-1")
         check(decrypted == canonical_text,
               "[1] giai ma lai (bang chinh sample_key da cap cho service) ra DUNG canonical_text")
     finally:
@@ -316,13 +354,14 @@ async def main() -> int:
         contents = [f"tin nhan flood so {i} - noi dung rieng biet" for i in range(n)]
 
         async def _one(i: int):
+            req_i = _build_request(auth_key_7, sample_id=f"sample-flood-{i}", raw_content=contents[i],
+                                   message_id=i, txid=i)
             return await request_signature(
-                socket_7, batch_id=_DEFAULT_BATCH_ID, conversation_id=1, message_id=i,
-                sample_id=f"sample-flood-{i}", raw_content=contents[i], customer_ref="cust-1",
-                conversation_ref="conv-1", purpose_code=_DEFAULT_PURPOSE, txid=i,
-                signing_authorization=_sign_test_authorization(
-                    auth_key_7, batch_id=_DEFAULT_BATCH_ID, conversation_id=1, message_id=i,
-                    sample_id=f"sample-flood-{i}", purpose_code=_DEFAULT_PURPOSE, txid=i))
+                socket_7, batch_id=req_i["batch_id"], conversation_id=req_i["conversation_id"],
+                message_id=req_i["message_id"], sample_id=req_i["sample_id"],
+                raw_content=req_i["raw_content"], customer_ref=req_i["customer_ref"],
+                conversation_ref=req_i["conversation_ref"], purpose_code=req_i["purpose_code"],
+                txid=req_i["txid"], signing_authorization=req_i["signing_authorization"])
 
         results = await asyncio.gather(*(_one(i) for i in range(n)), return_exceptions=True)
         ok_count = sum(1 for r in results if not isinstance(r, Exception))
@@ -338,7 +377,7 @@ async def main() -> int:
                 mismatched += 1
                 continue
             decrypted_i = decrypt_sample_value(r.ciphertext, customer_ref="cust-1",
-                                               conversation_ref="conv-1", sample_id=f"sample-flood-{i}")
+                                               conversation_ref="1", sample_id=f"sample-flood-{i}")
             if decrypted_i != contents[i]:
                 mismatched += 1
         check(mismatched == 0, "[7] KHONG co request nao bi tron lan noi dung/digest voi request "
@@ -361,8 +400,8 @@ async def main() -> int:
     finally:
         await stop_signing_service(proc_8, socket_8)
 
-    print("== [9]-[14] T12-02: signing_authorization adversarial - tat ca phai bi tu choi TRUOC "
-          "khi ky/ma hoa bat ky noi dung nao ==")
+    print("== [9]-[16] signing_authorization adversarial - tat ca phai bi tu choi TRUOC khi ky/ma "
+          "hoa bat ky noi dung nao ==")
     socket_9 = f"/tmp/m4-sst-9-{os.getpid()}/sock"
     proc_9, _sk9, _hk9, auth_key_9 = await start_signing_service(socket_path=socket_9, allowed_uid=os.getuid())
     try:
@@ -373,46 +412,149 @@ async def main() -> int:
         check(resp_9 is not None and resp_9.get("ok") is False and "chu ky khong khop" in resp_9.get("error", ""),
               f"[9] sample_id trong request khac voi luc ky -> chu ky khong khop, tu choi (thuc te: {resp_9})")
 
-        print("  -- [10] token da het han --")
-        past = int(time.time()) - 3600
-        req_10 = _build_request(auth_key_9, sample_id="s10", raw_content="noi dung s10",
-                                auth_overrides={"issued_epoch": past, "expires_epoch": past + 30})
+        print("  -- [10] T13-01: raw_content bi thay the SAU KHI token da ky cho noi dung KHAC --")
+        req_10 = _build_request(auth_key_9, sample_id="s10-content-tamper",
+                                raw_content="noi dung THAT duoc uy quyen")
+        req_10["raw_content"] = "noi dung GIA da bi thay the boi 1 tien trinh gian doan"
         resp_10 = await _raw_request(socket_9, req_10, timeout=3.0)
-        check(resp_10 is not None and resp_10.get("ok") is False and "het han" in resp_10.get("error", ""),
-              f"[10] token het han tu lau -> tu choi (thuc te: {resp_10})")
+        check(resp_10 is not None and resp_10.get("ok") is False and "chu ky khong khop" in resp_10.get("error", ""),
+              f"[10] raw_content bi thay doi -> digest khac, chu ky khong khop, tu choi TRUOC khi "
+              f"ma hoa noi dung gia (thuc te: {resp_10})")
 
-        print("  -- [11] TTL vuot qua muc cho phep (30s) --")
-        now_epoch = int(time.time())
-        req_11 = _build_request(auth_key_9, sample_id="s11", raw_content="noi dung s11",
-                                auth_overrides={"issued_epoch": now_epoch, "expires_epoch": now_epoch + 3600})
+        print("  -- [11] T13-01: customer_ref bi thay the (dung trong AAD/transcript) --")
+        req_11 = _build_request(auth_key_9, sample_id="s11-customer-tamper", raw_content="noi dung s11",
+                                customer_ref="cust-that")
+        req_11["customer_ref"] = "cust-gia-mao"
         resp_11 = await _raw_request(socket_9, req_11, timeout=3.0)
-        check(resp_11 is not None and resp_11.get("ok") is False and "TTL" in resp_11.get("error", ""),
-              f"[11] TTL 3600s vuot qua 30s cho phep -> tu choi (thuc te: {resp_11})")
+        check(resp_11 is not None and resp_11.get("ok") is False and "chu ky khong khop" in resp_11.get("error", ""),
+              f"[11] customer_ref bi thay doi -> chu ky khong khop, tu choi (thuc te: {resp_11})")
 
-        print("  -- [12] key_version khong duoc ho tro --")
-        req_12 = _build_request(auth_key_9, sample_id="s12", raw_content="noi dung s12",
-                                auth_overrides={"key_version": "m4-signing-auth-v99-khong-ton-tai"})
+        print("  -- [12] T13-01: db_char_truncated claim bi thay doi --")
+        req_12 = _build_request(auth_key_9, sample_id="s12-trunc-tamper", raw_content="noi dung s12",
+                                db_char_truncated=False)
+        req_12["db_char_truncated"] = True
         resp_12 = await _raw_request(socket_9, req_12, timeout=3.0)
-        check(resp_12 is not None and resp_12.get("ok") is False and "key_version" in resp_12.get("error", ""),
-              f"[12] key_version sai -> tu choi (thuc te: {resp_12})")
+        check(resp_12 is not None and resp_12.get("ok") is False and "chu ky khong khop" in resp_12.get("error", ""),
+              f"[12] db_char_truncated claim khac voi luc ky -> chu ky khong khop, tu choi "
+              f"(thuc te: {resp_12})")
 
-        print("  -- [13] dinh dang token sai (thieu phan) --")
-        req_13 = _build_request(auth_key_9, sample_id="s13", raw_content="noi dung s13")
-        req_13["signing_authorization"] = "chi-1-phan-khong-du"
+        print("  -- [13] token da het han --")
+        past = int(time.time()) - 3600
+        req_13 = _build_request(auth_key_9, sample_id="s13", raw_content="noi dung s13",
+                                auth_overrides={"issued_epoch": past, "expires_epoch": past + 30})
         resp_13 = await _raw_request(socket_9, req_13, timeout=3.0)
-        check(resp_13 is not None and resp_13.get("ok") is False and "dinh dang" in resp_13.get("error", ""),
-              f"[13] token dinh dang sai -> tu choi (thuc te: {resp_13})")
+        check(resp_13 is not None and resp_13.get("ok") is False and "het han" in resp_13.get("error", ""),
+              f"[13] token het han tu lau -> tu choi (thuc te: {resp_13})")
 
-        print("  -- [14] replay: dung LAI CHINH XAC 1 token da dung thanh cong --")
-        req_14 = _build_request(auth_key_9, sample_id="s14", raw_content="noi dung s14")
-        resp_14a = await _raw_request(socket_9, req_14, timeout=3.0)
-        check(resp_14a is not None and resp_14a.get("ok") is True,
-              f"[14] lan 1 (token con moi, chua dung) -> thanh cong (thuc te: {resp_14a and resp_14a.get('ok')})")
-        resp_14b = await _raw_request(socket_9, req_14, timeout=3.0)
-        check(resp_14b is not None and resp_14b.get("ok") is False and "replay" in resp_14b.get("error", ""),
-              f"[14] lan 2 (CUNG token) -> tu choi (replay) (thuc te: {resp_14b})")
+        print("  -- [14] TTL vuot qua muc cho phep (30s) --")
+        now_epoch = int(time.time())
+        req_14 = _build_request(auth_key_9, sample_id="s14", raw_content="noi dung s14",
+                                auth_overrides={"issued_epoch": now_epoch, "expires_epoch": now_epoch + 3600})
+        resp_14 = await _raw_request(socket_9, req_14, timeout=3.0)
+        check(resp_14 is not None and resp_14.get("ok") is False and "TTL" in resp_14.get("error", ""),
+              f"[14] TTL 3600s vuot qua 30s cho phep -> tu choi (thuc te: {resp_14})")
+
+        print("  -- [15] key_version khong duoc ho tro --")
+        req_15 = _build_request(auth_key_9, sample_id="s15", raw_content="noi dung s15",
+                                auth_overrides={"key_version": "m4-signing-auth-v99-khong-ton-tai"})
+        resp_15 = await _raw_request(socket_9, req_15, timeout=3.0)
+        check(resp_15 is not None and resp_15.get("ok") is False and "key_version" in resp_15.get("error", ""),
+              f"[15] key_version sai -> tu choi (thuc te: {resp_15})")
+
+        print("  -- [16] dinh dang token sai (thieu phan, gio la 5 phan) --")
+        req_16 = _build_request(auth_key_9, sample_id="s16", raw_content="noi dung s16")
+        req_16["signing_authorization"] = "chi-1-phan-khong-du"
+        resp_16 = await _raw_request(socket_9, req_16, timeout=3.0)
+        check(resp_16 is not None and resp_16.get("ok") is False and "dinh dang" in resp_16.get("error", ""),
+              f"[16] token dinh dang sai -> tu choi (thuc te: {resp_16})")
+
+        print("  -- [17] replay: dung LAI CHINH XAC 1 token da dung thanh cong (CUNG instance) --")
+        req_17 = _build_request(auth_key_9, sample_id="s17", raw_content="noi dung s17")
+        resp_17a = await _raw_request(socket_9, req_17, timeout=3.0)
+        check(resp_17a is not None and resp_17a.get("ok") is True,
+              f"[17] lan 1 (token con moi, chua dung) -> thanh cong (thuc te: {resp_17a and resp_17a.get('ok')})")
+        resp_17b = await _raw_request(socket_9, req_17, timeout=3.0)
+        check(resp_17b is not None and resp_17b.get("ok") is False and "replay" in resp_17b.get("error", ""),
+              f"[17] lan 2 (CUNG token) -> tu choi (replay, Redis) (thuc te: {resp_17b})")
     finally:
         await stop_signing_service(proc_9, socket_9)
+
+    print("== [18] T13-02: replay SAU KHI signer instance RESTART (tien trinh MOI, CUNG Redis+auth "
+          "key) — token dung TRUOC restart van bi tu choi ==")
+    socket_18 = f"/tmp/m4-sst-18-{os.getpid()}/sock"
+    shared_auth_key_18 = os.urandom(32)
+    proc_18a, _sk18a, _hk18a, _ak18a = await start_signing_service(
+        socket_path=socket_18, allowed_uid=os.getuid(), auth_verify_key=shared_auth_key_18)
+    req_18 = _build_request(shared_auth_key_18, sample_id="s18-restart", raw_content="noi dung s18")
+    resp_18a = await _raw_request(socket_18, req_18, timeout=3.0)
+    check(resp_18a is not None and resp_18a.get("ok") is True,
+          f"[18] lan 1 TRUOC restart -> thanh cong (thuc te: {resp_18a and resp_18a.get('ok')})")
+    await stop_signing_service(proc_18a, socket_18)
+
+    proc_18b, _sk18b, _hk18b, _ak18b = await start_signing_service(
+        socket_path=socket_18, allowed_uid=os.getuid(), auth_verify_key=shared_auth_key_18)
+    try:
+        resp_18b = await _raw_request(socket_18, req_18, timeout=3.0)
+        check(resp_18b is not None and resp_18b.get("ok") is False and "replay" in resp_18b.get("error", ""),
+              f"[18] SAU restart (tien trinh signer MOI) -> CUNG token van bi tu choi (replay) - "
+              f"chung minh state Redis TON TAI qua process restart, khac han cache trong-bo-nho "
+              f"REV13 (thuc te: {resp_18b})")
+    finally:
+        await stop_signing_service(proc_18b, socket_18)
+
+    print("== [19] T13-02: 2 signer instance KHAC NHAU (socket khac, CUNG Redis+auth key) nhan CUNG "
+          "1 token DONG THOI -> DUNG 1 thanh cong ==")
+    socket_19a = f"/tmp/m4-sst-19a-{os.getpid()}/sock"
+    socket_19b = f"/tmp/m4-sst-19b-{os.getpid()}/sock"
+    shared_auth_key_19 = os.urandom(32)
+    proc_19a, _sk19a, _hk19a, _ak19a = await start_signing_service(
+        socket_path=socket_19a, allowed_uid=os.getuid(), auth_verify_key=shared_auth_key_19)
+    proc_19b, _sk19b, _hk19b, _ak19b = await start_signing_service(
+        socket_path=socket_19b, allowed_uid=os.getuid(), auth_verify_key=shared_auth_key_19)
+    try:
+        req_19 = _build_request(shared_auth_key_19, sample_id="s19-2instances", raw_content="noi dung s19")
+        resp_19a, resp_19b = await asyncio.gather(
+            _raw_request(socket_19a, req_19, timeout=5.0),
+            _raw_request(socket_19b, req_19, timeout=5.0),
+        )
+        ok_count_19 = sum(1 for r in (resp_19a, resp_19b) if r is not None and r.get("ok") is True)
+        check(ok_count_19 == 1,
+              f"[19] 2 signer instance KHAC NHAU, CUNG token, goi DONG THOI -> DUNG 1 thanh cong "
+              f"(thuc te {ok_count_19}/2 — Redis SET NX PX dung CHUNG giua cac instance, T13-02) "
+              f"[{resp_19a}, {resp_19b}]")
+    finally:
+        await stop_signing_service(proc_19a, socket_19a)
+        await stop_signing_service(proc_19b, socket_19b)
+
+    print("== [20] T13-03: burst vuot ngan sach rate-limit -> mot phan bi tu choi TRUOC khi doc "
+          "frame, tu phuc hoi co kiem soat sau khi cua so lan sau bat dau ==")
+    socket_20 = f"/tmp/m4-sst-20-{os.getpid()}/sock"
+    proc_20, _sk20, _hk20, auth_key_20 = await start_signing_service(socket_path=socket_20, allowed_uid=os.getuid())
+    try:
+        n_burst = 60  # vuot han ngan sach 40/10s cua service
+
+        async def _burst_one(i: int):
+            req_i = _build_request(auth_key_20, sample_id=f"s20-burst-{i}",
+                                   raw_content=f"noi dung burst {i}", message_id=1000 + i, txid=1000 + i)
+            return await _raw_request(socket_20, req_i, timeout=3.0)
+
+        results_20 = await asyncio.gather(*(_burst_one(i) for i in range(n_burst)))
+        ok_20 = sum(1 for r in results_20 if r is not None and r.get("ok") is True)
+        none_20 = sum(1 for r in results_20 if r is None)
+        check(ok_20 <= 40, f"[20] burst {n_burst} request trong 1 cua so -> KHONG vuot ngan sach "
+              f"40 request duoc XU LY (thuc te {ok_20} thanh cong)")
+        check(none_20 > 0, f"[20] it nhat 1 request bi tu choi boi rate-limit (khong co response - "
+              f"tu choi TRUOC khi doc frame) (thuc te {none_20}/{n_burst} khong co response)")
+
+        await asyncio.sleep(_RATE_LIMIT_WINDOW_SECONDS_REF + 0.5)
+        req_recover = _build_request(auth_key_20, sample_id="s20-recover",
+                                     raw_content="noi dung phuc hoi", message_id=2000, txid=2000)
+        resp_recover = await _raw_request(socket_20, req_recover, timeout=3.0)
+        check(resp_recover is not None and resp_recover.get("ok") is True,
+              f"[20] SAU KHI cua so cu het han -> request MOI thanh cong (tu phuc hoi co kiem soat) "
+              f"(thuc te: {resp_recover})")
+    finally:
+        await stop_signing_service(proc_20, socket_20)
 
     print()
     if _fail:

@@ -958,14 +958,19 @@ DECLARE
   v_byte_trunc    BOOLEAN;
   v_canon         TEXT;
   v_cutlen        INT;
-  -- T12-02: signing authorization.
-  v_txid              BIGINT;
-  v_auth_key_version   TEXT;
-  v_auth_key           BYTEA;
-  v_auth_issued_epoch  BIGINT;
-  v_auth_expires_epoch BIGINT;
-  v_auth_payload       TEXT;
-  v_auth_sig           BYTEA;
+  -- T12-02/T13-01/T13-02: signing authorization.
+  v_txid                  BIGINT;
+  v_customer_id           BIGINT;
+  v_canonical_digest_hex  TEXT;
+  v_auth_key_version      TEXT;
+  v_auth_key              BYTEA;
+  v_auth_issued_epoch     BIGINT;
+  v_auth_expires_epoch    BIGINT;
+  v_auth_nonce            TEXT;
+  v_auth_fields           TEXT[];
+  v_auth_field            TEXT;
+  v_auth_payload          TEXT;
+  v_auth_sig              BYTEA;
   v_signing_authorization TEXT;
 BEGIN
   PERFORM pg_advisory_xact_lock(4013003);
@@ -1067,8 +1072,35 @@ BEGIN
   VALUES (p_batch_id, p_conversation_id, p_message_id, v_txid,
           char_length(v_canon), (v_char_trunc OR v_byte_trunc), digest(v_canon, 'sha256'));
 
-  -- T12-02: ky 1 signing authorization ngan han (30s) buoc vao CHINH request nay - collector chi
-  -- relay nguyen ven sang signing service, khong tu tao/sua duoc (khong co khoa).
+  -- T12-02/T13-01/T13-02: ky 1 signing authorization ngan han (30s) buoc vao CHINH request nay -
+  -- collector chi relay nguyen ven sang signing service, khong tu tao/sua duoc (khong co khoa).
+  --
+  -- T13-01 (CA Review #13): CA chi ro payload REV13 CHUA buoc canonical digest cua noi dung THAT,
+  -- CHUA buoc customer_ref/conversation_ref (dung trong AAD/transcript), CHUA co domain/operation
+  -- tag, va dung noi chuoi '|' KHONG unambiguous (khong length-prefixed). Sua ca 4:
+  --   (a) v_canonical_digest_hex tinh tu CHINH v_canon (canonical text THAT DB vua tinh o tren,
+  --       CUNG gia tri dung de tinh fetched_canonical_digest) - signer se tu canonicalize
+  --       raw_content roi doi chieu lai digest nay TRUOC khi ky/ma hoa (xem
+  --       stage0p_signing_service.py:_verify_signing_authorization);
+  --   (b) v_customer_id DO DB TU DERIVE tu m4_stage0p_capture_progress (KHONG nhan tu caller —
+  --       loai bo 1 diem caller-tu-khai nua, dung nguyen tac T4-04/T5-01/T9-02);
+  --   (c) domain tag co dinh 'm4-stage0p-sign-capture-v1' la truong DAU TIEN trong payload;
+  --   (d) payload xay bang length-prefix ('<so-byte>:<gia-tri>' noi tiep nhau, KHONG dung dau '|'
+  --       phan cach — loai bo hoan toan kha nang 1 truong chua ky tu phan cach lam lech ranh gioi
+  --       cac truong con lai, dung CHINH XAC thuat toan ma phia Python tai dung).
+  -- T13-02: v_auth_nonce (gen_random_uuid, ngau nhien 128-bit) buoc vao payload VA dua rieng vao
+  -- token (ngoai payload) de signer dung lam khoa "consume 1 lan" qua Redis SET NX (doc lap voi
+  -- tien trinh/instance signer nao xu ly, ton tai qua restart — dong khac biet CA neu voi cache
+  -- trong-bo-nho REV13 chi song trong 1 process).
+  SELECT customer_id INTO v_customer_id
+    FROM public.m4_stage0p_capture_progress
+    WHERE batch_id = p_batch_id AND conversation_id = p_conversation_id AND message_id = p_message_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'm4_stage0p_fetch_message_content: khong tim thay capture_progress cho (%,%) trong batch % (T13-01)',
+      p_conversation_id, p_message_id, p_batch_id;
+  END IF;
+  v_canonical_digest_hex := encode(digest(v_canon, 'sha256'), 'hex');
+
   SELECT sak.key_version, sak.hmac_key INTO v_auth_key_version, v_auth_key
     FROM public.m4_stage0p_signing_auth_keys AS sak
     WHERE sak.retired_at IS NULL
@@ -1079,12 +1111,23 @@ BEGIN
   END IF;
   v_auth_issued_epoch := extract(epoch FROM now())::bigint;
   v_auth_expires_epoch := v_auth_issued_epoch + 30;
-  v_auth_payload := p_batch_id::text || '|' || p_conversation_id::text || '|' || p_message_id::text
-    || '|' || p_sample_id::text || '|' || v_batch.purpose_code || '|' || v_txid::text
-    || '|' || v_auth_issued_epoch::text || '|' || v_auth_expires_epoch::text;
+  v_auth_nonce := gen_random_uuid()::text;
+
+  v_auth_fields := ARRAY[
+    'm4-stage0p-sign-capture-v1', p_batch_id::text, p_conversation_id::text, p_message_id::text,
+    p_sample_id::text, v_customer_id::text, p_conversation_id::text, v_batch.purpose_code,
+    v_txid::text, v_canonical_digest_hex,
+    (CASE WHEN (v_char_trunc OR v_byte_trunc) THEN '1' ELSE '0' END),
+    v_auth_nonce, v_auth_issued_epoch::text, v_auth_expires_epoch::text
+  ];
+  v_auth_payload := '';
+  FOREACH v_auth_field IN ARRAY v_auth_fields LOOP
+    v_auth_payload := v_auth_payload || octet_length(v_auth_field)::text || ':' || v_auth_field;
+  END LOOP;
+
   v_auth_sig := hmac(v_auth_payload::bytea, v_auth_key, 'sha256');
   v_signing_authorization := v_auth_key_version || '|' || v_auth_issued_epoch::text || '|'
-    || v_auth_expires_epoch::text || '|' || encode(v_auth_sig, 'hex');
+    || v_auth_expires_epoch::text || '|' || v_auth_nonce || '|' || encode(v_auth_sig, 'hex');
 
   RETURN QUERY SELECT 'ok'::TEXT, v_received, v_char_trunc, v_row.created_at, v_signing_authorization;
 END;
