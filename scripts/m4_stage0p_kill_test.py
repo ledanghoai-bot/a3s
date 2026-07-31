@@ -115,7 +115,7 @@ async def main() -> int:
     # REV11 T10-02: KHONG con dat m4_sample_key_b64/m4_transcript_hmac_key_b64 trong process nay
     # (dong vai collector) - 2 khoa CHI ton tai trong tien trinh signing service RIENG (xem
     # start_signing_service()), chung minh collector process THAT SU khong giu khoa.
-    signing_socket = f"/tmp/m4-signing-{os.getpid()}.sock"
+    signing_socket = f"/tmp/m4-signing-{os.getpid()}/sock"  # T11-02: thu muc RIENG, khong dat truc tiep duoi /tmp (mode 1777 bi tu choi)
     signing_proc, _sample_key, transcript_key = await start_signing_service(socket_path=signing_socket)
     settings.m4_stage0p_signing_socket = signing_socket
     real_redis_url = settings.redis_url

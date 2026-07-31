@@ -491,6 +491,91 @@ async def main() -> int:
         ok11 = await set_capture_enabled(conn_11b, enabled=False, approval_ref=None)
         check(ok11 is False, "actor B hoat dong binh thuong sau su co safety-unpin cua A")
 
+    print("== [12]-[16] T11-01: CancelledError tai TUNG diem trong __aenter__ — asyncio.CancelledError "
+          "ke thua BaseException (khong phai Exception) tu Python 3.8, nen truoc REV12 lan CancelledError "
+          "nao cung xuyen qua 'except Exception' cu, bo qua cleanup hoan toan. Moi kich ban duoi day mo "
+          "phong 1 lan cancellation THAT ngat DUNG 1 await cu the (tu quan diem __aenter__, 1 await raise "
+          "CancelledError KHONG THE phan biet voi cancellation THAT tu task.cancel() giua chung) ==")
+
+    class _CancelOnce:
+        """`Connection`/`PoolConnectionProxy` instance TU CHOI gan lai attribute method (read-only
+        — xac nhan qua thuc nghiem truc tiep truoc khi viet class nay), nen KHONG monkeypatch duoc
+        o cap INSTANCE nhu cac helper truoc day trong repo. Patch o cap CLASS
+        (`asyncpg.Connection.execute`/`fetchrow`) nhung CHI THUC SU can thiep khi `self is
+        target_conn` (so sanh identity voi CHINH physical Connection `pool_test.py` dang test) —
+        cac connection KHAC dang song song trong CUNG tien trinh (vd `admin`, cac connection cua
+        blocker o kich ban [7]) khong bi anh huong du dung CHUNG 1 class."""
+
+        def __init__(self, target_conn, *, method: str, prefix: str):
+            self._target = target_conn
+            self._method = method
+            self._prefix = prefix
+            self._fired = False
+            self._orig_execute = asyncpg.Connection.execute
+            self._orig_fetchrow = asyncpg.Connection.fetchrow
+
+        def install(self) -> None:
+            orig_execute = self._orig_execute
+            orig_fetchrow = self._orig_fetchrow
+
+            async def _execute(conn_self, sql, *args, **kwargs):
+                if (self._method == "execute" and not self._fired and conn_self is self._target
+                        and sql.startswith(self._prefix)):
+                    self._fired = True
+                    raise asyncio.CancelledError()
+                return await orig_execute(conn_self, sql, *args, **kwargs)
+
+            async def _fetchrow(conn_self, sql, *args, **kwargs):
+                if (self._method == "fetchrow" and not self._fired and conn_self is self._target
+                        and sql.startswith(self._prefix)):
+                    self._fired = True
+                    raise asyncio.CancelledError()
+                return await orig_fetchrow(conn_self, sql, *args, **kwargs)
+
+            asyncpg.Connection.execute = _execute
+            asyncpg.Connection.fetchrow = _fetchrow
+
+        def restore(self) -> None:
+            asyncpg.Connection.execute = self._orig_execute
+            asyncpg.Connection.fetchrow = self._orig_fetchrow
+
+    async def _run_cancel_point(label: str, *, method: str, prefix: str) -> None:
+        raw = await pool.acquire()
+        real_conn = raw._con  # PoolConnectionProxy khong the patch truc tiep - can identity cua Connection that
+        await pool.release(raw)
+        injector = _CancelOnce(real_conn, method=method, prefix=prefix)
+        injector.install()
+        try:
+            async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
+                                            business_role=Stage0PBusinessRole.CONTROL_PLANE):
+                check(False, f"{label}: CancelledError phai lam __aenter__ raise, khong duoc tra ve "
+                      "connection")
+        except asyncio.CancelledError:
+            check(True, f"{label}: CancelledError lan truyen ra ngoai __aenter__ (khong bi nuot boi "
+                  "'except Exception' cu bo sot BaseException, T11-01)")
+        finally:
+            injector.restore()
+        # Xac nhan pool KHONG leak: actor B checkout SAU DO tren CUNG connection vat ly phai SACH.
+        async with pinned_actor_session(pool, staff_id=staff_b["id"], pin_secret=PIN_SECRET_B,
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn_next:
+            pid_next = await conn_next.fetchval("SELECT pg_backend_pid()")
+            owner_next = await _actor_session_owner(admin, pid_next)
+            check(owner_next == staff_b["id"], f"{label}: sau CancelledError, pool tra ve connection "
+                  "SACH cho actor B ke tiep (khong pin cu con song, khong 'ket' checked-out vinh vien)")
+            ok_next = await set_capture_enabled(conn_next, enabled=False, approval_ref=None)
+            check(ok_next is False, f"{label}: actor B hoat dong binh thuong sau su co cancellation cua A")
+
+    await _run_cancel_point("[12] cancel sau acquire (trong 'SET ROLE actor_binder')",
+                            method="execute", prefix="SET ROLE alpha3s_m4_actor_binder")
+    await _run_cancel_point("[13] cancel sau actor-binder role (trong safety-unpin)",
+                            method="execute", prefix="SELECT m4_stage0p_unpin_actor()")
+    await _run_cancel_point("[14] cancel sau safety-unpin (trong pin_actor)",
+                            method="fetchrow", prefix="SELECT * FROM m4_stage0p_pin_actor")
+    await _run_cancel_point("[15] cancel sau pin (trong RESET ROLE)",
+                            method="execute", prefix="RESET ROLE")
+    await _run_cancel_point('[16] cancel sau reset-role / trong business-role setup (SET ROLE "...")',
+                            method="execute", prefix='SET ROLE "')
+
     await pool.close()
 
     await admin.execute(

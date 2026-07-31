@@ -71,7 +71,23 @@ Safety-unpin gio PHAN BIET RAISE THAT (permission/connection loi — `m4_stage0p
 1 DELETE don gian, KHONG RAISE cho truong hop binh thuong "chua tung co pin", nen bat ky
 `PostgresError` nao o day la dau hieu that bai ha tang THAT) voi truong hop "chua tung pin" (khong
 co gi de bat, ham SQL tu no khong RAISE) — loi that bay gio FAIL CLOSED (rethrow, discard
-connection), khong con bi nuot roi tiep tuc."""
+connection), khong con bi nuot roi tiep tuc.
+
+CA Technical Re-review #11 (F-M4-0P-T11-01, P1): REV11 chi `except Exception:` quanh chuoi setup —
+tu Python 3.8, `asyncio.CancelledError` ke thua `BaseException` TRUC TIEP (khong con ke thua
+`Exception` nhu Python 2/3.7), nen 1 lan cancel() THAT toi task dang chay `__aenter__()` (vd request
+HTTP bi client huy giua chung) NEM MOT `CancelledError` xuyen thang qua `except Exception:` — hoan
+toan bo qua `_wait_cleanup_and_release`, roi vi Python KHONG BAO GIO goi `__aexit__()` khi
+`__aenter__()` tu no raise (bat ke loai exception nao), connection bi "ket" checked-out VOI PIN/ROLE
+con song vinh vien tren pool.
+
+Sua REV12: `except Exception:` -> `except BaseException:`. AN TOAN o day (khac voi 1 `except
+BaseException` "bat tat ca" thong thuong hay bi canh bao vi co the nuot nham `KeyboardInterrupt`/
+`SystemExit` khien tien trinh "tiep tuc am tham") VI nhanh nay LUON LUON `raise` lai NGUYEN VEN
+VO DIEU KIEN o cuoi (khong co logic re-raise co dieu kien, khong co "xu ly roi tiep tuc") — du bat
+duoc `CancelledError`, `KeyboardInterrupt`, `SystemExit`, hay bat ky `BaseException` nao khac, hanh
+vi cuoi cung LUON LA: cleanup/discard connection roi re-raise CHINH XAC exception goc cho caller —
+khong co duong nao "nuot loi roi tiep tuc" ca."""
 
 import asyncio
 import enum
@@ -150,11 +166,15 @@ class _PinnedSession:
             await conn.execute("RESET ROLE")
             # T9-02: gia tri enum + quote identifier an toan (2 lop, xem module docstring).
             await conn.execute(f"SET ROLE {_quote_role_ident(self._business_role.value)}")
-        except Exception:
-            # T10-03: BAT KY that bai nao sau acquire() (safety-unpin/pin_actor/RESET ROLE/SET
-            # ROLE business_role) deu di qua CUNG 1 primitive cleanup/discard voi __aexit__ —
-            # khong con 1 nhanh rieng de sot buoc, khong con connection "mo cong" ma khong ai
-            # cleanup vi __aenter__ tu raise (Python khong goi __aexit__ khi __aenter__ raise).
+        except BaseException:
+            # T10-03/T11-01: BAT KY that bai nao sau acquire() (safety-unpin/pin_actor/RESET
+            # ROLE/SET ROLE business_role/cancellation) deu di qua CUNG 1 primitive cleanup/
+            # discard voi __aexit__ — khong con 1 nhanh rieng de sot buoc, khong con connection
+            # "mo cong" ma khong ai cleanup vi __aenter__ tu raise (Python khong goi __aexit__
+            # khi __aenter__ raise). `except BaseException` (khong phai `except Exception`) vi
+            # `asyncio.CancelledError` ke thua BaseException tu Python 3.8 — chi bat Exception se
+            # bo sot cancellation (T11-01). An toan vi nhanh nay LUON `raise` lai VO DIEU KIEN o
+            # cuoi, khong co duong nao nuot loi roi tiep tuc.
             await _wait_cleanup_and_release(self._pool, conn)
             self._conn = None
             raise
