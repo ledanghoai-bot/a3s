@@ -178,9 +178,13 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
 
     Tra {"status": "ok"|"control_off"|"pending", "truncated": bool}."""
     async with collector_conn.transaction():
+        # REV13 T12-02: sample_id gio PHAI sinh TRUOC khi goi fetch_message_content — DB can biet
+        # gia tri nay de buoc vao signing authorization no tu ky TRONG CUNG loi goi/transaction.
+        sample_id = str(uuid.uuid4())
         fetched = await collector_conn.fetchrow(
-            "SELECT * FROM m4_stage0p_fetch_message_content($1, $2, $3)",
-            batch_id, conversation_id, message_id, timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+            "SELECT * FROM m4_stage0p_fetch_message_content($1, $2, $3, $4)",
+            batch_id, conversation_id, message_id, sample_id,
+            timeout=DB_STATEMENT_TIMEOUT_SECONDS,
         )
         if fetched["status"] == "control_off":
             return {"status": "control_off", "truncated": False}
@@ -191,7 +195,6 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
                                      timeout=PENDING_RECHECK_TIMEOUT_SECONDS):
             return {"status": "pending", "truncated": False}
 
-        sample_id = str(uuid.uuid4())
         customer_ref = str(customer_id)
         conversation_ref = str(conversation_id)
         # REV10 T8-02 (CA Review #9 §4, Huong 3): txid_current() la "one-time capability nonce/
@@ -212,6 +215,8 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
             conversation_id=conversation_id, message_id=message_id, sample_id=sample_id,
             raw_content=fetched["content"], customer_ref=customer_ref,
             conversation_ref=conversation_ref, purpose_code=PURPOSE_CODE, txid=txid,
+            # REV13 T12-02: relay nguyen ven token DB da ky - collector khong tu tao/sua duoc.
+            signing_authorization=fetched["signing_authorization"],
             db_char_truncated=bool(fetched["char_truncated"]))
         await collector_conn.fetchrow(
             "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",

@@ -136,6 +136,12 @@ class Settings(BaseSettings):
     # tach biet - xem app/services/pii/stage0p_signing_service.py). Rong = collector KHONG the
     # ky sample nao (fail closed, khong fallback ve ky trong-process).
     m4_stage0p_signing_socket: str = ""
+    # REV12 F-M4-0P-T12-02: khoa HMAC-SHA256 (base64 32 byte) signer dung de VERIFY 1 signing
+    # authorization ngan han (30s) do DB tu ky trong m4_stage0p_fetch_message_content() - CHIEU
+    # NGUOC LAI m4_transcript_hmac_key_b64 (signer ky/DB verify). CHI tien trinh
+    # stage0p_signing_service.py doc truong nay - collector KHONG BAO GIO dat gia tri o day (khong
+    # co gi de collector tu gia mao authorization, chi relay nguyen ven tu DB).
+    m4_signing_auth_verify_key_b64: str = ""
 
 
 settings = Settings()

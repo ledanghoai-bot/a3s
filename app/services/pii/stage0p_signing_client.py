@@ -45,6 +45,7 @@ async def _write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
 async def request_signature(socket_path: str, *, batch_id, conversation_id: int, message_id: int,
                             sample_id: str, raw_content: str, customer_ref: str,
                             conversation_ref: str, purpose_code: str, txid: int,
+                            signing_authorization: str,
                             db_char_truncated: bool = False,
                             timeout: float = 5.0) -> SigningResult:
     """Goi signing service qua Unix domain socket, tra ve `SigningResult` da san sang truyen cho
@@ -54,7 +55,12 @@ async def request_signature(socket_path: str, *, batch_id, conversation_id: int,
     2000 ky tu TRUOC khi bi cat ve `raw_content` — thong tin nay KHONG THE tu suy ra tu chinh
     `raw_content` da bi cat) — service se OR voi ket qua tu-canonicalize cua chinh no de ra
     `truncated` cuoi cung, KHONG phai collector tu tinh gop (giu dung "signer tu derive TOAN BO
-    truong", T10-01)."""
+    truong", T10-01).
+
+    `signing_authorization`: chuoi opaque DB da ky trong CUNG transaction voi
+    `fetch_message_content()` (T12-02, REV13) — collector CHI relay nguyen ven, KHONG tu tao/hieu/
+    sua duoc (khong giu khoa verify). Signing service tu xac minh chu ky nay TRUOC KHI dong y ky/
+    ma hoa bat ky noi dung nao."""
     req = {
         "batch_id": str(batch_id),
         "conversation_id": conversation_id,
@@ -65,6 +71,7 @@ async def request_signature(socket_path: str, *, batch_id, conversation_id: int,
         "conversation_ref": conversation_ref,
         "purpose_code": purpose_code,
         "txid": txid,
+        "signing_authorization": signing_authorization,
         "db_char_truncated": db_char_truncated,
     }
     try:

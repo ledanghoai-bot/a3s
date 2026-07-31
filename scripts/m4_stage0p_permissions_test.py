@@ -56,6 +56,12 @@ MAX_BYTES = 8000
 # di qua app/services/pii/crypto.py:sign_capture() (ham do luon tu encrypt, khong cho phep truyen
 # ciphertext gia lap tuy y nhu nhieu kich ban duoi day can).
 TRANSCRIPT_HMAC_KEY = os.urandom(32)
+# Correction #13 T12-02: khoa HMAC RIENG cua chinh script nay cho bang
+# m4_stage0p_signing_auth_keys (provision truc tiep qua admin trong main()) - chi can co 1 dong
+# key_version='retired_at IS NULL' de fetch_message_content() khong RAISE; file nay KHONG doc/xac
+# minh gia tri signing_authorization tra ve (xem app/services/pii/stage0p_signing_service.py).
+SIGNING_AUTH_KEY = os.urandom(32)
+SIGNING_AUTH_KEY_VERSION = "m4-signing-auth-v1"
 
 
 def _canonical_digest(raw_content: str) -> bytes:
@@ -197,7 +203,7 @@ ROLES = [
 # tu BEN TRONG ham SECURITY DEFINER khac, chay voi quyen owner).
 FUNCTIONS = [
     ("m4_stage0p_peek_next_candidate", "uuid", "alpha3s_m4_sample_collector"),
-    ("m4_stage0p_fetch_message_content", "uuid,bigint,bigint", "alpha3s_m4_sample_collector"),
+    ("m4_stage0p_fetch_message_content", "uuid,bigint,bigint,uuid", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_record_sample", "uuid,bigint,bigint,uuid,bytea,int,boolean,bytea,bytea,bytea,text", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_close_collection", "uuid", "alpha3s_m4_sample_collector"),
     ("m4_stage0p_seed_capture_progress", "uuid", "alpha3s_m4_sample_collector"),
@@ -367,6 +373,12 @@ async def main() -> int:
         "INSERT INTO m4_stage0p_transcript_signing_keys (key_version, hmac_key) VALUES ($1, $2) "
         "ON CONFLICT (key_version) DO UPDATE SET hmac_key = EXCLUDED.hmac_key, retired_at = NULL",
         TRANSCRIPT_KEY_VERSION, TRANSCRIPT_HMAC_KEY)
+    # Correction #13 T12-02: provision khoa m4_stage0p_signing_auth_keys (xem SIGNING_AUTH_KEY o
+    # dau file) - fetch_message_content() nay RAISE neu khong co dong retired_at IS NULL.
+    await admin.execute(
+        "INSERT INTO m4_stage0p_signing_auth_keys (key_version, hmac_key) VALUES ($1, $2) "
+        "ON CONFLICT (key_version) DO UPDATE SET hmac_key = EXCLUDED.hmac_key, retired_at = NULL",
+        SIGNING_AUTH_KEY_VERSION, SIGNING_AUTH_KEY)
 
     staff = await admin.fetchrow(
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
@@ -576,6 +588,10 @@ async def main() -> int:
          "SELECT * FROM m4_stage0p_transcript_signing_keys", False),
         ("alpha3s_m4_sample_collector", "transcript_signing_keys", "SELECT",
          "SELECT * FROM m4_stage0p_transcript_signing_keys", False),
+        ("alpha3s_vendor_path", "signing_auth_keys", "SELECT",
+         "SELECT * FROM m4_stage0p_signing_auth_keys", False),
+        ("alpha3s_m4_sample_collector", "signing_auth_keys", "SELECT",
+         "SELECT * FROM m4_stage0p_signing_auth_keys", False),
 
         ("public", "samples", "SELECT", "SELECT * FROM m4_shadow_review_samples", False),
         ("public", "control", "SELECT", "SELECT * FROM m4_stage0p_control", False),
@@ -592,6 +608,8 @@ async def main() -> int:
          "SELECT * FROM m4_stage0p_normalization_approval_revocations", False),
         ("public", "transcript_signing_keys", "SELECT",
          "SELECT * FROM m4_stage0p_transcript_signing_keys", False),
+        ("public", "signing_auth_keys", "SELECT",
+         "SELECT * FROM m4_stage0p_signing_auth_keys", False),
     ]
 
     table_name_map = {
@@ -608,6 +626,7 @@ async def main() -> int:
         "normalization_approvals": "m4_stage0p_normalization_approvals",
         "normalization_approval_revocations": "m4_stage0p_normalization_approval_revocations",
         "transcript_signing_keys": "m4_stage0p_transcript_signing_keys",
+        "signing_auth_keys": "m4_stage0p_signing_auth_keys",
     }
 
     for role, table, action, sql, expected in matrix:
@@ -831,7 +850,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
-        await conn.fetchval("SELECT * FROM m4_stage0p_fetch_message_content($1,1,1)", str(uuid.uuid4()))
+        await conn.fetchval("SELECT * FROM m4_stage0p_fetch_message_content($1,1,1,$2)",
+                            str(uuid.uuid4()), str(uuid.uuid4()))
         check(False, "batch_id khong ton tai -> phai RAISE")
     except asyncpg.PostgresError as e:
         check("khong ton tai" in str(e), "batch_id khong ton tai -> RAISE dung")
@@ -848,7 +868,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
-        await conn.fetchval("SELECT * FROM m4_stage0p_fetch_message_content($1,1,1)", closed_batch["batch_id"])
+        await conn.fetchval("SELECT * FROM m4_stage0p_fetch_message_content($1,1,1,$2)",
+                            closed_batch["batch_id"], str(uuid.uuid4()))
         check(False, "batch status='collection_closed' -> phai RAISE")
     except asyncpg.PostgresError as e:
         check("collecting" in str(e), "batch status='collection_closed' -> RAISE dung (T3-02)")
@@ -882,7 +903,8 @@ async def main() -> int:
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
         off_result = await conn.fetchrow(
-            "SELECT * FROM m4_stage0p_fetch_message_content($1,1,1)", fresh_batch["batch_id"])
+            "SELECT * FROM m4_stage0p_fetch_message_content($1,1,1,$2)",
+            fresh_batch["batch_id"], str(uuid.uuid4()))
         check(off_result["status"] == "control_off", "control OFF -> status='control_off'")
         check(off_result["content"] is None, "control OFF -> content=NULL (khong doc plaintext)")
     finally:
@@ -917,8 +939,8 @@ async def main() -> int:
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     audit_blocked_denies_data = False
     try:
-        await conn.fetchval("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                            audit_batch["batch_id"], conv["id"], msg["id"])
+        await conn.fetchval("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                            audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()))
     except asyncpg.PostgresError:
         audit_blocked_denies_data = True
     finally:
@@ -954,8 +976,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
-        fetched_cross = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                            audit_batch["batch_id"], conv["id"], msg["id"])
+        fetched_cross = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                            audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()))
         check(fetched_cross["status"] == "ok", "fetch_message_content thanh cong (transaction A)")
     try:
         async with conn.transaction():
@@ -976,8 +998,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
-        fetched = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                      audit_batch["batch_id"], conv["id"], msg["id"])
+        fetched = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                      audit_batch["batch_id"], conv["id"], msg["id"], str(uuid.uuid4()))
         check(fetched["status"] == "ok", "fetch_message_content thanh cong tren du lieu that")
         count_mid = await admin.fetchval(
             "SELECT captured_count FROM m4_selection_batches WHERE batch_id=$1", audit_batch["batch_id"])
@@ -1007,8 +1029,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
-        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                            audit_batch["batch_id"], conv["id"], msg_a["id"])
+        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                            audit_batch["batch_id"], conv["id"], msg_a["id"], str(uuid.uuid4()))
         try:
             # T6-02: digest DUNG (noi dung that "tin nhan ngan") nhung canonical_text_len khai SAI
             # (5000, thuc te 13) — digest check PASS (doc lap voi do dai khai bao), roi moi den
@@ -1039,8 +1061,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
-        fetched_long = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                           audit_batch["batch_id"], conv_long["id"], msg_b["id"])
+        fetched_long = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                           audit_batch["batch_id"], conv_long["id"], msg_b["id"], str(uuid.uuid4()))
         check(fetched_long["char_truncated"] is True, "setup: noi dung 2500 ky tu -> DB bao char_truncated=true")
         try:
             # T6-02: digest DUNG (canonical that = "a"*2000, dung nhu DB da tinh luc fetch) + do
@@ -1064,8 +1086,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
-        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                            audit_batch["batch_id"], conv["id"], msg_c["id"])
+        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                            audit_batch["batch_id"], conv["id"], msg_c["id"], str(uuid.uuid4()))
         try:
             # T6-02: digest+do dai (10, "tin nhan c") DUNG het — chi ciphertext 3000 byte la SAI
             # (vuot xa AEAD overhead hop ly cho 10 ky tu, toi da 10*4+30=70 byte). REV10 T8-02:
@@ -1215,8 +1237,8 @@ async def main() -> int:
     seed3c = await conn.fetchrow("SELECT * FROM m4_stage0p_seed_capture_progress($1)", batch3c["batch_id"])
     check(seed3c["candidate_count"] == 3, "seed_capture_progress vet dung 3 candidate")
     async with conn.transaction():
-        fetched3c = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                        batch3c["batch_id"], conv3c["id"], msgs3c[0]["id"])
+        fetched3c = await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                        batch3c["batch_id"], conv3c["id"], msgs3c[0]["id"], str(uuid.uuid4()))
         check(fetched3c["status"] == "ok", f"setup: fetch batch3c thanh cong (thuc te {dict(fetched3c)})")
         await _record_sample_signed(
             conn, batch_id=batch3c["batch_id"], conversation_id=conv3c["id"],
@@ -1301,8 +1323,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
-        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                            batch4["batch_id"], rows4[0]["conversation_id"], rows4[0]["message_id"])
+        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                            batch4["batch_id"], rows4[0]["conversation_id"], rows4[0]["message_id"], str(uuid.uuid4()))
         await _record_sample_signed(
             conn, batch_id=batch4["batch_id"], conversation_id=rows4[0]["conversation_id"],
             message_id=rows4[0]["message_id"], sample_id=str(uuid.uuid4()), ciphertext=b"\x00" * 40,
@@ -1822,8 +1844,8 @@ async def main() -> int:
     conn = await asyncpg.connect(DB_URL)
     await conn.execute("SET ROLE alpha3s_m4_sample_collector")
     async with conn.transaction():
-        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                            audit_batch["batch_id"], conv_d["id"], msg_d["id"])
+        await conn.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                            audit_batch["batch_id"], conv_d["id"], msg_d["id"], str(uuid.uuid4()))
         try:
             # canonical_text_len=20/truncated=False DUNG het (khop dung "noi dung goc that su"),
             # nhung digest la cua 1 chuoi KHAC CO CUNG DO DAI (20 ky tu) — day chinh la kich ban CA
@@ -1888,8 +1910,8 @@ async def main() -> int:
         actual_sample_id = sample_id or str(uuid.uuid4())
         try:
             async with conn_t8.transaction():
-                await conn_t8.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                       batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+                await conn_t8.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                       batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], actual_sample_id)
                 txid = await conn_t8.fetchval("SELECT txid_current()")
                 real_ciphertext = ciphertext if ciphertext is not None else t8_ct
                 if transcript_override is not None:
@@ -1923,8 +1945,8 @@ async def main() -> int:
     await conn_missing.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
         async with conn_missing.transaction():
-            await conn_missing.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                        batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+            await conn_missing.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                        batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], str(uuid.uuid4()))
             await conn_missing.fetchrow(
                 "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
                 batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], str(uuid.uuid4()), t8_ct, 13,
@@ -1942,10 +1964,10 @@ async def main() -> int:
     await conn_badsig.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
         async with conn_badsig.transaction():
-            await conn_badsig.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                       batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
-            txid_bad = await conn_badsig.fetchval("SELECT txid_current()")
             sample_id_bad = str(uuid.uuid4())
+            await conn_badsig.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                       batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], sample_id_bad)
+            txid_bad = await conn_badsig.fetchval("SELECT txid_current()")
             transcript_bad, sig_bad = _sign_test_transcript(
                 batch_id=batch_t8["batch_id"], conversation_id=conv_t8["id"], message_id=msg_t8["id"],
                 sample_id=sample_id_bad, txid=txid_bad, canonical_digest=t8_digest, canonical_len=13,
@@ -1969,10 +1991,10 @@ async def main() -> int:
     await conn_sub.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
         async with conn_sub.transaction():
-            await conn_sub.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                    batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
-            txid_sub = await conn_sub.fetchval("SELECT txid_current()")
             sample_id_sub = str(uuid.uuid4())
+            await conn_sub.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                    batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], sample_id_sub)
+            txid_sub = await conn_sub.fetchval("SELECT txid_current()")
             transcript_sub, sig_sub = _sign_test_transcript(
                 batch_id=batch_t8["batch_id"], conversation_id=conv_t8["id"], message_id=msg_t8["id"],
                 sample_id=sample_id_sub, txid=txid_sub, canonical_digest=t8_digest, canonical_len=13,
@@ -1997,10 +2019,10 @@ async def main() -> int:
     await conn_replay_setup.execute("SET ROLE alpha3s_m4_sample_collector")
     replay_transcript = replay_sig = None
     async with conn_replay_setup.transaction():
-        await conn_replay_setup.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                         batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
-        txid_r = await conn_replay_setup.fetchval("SELECT txid_current()")
         replay_sample_id = str(uuid.uuid4())
+        await conn_replay_setup.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                         batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], replay_sample_id)
+        txid_r = await conn_replay_setup.fetchval("SELECT txid_current()")
         replay_transcript, replay_sig = _sign_test_transcript(
             batch_id=batch_t8["batch_id"], conversation_id=conv_t8["id"], message_id=msg_t8["id"],
             sample_id=replay_sample_id, txid=txid_r, canonical_digest=t8_digest, canonical_len=13,
@@ -2017,8 +2039,8 @@ async def main() -> int:
     await conn_replay.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
         async with conn_replay.transaction():
-            await conn_replay.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                       batch_t8["batch_id"], conv_t8b["id"], msg_t8b["id"])
+            await conn_replay.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                       batch_t8["batch_id"], conv_t8b["id"], msg_t8b["id"], str(uuid.uuid4()))
             # Dung LAI (replay) DUNG transcript+signature cua lan truoc cho message KHAC — txid
             # cua transaction nay KHAC txid da ky, nen T8-02 phai tu choi.
             await conn_replay.fetchrow(
@@ -2059,8 +2081,8 @@ async def main() -> int:
     await conn_xs.execute("SET ROLE alpha3s_m4_sample_collector")
     try:
         async with conn_xs.transaction():
-            await conn_xs.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3)",
-                                   batch_t8["batch_id"], conv_t8["id"], msg_t8["id"])
+            await conn_xs.fetchrow("SELECT * FROM m4_stage0p_fetch_message_content($1,$2,$3,$4)",
+                                   batch_t8["batch_id"], conv_t8["id"], msg_t8["id"], str(uuid.uuid4()))
             txid_xs = await conn_xs.fetchval("SELECT txid_current()")
             transcript_xs, sig_xs = _sign_test_transcript(
                 batch_id=batch_t8["batch_id"], conversation_id=conv_t8["id"], message_id=msg_t8["id"],

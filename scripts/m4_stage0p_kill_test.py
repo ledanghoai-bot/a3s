@@ -116,7 +116,12 @@ async def main() -> int:
     # (dong vai collector) - 2 khoa CHI ton tai trong tien trinh signing service RIENG (xem
     # start_signing_service()), chung minh collector process THAT SU khong giu khoa.
     signing_socket = f"/tmp/m4-signing-{os.getpid()}/sock"  # T11-02: thu muc RIENG, khong dat truc tiep duoi /tmp (mode 1777 bi tu choi)
-    signing_proc, _sample_key, transcript_key = await start_signing_service(socket_path=signing_socket)
+    # REV13 T12-01: allowed_uid gio BAT BUOC (khong con mac dinh tu tin chinh minh) - script nay
+    # dong vai CA signer LAN collector trong CUNG process (mo hinh don-gian, khac
+    # signing_service_test.py voi 2 UID THAT rieng biet cho T12-01) nen allowed_uid = uid cua
+    # chinh no.
+    signing_proc, _sample_key, transcript_key, auth_verify_key = await start_signing_service(
+        socket_path=signing_socket, allowed_uid=os.getuid())
     settings.m4_stage0p_signing_socket = signing_socket
     real_redis_url = settings.redis_url
 
@@ -127,6 +132,12 @@ async def main() -> int:
         "INSERT INTO m4_stage0p_transcript_signing_keys (key_version, hmac_key) VALUES ($1, $2) "
         "ON CONFLICT (key_version) DO UPDATE SET hmac_key = EXCLUDED.hmac_key, retired_at = NULL",
         TRANSCRIPT_KEY_VERSION, transcript_key)
+    # REV13 T12-02: provision khoa signing_auth (chieu nguoc lai - DB ky, signer verify) voi CUNG
+    # key_version signing service dang mong doi (_SIGNING_AUTH_KEY_VERSION).
+    await admin.execute(
+        "INSERT INTO m4_stage0p_signing_auth_keys (key_version, hmac_key) VALUES ($1, $2) "
+        "ON CONFLICT (key_version) DO UPDATE SET hmac_key = EXCLUDED.hmac_key, retired_at = NULL",
+        "m4-signing-auth-v1", auth_verify_key)
     await admin.execute("DELETE FROM m4_shadow_review_samples")
     await admin.execute("DELETE FROM m4_stage0p_capture_progress")
     await admin.execute("DELETE FROM m4_selection_batches")
