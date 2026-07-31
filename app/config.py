@@ -129,7 +129,13 @@ class Settings(BaseSettings):
     # signed capture transcript trong app/services/pii/crypto.py:sign_capture(). RIENG voi
     # m4_sample_key_b64 (ma hoa) — day la khoa KY, khong phai khoa MA HOA. KHONG duoc cap cho
     # role DB `alpha3s_m4_sample_collector`/`alpha3s_app`, KHONG log, KHONG commit vao fixture.
+    # REV11 F-M4-0P-T10-02: CHI tien trinh `stage0p_signing_service.py` doc truong nay -
+    # collector process (dung stage0p_signing_client.py) KHONG BAO GIO dat gia tri o day.
     m4_transcript_hmac_key_b64: str = ""
+    # REV11 F-M4-0P-T10-02: duong dan Unix domain socket den signing service RIENG (boundary
+    # tach biet - xem app/services/pii/stage0p_signing_service.py). Rong = collector KHONG the
+    # ky sample nao (fail closed, khong fallback ve ky trong-process).
+    m4_stage0p_signing_socket: str = ""
 
 
 settings = Settings()

@@ -193,21 +193,35 @@ def decrypt_sample_value(blob: bytes, *, customer_ref: str,
 
 # ---------------------------------------------------------------------------
 # REV10 F-M4-0P-T8-02 (CA Technical Re-review #9 §4) — signed capture transcript, Huong 3
-# (interim HMAC, DEV/TEST ONLY). CA khong chap nhan Phuong an B (Correction #8, chi ghi nhan
-# known limitation) lam closure cho ciphertext-substitution: 1 actor giu role
-# `alpha3s_m4_sample_collector` truoc day co the goi `encrypt_sample_value()` roi tu tao 1
-# ciphertext KHAC (cung do dai, giai ma duoc, nhung KHONG phai ban ma DB da chung kien luc
-# fetch) va van qua duoc moi kiem tra cu (T6-02 chi bind PLAINTEXT digest, khong bind
-# CIPHERTEXT). `sign_capture()` la 1 BOUNDARY DUY NHAT: tu lam encrypt + xay transcript
-# (JSON canonical, sort_keys+compact-separator de xac dinh byte-for-byte) + ky HMAC-SHA256 —
-# collector KHONG con duoc phep goi `encrypt_sample_value()` rieng le nua (neu lam vay,
-# `record_sample()` se tu choi vi thieu transcript/signature hop le). `m4_stage0p_record_sample`
-# (migration 039) verify chu ky bang 1 ban sao khoa HMAC luu trong bang
-# `m4_stage0p_transcript_signing_keys` (SELECT CHI GRANT cho `alpha3s_m4_definer` — collector
-# KHONG doc duoc), roi doi chieu MOI truong trong transcript (identity/txid/digest/AEAD
-# algorithm+key_version/AAD digest/thoi han) voi tham so THAT SU gui len — ciphertext bi thay
-# the se lam `ciphertext_digest` trong transcript khong khop `digest(p_encrypted_message)`,
-# RAISE ngay du chu ky HMAC van hop le cho transcript GOC.
+# (interim HMAC, DEV/TEST ONLY). REV11 (CA Technical Re-review #10, F-M4-0P-T10-01/T10-02):
+#
+# CA chi ro REV10 van co lo hong: `sign_capture()` REV10 nhan `canonical_digest`/`canonical_len`/
+# `truncated` NHU THAM SO TU CALLER (duoc tin cay) thay vi tu tinh tu CHINH plaintext no dang ma
+# hoa — 1 collector bi xam pham co the fetch plaintext THAT A (duoc authorized), lay
+# digest/length HOP LE cua A, roi goi sign_capture() voi PLAINTEXT GIA B nhung KHAI digest/length
+# cua A — signer se encrypt B (ciphertext_digest tinh dung tren B) NHUNG ky 1 transcript NOI
+# "canonical_digest la cua A" — ca 2 gia tri deu "tu hop le" theo cach rieng cua chung nen qua
+# duoc moi kiem tra REV10 (T6-02 kiem canonical_digest khop capability that; T8-02 REV10 kiem
+# ciphertext_digest khop CHINH ciphertext gui len) MA KHONG co rang buoc nao noi "ciphertext nay
+# THAT SU la ma hoa cua plaintext co digest nay" — chi CHINH signer (nguoi vua thay ca plaintext
+# lan ciphertext) moi kiem tra duoc lien ket do.
+#
+# Sua REV11: `sign_capture()` KHONG CON nhan `canonical_digest`/`canonical_len` — TU TINH ca hai
+# tu CHINH `plaintext_canonical` no vua ma hoa (`hashlib.sha256`/`len`), nen KHONG THE bi lech
+# khoi ciphertext no vua tao — loai tru hoan toan kich ban CA neu. `truncated` van la tham so (vi
+# 1 chuoi da bi cat KHONG THE tu no suy nguoc ra "co bi cat hay khong" — day la du kien ve NOI
+# DUNG GOC, khong phai ve chinh chuoi da cat) NHUNG REV11 chuyen no thanh output cua chinh buoc
+# canonicalize signer TU LAM (xem `stage0p_signing_service.py`, ham `_canonicalize_and_verify` —
+# nhan RAW content DB tra ve tu fetch, TU chay `canonicalize()` — bo tu day suy ra truncated,
+# khong nhan no nhu 1 tham so rieng tu caller nua). Ham `sign_capture()` o day gio la 1 buoc CON
+# BEN TRONG boundary do, KHONG con la boundary tu no.
+#
+# T10-02 (boundary tach biet THAT): `sign_capture()` VA khoa HMAC/AEAD gio CHI duoc goi/doc BEN
+# TRONG tien trinh `stage0p_signing_service.py` — 1 tien trinh HE DIEU HANH RIENG (Unix domain
+# socket IPC), KHONG con la 1 ham "logic rieng" trong CUNG process voi collector (CA tu bac bo
+# cach hieu do o Review #10). Collector (`stage0p_sampling.py`) gio goi qua
+# `stage0p_signing_client.request_signature()` — KHONG import module nay, KHONG bao gio doc
+# `settings.m4_sample_key_b64`/`settings.m4_transcript_hmac_key_b64` trong process cua no.
 #
 # CA yeu cau ro: day CHI la buoc tang cuong cho Stage 0P dev/test — TRUOC production-data-
 # access/activation PHAI chuyen sang chu ky BAT DOI XUNG (Ed25519/tuong duong) voi private key
@@ -219,6 +233,11 @@ def decrypt_sample_value(blob: bytes, *, customer_ref: str,
 TRANSCRIPT_KEY_VERSION = "sample-transcript-hmac-v1"
 TRANSCRIPT_TTL_SECONDS = 60
 TRANSCRIPT_AEAD_ALGORITHM = "AES-256-GCM"
+# REV11 T10-04: tach rieng "khoa KY transcript" (co bang versioned + revoke, xem migration 039)
+# khoi "khoa MA HOA AEAD" (hien chi 1 gia tri tinh, CHUA co ha tang rotation) — CA yeu cau ca hai
+# phai la 2 khai niem RO RANG, deu duoc rang buoc vao transcript/audit rieng biet, tranh nham lan
+# "doi 1 trong 2 khoa" tuong duong "doi ca 2".
+ENCRYPTION_KEY_VERSION = "sample-aead-v1"
 
 
 def sample_aad_digest(customer_ref: str, conversation_ref: str, sample_id: str) -> bytes:
@@ -229,12 +248,19 @@ def sample_aad_digest(customer_ref: str, conversation_ref: str, sample_id: str) 
 
 def sign_capture(plaintext_canonical: str, *, batch_id, conversation_id: int, message_id: int,
                  sample_id: str, customer_ref: str, conversation_ref: str,
-                 canonical_digest: bytes, canonical_len: int, truncated: bool,
+                 canonical_len: int, truncated: bool,
                  txid: int, purpose_code: str) -> tuple[bytes, bytes, bytes, str]:
-    """1 boundary DUY NHAT lam CA HAI viec: ma hoa (goi `encrypt_sample_value` NGAY TAI DAY,
-    khong nhan ciphertext tu caller) + xay + ky transcript. Tra ve
-    `(ciphertext_blob, transcript_bytes, signature, key_version)` — ca 4 gia tri nay PHAI duoc
-    truyen NGUYEN VEN cho `m4_stage0p_record_sample`, khong sua doi."""
+    """REV11 T10-01: TU TINH `canonical_digest` tu CHINH `plaintext_canonical` (KHONG con nhan
+    tu caller nhu authority) — xem doc-block module o tren cho ly do. `canonical_len` van con la
+    tham so nhung PHAI khop `len(plaintext_canonical)` (kiem RAISE neu sai — bay loi goi sai o
+    tang GOI, khong phai lo hong bao mat vi gia tri nay khong con dung de "chung minh" gi, chi la
+    kiem tra nhat quan noi bo). Chi duoc goi TU BEN TRONG `stage0p_signing_service.py` (T10-02) —
+    KHONG goi truc tiep tu collector nua. Tra ve
+    `(ciphertext_blob, transcript_bytes, signature, key_version)`."""
+    if len(plaintext_canonical) != canonical_len:
+        raise SlotCryptoError(
+            "sign_capture: canonical_len khong khop len(plaintext_canonical) - loi goi ham noi bo")
+    canonical_digest = hashlib.sha256(plaintext_canonical.encode("utf-8")).digest()
     key = _load_key(settings.m4_transcript_hmac_key_b64, "m4_transcript_hmac_key_b64")
     blob = encrypt_sample_value(plaintext_canonical, customer_ref=customer_ref,
                                 conversation_ref=conversation_ref, sample_id=sample_id)
@@ -252,6 +278,7 @@ def sign_capture(plaintext_canonical: str, *, batch_id, conversation_id: int, me
         "ciphertext_digest": hashlib.sha256(blob).hexdigest(),
         "aead_algorithm": TRANSCRIPT_AEAD_ALGORITHM,
         "key_version": TRANSCRIPT_KEY_VERSION,
+        "encryption_key_version": ENCRYPTION_KEY_VERSION,
         "aad_digest": sample_aad_digest(customer_ref, conversation_ref, sample_id).hex(),
         "purpose_code": purpose_code,
         "issued_at": now.isoformat(),

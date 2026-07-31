@@ -1092,8 +1092,49 @@ BEGIN
     RAISE EXCEPTION 'm4_stage0p_record_sample: transcript khong phai JSON hop le (T8-02)';
   END;
 
+  -- REV11 T10-04: schema NGHIEM NGAT - transcript PHAI la 1 JSON object voi DUNG BO 17 truong
+  -- CA yeu cau, khong thua/khong thieu. Bat truong LA (vd "extra_field" gia mao/tan cong dua
+  -- them du lieu qua schema-confusion) hoac thieu truong (transcript cu/khong day du) NGAY, TRUOC
+  -- khi doc bat ky gia tri nao ben trong.
+  IF jsonb_typeof(v_transcript) <> 'object' THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript khong phai JSON object (T8-02)';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM jsonb_object_keys(v_transcript) k
+    WHERE k NOT IN ('v', 'batch_id', 'conversation_id', 'message_id', 'sample_id', 'txid',
+                    'canonical_digest', 'canonical_len', 'truncated', 'ciphertext_digest',
+                    'aead_algorithm', 'key_version', 'encryption_key_version', 'aad_digest',
+                    'purpose_code', 'issued_at', 'expires_at')
+  ) THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript chua truong khong duoc cong nhan (T8-02/T10-04)';
+  END IF;
+  IF (SELECT count(*) FROM jsonb_object_keys(v_transcript)) <> 17 THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript thieu truong bat buoc (T8-02/T10-04)';
+  END IF;
+  IF (v_transcript->>'v') IS DISTINCT FROM '1' THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: transcript version khong duoc ho tro (T8-02/T10-04)';
+  END IF;
+
   IF (v_transcript->>'key_version') IS DISTINCT FROM p_key_version THEN
     RAISE EXCEPTION 'm4_stage0p_record_sample: key_version trong transcript khong khop tham so (T8-02)';
+  END IF;
+  -- REV11 T10-04: tach rieng khoa KY (signing_key_version, kiem o tren qua p_key_version - co
+  -- bang versioned+revoke that su) khoi khoa MA HOA AEAD (encryption_key_version) - CA yeu cau ca
+  -- hai la 2 khai niem RO RANG. Hien chi 1 gia tri hop le (chua co ha tang rotation cho khoa AEAD)
+  -- nhung transcript PHAI bind no tuong minh, khong duoc thieu/sai.
+  IF (v_transcript->>'encryption_key_version') IS DISTINCT FROM 'sample-aead-v1' THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: encryption_key_version khong duoc ho tro (T10-04)';
+  END IF;
+  -- REV11 T10-04: kiem TINH HOP LE CAU TRUC (expires_at PHAI sau issued_at, TTL khong vuot muc
+  -- da duyet 60s) TRUOC khi kiem "con hieu luc theo dong ho hien tai" — 1 transcript malformed
+  -- (vd expires_at truoc issued_at) PHAI bi tu choi vi LY DO CAU TRUC ro rang, khong duoc lan
+  -- trong thanh "da het han" (dung nhung sai ly do) chi vi no TINH CO cung nam trong qua khu.
+  IF (v_transcript->>'expires_at')::timestamptz <= (v_transcript->>'issued_at')::timestamptz THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: expires_at phai sau issued_at (T10-04)';
+  END IF;
+  IF (v_transcript->>'expires_at')::timestamptz - (v_transcript->>'issued_at')::timestamptz
+     > interval '60 seconds' THEN
+    RAISE EXCEPTION 'm4_stage0p_record_sample: TTL transcript vuot qua muc da duyet (60s) (T10-04)';
   END IF;
   IF (v_transcript->>'expires_at')::timestamptz < now() THEN
     RAISE EXCEPTION 'm4_stage0p_record_sample: transcript da het han (T8-02)';

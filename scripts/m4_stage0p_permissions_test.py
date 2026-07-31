@@ -88,15 +88,19 @@ def _sign_test_transcript(*, batch_id, conversation_id, message_id, sample_id, t
                           ciphertext: bytes, customer_ref: str, conversation_ref: str,
                           purpose_code: str = "P12_PII_DETECTOR_EVAL",
                           key_version: str = TRANSCRIPT_KEY_VERSION,
+                          encryption_key_version: str = "sample-aead-v1",
                           aead_algorithm: str = "AES-256-GCM", ttl_seconds: int = 60,
                           issued_at=None, hmac_key: bytes = TRANSCRIPT_HMAC_KEY,
-                          aad_digest: bytes | None = None) -> tuple[bytes, bytes]:
-    """REV10 T8-02: xay + ky 1 transcript THAT (cung thuat toan canonical JSON + HMAC-SHA256 voi
-    app/services/pii/crypto.py:sign_capture()), nhung nhan TRUC TIEP ciphertext/canonical_len/
-    truncated tu caller thay vi tu encrypt — cho phep moi kich ban adversarial trong file nay xay
-    1 transcript NOI BO NHAT QUAN voi cac tham so (ke ca gia tri SAI) no dang truyen cho
-    record_sample, de kiem tra dung logic downstream (T4-01/T5-02/T6-02) thay vi bi chan som boi
-    chinh lop xac minh transcript (T8-02). Tra ve (transcript_bytes, signature)."""
+                          aad_digest: bytes | None = None,
+                          extra_fields: dict | None = None,
+                          omit_fields: list | None = None) -> tuple[bytes, bytes]:
+    """REV10 T8-02 (REV11 T10-04 them encryption_key_version + extra_fields/omit_fields cho
+    kich ban schema-adversarial): xay + ky 1 transcript THAT (cung thuat toan canonical JSON +
+    HMAC-SHA256 voi app/services/pii/crypto.py:sign_capture()), nhung nhan TRUC TIEP ciphertext/
+    canonical_len/truncated tu caller thay vi tu encrypt — cho phep moi kich ban adversarial
+    trong file nay xay 1 transcript NOI BO NHAT QUAN voi cac tham so (ke ca gia tri SAI) no dang
+    truyen cho record_sample, de kiem tra dung logic downstream (T4-01/T5-02/T6-02) thay vi bi
+    chan som boi chinh lop xac minh transcript (T8-02). Tra ve (transcript_bytes, signature)."""
     now = issued_at or datetime.datetime.now(datetime.timezone.utc)
     if aad_digest is None:
         aad_digest = hashlib.sha256(_sample_aad(customer_ref, conversation_ref, sample_id)).digest()
@@ -113,11 +117,15 @@ def _sign_test_transcript(*, batch_id, conversation_id, message_id, sample_id, t
         "ciphertext_digest": hashlib.sha256(ciphertext).hexdigest(),
         "aead_algorithm": aead_algorithm,
         "key_version": key_version,
+        "encryption_key_version": encryption_key_version,
         "aad_digest": aad_digest.hex(),
         "purpose_code": purpose_code,
         "issued_at": now.isoformat(),
         "expires_at": (now + datetime.timedelta(seconds=ttl_seconds)).isoformat(),
     }
+    for f in (omit_fields or []):
+        fields.pop(f, None)
+    fields.update(extra_fields or {})
     transcript_bytes = _json.dumps(fields, sort_keys=True, separators=(",", ":"),
                                    ensure_ascii=True).encode("utf-8")
     signature = _hmac.new(hmac_key, transcript_bytes, hashlib.sha256).digest()
@@ -2074,6 +2082,34 @@ async def main() -> int:
     await _t8_expect_raise("modified AAD (aad_digest cua customer_ref khac)", "aad_digest",
                            canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
                            customer_ref=str(cust_t8["id"] + 999999))
+
+    # [k] REV11 T10-04: malformed timestamp — expires_at TRUOC issued_at (vo nghia).
+    now_k = datetime.datetime.now(datetime.timezone.utc)
+    await _t8_expect_raise("malformed timestamp (expires_at truoc issued_at)", "expires_at phai sau issued_at",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           issued_at=now_k, ttl_seconds=-30)
+
+    # [l] REV11 T10-04: TTL vuot qua muc da duyet (60s) — vd gia mao "song vinh vien".
+    await _t8_expect_raise("excessive TTL (vuot 60s da duyet)", "TTL transcript vuot qua muc da duyet",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           ttl_seconds=3600)
+
+    # [m] REV11 T10-04: transcript chua truong LA khong duoc cong nhan (schema-confusion/injection).
+    await _t8_expect_raise("unknown field trong transcript", "truong khong duoc cong nhan",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           extra_fields={"admin_override": True})
+
+    # [n] REV11 T10-04: thieu 1 truong bat buoc (transcript "cu"/khong day du).
+    await _t8_expect_raise("thieu truong bat buoc trong transcript", "transcript thieu truong bat buoc",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           omit_fields=["purpose_code"])
+
+    # [o] REV11 T10-04: key-version confusion — encryption_key_version SAI (khong phai
+    # "sample-aead-v1") trong khi signing_key_version (key_version) van DUNG — chung minh 2 khai
+    # niem duoc kiem TACH BIET, khong phai "doi 1 trong 2 tuong duong doi ca 2".
+    await _t8_expect_raise("encryption_key_version sai (key-version confusion)", "encryption_key_version",
+                           canonical_len=13, canonical_digest=t8_digest, ciphertext=t8_ct,
+                           encryption_key_version="sample-aead-v99-khong-ton-tai")
 
     off_conn_t8 = await asyncpg.connect(DB_URL)
     await _set_capture(off_conn_t8, enabled=False, staff_id=staff["id"], approval_ref="perm-test-t802-off")

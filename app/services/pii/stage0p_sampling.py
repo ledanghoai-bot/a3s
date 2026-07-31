@@ -48,13 +48,21 @@ import json
 import random
 import uuid
 
-from app.services.pii.crypto import sign_capture
-from app.services.pii.normalize import nfc
+from app.config import settings
+
+# REV11 T10-01/T10-02: canonicalize/truncate KHONG con dung TRUC TIEP trong module nay (chuyen
+# vao trong signing service, tien trinh RIENG) — re-export giu tuong thich cho
+# `m4_stage0p_sampling_test.py` (dung `s._truncate`/`s.MAX_CHARS`/`s.MAX_BYTES` kiem thuat toan
+# thuan tuy, KHONG di qua collector path).
+from app.services.pii.canonicalize import MAX_BYTES, MAX_CHARS  # noqa: F401
+from app.services.pii.canonicalize import truncate_canonical as _truncate  # noqa: F401
 from app.services.pii.stage0p_eligibility import is_pending_deletion
+from app.services.pii.stage0p_signing_client import (
+    SigningServiceError,
+    request_signature,
+)
 
 MAX_CONVERSATIONS = 260
-MAX_CHARS = 2000
-MAX_BYTES = 8000
 SELECTION_SEED_LABEL = "m4-stage0p-v1"
 RETENTION_DAYS = 45
 PURPOSE_CODE = "P12_PII_DETECTOR_EVAL"
@@ -81,25 +89,6 @@ def _seed_int() -> int:
     """Seed nguyen tu SHA256(nhan seed) — cong khai, tai lap doc lap duoc."""
     h = hashlib.sha256(SELECTION_SEED_LABEL.encode()).digest()
     return int.from_bytes(h[:8], "big")
-
-
-def _truncate(text: str) -> tuple[str, bool]:
-    """MAX_CHARS truoc, MAX_BYTES sau — UTF-8-safe CA HAI buoc (F-M4-0P-03B).
-
-    Buoc 1: cat theo code point (string slicing luon an toan UTF-8).
-    Buoc 2: encode UTF-8, neu qua MAX_BYTES thi cat tren BYTES da encode roi decode voi
-    errors='ignore' — CHI loai bo dung phan byte KHONG HOAN CHINH bi chen dot o cuoi, khong
-    lam hong bat ky ky tu nao dung truoc do."""
-    truncated = False
-    s = text
-    if len(s) > MAX_CHARS:
-        s = s[:MAX_CHARS]
-        truncated = True
-    encoded = s.encode("utf-8")
-    if len(encoded) > MAX_BYTES:
-        s = encoded[:MAX_BYTES].decode("utf-8", errors="ignore")
-        truncated = True
-    return s, truncated
 
 
 async def select_eligible_conversations(collector_conn, pending_conn, *,
@@ -202,36 +191,36 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
                                      timeout=PENDING_RECHECK_TIMEOUT_SECONDS):
             return {"status": "pending", "truncated": False}
 
-        text, was_truncated = _truncate(nfc(fetched["content"]))
-        was_truncated = was_truncated or bool(fetched["char_truncated"])
         sample_id = str(uuid.uuid4())
         customer_ref = str(customer_id)
         conversation_ref = str(conversation_id)
-        # REV7 T6-02: digest SHA-256 tinh NGAY TRUOC luc encrypt, tren CHINH van ban `text` se
-        # encrypt — DB doi chieu voi fetched_canonical_digest da tinh luc fetch (tren cung 1 thu tu
-        # nfc()+truncate()) de chan canonical-length-khai-sai.
-        canonical_digest = hashlib.sha256(text.encode("utf-8")).digest()
         # REV10 T8-02 (CA Review #9 §4, Huong 3): txid_current() la "one-time capability nonce/
         # transaction identity" dua vao transcript — CUNG gia tri fetch_message_content da dung
         # noi bo (cung 1 transaction Python dang mo), record_sample doi chieu lai luc verify.
         txid = await collector_conn.fetchval("SELECT txid_current()")
-        # REV4 T3-01: khong con truyen customer_ref/conversation_ref/retention_days/
-        # normalization_version — ham DB tu derive/doc lai (xem docstring module). Capability
-        # token da duoc dat boi fetch_message_content o tren, trong CUNG transaction nay.
-        # REV10 T8-02: sign_capture() la boundary DUY NHAT lam ca encrypt LAN ky transcript —
-        # KHONG con goi encrypt_sample_value() rieng le (xem crypto.py docstring).
-        blob, transcript_bytes, signature, key_version = sign_capture(
-            text, batch_id=batch_id, conversation_id=conversation_id, message_id=message_id,
-            sample_id=sample_id, customer_ref=customer_ref, conversation_ref=conversation_ref,
-            canonical_digest=canonical_digest, canonical_len=len(text), truncated=was_truncated,
-            txid=txid, purpose_code=PURPOSE_CODE)
+        # REV11 T10-01/T10-02: collector KHONG con tu canonicalize/tu tinh digest — gui RAW
+        # content (`fetched["content"]`, da la `left(content,2000)` tu DB) sang signing service
+        # (tien trinh RIENG, xem stage0p_signing_client.py/stage0p_signing_service.py). Service
+        # TU canonicalize + TU tinh digest/length/truncated + ma hoa + ky — collector chi RELAY
+        # ket qua, khong con giu/thay doi gia tri nao trong so do.
+        if not settings.m4_stage0p_signing_socket:
+            raise SigningServiceError(
+                "m4_stage0p_signing_socket chua duoc cau hinh - tu choi (fail closed, khong "
+                "fallback ve ky trong-process, T10-02)")
+        signed = await request_signature(
+            settings.m4_stage0p_signing_socket, batch_id=batch_id,
+            conversation_id=conversation_id, message_id=message_id, sample_id=sample_id,
+            raw_content=fetched["content"], customer_ref=customer_ref,
+            conversation_ref=conversation_ref, purpose_code=PURPOSE_CODE, txid=txid,
+            db_char_truncated=bool(fetched["char_truncated"]))
         await collector_conn.fetchrow(
             "SELECT * FROM m4_stage0p_record_sample($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-            batch_id, conversation_id, message_id, sample_id, blob, len(text), was_truncated,
-            canonical_digest, transcript_bytes, signature, key_version,
+            batch_id, conversation_id, message_id, sample_id, signed.ciphertext,
+            signed.canonical_len, signed.truncated, signed.canonical_digest,
+            signed.transcript, signed.signature, signed.key_version,
             timeout=DB_STATEMENT_TIMEOUT_SECONDS,
         )
-        return {"status": "ok", "truncated": was_truncated}
+        return {"status": "ok", "truncated": signed.truncated}
 
 
 async def _mark_outcome(collector_conn, *, batch_id, conversation_id, message_id, outcome, reason):

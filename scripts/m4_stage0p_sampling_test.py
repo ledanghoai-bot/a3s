@@ -36,6 +36,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import asyncpg  # noqa: E402
+from _stage0p_signing_service_helper import (  # noqa: E402
+    start_signing_service,
+    stop_signing_service,
+)
 
 from app.config import settings  # noqa: E402
 from app.services import data_deletion  # noqa: E402
@@ -92,9 +96,13 @@ async def _reset(admin) -> None:
 
 async def main() -> int:
     settings.database_url = DB_URL
+    # REV11 T10-01/T10-02: khoa nay CHI dung cho kich ban [A] duoi day (test crypto module TRUC
+    # TIEP, KHONG qua collector) — collector path THAT SU (s.run_collector) dung signing service
+    # RIENG (xem start_signing_service()), KHONG bao gio doc bien nay.
     settings.m4_sample_key_b64 = base64.b64encode(os.urandom(32)).decode()
-    transcript_key = os.urandom(32)
-    settings.m4_transcript_hmac_key_b64 = base64.b64encode(transcript_key).decode()
+    signing_socket = f"/tmp/m4-signing-{os.getpid()}.sock"
+    signing_proc, _sample_key, transcript_key = await start_signing_service(socket_path=signing_socket)
+    settings.m4_stage0p_signing_socket = signing_socket
     admin = await asyncpg.connect(DB_URL)
     # REV10 T8-02: provision ban sao khoa HMAC ky transcript de DB verifier doi chieu duoc.
     await admin.execute(
@@ -364,6 +372,7 @@ async def main() -> int:
 
     await _reset(admin)
     await admin.close()
+    await stop_signing_service(signing_proc, signing_socket)
 
     print()
     if _fail:

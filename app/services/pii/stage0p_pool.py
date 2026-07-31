@@ -51,7 +51,27 @@ KHONG phai identity authority production that su — Stage 0P hien khong co lop 
 de derive staff identity tu 1 authenticated application principal. `pinned_actor_session()` PHAI
 nhan 1 verified principal context (khong phai raw staff_id/pin_secret tu request body) truoc khi
 duoc cap production-data-access/activation — CA yeu cau ro rang nay khong duoc coi la dong boi
-round nay, chi duoc phep giu nguyen trong pham vi synthetic dev/test."""
+round nay, chi duoc phep giu nguyen trong pham vi synthetic dev/test.
+
+CA Technical Re-review #10 (F-M4-0P-T10-03, P1): REV10 `__aenter__()` chi boc try/except quanh
+`pin_actor()` — loi tai `SET ROLE alpha3s_m4_actor_binder` ban dau, safety-unpin, `RESET ROLE`
+sau pin, hay `SET ROLE <business_role>` KHONG duoc xu ly boi 1 resource guard THONG NHAT: business
+`SET ROLE` that bai SAU KHI pin thanh cong co the de lai 1 connection dang checked-out VOI PIN CON
+SONG ma `__aexit__()` khong bao gio chay (vi `__aenter__()` chua "hoan tat" — Python khong goi
+`__aexit__` neu `__aenter__` tu no raise). Safety-unpin REV10 con "nuot" MOI exception roi tiep
+tuc coi nhu binh thuong — 1 loi unpin THAT (vd mat ket noi/quyen) khong nen la no-op.
+
+Sua REV11: TOAN BO chuoi acquire/setup (`SET ROLE actor_binder` -> safety-unpin -> `pin_actor` ->
+`RESET ROLE` -> `SET ROLE business_role`) nam trong 1 `try` DUY NHAT; BAT KY that bai nao (tru
+`pin_actor` tu choi vi sai staff/secret — van la 1 "loi nghiep vu binh thuong", khong phai loi ha
+tang) deu di qua CUNG 1 primitive cleanup/discard ma `__aexit__()` dung (`_wait_cleanup_and_release`
+— tach ra tu logic REV10, dung chung ca 2 nhanh) — dam bao KHONG BAO GIO co 1 connection roi
+`__aenter__()` (du bang exception) ma van con dang checked-out voi pin/role chua don dep.
+Safety-unpin gio PHAN BIET RAISE THAT (permission/connection loi — `m4_stage0p_unpin_actor()` la
+1 DELETE don gian, KHONG RAISE cho truong hop binh thuong "chua tung co pin", nen bat ky
+`PostgresError` nao o day la dau hieu that bai ha tang THAT) voi truong hop "chua tung pin" (khong
+co gi de bat, ham SQL tu no khong RAISE) — loi that bay gio FAIL CLOSED (rethrow, discard
+connection), khong con bi nuot roi tiep tuc."""
 
 import asyncio
 import enum
@@ -117,70 +137,75 @@ class _PinnedSession:
         self._conn = None
 
     async def __aenter__(self):
-        self._conn = await self._pool.acquire()
-        conn = self._conn
-        await conn.execute("SET ROLE alpha3s_m4_actor_binder")
+        conn = await self._pool.acquire()
+        self._conn = conn
         try:
-            # T8-01: luoi an toan chu dong - xoa BAT KY pin nao con sot lai tren CHINH connection
-            # vat ly nay tu lan checkout truoc (vd cleanup lan do that bai/bi cancel giua chung).
-            # Loi o day (vd chua tung co pin) la binh thuong, khong phai dieu kien that bai.
+            await conn.execute("SET ROLE alpha3s_m4_actor_binder")
+            # T10-03: luoi an toan chu dong - xoa BAT KY pin nao con sot lai tren CHINH connection
+            # vat ly nay tu lan checkout truoc. `m4_stage0p_unpin_actor()` la 1 DELETE don gian,
+            # KHONG RAISE cho truong hop binh thuong "chua tung co pin" — bat ky PostgresError nao
+            # o day la 1 loi ha tang THAT (quyen/ket noi), KHONG con bi nuot roi tiep tuc nhu REV10.
             await conn.execute("SELECT m4_stage0p_unpin_actor()")
-        except Exception as e:  # noqa: BLE001
-            _log("m4_pool_checkout_safety_unpin_noop", error_type=type(e).__name__)
-        try:
             await pin_actor(conn, staff_id=self._staff_id, pin_secret=self._pin_secret)
-        except Exception:
             await conn.execute("RESET ROLE")
-            await self._pool.release(conn)
+            # T9-02: gia tri enum + quote identifier an toan (2 lop, xem module docstring).
+            await conn.execute(f"SET ROLE {_quote_role_ident(self._business_role.value)}")
+        except Exception:
+            # T10-03: BAT KY that bai nao sau acquire() (safety-unpin/pin_actor/RESET ROLE/SET
+            # ROLE business_role) deu di qua CUNG 1 primitive cleanup/discard voi __aexit__ —
+            # khong con 1 nhanh rieng de sot buoc, khong con connection "mo cong" ma khong ai
+            # cleanup vi __aenter__ tu raise (Python khong goi __aexit__ khi __aenter__ raise).
+            await _wait_cleanup_and_release(self._pool, conn)
             self._conn = None
             raise
-        await conn.execute("RESET ROLE")
-        # T9-02: gia tri enum + quote identifier an toan (2 lop, xem module docstring).
-        await conn.execute(f"SET ROLE {_quote_role_ident(self._business_role.value)}")
         return conn
 
     async def __aexit__(self, exc_type, exc, tb):
         conn = self._conn
         if conn is None:
             return False
-
-        cleanup_task = asyncio.ensure_future(_cleanup_connection(conn))
-        deadline = time.monotonic() + _CLEANUP_MAX_WAIT_SECONDS
-        terminated = False
-        # T9-01: LAP LAI shield tren CUNG 1 task cho toi khi no THAT SU done() — 1 lan cancel THEM
-        # nham vao outer task chi lam 1 vong lap thu lai (cleanup_task KHONG bi huy, KHONG bi tao
-        # lai), khong bao gio cho phep tien toi release() truoc khi cleanup that su ket thuc.
-        while not cleanup_task.done():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                # Backstop: cleanup khong hoan tat trong thoi gian cho phep du da lap lai nhieu
-                # lan - buoc ket thuc bang cach dong VAT LY connection NGAY (terminate, khac
-                # close() "lich su"), buoc moi await con lai cua cleanup_task tren connection do
-                # phai raise va ket thuc.
-                _log("m4_pool_cleanup_deadline_exceeded_terminating_connection")
-                conn.terminate()
-                terminated = True
-                break
-            try:
-                await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=remaining)
-            except asyncio.CancelledError:
-                continue
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:  # noqa: BLE001 - cleanup_task tu raise, xu ly duoi day qua .exception()
-                _log("m4_pool_cleanup_task_raised", error_type=type(e).__name__)
-                break
-
-        cleanup_failed = terminated or cleanup_task.cancelled() or (
-            cleanup_task.done() and cleanup_task.exception() is not None)
-        if cleanup_failed and not terminated:
-            _log("m4_pool_cleanup_failed_terminating_connection")
-            conn.terminate()
-            terminated = True
-
-        await _release_or_discard(self._pool, conn, discard=terminated)
+        await _wait_cleanup_and_release(self._pool, conn)
         self._conn = None
         return False
+
+
+async def _wait_cleanup_and_release(pool: asyncpg.Pool, conn) -> None:
+    """T9-01/T10-03: primitive cleanup/discard DUY NHAT, dung chung boi `__aenter__` (khi setup
+    that bai giua chung) VA `__aexit__` (duong binh thuong). Tao 1 Task cleanup TUONG MINH, LAP
+    LAI `await asyncio.shield(cleanup_task)` cho toi khi `cleanup_task.done()` la THAT — 1 lan
+    cancel THEM chi lam vong lap thu lai (cleanup_task KHONG bi huy, KHONG bi tao lai), khong bao
+    gio cho phep tien toi release() truoc khi cleanup that su ket thuc. Deadline backstop
+    `_CLEANUP_MAX_WAIT_SECONDS`: neu vuot qua, `conn.terminate()` (dong VAT LY ngay lap tuc) roi
+    discard thay vi release binh thuong; cleanup_task tu bao loi cung discard, khong bao gio tra
+    1 connection co the o trang thai session/role khong xac dinh ve pool."""
+    cleanup_task = asyncio.ensure_future(_cleanup_connection(conn))
+    deadline = time.monotonic() + _CLEANUP_MAX_WAIT_SECONDS
+    terminated = False
+    while not cleanup_task.done():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _log("m4_pool_cleanup_deadline_exceeded_terminating_connection")
+            conn.terminate()
+            terminated = True
+            break
+        try:
+            await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=remaining)
+        except asyncio.CancelledError:
+            continue
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:  # noqa: BLE001 - cleanup_task tu raise, xu ly duoi day qua .exception()
+            _log("m4_pool_cleanup_task_raised", error_type=type(e).__name__)
+            break
+
+    cleanup_failed = terminated or cleanup_task.cancelled() or (
+        cleanup_task.done() and cleanup_task.exception() is not None)
+    if cleanup_failed and not terminated:
+        _log("m4_pool_cleanup_failed_terminating_connection")
+        conn.terminate()
+        terminated = True
+
+    await _release_or_discard(pool, conn, discard=terminated)
 
 
 async def _cleanup_connection(conn) -> None:

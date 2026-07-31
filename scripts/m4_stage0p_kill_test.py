@@ -39,7 +39,6 @@ Kiem tra:
 """
 
 import asyncio
-import base64
 import datetime
 import os
 import sys
@@ -50,6 +49,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import asyncpg  # noqa: E402
+from _stage0p_signing_service_helper import (  # noqa: E402
+    start_signing_service,
+    stop_signing_service,
+)
 
 from app.config import settings  # noqa: E402
 from app.services.pii import stage0p_sampling as s  # noqa: E402
@@ -109,9 +112,12 @@ async def _grant_approval(admin, *, approval_ref: str, staff_id: int, now: datet
 
 
 async def main() -> int:
-    settings.m4_sample_key_b64 = base64.b64encode(os.urandom(32)).decode()
-    transcript_key = os.urandom(32)
-    settings.m4_transcript_hmac_key_b64 = base64.b64encode(transcript_key).decode()
+    # REV11 T10-02: KHONG con dat m4_sample_key_b64/m4_transcript_hmac_key_b64 trong process nay
+    # (dong vai collector) - 2 khoa CHI ton tai trong tien trinh signing service RIENG (xem
+    # start_signing_service()), chung minh collector process THAT SU khong giu khoa.
+    signing_socket = f"/tmp/m4-signing-{os.getpid()}.sock"
+    signing_proc, _sample_key, transcript_key = await start_signing_service(socket_path=signing_socket)
+    settings.m4_stage0p_signing_socket = signing_socket
     real_redis_url = settings.redis_url
 
     admin = await asyncpg.connect(DB_URL)
@@ -395,6 +401,7 @@ async def main() -> int:
     await control_conn.close()
     await pending_conn.close()
     await cp_conn.close()
+    await stop_signing_service(signing_proc, signing_socket)
 
     print()
     if _fail:

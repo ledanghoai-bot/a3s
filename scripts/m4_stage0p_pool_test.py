@@ -439,6 +439,58 @@ async def main() -> int:
           "cua no (fetch_message_content/record_sample) khong goi require_pinned_actor(), dua no "
           "vao allowlist se ngam dinh SAI rang no can pin (cross-role escalation surface)")
 
+    print("== [10] T10-03: that bai TAI buoc 'SET ROLE business_role' (SAU KHI pin THANH CONG) "
+          "-> connection van duoc cleanup/discard dung, KHONG leak pin ==")
+    # Luu y: connection test dung DATABASE_URL user "alpha3s" la SUPERUSER — REVOKE role
+    # membership KHONG chan duoc SET ROLE cua superuser (Postgres cho superuser SET ROLE toi BAT
+    # KY role nao, bo qua kiem tra membership — xac nhan bang thuc nghiem truc tiep truoc khi
+    # viet kich ban nay). Dung RENAME tam thoi de tao that bai "role khong ton tai" — loi nay
+    # KHONG phu thuoc superuser status (loi ten, khong phai loi quyen).
+    await admin.execute("ALTER ROLE alpha3s_m4_control_plane RENAME TO alpha3s_m4_control_plane_tmp")
+    pid_10 = None
+    try:
+        async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
+            check(False, "SET ROLE business_role that bai (role tam thoi khong ton tai) -> "
+                  "__aenter__ phai raise, khong duoc tra ve connection")
+    except asyncpg.PostgresError:
+        pass
+    finally:
+        await admin.execute("ALTER ROLE alpha3s_m4_control_plane_tmp RENAME TO alpha3s_m4_control_plane")
+    # Do bi RESET ROLE that bai giu nguyen pid ban dau kho xac dinh qua ngoai wrapper - kiem tra
+    # gian tiep: pool VAN dung duoc ngay sau do (khong bi "ket" 1 connection hong o trang thai
+    # checked-out vinh vien), va actor B pin+lam viec binh thuong tren CUNG connection vat ly.
+    async with pinned_actor_session(pool, staff_id=staff_b["id"], pin_secret=PIN_SECRET_B,
+                                    business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn_10b:
+        pid_10 = await conn_10b.fetchval("SELECT pg_backend_pid()")
+        owner_10 = await _actor_session_owner(admin, pid_10)
+        check(owner_10 == staff_b["id"], "T10-03: sau that bai o buoc SET ROLE business_role, "
+              "pool van tra ve 1 connection SACH cho actor B ke tiep (khong pin cu con song, "
+              "khong bi 'ket' checked-out)")
+        ok10 = await set_capture_enabled(conn_10b, enabled=False, approval_ref=None)
+        check(ok10 is False, "actor B hoat dong binh thuong sau su co __aenter__ cua A")
+
+    print("== [11] T10-03: that bai TAI buoc 'safety-unpin' (checkout) — EXECUTE unpin_actor() bi "
+          "thu hoi tam thoi -> fail closed, KHONG con la no-op im lang ==")
+    await admin.execute("REVOKE EXECUTE ON FUNCTION m4_stage0p_unpin_actor() FROM alpha3s_m4_actor_binder")
+    try:
+        async with pinned_actor_session(pool, staff_id=staff_a["id"], pin_secret=PIN_SECRET_A,
+                                        business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn:
+            check(False, "safety-unpin bi thu hoi EXECUTE -> __aenter__ phai raise (fail closed, "
+                  "T10-03), khong duoc coi la no-op roi tiep tuc nhu REV10")
+    except asyncpg.PostgresError:
+        pass
+    finally:
+        await admin.execute("GRANT EXECUTE ON FUNCTION m4_stage0p_unpin_actor() TO alpha3s_m4_actor_binder")
+    async with pinned_actor_session(pool, staff_id=staff_b["id"], pin_secret=PIN_SECRET_B,
+                                    business_role=Stage0PBusinessRole.CONTROL_PLANE) as conn_11b:
+        pid_11 = await conn_11b.fetchval("SELECT pg_backend_pid()")
+        owner_11 = await _actor_session_owner(admin, pid_11)
+        check(owner_11 == staff_b["id"], "T10-03: sau that bai o buoc safety-unpin, pool van tra "
+              "ve 1 connection SACH cho actor B ke tiep")
+        ok11 = await set_capture_enabled(conn_11b, enabled=False, approval_ref=None)
+        check(ok11 is False, "actor B hoat dong binh thuong sau su co safety-unpin cua A")
+
     await pool.close()
 
     await admin.execute(
