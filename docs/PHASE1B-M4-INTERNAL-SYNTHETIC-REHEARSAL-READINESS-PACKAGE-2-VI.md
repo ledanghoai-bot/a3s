@@ -211,11 +211,18 @@ gọi `provision-keys`.
 Đúng F-04 §5 mục 2 ("PR/head của reviewed runner + generator + immutable manifest"): 3 file
 (`scripts/m4_stage0p_gen_rehearsal_manifest.py`, `scripts/m4_stage0p_rehearsal_runner.py`,
 `scripts/m4_stage0p_rehearsal_runner_test.py`) + manifest (`datasets/pii/
-m4_stage0p_rehearsal_manifest_v2.jsonl`) + gói hồ sơ này được đóng gói trong **1 PR draft riêng**
-(`feat/m4-rehearsal-operational-tooling`, base `main`@`e96a3207`) — **KHÔNG merge** cho tới khi
-CA review code xong (đúng văn hoá của toàn bộ dự án M4: mọi thay đổi qua PR/CI/CA review trước
-khi vào `main`, kể cả code KHÔNG đụng gì tới production path). PR number/CI run sẽ được bổ sung
-ngay sau khi push (xem §7).
+m4_stage0p_rehearsal_manifest_v2.jsonl`) + gói hồ sơ này được đóng gói trong **1 PR draft riêng**:
+
+| Mục | Giá trị |
+|---|---|
+| PR | [ledanghoai-bot/a3s#6](https://github.com/ledanghoai-bot/a3s/pull/6) (`draft`) |
+| Branch | `feat/m4-rehearsal-operational-tooling` |
+| Base | `main`@`e96a32079bffedc8f6dbdeb3bc2006f2cf5ef77a` |
+| Commit | `da1d0a53a12550e6dbc4f59557225f1a80cba979` |
+| CI run | `31006802965` — `lint-test`: **success**; `deploy`: **skipped** (đúng CR-07, PR không trigger deploy) |
+
+**KHÔNG merge** cho tới khi CA review code xong (đúng văn hoá của toàn bộ dự án M4: mọi thay đổi
+qua PR/CI/CA review trước khi vào `main`, kể cả code KHÔNG đụng gì tới production path).
 
 ## 7. Đề nghị
 
