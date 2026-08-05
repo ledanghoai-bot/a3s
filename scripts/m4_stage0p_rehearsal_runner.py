@@ -608,6 +608,99 @@ async def _verify_cleanup_postconditions(admin_conn, state: RehearsalState) -> t
     return (len(problems) == 0), problems
 
 
+async def _do_cleanup(admin_conn, pool, *, operator_staff_id: int, operator_pin: str,
+                      state: RehearsalState) -> dict[str, bool]:
+    """4 buoc cleanup, best-effort — tra dict step->bool. TACH RIENG khoi _run_execute() (F-M4-
+    RH-R3-02/05) de co the goi TRUC TIEP tu test that (khong phai copy tay logic).
+
+    F-M4-RH-R3-02: capture-off doc TRANG THAI THAT tu DB (`read_capture_enabled`) — KHONG con
+    dua vao `state.capture_turned_on`. Ly do CA chi ro: neu tien trinh bi ngat DUNG giua luc
+    `set_capture_enabled(True)` da commit va luc dong `state.capture_turned_on = True` chay,
+    cleanup cu (dua vao co nho) se BO QUA buoc tat capture du DB dang thuc su ON. Co nho gio CHI
+    con dung lam telemetry/log, khong con la dieu kien "co nen thu tat khong"."""
+    cleanup_step_ok: dict[str, bool] = {}
+    try:
+        capture_now = await read_capture_enabled(admin_conn)
+        if capture_now:
+            async with pinned_actor_session(
+                pool, staff_id=operator_staff_id, pin_secret=operator_pin,
+                business_role=Stage0PBusinessRole.CONTROL_PLANE,
+            ) as ctrl_conn:
+                await set_capture_enabled(ctrl_conn, enabled=False, approval_ref=None)
+            _log("capture_enabled_off_in_finally")
+        else:
+            _log("capture_off_skip_already_off", state_flag_was=state.capture_turned_on)
+        cleanup_step_ok["capture_off"] = True
+    except Exception as e:  # noqa: BLE001 — cleanup phai tiep tuc du buoc nay loi
+        cleanup_step_ok["capture_off"] = False
+        _log("cleanup_capture_off_failed", error_type=type(e).__name__, error=str(e))
+
+    try:
+        keys_conn = await asyncpg.connect(_db_url())
+        try:
+            await _retire_key(keys_conn, "m4_stage0p_transcript_signing_keys", TRANSCRIPT_KEY_VERSION)
+            await _retire_key(keys_conn, "m4_stage0p_signing_auth_keys", _SIGNING_AUTH_KEY_VERSION)
+            _log("keys_retired_in_finally")
+        finally:
+            await keys_conn.close()
+        cleanup_step_ok["keys_retired"] = True
+    except Exception as e:  # noqa: BLE001
+        cleanup_step_ok["keys_retired"] = False
+        _log("cleanup_key_retire_failed", error_type=type(e).__name__, error=str(e))
+
+    try:
+        await _purge_synthetic(admin_conn, state)
+        cleanup_step_ok["purge"] = True
+    except Exception as e:  # noqa: BLE001
+        cleanup_step_ok["purge"] = False
+        _log("cleanup_purge_failed", error_type=type(e).__name__, error=str(e))
+
+    try:
+        redis_check = await _postcheck_redis_nonces(window_seconds=120)
+        _log("redis_nonce_postcheck", **redis_check)
+        cleanup_step_ok["redis_postcheck"] = True
+    except Exception as e:  # noqa: BLE001
+        cleanup_step_ok["redis_postcheck"] = False
+        _log("cleanup_redis_postcheck_failed", error_type=type(e).__name__, error=str(e))
+
+    return cleanup_step_ok
+
+
+async def _do_cleanup_and_verify(admin_conn, pool, *, operator_staff_id: int, operator_pin: str,
+                                 state: RehearsalState) -> tuple[bool, list[str], dict[str, bool]]:
+    """F-M4-RH-R3-03/04: chay `_do_cleanup()` roi xac minh hau dieu kien qua
+    `_verify_cleanup_postconditions()` — nhung KHONG con tin 2 nguon nay mot cach ngay tho:
+
+    - R3-03: Redis postcheck gio la HAU DIEU KIEN BAT BUOC — neu `_do_cleanup()` bao
+      `redis_postcheck=False` (mat ket noi/scan loi), `postcondition_ok` BI EP THANH False du
+      truy van DB co sach hay khong (khong con chi la 1 dong log tham khao).
+    - R3-04: ban than `_verify_cleanup_postconditions()` cung duoc boc trong try/except — neu NO
+      tu loi (vd mat ket noi DB giua chung), coi la "KHONG THE XAC MINH duoc an toan" = that bai
+      fail-closed, phat 1 alert chuan hoa, KHONG de traceback thoat thang ra ngoai ham nay ma
+      khong co ket luan CLEANUP_FAILED ro rang."""
+    cleanup_step_ok = await _do_cleanup(admin_conn, pool, operator_staff_id=operator_staff_id,
+                                        operator_pin=operator_pin, state=state)
+
+    try:
+        postcondition_ok, postcondition_problems = await _verify_cleanup_postconditions(
+            admin_conn, state)
+    except Exception as e:  # noqa: BLE001 — R3-04: verifier tu loi = khong the xac minh an toan
+        postcondition_ok = False
+        postcondition_problems = [
+            f"BAN THAN postcondition verifier loi ({type(e).__name__}: {e}) - KHONG THE XAC "
+            "MINH duoc trang thai an toan, coi nhu THAT BAI (fail-closed, khong doan an toan)"]
+        _log("cleanup_postcondition_verifier_failed", error_type=type(e).__name__, error=str(e))
+
+    if not cleanup_step_ok.get("redis_postcheck", False):
+        postcondition_ok = False
+        postcondition_problems = [*postcondition_problems,
+                                  "Redis nonce postcheck KHONG hoan tat (loi ket noi/scan) - "
+                                  "khong xac nhan duoc chinh sach nonce da duyet, coi nhu chua "
+                                  "an toan (F-M4-RH-R3-03)"]
+
+    return postcondition_ok, postcondition_problems, cleanup_step_ok
+
+
 async def _run_execute(args, manifest: list[dict]) -> int:
     _assert_distinct_principals(args.operator_staff_id, args.reviewer_staff_id)
     operator_pin = _require_env("STAGE0P_REHEARSAL_OPERATOR_PIN")
@@ -732,59 +825,19 @@ async def _run_execute(args, manifest: list[dict]) -> int:
         main_exc = e
         _log("rehearsal_lifecycle_failed", error_type=type(e).__name__, error=str(e))
 
-    # F-M4-RH-R1-04/R2-01: cleanup chay VO DIEU KIEN (du lifecycle chinh thanh cong hay that
-    # bai), nhung KHONG con "bat loi roi coi nhu xong" (dung CA chi ro o Review #2) - tung buoc
-    # duoc ghi ket qua, RIENG BIET voi buoc xac minh doc lap ben duoi (_verify_cleanup_
-    # postconditions) - "buoc nay khong nem loi" KHONG dong nghia "he thong da an toan".
-    cleanup_step_ok: dict[str, bool] = {}
+    # F-M4-RH-R1-04/R2-01/R3-02/03/04: cleanup+verify tach thanh 2 ham co the goi TRUC TIEP tu
+    # test (_do_cleanup/_do_cleanup_and_verify) - khong con logic cleanup nao chi ton tai "gan
+    # lien" trong _run_execute ma test phai copy tay moi kiem duoc.
     try:
-        if state.capture_turned_on:
-            async with pinned_actor_session(
-                pool, staff_id=args.operator_staff_id, pin_secret=operator_pin,
-                business_role=Stage0PBusinessRole.CONTROL_PLANE,
-            ) as ctrl_conn:
-                await set_capture_enabled(ctrl_conn, enabled=False, approval_ref=None)
-            _log("capture_enabled_off_in_finally")
-        cleanup_step_ok["capture_off"] = True
-    except Exception as e:  # noqa: BLE001 — cleanup phai tiep tuc du buoc nay loi
-        cleanup_step_ok["capture_off"] = False
-        _log("cleanup_capture_off_failed", error_type=type(e).__name__, error=str(e))
-
-    try:
-        keys_conn = await asyncpg.connect(_db_url())
-        try:
-            await _retire_key(keys_conn, "m4_stage0p_transcript_signing_keys", TRANSCRIPT_KEY_VERSION)
-            await _retire_key(keys_conn, "m4_stage0p_signing_auth_keys", _SIGNING_AUTH_KEY_VERSION)
-            _log("keys_retired_in_finally")
-        finally:
-            await keys_conn.close()
-        cleanup_step_ok["keys_retired"] = True
-    except Exception as e:  # noqa: BLE001
-        cleanup_step_ok["keys_retired"] = False
-        _log("cleanup_key_retire_failed", error_type=type(e).__name__, error=str(e))
-
-    try:
-        await _purge_synthetic(admin_conn, state)
-        cleanup_step_ok["purge"] = True
-    except Exception as e:  # noqa: BLE001
-        cleanup_step_ok["purge"] = False
-        _log("cleanup_purge_failed", error_type=type(e).__name__, error=str(e))
-
-    try:
-        redis_check = await _postcheck_redis_nonces(window_seconds=120)
-        _log("redis_nonce_postcheck", **redis_check)
-        cleanup_step_ok["redis_postcheck"] = True
-    except Exception as e:  # noqa: BLE001
-        cleanup_step_ok["redis_postcheck"] = False
-        _log("cleanup_redis_postcheck_failed", error_type=type(e).__name__, error=str(e))
-
-    # F-M4-RH-R2-01: nguon su that DUY NHAT cho quyet dinh exit code la truy van DOC LAP nay -
-    # KHONG phai viec tung buoc cleanup o tren "tu bao khong loi" (1 buoc co the tu no thanh cong
-    # nhung van de lai residual vi nguyen nhan khac, hoac nguoc lai).
-    postcondition_ok, postcondition_problems = await _verify_cleanup_postconditions(admin_conn, state)
-
-    await admin_conn.close()
-    await pool.close()
+        postcondition_ok, postcondition_problems, cleanup_step_ok = await _do_cleanup_and_verify(
+            admin_conn, pool, operator_staff_id=args.operator_staff_id, operator_pin=operator_pin,
+            state=state)
+    finally:
+        # F-M4-RH-R3-04: dong connection/pool bang finally VO DIEU KIEN - ke ca neu ban than
+        # _do_cleanup_and_verify raise (khong ky vong, no da tu bao ve rieng, nhung day la lop
+        # phong thu THEM, khong phai duong duy nhat).
+        await admin_conn.close()
+        await pool.close()
 
     if not postcondition_ok:
         _log("CLEANUP_FAILED", problems=postcondition_problems, cleanup_step_results=cleanup_step_ok,

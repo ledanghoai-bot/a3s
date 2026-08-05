@@ -663,6 +663,124 @@ async def scenario_7_dry_run_four_approval_states() -> None:
               f"(ky vong {expect_rc})")
 
 
+async def scenario_8_capture_off_ignores_stale_flag() -> None:
+    """F-M4-RH-R3-02: goi TRUC TIEP `runner._do_cleanup()` (ham THAT, khong copy tay) voi 1
+    `RehearsalState` co `capture_turned_on=False` GIA (gia lap crash giua luc DB da ghi True va
+    luc gan co nho), nhung DB THAT SU dang capture_enabled=true — xac nhan cleanup van tat dung
+    vi no doc TRANG THAI THAT tu DB, khong con dua vao co nho."""
+    print("== [8] F-M4-RH-R3-02: capture-off doc DB that, khong phu thuoc co nho stale ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approval_staff = await _make_staff(
+            admin, username="rehearsal-test-8-approver", permissions=["m4.stage0p.approve"],
+            pin_secret="approver-pin-8")
+        operator_staff = await _make_staff(
+            admin, username="rehearsal-test-8-operator", permissions=["m4.stage0p.operate"],
+            pin_secret="operator-pin-8")
+    finally:
+        await admin.close()
+
+    approval_ref = "m4-rehearsal-test-8-stale-flag"
+    r = _run_cli("record-approval", "--approval-staff-id", str(approval_staff),
+                "--approval-ref", approval_ref,
+                "--valid-from", "2020-01-01T00:00:00+00:00",
+                "--valid-until", "2099-01-01T00:00:00+00:00",
+                env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-8"})
+    check(r.returncode == 0, "setup: record-approval thanh cong")
+
+    admin_conn = await asyncpg.connect(DB_URL)
+    pool = await runner.create_stage0p_pool(DB_URL)
+    try:
+        # Bat capture qua DUNG con duong that (khong di tat) - roi CO Y KHONG gan
+        # state.capture_turned_on, mo phong crash giua 2 buoc do.
+        async with runner.pinned_actor_session(
+            pool, staff_id=operator_staff, pin_secret="operator-pin-8",
+            business_role=runner.Stage0PBusinessRole.CONTROL_PLANE,
+        ) as ctrl_conn:
+            await runner.set_capture_enabled(ctrl_conn, enabled=True, approval_ref=approval_ref)
+        capture_on_confirmed = await runner.read_capture_enabled(admin_conn)
+        check(capture_on_confirmed is True, "setup: capture THAT SU da ON truoc khi goi cleanup")
+
+        stale_state = runner.RehearsalState()
+        stale_state.capture_turned_on = False  # CO Y sai lech voi DB that
+
+        cleanup_step_ok = await runner._do_cleanup(
+            admin_conn, pool, operator_staff_id=operator_staff, operator_pin="operator-pin-8",
+            state=stale_state)
+        check(cleanup_step_ok.get("capture_off") is True, "_do_cleanup() bao capture_off=True")
+
+        capture_after = await runner.read_capture_enabled(admin_conn)
+        check(capture_after is False,
+              "xac nhan DOC LAP: capture_enabled THAT SU da tat du state.capture_turned_on=False "
+              "(cleanup doc DB, khong con phu thuoc co nho stale)")
+    finally:
+        await admin_conn.close()
+        await pool.close()
+
+
+async def scenario_9_redis_postcheck_is_mandatory() -> None:
+    """F-M4-RH-R3-03: goi TRUC TIEP `runner._do_cleanup_and_verify()` voi REDIS_URL bi pha (khong
+    ket noi duoc) — xac nhan postcondition_ok=False DU moi thu khac (DB) deu sach, vi Redis
+    postcheck gio la hau dieu kien bat buoc, khong con chi la 1 dong log tham khao."""
+    print("== [9] F-M4-RH-R3-03: Redis postcheck la hau dieu kien BAT BUOC ==")
+    admin_conn = await asyncpg.connect(DB_URL)
+    pool = await runner.create_stage0p_pool(DB_URL)
+    try:
+        empty_state = runner.RehearsalState()  # khong tracked gi - moi thu khac trivially sach
+        original_redis_url = os.environ.get("REDIS_URL")
+        os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"  # port 1 - chac chan khong ket noi duoc
+        try:
+            postcondition_ok, problems, cleanup_step_ok = await runner._do_cleanup_and_verify(
+                admin_conn, pool, operator_staff_id=0, operator_pin="unused-no-capture-to-turn-off",
+                state=empty_state)
+        finally:
+            if original_redis_url is not None:
+                os.environ["REDIS_URL"] = original_redis_url
+            else:
+                os.environ.pop("REDIS_URL", None)
+
+        check(cleanup_step_ok.get("redis_postcheck") is False,
+              "_do_cleanup() tu bao redis_postcheck=False khi REDIS_URL bi pha")
+        check(postcondition_ok is False,
+              "postcondition_ok=False DU cac truy van DB khac (state rong) deu se PASS - Redis "
+              "loi mot minh cung du lam CLEANUP_FAILED")
+        check(any("Redis" in p for p in problems),
+              f"problems neu ro nguyen nhan Redis (thuc te {problems})")
+    finally:
+        await admin_conn.close()
+        await pool.close()
+
+
+async def scenario_10_verifier_itself_fails_closed() -> None:
+    """F-M4-RH-R3-04: goi `runner._do_cleanup_and_verify()` voi 1 connection DA DONG cho tham so
+    verifier dung (mo phong "mat ket noi DB giua luc dang xac minh") — xac nhan KHONG co
+    traceback thoat thang ra ngoai ham, ma tra ve postcondition_ok=False voi ly do ro rang."""
+    print("== [10] F-M4-RH-R3-04: postcondition verifier tu loi -> fail-closed, khong traceback ==")
+    admin_conn = await asyncpg.connect(DB_URL)
+    pool = await runner.create_stage0p_pool(DB_URL)
+    try:
+        empty_state = runner.RehearsalState()
+        closed_conn = await asyncpg.connect(DB_URL)
+        await closed_conn.close()
+
+        raised = False
+        postcondition_ok, problems, cleanup_step_ok = (None, None, None)
+        try:
+            postcondition_ok, problems, cleanup_step_ok = await runner._do_cleanup_and_verify(
+                closed_conn, pool, operator_staff_id=0, operator_pin="unused-no-capture-to-turn-off",
+                state=empty_state)
+        except Exception:  # noqa: BLE001 — chinh dieu KHONG duoc xay ra, day la assertion
+            raised = True
+
+        check(not raised,
+              "_do_cleanup_and_verify() KHONG de traceback thoat thang ra ngoai du verifier tu loi")
+        check(postcondition_ok is False,
+              f"postcondition_ok=False khi verifier tu no khong xac minh duoc (thuc te {postcondition_ok})")
+        check(problems is not None and any("KHONG THE XAC MINH" in p for p in problems),
+              f"problems neu ro 'khong the xac minh' thay vi 1 loi mo ho (thuc te {problems})")
+    finally:
+        await admin_conn.close()
+        await pool.close()
 
 
 async def main() -> int:
@@ -674,6 +792,9 @@ async def main() -> int:
     await scenario_5b_blackbox_purge_failure()
     await scenario_6_real_full_lifecycle()
     await scenario_7_dry_run_four_approval_states()
+    await scenario_8_capture_off_ignores_stale_flag()
+    await scenario_9_redis_postcheck_is_mandatory()
+    await scenario_10_verifier_itself_fails_closed()
 
     print()
     if _fail:
