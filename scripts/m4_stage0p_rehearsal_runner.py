@@ -162,6 +162,43 @@ def _assert_distinct_principals(*staff_ids: int) -> None:
             f"reviewer) - nhan duoc {staff_ids}, co gia tri trung nhau")
 
 
+async def _check_approval_active(conn, approval_ref: str) -> tuple[bool, int | None, list[str]]:
+    """F-M4-RH-R2-02/03: doc lai approval record THAT (ai record + cua so hieu luc) tu DB —
+    dung CHUNG cho dry-run VA execute (execute PHAI kiem tra lai NGAY TRUOC khi bat capture,
+    khong chi dua vao 1 lan dry-run truoc do co the da cu). Tra (ok, recorded_by, problems) —
+    `recorded_by` dung de doi chieu principal (F-R2-02: approval recorder phai KHAC operator/
+    reviewer THAT, khong chi 2 CLI argument tu khai)."""
+    row = await conn.fetchrow(
+        "SELECT a.recorded_by, a.requested_enabled, a.valid_from, a.valid_until, "
+        "EXISTS(SELECT 1 FROM m4_stage0p_capture_approval_revocations r "
+        "       WHERE r.approval_ref = a.approval_ref) AS revoked "
+        "FROM m4_stage0p_capture_approvals a WHERE a.approval_ref = $1 "
+        "AND a.purpose_code = $2", approval_ref, PURPOSE_CODE)
+    if row is None:
+        return False, None, ["khong tim thay approval_ref hop le (chua record hoac sai purpose_code)"]
+    problems = []
+    if row["revoked"]:
+        problems.append("approval_ref da bi thu hoi")
+    if not row["requested_enabled"]:
+        problems.append("approval_ref khong phai loai requested_enabled=true - khong the dung bat capture")
+    now = datetime.now(timezone.utc)
+    if now < row["valid_from"]:
+        problems.append(f"approval_ref CHUA bat dau hieu luc (valid_from={row['valid_from'].isoformat()}, "
+                        f"now={now.isoformat()})")
+    if now >= row["valid_until"]:
+        problems.append(f"approval_ref DA het han (valid_until={row['valid_until'].isoformat()}, "
+                        f"now={now.isoformat()})")
+    return (len(problems) == 0), row["recorded_by"], problems
+
+
+def _principal_conflict_problems(*staff_ids: int) -> list[str]:
+    """Phien ban KHONG raise cua `_assert_distinct_principals` — dung trong dry-run de gom vao
+    danh sach `problems` thay vi thoat ngay, giu duoc bao cao day du tat ca van de cung luc."""
+    if len(set(staff_ids)) != len(staff_ids):
+        return [f"F-M4-RH-R1-07/R2-02: staff_id trung nhau giua cac principal - {staff_ids}"]
+    return []
+
+
 # ===========================================================================
 # record-approval — do approval recorder (PO hoac staff PO chi dinh) thuc hien, TACH BIET
 # khoi operator/reviewer. Runner KHONG tu goi ham nay trong luong `run` (F-07: "runner khong
@@ -534,6 +571,43 @@ async def _run_collector_with_retry(batch_id) -> dict:
                      "chua xu ly xong - abort")
 
 
+async def _verify_cleanup_postconditions(admin_conn, state: RehearsalState) -> tuple[bool, list[str]]:
+    """F-M4-RH-R2-01: xac minh HAU DIEU KIEN bat buoc bang truy van DOC LAP sau khi cleanup da
+    chay — KHONG tin vao viec tung buoc cleanup "khong nem loi" (buoc do co the tu no thanh cong
+    nhung van de lai residual vi ly do khac, hoac nguoc lai bi nuot loi ma khong ai biet). Day la
+    nguon su that DUY NHAT quyet dinh cleanup co THAT SU dat trang thai an toan hay khong."""
+    problems: list[str] = []
+    if await read_capture_enabled(admin_conn):
+        problems.append("capture_enabled VAN la true sau cleanup")
+    if state.customer_ids:
+        n = await admin_conn.fetchval(
+            "SELECT count(*) FROM customers WHERE id = ANY($1::bigint[])", state.customer_ids)
+        if n:
+            problems.append(f"con {n}/{len(state.customer_ids)} customer synthetic (ID tracked cua "
+                            "chinh lan chay nay) chua bi purge")
+    if state.conversation_ids:
+        n = await admin_conn.fetchval(
+            "SELECT count(*) FROM conversations WHERE id = ANY($1::bigint[])", state.conversation_ids)
+        if n:
+            problems.append(f"con {n} conversation synthetic (ID tracked) chua bi purge")
+    if state.batch_id:
+        n = await admin_conn.fetchval(
+            "SELECT count(*) FROM m4_shadow_review_samples WHERE selection_batch = $1", state.batch_id)
+        if n:
+            problems.append(f"con {n} sample chua bi purge cho batch {state.batch_id}")
+    n = await admin_conn.fetchval(
+        "SELECT count(*) FROM m4_stage0p_transcript_signing_keys "
+        "WHERE key_version = $1 AND retired_at IS NULL", TRANSCRIPT_KEY_VERSION)
+    if n:
+        problems.append("transcript signing key CHUA duoc retire")
+    n = await admin_conn.fetchval(
+        "SELECT count(*) FROM m4_stage0p_signing_auth_keys "
+        "WHERE key_version = $1 AND retired_at IS NULL", _SIGNING_AUTH_KEY_VERSION)
+    if n:
+        problems.append("signing-auth key CHUA duoc retire")
+    return (len(problems) == 0), problems
+
+
 async def _run_execute(args, manifest: list[dict]) -> int:
     _assert_distinct_principals(args.operator_staff_id, args.reviewer_staff_id)
     operator_pin = _require_env("STAGE0P_REHEARSAL_OPERATOR_PIN")
@@ -543,10 +617,20 @@ async def _run_execute(args, manifest: list[dict]) -> int:
     pool = await create_stage0p_pool(_db_url())
     state = RehearsalState()
     start_ts = time.monotonic()
+    main_exc: BaseException | None = None
     try:
         if await read_capture_enabled(admin_conn):
             raise SystemExit("PRECHECK FAIL: capture_enabled da la true TRUOC khi rehearsal bat "
                              "dau - abort, khong ro trang thai he thong")
+
+        # F-M4-RH-R2-03: kiem tra lai approval window NGAY TRUOC khi bat capture (khong chi dua
+        # vao 1 lan dry-run truoc do co the da cu/het han giua luc dry-run va luc execute that).
+        # F-M4-RH-R2-02: doi chieu recorded_by THAT (khong chi 2 CLI argument operator/reviewer).
+        approval_ok, recorded_by, approval_problems = await _check_approval_active(
+            admin_conn, args.approval_ref)
+        if not approval_ok:
+            raise SystemExit(f"APPROVAL PRECHECK FAIL (F-R2-03): {approval_problems}")
+        _assert_distinct_principals(recorded_by, args.operator_staff_id, args.reviewer_staff_id)
 
         await _seed_synthetic(admin_conn, manifest, state)
         await _assert_batch_isolated(admin_conn, state)
@@ -640,96 +724,125 @@ async def _run_execute(args, manifest: list[dict]) -> int:
             _log("evaluation_completed", completed_at=str(eval_result["completed_at"]),
                  report_hash=eval_result["report_hash"], metrics=eval_result["metrics"])
 
-        elapsed = time.monotonic() - start_ts
-        _log("rehearsal_execute_succeeded", elapsed_seconds=round(elapsed, 1))
-        return 0
-    finally:
-        # F-M4-RH-R1-04: finally VO DIEU KIEN - capture OFF -> keys retired (best-effort, thao
-        # tac idempotent) -> purge synthetic (theo ID tracked) -> postcheck. Chay DU buoc nao o
-        # tren that bai giua chung.
-        try:
-            if state.capture_turned_on:
-                async with pinned_actor_session(
-                    pool, staff_id=args.operator_staff_id, pin_secret=operator_pin,
-                    business_role=Stage0PBusinessRole.CONTROL_PLANE,
-                ) as ctrl_conn:
-                    await set_capture_enabled(ctrl_conn, enabled=False, approval_ref=None)
-                _log("capture_enabled_off_in_finally")
-        except Exception as e:  # noqa: BLE001 — cleanup phai tiep tuc du buoc nay loi
-            _log("cleanup_capture_off_failed", error_type=type(e).__name__, error=str(e))
+        _log("rehearsal_lifecycle_succeeded", note="chua ket luan overall exit - cho cleanup + "
+             "postcondition verification (F-M4-RH-R2-01) o duoi")
+    except BaseException as e:  # noqa: BLE001 — luon re-raise (main_exc) o cuoi, khong nuot loi;
+        # can bat BaseException (khong chi Exception) de ca CancelledError cung buoc qua cleanup
+        # thay vi bo qua thang, giong ly do da dung trong stage0p_pool.py __aenter__ (T11-01).
+        main_exc = e
+        _log("rehearsal_lifecycle_failed", error_type=type(e).__name__, error=str(e))
 
-        try:
-            keys_conn = await asyncpg.connect(_db_url())
-            try:
-                await _retire_key(keys_conn, "m4_stage0p_transcript_signing_keys", TRANSCRIPT_KEY_VERSION)
-                await _retire_key(keys_conn, "m4_stage0p_signing_auth_keys", _SIGNING_AUTH_KEY_VERSION)
-                _log("keys_retired_in_finally")
-            finally:
-                await keys_conn.close()
-        except Exception as e:  # noqa: BLE001
-            _log("cleanup_key_retire_failed", error_type=type(e).__name__, error=str(e))
+    # F-M4-RH-R1-04/R2-01: cleanup chay VO DIEU KIEN (du lifecycle chinh thanh cong hay that
+    # bai), nhung KHONG con "bat loi roi coi nhu xong" (dung CA chi ro o Review #2) - tung buoc
+    # duoc ghi ket qua, RIENG BIET voi buoc xac minh doc lap ben duoi (_verify_cleanup_
+    # postconditions) - "buoc nay khong nem loi" KHONG dong nghia "he thong da an toan".
+    cleanup_step_ok: dict[str, bool] = {}
+    try:
+        if state.capture_turned_on:
+            async with pinned_actor_session(
+                pool, staff_id=args.operator_staff_id, pin_secret=operator_pin,
+                business_role=Stage0PBusinessRole.CONTROL_PLANE,
+            ) as ctrl_conn:
+                await set_capture_enabled(ctrl_conn, enabled=False, approval_ref=None)
+            _log("capture_enabled_off_in_finally")
+        cleanup_step_ok["capture_off"] = True
+    except Exception as e:  # noqa: BLE001 — cleanup phai tiep tuc du buoc nay loi
+        cleanup_step_ok["capture_off"] = False
+        _log("cleanup_capture_off_failed", error_type=type(e).__name__, error=str(e))
 
+    try:
+        keys_conn = await asyncpg.connect(_db_url())
         try:
-            await _purge_synthetic(admin_conn, state)
-        except Exception as e:  # noqa: BLE001
-            _log("cleanup_purge_failed", error_type=type(e).__name__, error=str(e))
+            await _retire_key(keys_conn, "m4_stage0p_transcript_signing_keys", TRANSCRIPT_KEY_VERSION)
+            await _retire_key(keys_conn, "m4_stage0p_signing_auth_keys", _SIGNING_AUTH_KEY_VERSION)
+            _log("keys_retired_in_finally")
+        finally:
+            await keys_conn.close()
+        cleanup_step_ok["keys_retired"] = True
+    except Exception as e:  # noqa: BLE001
+        cleanup_step_ok["keys_retired"] = False
+        _log("cleanup_key_retire_failed", error_type=type(e).__name__, error=str(e))
 
-        try:
-            redis_check = await _postcheck_redis_nonces(window_seconds=120)
-            _log("redis_nonce_postcheck", **redis_check)
-        except Exception as e:  # noqa: BLE001
-            _log("cleanup_redis_postcheck_failed", error_type=type(e).__name__, error=str(e))
+    try:
+        await _purge_synthetic(admin_conn, state)
+        cleanup_step_ok["purge"] = True
+    except Exception as e:  # noqa: BLE001
+        cleanup_step_ok["purge"] = False
+        _log("cleanup_purge_failed", error_type=type(e).__name__, error=str(e))
 
-        await admin_conn.close()
-        await pool.close()
+    try:
+        redis_check = await _postcheck_redis_nonces(window_seconds=120)
+        _log("redis_nonce_postcheck", **redis_check)
+        cleanup_step_ok["redis_postcheck"] = True
+    except Exception as e:  # noqa: BLE001
+        cleanup_step_ok["redis_postcheck"] = False
+        _log("cleanup_redis_postcheck_failed", error_type=type(e).__name__, error=str(e))
+
+    # F-M4-RH-R2-01: nguon su that DUY NHAT cho quyet dinh exit code la truy van DOC LAP nay -
+    # KHONG phai viec tung buoc cleanup o tren "tu bao khong loi" (1 buoc co the tu no thanh cong
+    # nhung van de lai residual vi nguyen nhan khac, hoac nguoc lai).
+    postcondition_ok, postcondition_problems = await _verify_cleanup_postconditions(admin_conn, state)
+
+    await admin_conn.close()
+    await pool.close()
+
+    if not postcondition_ok:
+        _log("CLEANUP_FAILED", problems=postcondition_problems, cleanup_step_results=cleanup_step_ok,
+             lifecycle_error=(f"{type(main_exc).__name__}: {main_exc}" if main_exc else None))
+        raise SystemExit(
+            f"CLEANUP_FAILED (F-M4-RH-R2-01): he thong CHUA o trang thai an toan sau rehearsal - "
+            f"{postcondition_problems} - day la trang thai NGUY HIEM NHAT (co the con capture ON "
+            "hoac du lieu/key chua don dep), KHONG duoc bao cao thanh cong du lifecycle chinh co "
+            "thanh cong hay khong")
+    if main_exc is not None:
+        raise main_exc
+    elapsed = time.monotonic() - start_ts
+    _log("rehearsal_execute_succeeded", elapsed_seconds=round(elapsed, 1))
+    return 0
 
 
 async def _run_dry_run(args, manifest: list[dict]) -> int:
     """Preflight - KHONG ghi gi vao DB. Kiem: capture hien OFF, khong synthetic row du sot lai,
-    manifest hop le, approval_ref con hieu luc (doc-only qua SELECT, khong pin actor / khong
-    tieu thu approval)."""
+    manifest hop le, approval_ref con hieu luc THAT SU (F-M4-RH-R2-03: valid_from<=now<valid_
+    until, requested_enabled=true, dung purpose, chua revoke - khong chi log thong tin roi bo
+    qua), va 3 principal (approval recorder THAT/operator/reviewer) phan biet (F-M4-RH-R2-02)."""
     _assert_distinct_principals(args.operator_staff_id, args.reviewer_staff_id)
     admin_conn = await asyncpg.connect(_db_url())
     try:
         capture_now = await read_capture_enabled(admin_conn)
         leftover = await admin_conn.fetchval(
             "SELECT count(*) FROM customers WHERE psid LIKE $1", f"{PSID_PREFIX}%")
-        approval_row = await admin_conn.fetchrow(
-            "SELECT a.valid_from, a.valid_until, "
-            "EXISTS(SELECT 1 FROM m4_stage0p_capture_approval_revocations r "
-            "       WHERE r.approval_ref = a.approval_ref) AS revoked "
-            "FROM m4_stage0p_capture_approvals a WHERE a.approval_ref = $1 "
-            "AND a.purpose_code = $2", args.approval_ref, PURPOSE_CODE)
+        approval_ok, recorded_by, approval_problems = await _check_approval_active(
+            admin_conn, args.approval_ref)
         gate_eligible = sum(1 for r in manifest if r["expect_gate"])
         _log("dry_run_report",
              capture_currently_enabled=capture_now,
              leftover_synthetic_customers=leftover,
-             approval_found=approval_row is not None,
-             approval_valid_from=str(approval_row["valid_from"]) if approval_row else None,
-             approval_valid_until=str(approval_row["valid_until"]) if approval_row else None,
-             approval_revoked=bool(approval_row["revoked"]) if approval_row else None,
+             approval_active=approval_ok,
+             approval_recorded_by=recorded_by,
+             approval_problems=approval_problems,
              manifest_conversation_count=len(manifest),
              manifest_gate_eligible_count=gate_eligible,
              manifest_meets_200_floor=gate_eligible >= 200,
              operator_staff_id=args.operator_staff_id,
              reviewer_staff_id=args.reviewer_staff_id,
              note="DRY RUN - khong ghi gi, chi bao cao")
-        problems = []
+        problems = list(approval_problems)
         if capture_now:
             problems.append("capture_enabled dang true - phai OFF truoc rehearsal")
         if leftover:
             problems.append(f"con {leftover} customer synthetic sot lai tu lan chay truoc")
-        if approval_row is None:
-            problems.append("khong tim thay approval_ref hop le (chua record hoac sai purpose_code)")
-        elif approval_row["revoked"]:
-            problems.append("approval_ref da bi thu hoi")
         if gate_eligible < 200:
             problems.append(f"manifest chi co {gate_eligible} gate-eligible conversation (<200)")
+        if recorded_by is not None:
+            problems.extend(_principal_conflict_problems(
+                recorded_by, args.operator_staff_id, args.reviewer_staff_id))
         if problems:
             for p in problems:
                 _log("dry_run_problem", problem=p)
             return 1
-        _log("dry_run_ready", note="tat ca precondition OK - san sang execute trong approval window")
+        _log("dry_run_ready", note="tat ca precondition OK (bao gom approval window/principal "
+             "binding that su) - san sang execute trong approval window")
         return 0
     finally:
         await admin_conn.close()

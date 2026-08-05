@@ -19,14 +19,17 @@ Kich ban:
       runtime assertion) va _assert_batch_isolated() se abort neu bi ep chen thu cong.
   [3] F-M4-RH-R1-07: _assert_distinct_principals() tu choi khi 2 staff_id trung nhau.
   [4] Dry-run khong ghi gi: dem row truoc/sau `run --dry-run`, phai bang nhau tuyet doi.
-  [5] Idempotent cleanup khi that bai giua chung: ep _label_samples that bai (manifest tro toi
-      conversation_key khong ton tai trong batch) SAU KHI capture da bat va sample da capture —
-      xac nhan finally VAN dua he thong ve OFF-state sach (capture OFF, 0 residual, keys retired)
-      DU cho execute() raise SystemExit giua chung.
+  [5a/5b] F-M4-RH-R2-01/05: fault-injection BLACK-BOX tren CHINH subprocess `run` that (khong
+      phai ban sao cleanup viet tay) — [5a] sabotage pin_secret operator ngay khi capture vua
+      bat, buoc capture-off THAT SU that bai; [5b] chen 1 row `orders` tham chieu customer
+      synthetic ngay sau khi seed, buoc purge THAT SU that bai vi FK conflict. Ca 2 xac nhan:
+      exit code khac 0, log CLEANUP_FAILED, va trang thai DB doc lap THAT SU nguy hiem (capture
+      con ON / residual con lai) — khong bao gio bao cao thanh cong trong tinh huong nay.
 """
 
 import asyncio
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -283,153 +286,239 @@ async def scenario_4_dry_run_no_writes() -> None:
         await admin.close()
 
 
-async def scenario_5_idempotent_cleanup_on_failure() -> None:
-    print("== [5] Idempotent cleanup: labeling that bai giua chung van dua he thong ve OFF-state ==")
+def _write_small_manifest(n: int, suffix: str) -> Path:
+    """Manifest con (N conversation dau) rieng cho 1 kich ban fault-injection — psid van dung
+    tien to that (PSID_PREFIX) nhung noi dung file la 1 ban sao rieng, khong dung chung voi cac
+    kich ban khac chay song song/tuan tu."""
+    full = runner._load_manifest(ROOT / "datasets" / "pii" / "m4_stage0p_rehearsal_manifest_v2.jsonl")
+    subset = full[:n]
+    path = ROOT / "datasets" / "pii" / f"_rehearsal_test_manifest_{suffix}.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        for r in subset:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return path
+
+
+async def _poll_until(predicate_coro_fn, *, timeout: float, interval: float = 0.3) -> bool:
+    """Poll `await predicate_coro_fn()` cho toi khi True hoac het `timeout` giay. Tra True/False."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if await predicate_coro_fn():
+            return True
+        await asyncio.sleep(interval)
+    return False
+
+
+async def scenario_5a_blackbox_capture_off_failure() -> None:
+    """F-M4-RH-R2-05: fault-injection tren CHINH tien trinh `run` that (subprocess that, khong
+    phai ban sao cleanup viet tay) — sabotage credential cua operator NGAY khi capture vua bat,
+    buoc buoc cleanup capture-OFF trong _run_execute() THAT SU that bai. Xac nhan runner phat
+    hien dung (F-M4-RH-R2-01): exit khac 0, log CLEANUP_FAILED, va capture_enabled VAN true (vi
+    that su khong tat duoc) — khong bao gio bao cao thanh cong trong tinh huong nguy hiem nay."""
+    print("== [5a] Black-box fault-injection: capture-off THAT SU that bai giua _run_execute() ==")
     admin = await asyncpg.connect(DB_URL)
     try:
         approval_staff = await _make_staff(
-            admin, username="rehearsal-test-cleanup-approver", permissions=["m4.stage0p.approve"],
-            pin_secret="approver-pin-3")
+            admin, username="rehearsal-test-5a-approver", permissions=["m4.stage0p.approve"],
+            pin_secret="approver-pin-5a")
         operator_staff = await _make_staff(
-            admin, username="rehearsal-test-cleanup-operator", permissions=["m4.stage0p.operate"],
-            pin_secret="operator-pin-3")
-        # reviewer khong can trong kich ban nay - diem hong (thieu signing socket) xay ra o
-        # buoc collector, TRUOC khi lifecycle toi phan labeling can reviewer principal.
+            admin, username="rehearsal-test-5a-operator", permissions=["m4.stage0p.operate"],
+            pin_secret="operator-pin-5a")
+        reviewer_staff = await _make_staff(
+            admin, username="rehearsal-test-5a-reviewer",
+            permissions=["m4.stage0p.review", "m4.stage0p.evaluate"], pin_secret="reviewer-pin-5a")
     finally:
         await admin.close()
 
-    approval_ref = "m4-rehearsal-test-cleanup"
+    approval_ref = "m4-rehearsal-test-5a-capture-off-fail"
     r = _run_cli("record-approval", "--approval-staff-id", str(approval_staff),
                 "--approval-ref", approval_ref,
                 "--valid-from", "2020-01-01T00:00:00+00:00",
                 "--valid-until", "2099-01-01T00:00:00+00:00",
-                env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-3"})
+                env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-5a"})
     check(r.returncode == 0, "setup: record-approval thanh cong")
 
-    sample_key, transcript_key, auth_key = _gen_key_b64(), _gen_key_b64(), _gen_key_b64()
-    r = _run_cli("provision-keys", env_extra={
-        "M4_SAMPLE_KEY_B64": sample_key, "M4_TRANSCRIPT_HMAC_KEY_B64": transcript_key,
-        "M4_SIGNING_AUTH_VERIFY_KEY_B64": auth_key})
-    check(r.returncode == 0, "setup: provision-keys thanh cong")
+    manifest_path = _write_small_manifest(3, "5a")
+    env = {**os.environ, "DATABASE_URL": DB_URL, "REDIS_URL": REDIS_URL,
+          "STAGE0P_REHEARSAL_OPERATOR_PIN": "operator-pin-5a",
+          "STAGE0P_REHEARSAL_REVIEWER_PIN": "reviewer-pin-5a"}
+    proc = subprocess.Popen(
+        [sys.executable, "scripts/m4_stage0p_rehearsal_runner.py", "run",
+         "--manifest", str(manifest_path), "--approval-ref", approval_ref,
+         "--operator-staff-id", str(operator_staff), "--reviewer-staff-id", str(reviewer_staff)],
+        cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-    # Manifest CO Y hong: 3 conversation dau tien, nhung 1 message trong do bi doi content rong
-    # sau khi seed - gia lap 1 loai loi thuc te (khong lien quan runner) buoc collector/labeling
-    # phai dung lai giua chung. Don gian hon: xoa 1 dong khoi manifest SAU KHI seed nhung TRUOC
-    # labeling bang cach truyen manifest chi co 2/3 record cho _label_samples nhung seed du 3 -
-    # that su ta goi truc tiep ham noi bo de kiem soat chinh xac diem hong, thay vi qua CLI (CLI
-    # se can 1 signing service that dang chay - qua pham vi test nay, xem scenario 1).
-    import datetime as _dt
-    manifest_full = runner._load_manifest(
-        ROOT / "datasets" / "pii" / "m4_stage0p_rehearsal_manifest_v2.jsonl")
-    manifest_subset = manifest_full[:3]
-
-    admin_conn = await asyncpg.connect(DB_URL)
-    state = runner.RehearsalState()
+    poll_conn = await asyncpg.connect(DB_URL)
     try:
-        pre_capture = await runner.read_capture_enabled(admin_conn)
-        check(pre_capture is False, "precheck: capture OFF truoc khi bat dau")
+        async def _capture_is_on():
+            return bool(await poll_conn.fetchval(
+                "SELECT capture_enabled FROM m4_stage0p_control WHERE id = 1"))
+        observed_on = await _poll_until(_capture_is_on, timeout=20.0)
+        check(observed_on, "quan sat duoc capture_enabled chuyen true trong khi subprocess dang chay")
 
-        await runner._seed_synthetic(admin_conn, manifest_subset, state)
-        await runner._assert_batch_isolated(admin_conn, state)
+        # Sabotage credential operator NGAY luc nay - lan pin_actor KE TIEP (trong cleanup) se
+        # that bai vi pin_secret khong con khop hash trong DB.
+        await poll_conn.execute(
+            "UPDATE m4_stage0p_actor_credentials SET pin_secret_hash = crypt('sabotaged-wrong-pin', "
+            "gen_salt('bf')), failed_attempts = 0, locked_until = NULL WHERE staff_id = $1",
+            operator_staff)
+    finally:
+        await poll_conn.close()
 
+    try:
+        stdout, stderr = proc.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        check(False, "subprocess KHONG thoat trong 120s sau sabotage - treo bat thuong")
+        stdout = stdout or ""
+
+    check(proc.returncode != 0,
+          f"exit code khac 0 khi cleanup capture-off that bai THAT SU (thuc te {proc.returncode})")
+    check('"CLEANUP_FAILED"' in stdout,
+          "log co dung marker CLEANUP_FAILED (F-M4-RH-R2-01) thay vi bao cao thanh cong")
+    check('"capture_enabled VAN la true sau cleanup"' in stdout,
+          "CLEANUP_FAILED neu ro dung nguyen nhan: capture_enabled van true")
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        capture_still_on = await verify_conn.fetchval(
+            "SELECT capture_enabled FROM m4_stage0p_control WHERE id = 1")
+        check(bool(capture_still_on) is True,
+              "xac nhan DOC LAP: capture_enabled THAT SU van con true (dung nhu CLEANUP_FAILED tuyen bo, "
+              "khong phai bao gia)")
+
+        # Don dep sandbox cho cac kich ban sau: phuc hoi pin_secret dung, tu tat capture, purge
+        # thu cong (test tu chiu trach nhiem don dep sau khi CO Y gay loi de kiem thu).
+        await _provision_pin_secret(verify_conn, staff_id=operator_staff, pin_secret="operator-pin-5a")
         pool = await runner.create_stage0p_pool(DB_URL)
         try:
             async with runner.pinned_actor_session(
-                pool, staff_id=operator_staff, pin_secret="operator-pin-3",
+                pool, staff_id=operator_staff, pin_secret="operator-pin-5a",
                 business_role=runner.Stage0PBusinessRole.CONTROL_PLANE,
             ) as ctrl_conn:
-                await runner.set_capture_enabled(ctrl_conn, enabled=True, approval_ref=approval_ref)
-            state.capture_turned_on = True
-
-            selected = [{"conversation_id": cid,
-                        "customer_id": state.conversation_id_to_customer_id[cid]}
-                       for cid in state.conversation_ids]
-            norm_conn = await pool.acquire()
-            try:
-                normalization_version = await runner.get_current_normalization_version(norm_conn)
-            finally:
-                await pool.release(norm_conn)
-
-            window_start = _dt.datetime.now(_dt.timezone.utc)
-            window_end = window_start + _dt.timedelta(seconds=1)
-            lock_conn = await asyncpg.connect(DB_URL)
-            try:
-                await lock_conn.execute("SET ROLE alpha3s_m4_sample_collector")
-                row = await lock_conn.fetchrow(
-                    "INSERT INTO m4_selection_batches (window_start, window_end, eligible_count, "
-                    "selected_count, algorithm_seed, locked_conversation_ids, purpose_code, "
-                    "status, retention_days, normalization_version) VALUES "
-                    "($1,$2,$3,$4,$5,$6,$7,'locked',$8,$9) RETURNING batch_id",
-                    window_start, window_end, len(selected), len(selected),
-                    runner.SELECTION_SEED_LABEL + "-rehearsal-cleanup-test",
-                    [s["conversation_id"] for s in selected], runner.PURPOSE_CODE,
-                    runner.RETENTION_DAYS, normalization_version)
-                state.batch_id = row["batch_id"]
-            finally:
-                await lock_conn.close()
-
-            collector_conn = await asyncpg.connect(DB_URL)
-            pending_conn = await asyncpg.connect(DB_URL)
-            collector_failed_as_expected = False
-            try:
-                await collector_conn.execute("SET ROLE alpha3s_m4_sample_collector")
-                await pending_conn.execute("SET ROLE alpha3s_m4_pending_checker")
-                # Signing socket chua cau hinh trong sandbox nay (khong co signing service that
-                # dang chay) - run_collector se gap SigningServiceError fail-closed NGAY o
-                # message dau tien. Day CHINH LA diem hong "giua chung" ta can (capture da ON,
-                # 1 phan seed/lock da xay ra, roi 1 buoc sau do that bai that su vi thieu ha
-                # tang) - dung de chung minh finally cleanup van chay dung.
-                await runner.run_collector(collector_conn, pending_conn, batch_id=state.batch_id)
-            except Exception:
-                collector_failed_as_expected = True
-            finally:
-                await collector_conn.close()
-                await pending_conn.close()
-            check(collector_failed_as_expected,
-                  "gia lap diem hong giua chung: collector that bai vi signing socket chua "
-                  "cau hinh (dung ky vong - fail closed, khong fallback)")
+                await runner.set_capture_enabled(ctrl_conn, enabled=False, approval_ref=None)
         finally:
             await pool.close()
-
-        # ---- finally cleanup thu cong (mo phong dung logic finally cua _run_execute) ----
-        cleanup_pool = await runner.create_stage0p_pool(DB_URL)
-        try:
-            if state.capture_turned_on:
-                async with runner.pinned_actor_session(
-                    cleanup_pool, staff_id=operator_staff, pin_secret="operator-pin-3",
-                    business_role=runner.Stage0PBusinessRole.CONTROL_PLANE,
-                ) as ctrl_conn:
-                    await runner.set_capture_enabled(ctrl_conn, enabled=False, approval_ref=None)
-            keys_conn = await asyncpg.connect(DB_URL)
-            try:
-                await runner._retire_key(keys_conn, "m4_stage0p_transcript_signing_keys",
-                                         runner.TRANSCRIPT_KEY_VERSION)
-                await runner._retire_key(keys_conn, "m4_stage0p_signing_auth_keys",
-                                         runner._SIGNING_AUTH_KEY_VERSION)
-            finally:
-                await keys_conn.close()
-            await runner._purge_synthetic(admin_conn, state)
-        finally:
-            await cleanup_pool.close()
-
-        post_capture = await runner.read_capture_enabled(admin_conn)
-        check(post_capture is False, "post-cleanup: capture_enabled = False (finally chay dung)")
-
-        residual = await admin_conn.fetchval(
-            "SELECT count(*) FROM customers WHERE psid = ANY($1::text[])",
-            [r["psid"] for r in manifest_subset])
-        check(residual == 0, "post-cleanup: 0 synthetic customer con sot lai")
-
-        transcript_active = await admin_conn.fetchval(
-            "SELECT count(*) FROM m4_stage0p_transcript_signing_keys "
-            "WHERE key_version = $1 AND retired_at IS NULL", runner.TRANSCRIPT_KEY_VERSION)
-        auth_active = await admin_conn.fetchval(
-            "SELECT count(*) FROM m4_stage0p_signing_auth_keys "
-            "WHERE key_version = $1 AND retired_at IS NULL", runner._SIGNING_AUTH_KEY_VERSION)
-        check(transcript_active == 0 and auth_active == 0,
-              "post-cleanup: ca 2 key da duoc retire (retired_at khong con NULL)")
+        await verify_conn.execute("DELETE FROM messages WHERE conversation_id IN "
+                                  "(SELECT id FROM conversations WHERE customer_id IN "
+                                  "(SELECT id FROM customers WHERE psid LIKE $1))", f"{runner.PSID_PREFIX}%")
+        await verify_conn.execute("DELETE FROM conversations WHERE customer_id IN "
+                                  "(SELECT id FROM customers WHERE psid LIKE $1)", f"{runner.PSID_PREFIX}%")
+        await verify_conn.execute("DELETE FROM customers WHERE psid LIKE $1", f"{runner.PSID_PREFIX}%")
+        await runner._retire_key(verify_conn, "m4_stage0p_transcript_signing_keys",
+                                 runner.TRANSCRIPT_KEY_VERSION)
+        await runner._retire_key(verify_conn, "m4_stage0p_signing_auth_keys",
+                                 runner._SIGNING_AUTH_KEY_VERSION)
     finally:
-        await admin_conn.close()
+        await verify_conn.close()
+    manifest_path.unlink(missing_ok=True)
+
+
+async def scenario_5b_blackbox_purge_failure() -> None:
+    """F-M4-RH-R2-05: fault-injection thu 2 tren CHINH `run` that — chen 1 row `orders` tham
+    chieu toi 1 customer synthetic NGAY sau khi seed xong (FK ma purge KHONG lam sach), buoc
+    DELETE FROM customers trong `_purge_synthetic` that bai that su vi ForeignKeyViolationError.
+    Khong co signing service that trong sandbox nay nen collector se tu fail-closed (thieu
+    socket) — dung de lifecycle chinh ket thuc nhanh, nhung diem can kiem la CLEANUP co phat
+    hien dung purge that bai hay khong, khong phai lifecycle chinh."""
+    print("== [5b] Black-box fault-injection: purge THAT SU that bai (FK conflict tu orders) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approval_staff = await _make_staff(
+            admin, username="rehearsal-test-5b-approver", permissions=["m4.stage0p.approve"],
+            pin_secret="approver-pin-5b")
+        operator_staff = await _make_staff(
+            admin, username="rehearsal-test-5b-operator", permissions=["m4.stage0p.operate"],
+            pin_secret="operator-pin-5b")
+        reviewer_staff = await _make_staff(
+            admin, username="rehearsal-test-5b-reviewer",
+            permissions=["m4.stage0p.review", "m4.stage0p.evaluate"], pin_secret="reviewer-pin-5b")
+    finally:
+        await admin.close()
+
+    approval_ref = "m4-rehearsal-test-5b-purge-fail"
+    r = _run_cli("record-approval", "--approval-staff-id", str(approval_staff),
+                "--approval-ref", approval_ref,
+                "--valid-from", "2020-01-01T00:00:00+00:00",
+                "--valid-until", "2099-01-01T00:00:00+00:00",
+                env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-5b"})
+    check(r.returncode == 0, "setup: record-approval thanh cong")
+
+    manifest_path = _write_small_manifest(3, "5b")
+    env = {**os.environ, "DATABASE_URL": DB_URL, "REDIS_URL": REDIS_URL,
+          "STAGE0P_REHEARSAL_OPERATOR_PIN": "operator-pin-5b",
+          "STAGE0P_REHEARSAL_REVIEWER_PIN": "reviewer-pin-5b"}
+    proc = subprocess.Popen(
+        [sys.executable, "scripts/m4_stage0p_rehearsal_runner.py", "run",
+         "--manifest", str(manifest_path), "--approval-ref", approval_ref,
+         "--operator-staff-id", str(operator_staff), "--reviewer-staff-id", str(reviewer_staff)],
+        cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    poll_conn = await asyncpg.connect(DB_URL)
+    injected_customer_id = None
+    try:
+        async def _synthetic_seeded():
+            row = await poll_conn.fetchval(
+                "SELECT id FROM customers WHERE psid LIKE $1 ORDER BY id LIMIT 1",
+                f"{runner.PSID_PREFIX}%")
+            return row is not None
+        observed = await _poll_until(_synthetic_seeded, timeout=20.0)
+        check(observed, "quan sat duoc customer synthetic xuat hien trong khi subprocess dang chay")
+
+        injected_customer_id = await poll_conn.fetchval(
+            "SELECT id FROM customers WHERE psid LIKE $1 ORDER BY id LIMIT 1",
+            f"{runner.PSID_PREFIX}%")
+        # Chen 1 order THAT tham chieu toi customer synthetic nay - purge KHONG biet ve bang
+        # orders (chi xoa customers/conversations/messages/samples/capture_progress theo ID
+        # tracked), nen DELETE FROM customers se vi pham FK va that bai that su.
+        await poll_conn.execute(
+            "INSERT INTO orders (customer_id, created_at) VALUES ($1, now())", injected_customer_id)
+    finally:
+        await poll_conn.close()
+
+    try:
+        stdout, stderr = proc.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        check(False, "subprocess KHONG thoat trong 120s - treo bat thuong")
+        stdout = stdout or ""
+
+    check(proc.returncode != 0,
+          f"exit code khac 0 khi purge that bai THAT SU do FK conflict (thuc te {proc.returncode})")
+    check('"CLEANUP_FAILED"' in stdout, "log co dung marker CLEANUP_FAILED")
+    check("chua bi purge" in stdout,
+          "CLEANUP_FAILED neu ro nguyen nhan lien quan residual row chua purge duoc")
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        residual = await verify_conn.fetchval(
+            "SELECT count(*) FROM customers WHERE psid LIKE $1", f"{runner.PSID_PREFIX}%")
+        check(residual > 0,
+              f"xac nhan DOC LAP: van con {residual} customer synthetic sot lai that su (purge that "
+              "bai dung nhu CLEANUP_FAILED tuyen bo)")
+        capture_off = not bool(await verify_conn.fetchval(
+            "SELECT capture_enabled FROM m4_stage0p_control WHERE id = 1"))
+        check(capture_off, "capture-off van thanh cong doc lap voi purge (2 buoc cleanup that bai "
+                           "rieng biet, khong lien luy nhau)")
+
+        # Don dep that su: xoa order da chen, roi purge tay phan con lai.
+        if injected_customer_id is not None:
+            await verify_conn.execute("DELETE FROM orders WHERE customer_id = $1", injected_customer_id)
+        await verify_conn.execute("DELETE FROM messages WHERE conversation_id IN "
+                                  "(SELECT id FROM conversations WHERE customer_id IN "
+                                  "(SELECT id FROM customers WHERE psid LIKE $1))", f"{runner.PSID_PREFIX}%")
+        await verify_conn.execute("DELETE FROM conversations WHERE customer_id IN "
+                                  "(SELECT id FROM customers WHERE psid LIKE $1)", f"{runner.PSID_PREFIX}%")
+        await verify_conn.execute("DELETE FROM customers WHERE psid LIKE $1", f"{runner.PSID_PREFIX}%")
+        await runner._retire_key(verify_conn, "m4_stage0p_transcript_signing_keys",
+                                 runner.TRANSCRIPT_KEY_VERSION)
+        await runner._retire_key(verify_conn, "m4_stage0p_signing_auth_keys",
+                                 runner._SIGNING_AUTH_KEY_VERSION)
+    finally:
+        await verify_conn.close()
+    manifest_path.unlink(missing_ok=True)
 
 
 async def scenario_6_real_full_lifecycle() -> None:
@@ -514,13 +603,77 @@ async def scenario_6_real_full_lifecycle() -> None:
         await admin.close()
 
 
+async def scenario_7_dry_run_four_approval_states() -> None:
+    """F-M4-RH-R2-03, evidence CA yeu cau ro o Submission #3 muc 4: dry-run PHAI phan biet dung
+    4 tinh huong approval_ref — hop le, CHUA bat dau, DA het han, DA thu hoi. Ca 4 dung CHINH
+    CLI `run --dry-run` that (khong goi ham noi bo)."""
+    print("== [7] Dry-run evidence cho 4 trang thai approval (F-M4-RH-R2-03) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        operator_staff = await _make_staff(
+            admin, username="rehearsal-test-7-operator", permissions=["m4.stage0p.operate"],
+            pin_secret="operator-pin-7")
+        reviewer_staff = await _make_staff(
+            admin, username="rehearsal-test-7-reviewer",
+            permissions=["m4.stage0p.review", "m4.stage0p.evaluate"], pin_secret="reviewer-pin-7")
+    finally:
+        await admin.close()
+    manifest_path = ROOT / "datasets" / "pii" / "m4_stage0p_rehearsal_manifest_v2.jsonl"
+
+    def _dry_run_for(approval_ref: str) -> subprocess.CompletedProcess:
+        return _run_cli("run", "--dry-run", "--manifest", str(manifest_path),
+                        "--approval-ref", approval_ref,
+                        "--operator-staff-id", str(operator_staff),
+                        "--reviewer-staff-id", str(reviewer_staff),
+                        env_extra={"STAGE0P_REHEARSAL_OPERATOR_PIN": "operator-pin-7",
+                                  "STAGE0P_REHEARSAL_REVIEWER_PIN": "reviewer-pin-7"})
+
+    cases = [
+        ("m4-rehearsal-test-7-valid", "2020-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00",
+         False, 0, "hop le (dang trong cua so)"),
+        ("m4-rehearsal-test-7-not-started", "2099-01-01T00:00:00+00:00", "2100-01-01T00:00:00+00:00",
+         False, 1, "CHUA bat dau (valid_from o tuong lai)"),
+        ("m4-rehearsal-test-7-expired", "2020-01-01T00:00:00+00:00", "2021-01-01T00:00:00+00:00",
+         False, 1, "DA het han (valid_until o qua khu)"),
+        ("m4-rehearsal-test-7-revoked", "2020-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00",
+         True, 1, "DA bi thu hoi"),
+    ]
+    for approval_ref, valid_from, valid_until, revoke, expect_rc, label in cases:
+        admin2 = await asyncpg.connect(DB_URL)
+        try:
+            approver = await _make_staff(
+                admin2, username=f"rehearsal-test-7-approver-{approval_ref[-12:]}",
+                permissions=["m4.stage0p.approve"], pin_secret="approver-pin-7x")
+        finally:
+            await admin2.close()
+        r = _run_cli("record-approval", "--approval-staff-id", str(approver),
+                    "--approval-ref", approval_ref, "--valid-from", valid_from,
+                    "--valid-until", valid_until,
+                    env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-7x"})
+        check(r.returncode == 0, f"[{label}] setup record-approval thanh cong")
+        if revoke:
+            r = _run_cli("record-approval", "--revoke", "--approval-staff-id", str(approver),
+                        "--approval-ref", approval_ref, "--reason", "test thu hoi",
+                        env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-7x"})
+            check(r.returncode == 0, f"[{label}] setup revoke thanh cong")
+
+        r = _dry_run_for(approval_ref)
+        check(r.returncode == expect_rc,
+              f"[{label}] dry-run --approval-ref {approval_ref} tra rc={r.returncode} "
+              f"(ky vong {expect_rc})")
+
+
+
+
 async def main() -> int:
     await scenario_1_happy_path_e2e()
     await scenario_2_hard_fence()
     await scenario_3_distinct_principals()
     await scenario_4_dry_run_no_writes()
-    await scenario_5_idempotent_cleanup_on_failure()
+    await scenario_5a_blackbox_capture_off_failure()
+    await scenario_5b_blackbox_purge_failure()
     await scenario_6_real_full_lifecycle()
+    await scenario_7_dry_run_four_approval_states()
 
     print()
     if _fail:
