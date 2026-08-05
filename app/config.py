@@ -95,5 +95,53 @@ class Settings(BaseSettings):
     # OFF = job no-op (dry-run thủ công vẫn chạy được qua script).
     m3_retention_executor: bool = False
 
+    # I-B M4 (Trusted PII Path, A3S-PHASE1B-M4-SPEC-001 + DEV-DIRECTIVE-001 v1.1.0 §8).
+    # m4_pii_shadow: detector PII cuc bo (regex/rule thuan, KHONG model, KHONG vendor call)
+    # chay SONG SONG de do recall/precision — CHI quan sat, khong doi response/tool flow;
+    # loi detector bi nuot trong shadow_scan (app/services/pii/shadow.py), KHONG BAO GIO
+    # lam vo flow tra loi chinh. MAC DINH TAT; config missing => TAT (pydantic default).
+    m4_pii_shadow: bool = False
+    # m4_trusted_pii_path: PLACEHOLDER theo Directive §8 — KHONG co active code path trong
+    # M4-S0..S3 development. Enforcement (masked orchestration) chi sau gate M4-G1 +
+    # directive rieng. MAC DINH TAT.
+    m4_trusted_pii_path: bool = False
+    # M4-S1 Trusted Slot Store (bang pii_slots, migration provisional 040):
+    # - m4_slot_key_b64: khoa AES-256-GCM (base64 32 byte) ma hoa gia tri slot o TANG APP,
+    #   AAD bind customer|conversation|slot_type. RONG = slot store KHONG hoat dong
+    #   (fail closed — khong bao gio luu plaintext thay the).
+    # - m4_slot_fp_key_b64: khoa HMAC fingerprint dedupe (base64 32 byte) — TACH khoi khoa
+    #   ma hoa; fingerprint khong phai public identifier.
+    # - m4_slot_ttl_hours: retention ngan mac dinh 24h (spec §8 "short retention").
+    # Sinh khoa dev/test: python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"
+    m4_slot_key_b64: str = ""
+    m4_slot_fp_key_b64: str = ""
+    m4_slot_ttl_hours: int = 24
+
+    # Stage 0P (m4_shadow_review_samples, migration 039 — CA Design Acceptance d2a63c5, package
+    # v4.0.0). Khoa RIENG voi Slot Store (F-M4-0P-04) — khong dung chung m4_slot_key_b64.
+    # m4_stage0p_capture_enabled: PLACEHOLDER — control THAT nam o bang DB `m4_stage0p_control`
+    # (F-M4-0P-01B, doc dong khong dung settings static). Truong nay CHUA co active code path,
+    # giu de tuong thich neu can fallback/tai lieu — KHONG duoc dung lam kill switch that.
+    m4_sample_key_b64: str = ""
+    m4_stage0p_capture_enabled: bool = False
+    # REV10 F-M4-0P-T8-02 (CA Review #9 §4, Huong 3 interim — dev/test only, PHAI nang cap len
+    # KMS/HSM asymmetric TRUOC production activation): khoa HMAC-SHA256 (base64 32 byte) ky
+    # signed capture transcript trong app/services/pii/crypto.py:sign_capture(). RIENG voi
+    # m4_sample_key_b64 (ma hoa) — day la khoa KY, khong phai khoa MA HOA. KHONG duoc cap cho
+    # role DB `alpha3s_m4_sample_collector`/`alpha3s_app`, KHONG log, KHONG commit vao fixture.
+    # REV11 F-M4-0P-T10-02: CHI tien trinh `stage0p_signing_service.py` doc truong nay -
+    # collector process (dung stage0p_signing_client.py) KHONG BAO GIO dat gia tri o day.
+    m4_transcript_hmac_key_b64: str = ""
+    # REV11 F-M4-0P-T10-02: duong dan Unix domain socket den signing service RIENG (boundary
+    # tach biet - xem app/services/pii/stage0p_signing_service.py). Rong = collector KHONG the
+    # ky sample nao (fail closed, khong fallback ve ky trong-process).
+    m4_stage0p_signing_socket: str = ""
+    # REV12 F-M4-0P-T12-02: khoa HMAC-SHA256 (base64 32 byte) signer dung de VERIFY 1 signing
+    # authorization ngan han (30s) do DB tu ky trong m4_stage0p_fetch_message_content() - CHIEU
+    # NGUOC LAI m4_transcript_hmac_key_b64 (signer ky/DB verify). CHI tien trinh
+    # stage0p_signing_service.py doc truong nay - collector KHONG BAO GIO dat gia tri o day (khong
+    # co gi de collector tu gia mao authorization, chi relay nguyen ven tu DB).
+    m4_signing_auth_verify_key_b64: str = ""
+
 
 settings = Settings()

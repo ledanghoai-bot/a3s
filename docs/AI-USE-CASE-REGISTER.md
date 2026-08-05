@@ -73,6 +73,25 @@ ai_processing_record:
   note: M4 sẽ nâng entity_extraction thành PII detector (shadow trước) — record mới khi M4 mở
 ```
 
+## UC-004 — PII Detector Shadow Evaluation (M4 Stage 0P)
+
+```yaml
+ai_processing_record:
+  use_case_id: UC-004
+  model_provider: local (rule/regex thuần — app/services/pii/detector.py, KHÔNG model học máy, KHÔNG vendor)
+  model_name_or_class: detector_version m4d-0.1.0 (taxonomy.py DETECTOR_VERSION)
+  purpose_code: [P12_PII_DETECTOR_EVAL]
+  input_data_classes: [D1, D2]  # tin nhắn khách trong cửa sổ sample, sample zone restricted (§5)
+  output_data_classes: [D4]  # metric counts/enum vận hành thường trực; labeled/predicted sample thô là D1/D2 restricted zone riêng, KHÔNG phải output vận hành
+  retention_mode: RET-11b (eval completed OR 45 ngày, tuỳ điều kiện nào tới trước)
+  training_usage_allowed: không train — chỉ đo recall/precision detector nội bộ
+  region: local container VN (cùng Postgres instance production, schema/quyền tách biệt)
+  cross_border_status: KHÔNG (không gọi vendor — CA Review #1 ACCEPTED có điều kiện, đúng miễn không byte nào đi vendor path)
+  risk_class: MEDIUM — không gửi vendor, không tác động response khách, nhưng CÓ truy cập nội dung tin nhắn thật để gán nhãn (kiểm soát bằng RBAC 6 role least-privilege, migration 039)
+  status: dev/test scope — CA Design Acceptance 29/7 (`d2a63c5`); capture control (`m4_stage0p_control.capture_enabled`) mặc định FALSE, CHƯA bật production
+  note: Kế tiếp UC-003 đúng như ghi chú "record mới khi M4 mở". Đủ 5 finding CLOSED AT DESIGN LEVEL (F-M4-0P-01..05) trước khi cấp technical implementation.
+```
+
 ## Quy tắc chung đang áp (spec §13.8)
 
 - D2 default deny vendor path — hiện chưa có detector (M4); tạm thời mitigate bằng disclosure +

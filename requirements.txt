@@ -11,3 +11,4 @@ sentence-transformers>=3.0
 numpy>=1.26
 openai>=1.40
 pyyaml>=6.0
+cryptography>=42  # I-B M4-S1: AES-256-GCM cho Trusted Slot Store (app/services/pii/crypto.py)

@@ -22,7 +22,8 @@ rules: không retain_forever; raw ngắn hơn aggregate; backup có expiry; rest
 | RET-08 | Container stdout logs | vận hành | ghi | theo log-rotate hạ tầng | rotate | ngoài app — ghi nhận; PII phải sạch từ S4 |
 | RET-09 | `data_deletion_requests` (confirmation code) | P11/DSR | request | **[PROPOSED] 2 năm** (chứng minh tuân thủ) | delete | CHƯA — S6 |
 | RET-10 | KB assets/chunks/vectors (D0) | P01 | version | theo vòng đời nội dung (không phải personal data) | version control | n/a |
-| RET-11 | (M4 tương lai) labeled shadow samples, slot store | P10 | capture | slot store: ngắn (theo M4 spec); labeled samples: theo sample plan có approval | delete | thiết kế tại M4 |
+| RET-11 | `pii_slots` (M4 Trusted Slot Store, migration 038) | P10 | capture | ngắn — theo `m4_slot_ttl_hours` (mặc định 24h, spec §8) | `purge_expired()` DELETE, counts-only log | **dev/test scope** — flag `m4_trusted_pii_path` OFF, chưa canary |
+| RET-11b | `m4_shadow_review_samples` (M4 Stage 0P, migration 039, CA Design Acceptance `d2a63c5`) | P12 | captured_at | `eval completed (predicted_slots IS NOT NULL AND label_status='labeled') OR 45 ngày, tuỳ điều kiện nào tới trước` — CA ACCEPTED trần kỹ thuật có điều kiện (§6 gói governance v4.0.0) | purge job DELETE `expires_at<=now() OR eval-completed`, counts-only; DSR #17 xoá vô điều kiện độc lập | **dev/test scope** — chưa capture production (control row `m4_stage0p_control.capture_enabled` mặc định FALSE) |
 
 ## Legal hold
 
