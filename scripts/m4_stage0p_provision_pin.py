@@ -62,10 +62,12 @@ deploy-dormant gate rieng (F-M4-PIN-R1-02) -- chay file untracked tren VPS bi CA
 Chay (principal, TU chay tren chinh session cua ho, KHONG can DATABASE_URL):
     python scripts/m4_stage0p_provision_pin.py generate-token
 
-Chay (PO / nguoi PO uy quyen, TU chay tren SSH session cua ho):
+Chay (F-M4-PIN-R3-02: cho lan rehearsal synthetic-only nay, PO chi dinh staff_id=3
+(`m4-approval-recorder`) la nguoi TU chay record-bind-approval cho CA BA target 3/4/5 -- KHONG
+dung ID nao khac, approval_ref rieng cho tung target, khong nhap nhang):
     docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py \\
-        record-bind-approval --target-staff-id 5 --recorded-by 5 \\
-        --approval-ref m4-pin-bind-20260806-01 --valid-minutes 60
+        record-bind-approval --target-staff-id 5 --recorded-by 3 \\
+        --approval-ref m4-pin-bind-5-20260806-01 --valid-minutes 60
 
 Chay (Dev/admin, CHI nhan hash -- khong bao gio nhan raw token):
     docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py bind-token \\
