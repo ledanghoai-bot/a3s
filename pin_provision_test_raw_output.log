@@ -1,0 +1,87 @@
+=== command: docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@alpha3s-rehearsal-test-db:5432/alpha3s alpha3s-api-1 python scripts/m4_stage0p_provision_pin_test.py ===
+=== started_at (host date): 2026-08-06T05:07:04Z ===
+== [1] provision-pin KHONG con nhan staff-id duoi bat ky dang nao ==
+  PASS  subcommand provision-pin KHONG co --staff-id
+  PASS  subcommand provision-pin KHONG co bat ky bien the --staff nao
+== [2] generate-token chay HOAN TOAN cuc bo (khong can DATABASE_URL) ==
+  PASS  generate-token exit 0 khong can DB (thuc te 0)
+  PASS  raw token trich xuat duoc, do dai hop ly
+  PASS  hash trich xuat duoc dung dinh dang sha256 hex
+  PASS  hash in ra THAT SU la sha256(raw token) - khop tinh toan doc lap
+== [3] Round-trip that: generate-token -> record-bind-approval -> bind-token (chi hash) -> provision-pin -> pin_actor() THAT chap nhan ==
+  PASS  record-bind-approval exit 0 (thuc te 0)
+  PASS  bind-token exit 0 (thuc te 0); stderr=
+  PASS  bind-token KHONG BAO GIO nhan/in raw token - chi lam viec voi hash
+  PASS  provision-pin exit 0 (thuc te 0); stderr=/usr/local/lib/python3.12/getpass.py:91: GetPassWarning: Can not control echo on the terminal.
+  passwd = fallback_getpass(prompt, stream)
+Warning: Password input may be echoed.
+Nhap token da duoc cap (khong hien thi khi go): 
+Warning: Password input may be echoed.
+Nhap PIN M4 moi (>=8 ky tu): 
+Warning: Password input may be echoed.
+Nhap lai de xac nhan: 
+
+  PASS  output xac nhan DUNG staff_id duoc resolve tu token (khong phai tu caller)
+  PASS  row THAT SU ton tai cho DUNG target_id
+  PASS  crypt() xac nhan hash khop PIN da nhap
+  PASS  m4_stage0p_pin_actor() THAT chap nhan PIN vua provision qua token
+  PASS  token da duoc danh dau consumed_at sau khi thanh cong
+  PASS  issued_by duoc SERVER-SIDE resolve tu approval record (khong phai CLI flag rieng)
+  PASS  output bind-token KHONG chua token that
+  PASS  output provision-pin KHONG chua token that
+  PASS  khong buoc nao trong output chua PIN that
+  PASS  khong buoc nao trong output chua gia tri bcrypt hash that
+== [4] Approval cua A KHONG the dung de bind-token cho B ==
+  PASS  bind-token cho staff_b bang approval BUOC voi staff_a bi tu choi
+  PASS  KHONG co token nao duoc bind cho staff_b tu approval sai target
+== [5] bind-token khong co approval khop (approval-id gia) -> tu choi ==
+  PASS  bind-token voi approval-id khong ton tai bi tu choi
+  PASS  KHONG co token nao duoc tao khi khong co approval khop
+== [6] Approval bi thu hoi -> bind-token bi tu choi ngay ==
+  PASS  revoke-bind-approval exit 0 (thuc te 0)
+  PASS  bind-token voi approval DA thu hoi bi tu choi
+== [7] Approval het han (valid_until qua khu) -> bind-token bi tu choi ==
+  PASS  bind-token voi approval DA het han bi tu choi
+== [8] bind-token ttl-minutes ngoai [1,30] -> tu choi TRUOC KHI cham DB ==
+  PASS  ttl-minutes=0 bi tu choi
+  PASS  ttl-minutes=31 bi tu choi (tran cung 30)
+  PASS  token-hash sai dinh dang bi tu choi truoc khi cham DB
+== [9] Token da dung (consumed) -> lan 2 bi tu choi ==
+  PASS  bind-token thanh cong (chuan bi cho test reuse)
+  PASS  lan dau dung token thanh cong
+  PASS  lan 2 dung LAI CUNG token bi tu choi (da consumed)
+  PASS  loi neu ro token khong hop le/da dung
+== [10] Token het han -> bi tu choi ==
+  PASS  bind-token thanh cong (chuan bi cho test het han)
+  PASS  token het han bi tu choi
+  PASS  KHONG co credential nao duoc tao tu token het han
+== [11] PIN mismatch/qua ngan -> tu choi NHUNG token VAN dung duoc lai ==
+  PASS  bind-token thanh cong (chuan bi cho test retry)
+  PASS  mismatch bi tu choi
+  PASS  token VAN CHUA bi consumed sau lan mismatch - con dung duoc lai
+  PASS  dung LAI CUNG token (sau mismatch) thanh cong lan nay
+== [12] bind THANH CONG truoc, SAU DO revoke approval -> provision-pin bi tu choi dung (F-M4-PIN-R3-01) ==
+  PASS  bind-token thanh cong TRUOC khi revoke (chuan bi)
+  PASS  revoke-bind-approval SAU bind exit 0 (thuc te 0)
+  PASS  provision-pin voi token DA bind nhung approval bi revoke SAU do van bi tu choi
+  PASS  KHONG co credential nao duoc tao tu token co approval bi revoke sau bind
+  PASS  token BAN THAN no khong bi danh dau consumed (bi chan boi approval, khong phai boi chinh no)
+== [13] bind THANH CONG truoc, SAU DO approval het han (token.expires_at rieng no VAN con tuong lai) -> provision-pin van bi tu choi dung (F-M4-PIN-R3-01) ==
+  PASS  bind-token thanh cong TRUOC khi approval het han (chuan bi)
+  PASS  provision-pin voi token co approval het han SAU bind van bi tu choi, MAC DU token.expires_at rieng no van con trong tuong lai
+  PASS  xac nhan gia thiet: token.expires_at rieng no THAT SU van con trong tuong lai luc test nay chay (nen viec bi tu choi la NHO join lai approval, khong phai tinh co)
+== [14] token.expires_at bi CAP theo approval.valid_until khi ngan hon ttl yeu cau; approval sap het han duoi 1 phut -> bind-token tu choi hoan toan (F-M4-PIN-R3-01) ==
+  PASS  bind-token thanh cong (approval con hieu luc ~5p, yeu cau 30p)
+  PASS  token.expires_at (2026-08-06T05:12:35.762695+00:00) khop approval.valid_until (2026-08-06T05:12:35.762695+00:00) trong sai so <2s - CAP dung, KHONG dung ttl 30p yeu cau
+  PASS  bind-token tu choi khi approval con lai duoi 1 phut - khong du thoi gian toi thieu
+  PASS  KHONG co token row nao duoc tao khi approval sap het han
+== [15] Race THAT giua revoke va consume qua 2 ket noi Postgres dong thoi - dung CHINH XAC cau lenh JOIN+FOR UPDATE ma provision_pin() dung (F-M4-PIN-R3-01) ==
+  PASS  bind-token thanh cong (chuan bi cho test race)
+  PASS  connection A lay duoc lock (approval van hop le luc do)
+  PASS  revoke tu connection B THAT SU bi Postgres CHAN boi FOR UPDATE cua connection A (row-level lock that, khong phai gia lap bang code)
+  PASS  SAU KHI A nha lock, revoke cua B hoan tat thanh cong (bi tri hoan, khong bi mat)
+  PASS  provision-pin SAU race that (approval da revoke) van bi tu choi dung - khong co trang thai vua-revoked-vua-provisioned
+
+RESULT: PASS
+=== exit_code: 0 ===
+=== ended_at (host date): 2026-08-06T05:07:42Z ===
