@@ -1,39 +1,61 @@
 #!/usr/bin/env python
 """I-B M4 Stage 0P — provisioning PIN nghiep vu (`m4_stage0p_actor_credentials.pin_secret_hash`)
 qua single-use bootstrap token, dap lai
-`PHASE1B-M4-REHEARSAL-READINESS-SNAPSHOT-REVIEW-1-VI.md` F-M4-PIN-R1-01 — "tool khong bind
-nguoi chay voi staff_id... bat ky ai co quyen chay docker exec deu co the chon staff_id 3, 4
-hoac 5 va dat lai PIN cua principal khac".
+`PHASE1B-M4-REHEARSAL-READINESS-SNAPSHOT-REVIEW-1-VI.md` F-M4-PIN-R1-01 va
+`PHASE1B-M4-REHEARSAL-PIN-TOOL-REVIEW-2-VI.md` F-M4-PIN-R2-01/02/03.
 
-REV2 (dap CA Review #1 tren PR #7): xoa han tham so `--staff-id` khoi subcommand dat PIN — CALLER
-KHONG CON tu chon staff_id duoc nua duoi bat ky hinh thuc nao. Thay vao do:
+REV3 (dap CA Review #2 tren PR #7):
 
-1. `issue-token` (Dev/nguoi issue chay TRUOC, ngoai luong): BUOC 1 token ngau nhien (32 byte,
-   `secrets.token_urlsafe`) VOI 1 staff_id CU THE ngay luc tao — chi luu `sha256(token)` vao bang
-   moi `m4_stage0p_pin_bootstrap_tokens` (migration 040), KHONG BAO GIO luu token goc. In token
-   goc RA MAN HINH DUY NHAT 1 LAN de Dev chuyen cho dung nguoi qua kenh rieng (Signal/Telegram/
-   noi truc tiep — KHONG qua kenh ma nguoi khac doc lai duoc). Token KHONG PHAI PIN — no la ve
-   "duoc phep dat PIN cho DUNG staff_id nay", Dev biet token khong sao (no khong tu no la
-   credential nghiep vu), nhung VAN KHONG BIET PIN thuc te nguoi do se go (buoc 2 duoi day hoan
-   toan tach biet, van qua getpass).
-2. `provision-pin` (nguoi dam nhan vai tro TU chay, tren chinh SSH session cua ho): CHI hoi
-   token (getpass, khong echo) — staff_id duoc SERVER-SIDE RESOLVE tu chinh token do (khong con
-   la input cua caller). Token tieu thu 1 lan, CUNG 1 transaction voi viec ghi PIN — that bai
-   xac nhan PIN (mismatch/qua ngan) KHONG tieu thu token (cho phep thu lai voi CUNG token); chi
+1. `generate-token` (principal TU chay tren CHINH session cua ho, KHONG can DB): sinh 1 token
+   ngau nhien (32 byte, `secrets.token_urlsafe`) hoan toan CUC BO -- in ra 2 gia tri TACH BIET:
+   raw token (principal TU GIU, dung 1 lan o buoc `provision-pin` sau nay) va sha256(token) (GIA
+   TRI DUY NHAT principal dua cho Dev/admin de bind -- KHONG PHAI secret, khong the dung nguoc
+   lai de suy ra raw token hay PIN). Dap F-M4-PIN-R2-01: Dev/admin KHONG BAO GIO sinh ra hay
+   nhin thay raw token duoi bat ky hinh thuc nao trong toan bo quy trinh.
+2. `record-bind-approval` (PO / nguoi PO uy quyen TU chay, ngoai luong): ghi 1 approval record
+   RIENG BIET (bang moi `m4_stage0p_pin_bind_approvals`, migration 041) co approval_ref/
+   timestamp/validity-window/kha nang thu hoi, BUOC voi 1 target_staff_id cu the -- TRUOC va
+   TACH BIET khoi buoc bind token. Day la "approval-bound request record PO ky nhan" CA yeu cau
+   thay the cho 1 CLI flag tu do khai `--issued-by` (F-M4-PIN-R2-02). GIOI HAN TRUNG THUC: vi
+   moi truong CLI nay KHONG co authenticated session/SSO cho thao tac van hanh (va day CHINH LA
+   cong cu bootstrap PIN dau tien nen khong the dung pin_actor() de xac thuc nguoc - chicken-
+   and-egg), code KHONG the chung minh bang mat ma ai THAT SU go lenh nay -- day la 1 audit
+   trail co the thu hoi, dua tren ky luat quy trinh (PO/nguoi duoc PO uy quyen TU chay tren SSH
+   session cua ho), CUNG mo hinh CA da chap nhan cho `record-approval`/PO Decision Record, KHONG
+   phai 1 khang dinh danh tinh duoc ma hoa.
+3. `revoke-bind-approval`: thu hoi 1 approval record neu ghi nham/doi y -- bind-token se tu choi
+   ngay lap tuc sau do (khong can cho het valid_until).
+4. `bind-token` (Dev/admin chay, CHI nhan HASH -- khong bao gio nhan/sinh raw token): yeu cau
+   `--approval-id` tro toi 1 approval record CON HIEU LUC (chua thu hoi, dung target_staff_id,
+   trong validity window) -- `issued_by` duoc SERVER-SIDE resolve TU chinh approval do, khong
+   con la tham so CLI. `--ttl-minutes` bi CHAN CUNG 1-30 phut ca o CLI lan DB CHECK
+   (F-M4-PIN-R2-03, migration 041 `m4_pin_bootstrap_ttl_bounded`).
+5. `provision-pin` (nguoi dam nhan vai tro TU chay, tren chinh SSH session cua ho) -- KHONG DOI
+   so voi REV2: chi hoi token (getpass, khong echo) -- staff_id duoc SERVER-SIDE RESOLVE tu
+   chinh token do. Token tieu thu 1 lan, CUNG 1 transaction voi viec ghi PIN -- that bai xac
+   nhan PIN (mismatch/qua ngan) KHONG tieu thu token (cho phep thu lai voi CUNG token); chi
    thanh cong that su moi tieu thu.
 
-Thiet ke bao mat con lai giu nguyen tu REV1: khong CLI argument nao mang PIN, doc qua
+Thiet ke bao mat con lai giu nguyen tu REV1/REV2: khong CLI argument nao mang PIN, doc qua
 `getpass.getpass()`, `del` bien PIN ngay sau dung, output CHI xac nhan row/metadata ton tai
 (KHONG BAO GIO in `pin_secret_hash`).
 
 QUAN TRONG: KHONG chay file nay tren production truoc khi PR merge/deploy qua dung merge/
-deploy-dormant gate rieng (F-M4-PIN-R1-02) — chay file untracked tren VPS bi CA tu choi ro rang.
+deploy-dormant gate rieng (F-M4-PIN-R1-02) -- chay file untracked tren VPS bi CA tu choi ro rang.
 
-Chay (Dev, issue token TRUOC cho tung staff_id):
-    docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py issue-token \\
-        --staff-id 5 --issued-by 4 --ttl-minutes 30
+Chay (principal, TU chay tren chinh session cua ho, KHONG can DATABASE_URL):
+    python scripts/m4_stage0p_provision_pin.py generate-token
 
-Chay (nguoi dam nhan vai tro, TU chay tren SSH session cua chinh ho):
+Chay (PO / nguoi PO uy quyen, TU chay tren SSH session cua ho):
+    docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py \\
+        record-bind-approval --target-staff-id 5 --recorded-by 5 \\
+        --approval-ref m4-pin-bind-20260806-01 --valid-minutes 60
+
+Chay (Dev/admin, CHI nhan hash -- khong bao gio nhan raw token):
+    docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py bind-token \\
+        --token-hash <hash-tu-principal> --target-staff-id 5 --approval-id 1 --ttl-minutes 15
+
+Chay (nguoi dam nhan vai tro, TU chay tren chinh SSH session cua ho):
     docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py provision-pin
 """
 
@@ -42,6 +64,7 @@ import asyncio
 import getpass
 import hashlib
 import os
+import re
 import secrets
 import sys
 from datetime import datetime, timedelta, timezone
@@ -53,7 +76,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 MIN_PIN_LEN = 8
-DEFAULT_TTL_MINUTES = 30
+TOKEN_TTL_MIN_MINUTES = 1
+TOKEN_TTL_MAX_MINUTES = 30
+APPROVAL_TTL_MIN_MINUTES = 1
+APPROVAL_TTL_MAX_MINUTES = 1440
+_TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _db_url() -> str:
@@ -64,37 +91,127 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-async def issue_token(staff_id: int, issued_by: int, ttl_minutes: int) -> int:
+def generate_token() -> int:
+    """F-M4-PIN-R2-01: chay HOAN TOAN cuc bo, KHONG mo ket noi DB -- Dev/admin khong the chan
+    duoc/nhin thay buoc nay du co quyen truy cap DB the nao."""
+    token = secrets.token_urlsafe(32)
+    token_hash = _hash_token(token)
+    print("Token da sinh CUC BO tren may/session nay -- KHONG ghi vao dau, KHONG gui qua bat ky")
+    print("kenh nao ngoai 2 buoc duoi day.")
+    print()
+    print("[1] GIU LAI rieng cho minh (dung 1 LAN DUY NHAT o buoc `provision-pin` sau nay -- ")
+    print("    KHONG dua cho Dev/admin hay bat ky ai khac duoi bat ky hinh thuc nao):")
+    print(f"TOKEN={token}")
+    print()
+    print("[2] Dua CHINH XAC gia tri nay (chi gia tri nay) cho Dev/admin de ho `bind-token` --")
+    print("    day la sha256 hash, KHONG the dung de suy nguoc ra token o [1] hay PIN cua ban:")
+    print(f"TOKEN_HASH={token_hash}")
+    del token
+    return 0
+
+
+async def record_bind_approval(target_staff_id: int, recorded_by: int, approval_ref: str,
+                                valid_minutes: int) -> int:
+    if not (APPROVAL_TTL_MIN_MINUTES <= valid_minutes <= APPROVAL_TTL_MAX_MINUTES):
+        print(f"LOI: valid-minutes phai trong khoang [{APPROVAL_TTL_MIN_MINUTES}, "
+              f"{APPROVAL_TTL_MAX_MINUTES}]", file=sys.stderr)
+        return 1
     conn = await asyncpg.connect(_db_url())
     try:
-        staff = await conn.fetchrow(
-            "SELECT id, username, is_active FROM staff_users WHERE id = $1", staff_id)
-        if staff is None:
-            print(f"LOI: staff_id {staff_id} khong ton tai", file=sys.stderr)
+        target = await conn.fetchrow(
+            "SELECT id, username, is_active FROM staff_users WHERE id = $1", target_staff_id)
+        if target is None or not target["is_active"]:
+            print(f"LOI: target-staff-id {target_staff_id} khong ton tai/khong active",
+                  file=sys.stderr)
             return 1
-        if not staff["is_active"]:
-            print(f"LOI: staff_id {staff_id} ({staff['username']}) khong active", file=sys.stderr)
-            return 1
-        issuer = await conn.fetchrow(
-            "SELECT id FROM staff_users WHERE id = $1 AND is_active", issued_by)
-        if issuer is None:
-            print(f"LOI: issued_by {issued_by} khong ton tai hoac khong active", file=sys.stderr)
+        recorder = await conn.fetchrow(
+            "SELECT id, username, is_active FROM staff_users WHERE id = $1", recorded_by)
+        if recorder is None or not recorder["is_active"]:
+            print(f"LOI: recorded-by {recorded_by} khong ton tai/khong active", file=sys.stderr)
             return 1
 
-        token = secrets.token_urlsafe(32)
-        token_hash = _hash_token(token)
+        valid_from = datetime.now(timezone.utc)
+        valid_until = valid_from + timedelta(minutes=valid_minutes)
+        row = await conn.fetchrow(
+            "INSERT INTO m4_stage0p_pin_bind_approvals "
+            "  (approval_ref, target_staff_id, recorded_by, valid_from, valid_until) "
+            "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            approval_ref, target_staff_id, recorded_by, valid_from, valid_until)
+
+        print(f"Approval id={row['id']} da ghi: approval_ref={approval_ref!r} "
+              f"target_staff_id={target_staff_id} (username={target['username']!r}) "
+              f"recorded_by={recorded_by} (username={recorder['username']!r}) "
+              f"valid_from={valid_from.isoformat()} valid_until={valid_until.isoformat()}")
+        print(f"Dua approval id={row['id']} nay cho Dev/admin de ho `bind-token "
+              f"--approval-id {row['id']}` -- id KHONG PHAI secret.")
+        return 0
+    finally:
+        await conn.close()
+
+
+async def revoke_bind_approval(approval_id: int, reason: str) -> int:
+    conn = await asyncpg.connect(_db_url())
+    try:
+        row = await conn.fetchrow(
+            "UPDATE m4_stage0p_pin_bind_approvals SET revoked_at = now(), revoke_reason = $2 "
+            "WHERE id = $1 AND revoked_at IS NULL RETURNING id",
+            approval_id, reason)
+        if row is None:
+            print(f"LOI: approval id={approval_id} khong ton tai hoac da bi thu hoi truoc do",
+                  file=sys.stderr)
+            return 1
+        print(f"Approval id={approval_id} da bi thu hoi. bind-token voi approval nay se bi "
+              f"tu choi ngay lap tuc.")
+        return 0
+    finally:
+        await conn.close()
+
+
+async def bind_token(token_hash: str, target_staff_id: int, approval_id: int,
+                      ttl_minutes: int) -> int:
+    """F-M4-PIN-R2-01: CHI nhan token_hash (da duoc principal hash san) -- KHONG BAO GIO sinh
+    hay nhan raw token o day. F-M4-PIN-R2-02: issued_by resolve TU approval record, khong con
+    la CLI flag. F-M4-PIN-R2-03: ttl-minutes CHAN CUNG [1, 30]."""
+    if not _TOKEN_HASH_RE.match(token_hash):
+        print("LOI: token-hash phai la chuoi sha256 hex (64 ky tu 0-9a-f) - tu choi truoc khi "
+              "cham DB", file=sys.stderr)
+        return 1
+    if not (TOKEN_TTL_MIN_MINUTES <= ttl_minutes <= TOKEN_TTL_MAX_MINUTES):
+        print(f"LOI: ttl-minutes phai trong khoang [{TOKEN_TTL_MIN_MINUTES}, "
+              f"{TOKEN_TTL_MAX_MINUTES}]", file=sys.stderr)
+        return 1
+
+    conn = await asyncpg.connect(_db_url())
+    try:
+        approval = await conn.fetchrow(
+            "SELECT id, recorded_by, target_staff_id FROM m4_stage0p_pin_bind_approvals "
+            "WHERE id = $1 AND target_staff_id = $2 AND revoked_at IS NULL "
+            "AND valid_from <= now() AND now() < valid_until",
+            approval_id, target_staff_id)
+        if approval is None:
+            print("LOI: khong tim thay approval con hieu luc khop approval-id VA "
+                  "target-staff-id nay (co the da het han/bi thu hoi/sai id) - huy, khong bind",
+                  file=sys.stderr)
+            return 1
+        issued_by = approval["recorded_by"]
+
+        target = await conn.fetchrow(
+            "SELECT id, username, is_active FROM staff_users WHERE id = $1", target_staff_id)
+        if target is None or not target["is_active"]:
+            print(f"LOI: target-staff-id {target_staff_id} khong ton tai/khong active",
+                  file=sys.stderr)
+            return 1
+
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
         await conn.execute(
             "INSERT INTO m4_stage0p_pin_bootstrap_tokens "
             "  (token_hash, staff_id, issued_by, expires_at) VALUES ($1, $2, $3, $4)",
-            token_hash, staff_id, issued_by, expires_at)
-        del token_hash  # khong can giu lai, chi la du lieu trung gian
+            token_hash, target_staff_id, issued_by, expires_at)
 
-        print(f"Token da phat cho staff_id={staff_id} username={staff['username']!r}, "
+        print(f"Token da bind cho staff_id={target_staff_id} username={target['username']!r}, "
+              f"issued_by={issued_by} (resolve tu approval id={approval_id}), "
               f"het han luc {expires_at.isoformat()} ({ttl_minutes} phut).")
-        print("Chuyen CHINH XAC chuoi duoi day cho DUNG nguoi qua kenh RIENG (khong dan vao "
-              "noi nguoi khac doc lai duoc) — token nay dung DUOC DUNG 1 LAN:")
-        print(token)
+        print("Dev/admin KHONG nhin thay/sinh ra raw token o buoc nay - chi hash duoc dung.")
         return 0
     finally:
         await conn.close()
@@ -171,19 +288,46 @@ async def provision_pin(*, token_reader=getpass.getpass, pin_reader=getpass.getp
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Dat PIN M4 nghiep vu qua single-use bootstrap token (F-M4-PIN-R1-01).")
+        description="Dat PIN M4 nghiep vu qua single-use bootstrap token, principal tu sinh "
+                    "token + approval-bound bind ceremony (F-M4-PIN-R2-01/02/03).")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_issue = sub.add_parser("issue-token", help="Dev: phat 1 token BUOC voi 1 staff_id cu the")
-    p_issue.add_argument("--staff-id", type=int, required=True)
-    p_issue.add_argument("--issued-by", type=int, required=True)
-    p_issue.add_argument("--ttl-minutes", type=int, default=DEFAULT_TTL_MINUTES)
+    sub.add_parser("generate-token",
+                    help="Principal TU chay tren session cua ho - sinh token cuc bo, khong DB")
+
+    p_approve = sub.add_parser(
+        "record-bind-approval",
+        help="PO/nguoi PO uy quyen TU chay - ghi 1 approval record rieng biet cho 1 target")
+    p_approve.add_argument("--target-staff-id", type=int, required=True)
+    p_approve.add_argument("--recorded-by", type=int, required=True)
+    p_approve.add_argument("--approval-ref", type=str, required=True)
+    p_approve.add_argument("--valid-minutes", type=int, default=60)
+
+    p_revoke = sub.add_parser("revoke-bind-approval", help="Thu hoi 1 approval record da ghi")
+    p_revoke.add_argument("--approval-id", type=int, required=True)
+    p_revoke.add_argument("--reason", type=str, required=True)
+
+    p_bind = sub.add_parser(
+        "bind-token",
+        help="Dev/admin chay - CHI nhan token-hash (khong bao gio nhan/sinh raw token)")
+    p_bind.add_argument("--token-hash", type=str, required=True)
+    p_bind.add_argument("--target-staff-id", type=int, required=True)
+    p_bind.add_argument("--approval-id", type=int, required=True)
+    p_bind.add_argument("--ttl-minutes", type=int, default=15)
 
     sub.add_parser("provision-pin", help="Nguoi dam nhan vai tro TU chay - chi hoi token + PIN")
 
     args = parser.parse_args()
-    if args.command == "issue-token":
-        return asyncio.run(issue_token(args.staff_id, args.issued_by, args.ttl_minutes))
+    if args.command == "generate-token":
+        return generate_token()
+    if args.command == "record-bind-approval":
+        return asyncio.run(record_bind_approval(
+            args.target_staff_id, args.recorded_by, args.approval_ref, args.valid_minutes))
+    if args.command == "revoke-bind-approval":
+        return asyncio.run(revoke_bind_approval(args.approval_id, args.reason))
+    if args.command == "bind-token":
+        return asyncio.run(bind_token(
+            args.token_hash, args.target_staff_id, args.approval_id, args.ttl_minutes))
     return asyncio.run(provision_pin())
 
 
