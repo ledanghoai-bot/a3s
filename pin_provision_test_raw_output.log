@@ -1,0 +1,40 @@
+=== command: docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@alpha3s-rehearsal-test-db:5432/alpha3s alpha3s-api-1 python scripts/m4_stage0p_provision_pin_test.py ===
+=== started_at (host date): 2026-08-06T03:43:54Z ===
+== [1] provision-pin KHONG con nhan staff-id duoi bat ky dang nao ==
+  PASS  subcommand provision-pin KHONG co --staff-id
+  PASS  subcommand provision-pin KHONG co bat ky bien the --staff nao
+== [2] Round-trip that: issue-token -> provision-pin -> pin_actor() THAT chap nhan ==
+  PASS  issue-token exit 0 (thuc te 0)
+  PASS  token trich xuat duoc, do dai hop ly
+  PASS  provision-pin exit 0 (thuc te 0); stderr=/usr/local/lib/python3.12/getpass.py:91: GetPassWarning: Can not control echo on the terminal.
+  passwd = fallback_getpass(prompt, stream)
+Warning: Password input may be echoed.
+Nhap token da duoc cap (khong hien thi khi go): 
+Warning: Password input may be echoed.
+Nhap PIN M4 moi (>=8 ky tu): 
+Warning: Password input may be echoed.
+Nhap lai de xac nhan: 
+
+  PASS  output xac nhan DUNG staff_id duoc resolve tu token (khong phai tu caller)
+  PASS  row THAT SU ton tai cho DUNG target_id
+  PASS  crypt() xac nhan hash khop PIN da nhap
+  PASS  m4_stage0p_pin_actor() THAT chap nhan PIN vua provision qua token
+  PASS  token da duoc danh dau consumed_at sau khi thanh cong
+  PASS  output KHONG chua token that
+  PASS  output KHONG chua PIN that
+  PASS  output KHONG chua gia tri bcrypt hash that
+== [3] Token da dung (consumed) -> lan 2 bi tu choi ==
+  PASS  lan dau dung token thanh cong
+  PASS  lan 2 dung LAI CUNG token bi tu choi (da consumed)
+  PASS  loi neu ro token khong hop le/da dung
+== [4] Token het han -> bi tu choi ==
+  PASS  token het han bi tu choi
+  PASS  KHONG co credential nao duoc tao tu token het han
+== [5] PIN mismatch/qua ngan -> tu choi NHUNG token VAN dung duoc lai ==
+  PASS  mismatch bi tu choi
+  PASS  token VAN CHUA bi consumed sau lan mismatch - con dung duoc lai
+  PASS  dung LAI CUNG token (sau mismatch) thanh cong lan nay
+
+RESULT: PASS
+=== exit_code: 0 ===
+=== ended_at (host date): 2026-08-06T03:44:07Z ===

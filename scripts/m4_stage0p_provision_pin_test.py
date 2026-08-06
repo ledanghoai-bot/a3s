@@ -1,20 +1,24 @@
 #!/usr/bin/env python
-"""I-B M4 Stage 0P — evidence cho `scripts/m4_stage0p_provision_pin.py`, dap lai
-`PHASE1B-M4-REHEARSAL-PRINCIPAL-ASSIGNMENT-REVIEW-1-VI.md` P-M4-PA-02.
+"""I-B M4 Stage 0P — evidence cho `scripts/m4_stage0p_provision_pin.py` REV2, dap lai
+`PHASE1B-M4-REHEARSAL-READINESS-SNAPSHOT-REVIEW-1-VI.md` F-M4-PIN-R1-01/02/03.
 
-Chay (sandbox RIENG, KHONG production - script TU RESET schema public):
+Chay (sandbox RIENG, KHONG production - script TU RESET schema public, migration 040 duoc apply
+qua chinh `scripts/migrate.py up` nhu binh thuong):
   docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@<sandbox-db>:5432/alpha3s \
       alpha3s-api-1 python scripts/m4_stage0p_provision_pin_test.py
 
 Kich ban:
-  [1] Argparse KHONG co `--pin`/`--secret`/`--password` - cau truc khong the truyen PIN qua CLI.
-  [2] Round-trip that: cap PIN qua stdin (gia lap nguoi go), xac nhan row duoc tao, `crypt()`
-      xac minh dung PIN, VA `m4_stage0p_pin_actor()` (ham DB THAT) chap nhan PIN do.
-  [3] 2 lan nhap khong khop -> tu choi, khong ghi gi.
-  [4] PIN qua ngan -> tu choi, khong ghi gi.
-  [5] Toan bo stdout/stderr cua qua trinh KHONG BAO GIO chua PIN THAT (kiem tra chuoi con)."""
+  [1] Token BUOC voi staff A KHONG THE dung de dat PIN cho staff B — ve mat cau truc (provision-
+      pin KHONG con nhan staff-id tu caller o bat ky dang nao, staff_id luon resolve tu token).
+  [2] Round-trip that: issue-token -> provision-pin (token qua stdin) -> row -> `m4_stage0p_
+      pin_actor()` THAT chap nhan.
+  [3] Token da dung (consumed) -> lan 2 bi tu choi.
+  [4] Token het han -> bi tu choi.
+  [5] PIN mismatch/qua ngan -> tu choi NHUNG token VAN con dung duoc lai (khong bi tieu thu oan).
+  [6] Toan bo stdout/stderr KHONG BAO GIO chua token that, PIN that, hay gia tri bcrypt hash."""
 
 import asyncio
+import hashlib
 import os
 import subprocess
 import sys
@@ -50,31 +54,46 @@ def _run_migrations() -> None:
         raise SystemExit("migrate.py up that bai - khong the thiet lap sandbox")
 
 
-def _run_provision(staff_id: int, stdin_text: str) -> subprocess.CompletedProcess:
+def _run_issue_token(staff_id: int, issued_by: int, ttl_minutes: int = 30) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "scripts/m4_stage0p_provision_pin.py", "--staff-id", str(staff_id)],
+        [sys.executable, "scripts/m4_stage0p_provision_pin.py", "issue-token",
+         "--staff-id", str(staff_id), "--issued-by", str(issued_by),
+         "--ttl-minutes", str(ttl_minutes)],
+        cwd=str(ROOT), env={**os.environ, "DATABASE_URL": DB_URL},
+        capture_output=True, text=True, timeout=30)
+
+
+def _extract_token(issue_stdout: str) -> str:
+    # Token la dong CUOI CUNG khac rong cua stdout (xem issue_token() - in token o dong rieng).
+    lines = [ln for ln in issue_stdout.strip().splitlines() if ln.strip()]
+    return lines[-1].strip()
+
+
+def _run_provision_pin(stdin_text: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "scripts/m4_stage0p_provision_pin.py", "provision-pin"],
         cwd=str(ROOT), env={**os.environ, "DATABASE_URL": DB_URL},
         input=stdin_text, capture_output=True, text=True, timeout=30)
 
 
-async def scenario_1_no_cli_pin_argument() -> None:
-    print("== [1] argparse KHONG co --pin/--secret/--password ==")
-    help_text = subprocess.run(
-        [sys.executable, "scripts/m4_stage0p_provision_pin.py", "--help"],
-        cwd=str(ROOT), capture_output=True, text=True).stdout
-    check("--pin" not in help_text, "--pin KHONG phai argument hop le")
-    check("--secret" not in help_text, "--secret KHONG phai argument hop le")
-    check("--password" not in help_text, "--password KHONG phai argument hop le")
+async def _make_staff(admin, username: str) -> int:
+    row = await admin.fetchrow(
+        "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
+        "VALUES ($1, 'x', 'x', true) RETURNING id", username)
+    return row["id"]
 
-    rejected = subprocess.run(
-        [sys.executable, "scripts/m4_stage0p_provision_pin.py", "--staff-id", "1",
-         "--pin", "should-not-work"],
-        cwd=str(ROOT), capture_output=True, text=True)
-    check(rejected.returncode != 0, "truyen --pin qua CLI bi argparse tu choi ngay (unrecognized)")
+
+async def scenario_1_no_staff_id_input_surface() -> None:
+    print("== [1] provision-pin KHONG con nhan staff-id duoi bat ky dang nao ==")
+    help_text = subprocess.run(
+        [sys.executable, "scripts/m4_stage0p_provision_pin.py", "provision-pin", "--help"],
+        cwd=str(ROOT), capture_output=True, text=True).stdout
+    check("--staff-id" not in help_text, "subcommand provision-pin KHONG co --staff-id")
+    check("--staff" not in help_text, "subcommand provision-pin KHONG co bat ky bien the --staff nao")
 
 
 async def scenario_2_round_trip_real_pin_actor() -> None:
-    print("== [2] Round-trip that: PIN qua stdin -> row -> pin_actor() THAT chap nhan ==")
+    print("== [2] Round-trip that: issue-token -> provision-pin -> pin_actor() THAT chap nhan ==")
     admin = await asyncpg.connect(DB_URL)
     try:
         await _reset_schema(admin)
@@ -84,111 +103,153 @@ async def scenario_2_round_trip_real_pin_actor() -> None:
 
     admin = await asyncpg.connect(DB_URL)
     try:
-        staff = await admin.fetchrow(
-            "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
-            "VALUES ('provision-pin-test-staff', 'x', 'x', true) RETURNING id")
-        staff_id = staff["id"]
-        for perm in ("m4.stage0p.operate",):
-            await admin.execute(
-                "INSERT INTO m4_stage0p_staff_permissions (staff_id, permission, granted_by) "
-                "VALUES ($1, $2, $1)", staff_id, perm)
+        issuer_id = await _make_staff(admin, "provision-pin-test-issuer")
+        target_id = await _make_staff(admin, "provision-pin-test-target")
+        await admin.execute(
+            "INSERT INTO m4_stage0p_staff_permissions (staff_id, permission, granted_by) "
+            "VALUES ($1, 'm4.stage0p.operate', $1)", target_id)
     finally:
         await admin.close()
 
+    r = _run_issue_token(target_id, issuer_id)
+    check(r.returncode == 0, f"issue-token exit 0 (thuc te {r.returncode})")
+    token = _extract_token(r.stdout)
+    check(len(token) > 20, "token trich xuat duoc, do dai hop ly")
+
     test_pin = "correct-horse-battery-staple-9"
-    r = _run_provision(staff_id, f"{test_pin}\n{test_pin}\n")
-    check(r.returncode == 0, f"provision script exit 0 (thuc te {r.returncode})")
-    check("OK - credential row ton tai" in r.stdout, "output xac nhan row ton tai")
-    # Chi kiem tra KHONG lo GIA TRI hash that (dang bcrypt "$2b$..."/"$2a$...") - nhac TEN cot
-    # trong 1 dong tu giai thich ("khong in X") la binh thuong, khong phai lo bi mat.
-    check("$2b$" not in r.stdout and "$2a$" not in r.stdout
-          and "$2b$" not in r.stderr and "$2a$" not in r.stderr,
-          "output KHONG bao gio chua GIA TRI bcrypt hash that (chi ten cot trong loi giai thich la OK)")
+    r2 = _run_provision_pin(f"{token}\n{test_pin}\n{test_pin}\n")
+    check(r2.returncode == 0, f"provision-pin exit 0 (thuc te {r2.returncode}); stderr={r2.stderr}")
+    check(f"staff_id={target_id}" in r2.stdout,
+          "output xac nhan DUNG staff_id duoc resolve tu token (khong phai tu caller)")
 
     verify_conn = await asyncpg.connect(DB_URL)
     try:
         row = await verify_conn.fetchrow(
-            "SELECT staff_id, provisioned_at FROM m4_stage0p_actor_credentials WHERE staff_id = $1",
-            staff_id)
-        check(row is not None, "row THAT SU ton tai trong m4_stage0p_actor_credentials")
+            "SELECT staff_id FROM m4_stage0p_actor_credentials WHERE staff_id = $1", target_id)
+        check(row is not None, "row THAT SU ton tai cho DUNG target_id")
 
-        # crypt() tu Postgres xac minh dung PIN (khong doan mo, doc lap voi script).
         matches = await verify_conn.fetchval(
             "SELECT pin_secret_hash = crypt($1, pin_secret_hash) "
-            "FROM m4_stage0p_actor_credentials WHERE staff_id = $2", test_pin, staff_id)
-        check(matches is True, "crypt() xac nhan hash THAT SU khop voi PIN da nhap (khong phai gia)")
+            "FROM m4_stage0p_actor_credentials WHERE staff_id = $2", test_pin, target_id)
+        check(matches is True, "crypt() xac nhan hash khop PIN da nhap")
 
-        # pin_actor() - ham DB THAT dung trong toan bo rehearsal - chap nhan PIN nay.
         pin_conn = await asyncpg.connect(DB_URL)
         try:
             await pin_conn.execute("SET ROLE alpha3s_m4_actor_binder")
             pinned = await pin_conn.fetchrow(
-                "SELECT * FROM m4_stage0p_pin_actor($1, $2)", staff_id, test_pin)
-            check(pinned is not None and pinned["pinned_staff_id"] == staff_id,
-                  "m4_stage0p_pin_actor() THAT chap nhan PIN vua provision - credential dung duoc "
-                  "cho rehearsal that, khong chi 'trong hash'")
+                "SELECT * FROM m4_stage0p_pin_actor($1, $2)", target_id, test_pin)
+            check(pinned is not None and pinned["pinned_staff_id"] == target_id,
+                  "m4_stage0p_pin_actor() THAT chap nhan PIN vua provision qua token")
         finally:
             await pin_conn.close()
+
+        consumed_row = await verify_conn.fetchrow(
+            "SELECT consumed_at FROM m4_stage0p_pin_bootstrap_tokens WHERE staff_id = $1", target_id)
+        check(consumed_row is not None and consumed_row["consumed_at"] is not None,
+              "token da duoc danh dau consumed_at sau khi thanh cong")
     finally:
         await verify_conn.close()
 
-    check(test_pin not in r.stdout and test_pin not in r.stderr,
-          "stdout/stderr cua lan chay THANH CONG KHONG chua PIN that")
+    check(token not in r2.stdout and token not in r2.stderr, "output KHONG chua token that")
+    check(test_pin not in r.stdout and test_pin not in r2.stdout and test_pin not in r2.stderr,
+          "output KHONG chua PIN that")
+    check("$2b$" not in r2.stdout and "$2a$" not in r2.stdout,
+          "output KHONG chua gia tri bcrypt hash that")
 
 
-async def scenario_3_mismatch_rejected() -> None:
-    print("== [3] 2 lan nhap khong khop -> tu choi, khong ghi gi ==")
+async def scenario_3_token_reuse_rejected() -> None:
+    print("== [3] Token da dung (consumed) -> lan 2 bi tu choi ==")
     admin = await asyncpg.connect(DB_URL)
     try:
-        staff = await admin.fetchrow(
-            "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
-            "VALUES ('provision-pin-test-mismatch', 'x', 'x', true) RETURNING id")
-        staff_id = staff["id"]
+        issuer_id = await _make_staff(admin, "provision-pin-test-reuse-issuer")
+        target_id = await _make_staff(admin, "provision-pin-test-reuse-target")
     finally:
         await admin.close()
 
-    r = _run_provision(staff_id, "pin-value-one-12345\npin-value-two-67890\n")
-    check(r.returncode != 0, "exit != 0 khi 2 lan nhap khac nhau")
+    r = _run_issue_token(target_id, issuer_id)
+    token = _extract_token(r.stdout)
+
+    pin = "first-use-pin-value-12"
+    r1 = _run_provision_pin(f"{token}\n{pin}\n{pin}\n")
+    check(r1.returncode == 0, "lan dau dung token thanh cong")
+
+    r2 = _run_provision_pin(f"{token}\nanother-pin-value-99\nanother-pin-value-99\n")
+    check(r2.returncode != 0, "lan 2 dung LAI CUNG token bi tu choi (da consumed)")
+    check("token khong hop le" in r2.stderr.lower() or "khong hop le" in r2.stderr.lower(),
+          "loi neu ro token khong hop le/da dung")
+
+
+async def scenario_4_expired_token_rejected() -> None:
+    print("== [4] Token het han -> bi tu choi ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        issuer_id = await _make_staff(admin, "provision-pin-test-expiry-issuer")
+        target_id = await _make_staff(admin, "provision-pin-test-expiry-target")
+    finally:
+        await admin.close()
+
+    r = _run_issue_token(target_id, issuer_id, ttl_minutes=30)
+    token = _extract_token(r.stdout)
+
+    # Gia lap het han: lui expires_at ve qua khu truc tiep qua admin connection (test-only).
+    admin2 = await asyncpg.connect(DB_URL)
+    try:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        await admin2.execute(
+            "UPDATE m4_stage0p_pin_bootstrap_tokens SET "
+            "issued_at = now() - interval '2 hours', "
+            "expires_at = now() - interval '1 minute' "
+            "WHERE token_hash = $1", token_hash)
+    finally:
+        await admin2.close()
+
+    r2 = _run_provision_pin(f"{token}\nexpired-pin-value-12\nexpired-pin-value-12\n")
+    check(r2.returncode != 0, "token het han bi tu choi")
 
     verify_conn = await asyncpg.connect(DB_URL)
     try:
         row = await verify_conn.fetchrow(
-            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", staff_id)
-        check(row is None, "KHONG co row nao duoc tao khi mismatch")
+            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", target_id)
+        check(row is None, "KHONG co credential nao duoc tao tu token het han")
     finally:
         await verify_conn.close()
-    check("pin-value-one-12345" not in r.stdout and "pin-value-one-12345" not in r.stderr,
-          "stdout/stderr khong chua PIN du that bai")
 
 
-async def scenario_4_too_short_rejected() -> None:
-    print("== [4] PIN qua ngan -> tu choi, khong ghi gi ==")
+async def scenario_5_pin_mismatch_does_not_burn_token() -> None:
+    print("== [5] PIN mismatch/qua ngan -> tu choi NHUNG token VAN dung duoc lai ==")
     admin = await asyncpg.connect(DB_URL)
     try:
-        staff = await admin.fetchrow(
-            "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
-            "VALUES ('provision-pin-test-short', 'x', 'x', true) RETURNING id")
-        staff_id = staff["id"]
+        issuer_id = await _make_staff(admin, "provision-pin-test-retry-issuer")
+        target_id = await _make_staff(admin, "provision-pin-test-retry-target")
     finally:
         await admin.close()
 
-    r = _run_provision(staff_id, "abc12\nabc12\n")
-    check(r.returncode != 0, "exit != 0 khi PIN < 8 ky tu")
+    r = _run_issue_token(target_id, issuer_id)
+    token = _extract_token(r.stdout)
+
+    r1 = _run_provision_pin(f"{token}\npin-one-value-123\npin-two-value-456\n")
+    check(r1.returncode != 0, "mismatch bi tu choi")
 
     verify_conn = await asyncpg.connect(DB_URL)
     try:
         row = await verify_conn.fetchrow(
-            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", staff_id)
-        check(row is None, "KHONG co row nao duoc tao khi PIN qua ngan")
+            "SELECT consumed_at FROM m4_stage0p_pin_bootstrap_tokens WHERE staff_id = $1", target_id)
+        check(row is not None and row["consumed_at"] is None,
+              "token VAN CHUA bi consumed sau lan mismatch - con dung duoc lai")
     finally:
         await verify_conn.close()
+
+    good_pin = "retry-succeeds-now-1"
+    r2 = _run_provision_pin(f"{token}\n{good_pin}\n{good_pin}\n")
+    check(r2.returncode == 0, "dung LAI CUNG token (sau mismatch) thanh cong lan nay")
 
 
 async def main() -> int:
-    await scenario_1_no_cli_pin_argument()
+    await scenario_1_no_staff_id_input_surface()
     await scenario_2_round_trip_real_pin_actor()
-    await scenario_3_mismatch_rejected()
-    await scenario_4_too_short_rejected()
+    await scenario_3_token_reuse_rejected()
+    await scenario_4_expired_token_rejected()
+    await scenario_5_pin_mismatch_does_not_burn_token()
 
     print()
     if _fail:

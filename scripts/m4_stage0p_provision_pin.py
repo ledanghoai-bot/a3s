@@ -1,43 +1,50 @@
 #!/usr/bin/env python
 """I-B M4 Stage 0P — provisioning PIN nghiep vu (`m4_stage0p_actor_credentials.pin_secret_hash`)
-CHO CHINH NGUOI CHAY SCRIPT NAY, dap lai
-`PHASE1B-M4-REHEARSAL-PRINCIPAL-ASSIGNMENT-REVIEW-1-VI.md` finding P-M4-PA-02 — "moi principal
-phai tu dat PIN rieng qua 1 co che duoc mo ta va kiem soat; DEV khong duoc nhin thay PIN cua
-approval recorder hoac PO Reviewer".
+qua single-use bootstrap token, dap lai
+`PHASE1B-M4-REHEARSAL-READINESS-SNAPSHOT-REVIEW-1-VI.md` F-M4-PIN-R1-01 — "tool khong bind
+nguoi chay voi staff_id... bat ky ai co quyen chay docker exec deu co the chon staff_id 3, 4
+hoac 5 va dat lai PIN cua principal khac".
 
-THIET KE BAO MAT (tai sao script nay khac han `_provision_pin_secret()` dung trong cac evidence
-script khac cua du an — NHUNG cai do nhan PIN nhu 1 tham so Python thuong, chi phu hop cho test
-tu dong, KHONG phu hop cho nguoi that tu dat PIN):
+REV2 (dap CA Review #1 tren PR #7): xoa han tham so `--staff-id` khoi subcommand dat PIN — CALLER
+KHONG CON tu chon staff_id duoc nua duoi bat ky hinh thuc nao. Thay vao do:
 
-1. PIN KHONG BAO GIO la CLI argument — argparse CHI dinh nghia `--staff-id`, KHONG co
-   `--pin`/`--secret`/`--password` nao ca (kiem tra duoc bang `--help`: khong thay). Neu co, PIN
-   se nam trong shell history/process list (`ps aux`) - dung chinh dieu nay la vi du cho
-   "khong duoc" trong toan bo du an nay (xem docstring `m4_stage0p_rehearsal_runner.py`
-   `_require_env`).
-2. PIN doc qua `getpass.getpass()` — KHONG echo ra terminal, KHONG luu shell history (khac
-   `input()`).
-3. PIN CHI ton tai trong bo nho tien trinh nay, trong thoi gian NGAN (tu luc nhap toi luc
-   `crypt()` xong) — `del` tuong minh 2 bien ngay sau khi dung, khong bao gio duoc `print`/log.
-4. Nguoi chay PHAI tu SSH vao VPS va tu go lenh nay — Dev (dieu khien qua tool goi lenh SSH/
-   Bash) KHONG BAO GIO la nguoi thuc thi script nay cho nguoi khac, vi tool cua Dev chi thay
-   command + output, KHONG co kenh nhap TTY rieng cho 1 nguoi thu 3 go PIN ma Dev khong thay
-   duoc. Day la ly do CHINH quy trinh van hanh (xem
-   `PHASE1B-M4-REHEARSAL-PIN-PROVISIONING-PROCEDURE-VI.md`) yeu cau tung principal tu SSH vao,
-   khong nho Dev chay ho.
-5. Output CUOI CUNG chi xac nhan "row ton tai" + metadata KHONG mat (provisioned_at,
-   failed_attempts, locked_until) — KHONG BAO GIO in `pin_secret_hash` (du la hash, khong phai
-   PIN goc, van khong can thiet phai lo ra ngoai evidence theo yeu cau CA "khong dua secret vao
-   evidence").
+1. `issue-token` (Dev/nguoi issue chay TRUOC, ngoai luong): BUOC 1 token ngau nhien (32 byte,
+   `secrets.token_urlsafe`) VOI 1 staff_id CU THE ngay luc tao — chi luu `sha256(token)` vao bang
+   moi `m4_stage0p_pin_bootstrap_tokens` (migration 040), KHONG BAO GIO luu token goc. In token
+   goc RA MAN HINH DUY NHAT 1 LAN de Dev chuyen cho dung nguoi qua kenh rieng (Signal/Telegram/
+   noi truc tiep — KHONG qua kenh ma nguoi khac doc lai duoc). Token KHONG PHAI PIN — no la ve
+   "duoc phep dat PIN cho DUNG staff_id nay", Dev biet token khong sao (no khong tu no la
+   credential nghiep vu), nhung VAN KHONG BIET PIN thuc te nguoi do se go (buoc 2 duoi day hoan
+   toan tach biet, van qua getpass).
+2. `provision-pin` (nguoi dam nhan vai tro TU chay, tren chinh SSH session cua ho): CHI hoi
+   token (getpass, khong echo) — staff_id duoc SERVER-SIDE RESOLVE tu chinh token do (khong con
+   la input cua caller). Token tieu thu 1 lan, CUNG 1 transaction voi viec ghi PIN — that bai
+   xac nhan PIN (mismatch/qua ngan) KHONG tieu thu token (cho phep thu lai voi CUNG token); chi
+   thanh cong that su moi tieu thu.
 
-Chay (nguoi dam nhan vai tro TU CHAY, tren chinh may/SSH session cua ho):
-    docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py --staff-id 5
+Thiet ke bao mat con lai giu nguyen tu REV1: khong CLI argument nao mang PIN, doc qua
+`getpass.getpass()`, `del` bien PIN ngay sau dung, output CHI xac nhan row/metadata ton tai
+(KHONG BAO GIO in `pin_secret_hash`).
+
+QUAN TRONG: KHONG chay file nay tren production truoc khi PR merge/deploy qua dung merge/
+deploy-dormant gate rieng (F-M4-PIN-R1-02) — chay file untracked tren VPS bi CA tu choi ro rang.
+
+Chay (Dev, issue token TRUOC cho tung staff_id):
+    docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py issue-token \\
+        --staff-id 5 --issued-by 4 --ttl-minutes 30
+
+Chay (nguoi dam nhan vai tro, TU chay tren SSH session cua chinh ho):
+    docker exec -it alpha3s-api-1 python scripts/m4_stage0p_provision_pin.py provision-pin
 """
 
 import argparse
 import asyncio
 import getpass
+import hashlib
 import os
+import secrets
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import asyncpg
@@ -46,13 +53,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 MIN_PIN_LEN = 8
+DEFAULT_TTL_MINUTES = 30
 
 
 def _db_url() -> str:
     return os.environ.get("DATABASE_URL") or "postgresql://alpha3s:alpha3s@db:5432/alpha3s"
 
 
-async def provision(staff_id: int, *, pin_reader=getpass.getpass) -> int:
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def issue_token(staff_id: int, issued_by: int, ttl_minutes: int) -> int:
     conn = await asyncpg.connect(_db_url())
     try:
         staff = await conn.fetchrow(
@@ -63,20 +75,78 @@ async def provision(staff_id: int, *, pin_reader=getpass.getpass) -> int:
         if not staff["is_active"]:
             print(f"LOI: staff_id {staff_id} ({staff['username']}) khong active", file=sys.stderr)
             return 1
+        issuer = await conn.fetchrow(
+            "SELECT id FROM staff_users WHERE id = $1 AND is_active", issued_by)
+        if issuer is None:
+            print(f"LOI: issued_by {issued_by} khong ton tai hoac khong active", file=sys.stderr)
+            return 1
 
-        print(f"Dat PIN M4 cho staff_id={staff_id} username={staff['username']!r}")
-        print("PIN se KHONG hien thi khi go va KHONG luu vao shell history.")
+        token = secrets.token_urlsafe(32)
+        token_hash = _hash_token(token)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
+        await conn.execute(
+            "INSERT INTO m4_stage0p_pin_bootstrap_tokens "
+            "  (token_hash, staff_id, issued_by, expires_at) VALUES ($1, $2, $3, $4)",
+            token_hash, staff_id, issued_by, expires_at)
+        del token_hash  # khong can giu lai, chi la du lieu trung gian
+
+        print(f"Token da phat cho staff_id={staff_id} username={staff['username']!r}, "
+              f"het han luc {expires_at.isoformat()} ({ttl_minutes} phut).")
+        print("Chuyen CHINH XAC chuoi duoi day cho DUNG nguoi qua kenh RIENG (khong dan vao "
+              "noi nguoi khac doc lai duoc) — token nay dung DUOC DUNG 1 LAN:")
+        print(token)
+        return 0
+    finally:
+        await conn.close()
+
+
+async def provision_pin(*, token_reader=getpass.getpass, pin_reader=getpass.getpass) -> int:
+    conn = await asyncpg.connect(_db_url())
+    try:
+        token = token_reader("Nhap token da duoc cap (khong hien thi khi go): ")
+        token_hash = _hash_token(token)
+        del token
+
+        token_row = await conn.fetchrow(
+            "SELECT staff_id FROM m4_stage0p_pin_bootstrap_tokens "
+            "WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()", token_hash)
+        if token_row is None:
+            print("LOI: token khong hop le, da dung, hoac het han - huy", file=sys.stderr)
+            return 1
+        staff_id = token_row["staff_id"]
+
+        staff = await conn.fetchrow(
+            "SELECT username, is_active FROM staff_users WHERE id = $1", staff_id)
+        if staff is None or not staff["is_active"]:
+            print(f"LOI: staff_id {staff_id} (tu token) khong ton tai/khong active", file=sys.stderr)
+            return 1
+
+        print(f"Token hop le - dang dat PIN M4 cho staff_id={staff_id} username={staff['username']!r}")
+        print("PIN se KHONG hien thi khi go va KHONG luu shell history.")
         pin = pin_reader("Nhap PIN M4 moi (>=8 ky tu): ")
         pin_confirm = pin_reader("Nhap lai de xac nhan: ")
 
         if pin != pin_confirm:
-            print("LOI: 2 lan nhap khong khop - huy, KHONG ghi gi", file=sys.stderr)
+            print("LOI: 2 lan nhap khong khop - huy, KHONG ghi gi (token VAN con dung duoc lai)",
+                  file=sys.stderr)
             return 1
         if len(pin) < MIN_PIN_LEN:
-            print(f"LOI: PIN can toi thieu {MIN_PIN_LEN} ky tu - huy, KHONG ghi gi", file=sys.stderr)
+            print(f"LOI: PIN can toi thieu {MIN_PIN_LEN} ky tu - huy, KHONG ghi gi "
+                  "(token VAN con dung duoc lai)", file=sys.stderr)
             return 1
 
         async with conn.transaction():
+            # Tieu thu token VA ghi PIN trong CUNG 1 transaction — token CHI thuc su "dung 1
+            # lan" khi lan dung do THANH CONG; mismatch/qua ngan o tren khong cham toi day nen
+            # token chua bao gio bi tieu thu trong cac truong hop do.
+            consumed = await conn.fetchrow(
+                "UPDATE m4_stage0p_pin_bootstrap_tokens SET consumed_at = now() "
+                "WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now() "
+                "RETURNING staff_id", token_hash)
+            if consumed is None:
+                print("LOI: token vua bi dung/het han o noi khac giua chung (race) - huy",
+                      file=sys.stderr)
+                return 1
             await conn.execute(
                 "INSERT INTO m4_stage0p_actor_credentials "
                 "  (staff_id, pin_secret_hash, provisioned_by) "
@@ -85,7 +155,7 @@ async def provision(staff_id: int, *, pin_reader=getpass.getpass) -> int:
                 "  pin_secret_hash = crypt($2, gen_salt('bf')), "
                 "  failed_attempts = 0, locked_until = NULL, provisioned_at = now()",
                 staff_id, pin)
-        del pin, pin_confirm  # khong bao gio giu lai trong bo nho lau hon can thiet
+        del pin, pin_confirm
 
         row = await conn.fetchrow(
             "SELECT staff_id, provisioned_at, failed_attempts, locked_until "
@@ -101,10 +171,20 @@ async def provision(staff_id: int, *, pin_reader=getpass.getpass) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Dat PIN M4 nghiep vu cho CHINH nguoi chay script (interactive only).")
-    parser.add_argument("--staff-id", type=int, required=True)
+        description="Dat PIN M4 nghiep vu qua single-use bootstrap token (F-M4-PIN-R1-01).")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_issue = sub.add_parser("issue-token", help="Dev: phat 1 token BUOC voi 1 staff_id cu the")
+    p_issue.add_argument("--staff-id", type=int, required=True)
+    p_issue.add_argument("--issued-by", type=int, required=True)
+    p_issue.add_argument("--ttl-minutes", type=int, default=DEFAULT_TTL_MINUTES)
+
+    sub.add_parser("provision-pin", help="Nguoi dam nhan vai tro TU chay - chi hoi token + PIN")
+
     args = parser.parse_args()
-    return asyncio.run(provision(args.staff_id))
+    if args.command == "issue-token":
+        return asyncio.run(issue_token(args.staff_id, args.issued_by, args.ttl_minutes))
+    return asyncio.run(provision_pin())
 
 
 if __name__ == "__main__":
