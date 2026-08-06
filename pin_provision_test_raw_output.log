@@ -1,5 +1,5 @@
 === command: docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@alpha3s-rehearsal-test-db:5432/alpha3s alpha3s-api-1 python scripts/m4_stage0p_provision_pin_test.py ===
-=== started_at (host date): 2026-08-06T04:38:32Z ===
+=== started_at (host date): 2026-08-06T05:07:04Z ===
 == [1] provision-pin KHONG con nhan staff-id duoi bat ky dang nao ==
   PASS  subcommand provision-pin KHONG co --staff-id
   PASS  subcommand provision-pin KHONG co bat ky bien the --staff nao
@@ -60,7 +60,28 @@ Nhap lai de xac nhan:
   PASS  mismatch bi tu choi
   PASS  token VAN CHUA bi consumed sau lan mismatch - con dung duoc lai
   PASS  dung LAI CUNG token (sau mismatch) thanh cong lan nay
+== [12] bind THANH CONG truoc, SAU DO revoke approval -> provision-pin bi tu choi dung (F-M4-PIN-R3-01) ==
+  PASS  bind-token thanh cong TRUOC khi revoke (chuan bi)
+  PASS  revoke-bind-approval SAU bind exit 0 (thuc te 0)
+  PASS  provision-pin voi token DA bind nhung approval bi revoke SAU do van bi tu choi
+  PASS  KHONG co credential nao duoc tao tu token co approval bi revoke sau bind
+  PASS  token BAN THAN no khong bi danh dau consumed (bi chan boi approval, khong phai boi chinh no)
+== [13] bind THANH CONG truoc, SAU DO approval het han (token.expires_at rieng no VAN con tuong lai) -> provision-pin van bi tu choi dung (F-M4-PIN-R3-01) ==
+  PASS  bind-token thanh cong TRUOC khi approval het han (chuan bi)
+  PASS  provision-pin voi token co approval het han SAU bind van bi tu choi, MAC DU token.expires_at rieng no van con trong tuong lai
+  PASS  xac nhan gia thiet: token.expires_at rieng no THAT SU van con trong tuong lai luc test nay chay (nen viec bi tu choi la NHO join lai approval, khong phai tinh co)
+== [14] token.expires_at bi CAP theo approval.valid_until khi ngan hon ttl yeu cau; approval sap het han duoi 1 phut -> bind-token tu choi hoan toan (F-M4-PIN-R3-01) ==
+  PASS  bind-token thanh cong (approval con hieu luc ~5p, yeu cau 30p)
+  PASS  token.expires_at (2026-08-06T05:12:35.762695+00:00) khop approval.valid_until (2026-08-06T05:12:35.762695+00:00) trong sai so <2s - CAP dung, KHONG dung ttl 30p yeu cau
+  PASS  bind-token tu choi khi approval con lai duoi 1 phut - khong du thoi gian toi thieu
+  PASS  KHONG co token row nao duoc tao khi approval sap het han
+== [15] Race THAT giua revoke va consume qua 2 ket noi Postgres dong thoi - dung CHINH XAC cau lenh JOIN+FOR UPDATE ma provision_pin() dung (F-M4-PIN-R3-01) ==
+  PASS  bind-token thanh cong (chuan bi cho test race)
+  PASS  connection A lay duoc lock (approval van hop le luc do)
+  PASS  revoke tu connection B THAT SU bi Postgres CHAN boi FOR UPDATE cua connection A (row-level lock that, khong phai gia lap bang code)
+  PASS  SAU KHI A nha lock, revoke cua B hoan tat thanh cong (bi tri hoan, khong bi mat)
+  PASS  provision-pin SAU race that (approval da revoke) van bi tu choi dung - khong co trang thai vua-revoked-vua-provisioned
 
 RESULT: PASS
 === exit_code: 0 ===
-=== ended_at (host date): 2026-08-06T04:38:58Z ===
+=== ended_at (host date): 2026-08-06T05:07:42Z ===

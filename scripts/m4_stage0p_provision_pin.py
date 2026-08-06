@@ -1,8 +1,24 @@
 #!/usr/bin/env python
 """I-B M4 Stage 0P — provisioning PIN nghiep vu (`m4_stage0p_actor_credentials.pin_secret_hash`)
 qua single-use bootstrap token, dap lai
-`PHASE1B-M4-REHEARSAL-READINESS-SNAPSHOT-REVIEW-1-VI.md` F-M4-PIN-R1-01 va
-`PHASE1B-M4-REHEARSAL-PIN-TOOL-REVIEW-2-VI.md` F-M4-PIN-R2-01/02/03.
+`PHASE1B-M4-REHEARSAL-READINESS-SNAPSHOT-REVIEW-1-VI.md` F-M4-PIN-R1-01,
+`PHASE1B-M4-REHEARSAL-PIN-TOOL-REVIEW-2-VI.md` F-M4-PIN-R2-01/02/03, va
+`PHASE1B-M4-REHEARSAL-PIN-TOOL-REVIEW-3-VI.md` F-M4-PIN-R3-01.
+
+REV4 (dap CA Review #3 tren PR #7) — F-M4-PIN-R3-01: revoke/het han approval SAU khi bind
+KHONG vo hieu hoa duoc token da bind, vi row token khong tham chieu approval nao va provision-pin
+chi kiem lai chinh no (consumed_at/expires_at), khong join lai approval. Sua bang migration 042
+them cot `approval_id` (NOT NULL, FK) vao `m4_stage0p_pin_bootstrap_tokens`:
+
+- `bind-token`: `expires_at` gio la `MIN(now + ttl-minutes yeu cau, approval.valid_until)` —
+  token khong the song lau hon chinh approval cho phep no ton tai; neu approval con lai duoi 1
+  phut thi tu choi bind (khong du thoi gian toi thieu).
+- `provision-pin`: buoc consume (trong `async with conn.transaction()`) gio JOIN + `FOR UPDATE`
+  CA token LAN approval TRONG CUNG 1 cau lenh, yeu cau approval van CHUA revoke VA con trong
+  validity window **TAI THOI DIEM CONSUME** (khong chi tai thoi diem bind truoc do). `FOR UPDATE`
+  khoa ca 2 row: neu `revoke-bind-approval` chay dong thoi tren cung approval, no se bi CHAN toi
+  khi transaction nay commit/rollback (Postgres row-level lock) — ai lay lock truoc thi thang,
+  khong con trang thai vua-revoked-vua-provisioned.
 
 REV3 (dap CA Review #2 tren PR #7):
 
@@ -184,7 +200,7 @@ async def bind_token(token_hash: str, target_staff_id: int, approval_id: int,
     conn = await asyncpg.connect(_db_url())
     try:
         approval = await conn.fetchrow(
-            "SELECT id, recorded_by, target_staff_id FROM m4_stage0p_pin_bind_approvals "
+            "SELECT id, recorded_by, target_staff_id, valid_until FROM m4_stage0p_pin_bind_approvals "
             "WHERE id = $1 AND target_staff_id = $2 AND revoked_at IS NULL "
             "AND valid_from <= now() AND now() < valid_until",
             approval_id, target_staff_id)
@@ -202,15 +218,25 @@ async def bind_token(token_hash: str, target_staff_id: int, approval_id: int,
                   file=sys.stderr)
             return 1
 
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
+        issued_at = datetime.now(timezone.utc)
+        # F-M4-PIN-R3-01: token khong duoc song lau hon approval cho phep no ton tai - cap
+        # expires_at o MIN(requested TTL, approval.valid_until), khong chi requested TTL.
+        expires_at = min(issued_at + timedelta(minutes=ttl_minutes), approval["valid_until"])
+        if expires_at < issued_at + timedelta(minutes=TOKEN_TTL_MIN_MINUTES):
+            print("LOI: approval sap het han (con lai duoi 1 phut) - khong con du thoi gian "
+                  "toi thieu de bind token, huy (khong tao token row)", file=sys.stderr)
+            return 1
+
         await conn.execute(
             "INSERT INTO m4_stage0p_pin_bootstrap_tokens "
-            "  (token_hash, staff_id, issued_by, expires_at) VALUES ($1, $2, $3, $4)",
-            token_hash, target_staff_id, issued_by, expires_at)
+            "  (token_hash, staff_id, issued_by, approval_id, issued_at, expires_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            token_hash, target_staff_id, issued_by, approval_id, issued_at, expires_at)
 
         print(f"Token da bind cho staff_id={target_staff_id} username={target['username']!r}, "
               f"issued_by={issued_by} (resolve tu approval id={approval_id}), "
-              f"het han luc {expires_at.isoformat()} ({ttl_minutes} phut).")
+              f"het han luc {expires_at.isoformat()} "
+              f"(min cua {ttl_minutes} phut yeu cau va approval.valid_until).")
         print("Dev/admin KHONG nhin thay/sinh ra raw token o buoc nay - chi hash duoc dung.")
         return 0
     finally:
@@ -224,11 +250,17 @@ async def provision_pin(*, token_reader=getpass.getpass, pin_reader=getpass.getp
         token_hash = _hash_token(token)
         del token
 
+        # F-M4-PIN-R3-01: kiem ca token LAN approval lien quan ngay tu buoc doc som (chua lock)
+        # de bao loi ro rang som - buoc consume o duoi se kiem lai CO LOCK, day chi la UX.
         token_row = await conn.fetchrow(
-            "SELECT staff_id FROM m4_stage0p_pin_bootstrap_tokens "
-            "WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()", token_hash)
+            "SELECT t.staff_id FROM m4_stage0p_pin_bootstrap_tokens t "
+            "JOIN m4_stage0p_pin_bind_approvals a ON a.id = t.approval_id "
+            "WHERE t.token_hash = $1 AND t.consumed_at IS NULL AND t.expires_at > now() "
+            "AND a.revoked_at IS NULL AND now() < a.valid_until",
+            token_hash)
         if token_row is None:
-            print("LOI: token khong hop le, da dung, hoac het han - huy", file=sys.stderr)
+            print("LOI: token khong hop le, da dung, het han, hoac approval lien quan da bi "
+                  "thu hoi/het han - huy", file=sys.stderr)
             return 1
         staff_id = token_row["staff_id"]
 
@@ -253,9 +285,29 @@ async def provision_pin(*, token_reader=getpass.getpass, pin_reader=getpass.getp
             return 1
 
         async with conn.transaction():
+            # F-M4-PIN-R3-01: JOIN + FOR UPDATE ca token LAN approval TRONG CUNG transaction voi
+            # viec tieu thu — day la lan kiem CUOI CUNG, co gia tri, ngay truoc khi ghi PIN.
+            # FOR UPDATE khoa CA HAI row: neu 1 revoke-bind-approval dang chay dong thoi tren
+            # CUNG approval nay, no se BI CHAN toi khi transaction nay commit/rollback (Postgres
+            # row-level lock tren UPDATE) — ai lay lock truoc thi thang, khong con trang thai
+            # nua-vua-revoked-nua-vua-provisioned. Neu revoke da commit TRUOC khi ta toi day,
+            # dieu kien a.revoked_at IS NULL don gian khong con dung, locked=None, tu choi sach.
+            locked = await conn.fetchrow(
+                "SELECT t.staff_id FROM m4_stage0p_pin_bootstrap_tokens t "
+                "JOIN m4_stage0p_pin_bind_approvals a ON a.id = t.approval_id "
+                "WHERE t.token_hash = $1 AND t.consumed_at IS NULL AND t.expires_at > now() "
+                "AND a.revoked_at IS NULL AND now() < a.valid_until "
+                "FOR UPDATE OF t, a",
+                token_hash)
+            if locked is None:
+                print("LOI: token vua bi dung/het han, hoac approval lien quan vua bi thu hoi/"
+                      "het han o noi khac giua chung (race) - huy", file=sys.stderr)
+                return 1
+
             # Tieu thu token VA ghi PIN trong CUNG 1 transaction — token CHI thuc su "dung 1
             # lan" khi lan dung do THANH CONG; mismatch/qua ngan o tren khong cham toi day nen
-            # token chua bao gio bi tieu thu trong cac truong hop do.
+            # token chua bao gio bi tieu thu trong cac truong hop do. WHERE ben duoi la 1 lop
+            # bao ve them (defense-in-depth) — tai day ta da giu lock nen ve ly thuyet luon khop.
             consumed = await conn.fetchrow(
                 "UPDATE m4_stage0p_pin_bootstrap_tokens SET consumed_at = now() "
                 "WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now() "

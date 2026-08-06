@@ -1,34 +1,49 @@
 #!/usr/bin/env python
-"""I-B M4 Stage 0P — evidence cho `scripts/m4_stage0p_provision_pin.py` REV3, dap lai
-`PHASE1B-M4-REHEARSAL-PIN-TOOL-REVIEW-2-VI.md` F-M4-PIN-R2-01/02/03 (REV2 evidence van con o
-git history cua branch nay cho F-M4-PIN-R1-01/03).
+"""I-B M4 Stage 0P — evidence cho `scripts/m4_stage0p_provision_pin.py` REV4, dap lai
+`PHASE1B-M4-REHEARSAL-PIN-TOOL-REVIEW-3-VI.md` F-M4-PIN-R3-01 (REV2/REV3 evidence van con o git
+history cua branch nay cho F-M4-PIN-R1-01/03 va F-M4-PIN-R2-01/02/03).
 
-Chay (sandbox RIENG, KHONG production - script TU RESET schema public, migration 040+041 duoc
-apply qua chinh `scripts/migrate.py up` nhu binh thuong):
+Chay (sandbox RIENG, KHONG production - script TU RESET schema public, migration 040+041+042
+duoc apply qua chinh `scripts/migrate.py up` nhu binh thuong):
   docker exec -e DATABASE_URL=postgresql://alpha3s:alpha3s@<sandbox-db>:5432/alpha3s \
       alpha3s-api-1 python scripts/m4_stage0p_provision_pin_test.py
 
 Kich ban:
-  [1] provision-pin KHONG nhan staff-id duoi bat ky dang nao (cau truc, REV1/2/3 deu giu).
+  [1] provision-pin KHONG nhan staff-id duoi bat ky dang nao (cau truc, tu REV1 giu nguyen).
   [2] generate-token chay HOAN TOAN cuc bo (khong DATABASE_URL van chay duoc) - sinh 2 gia tri
       TACH BIET: raw token + sha256 hash.
   [3] Round-trip that day du: generate-token (cuc bo) -> record-bind-approval -> bind-token (CHI
       nhan hash) -> provision-pin (token qua stdin) -> row -> `m4_stage0p_pin_actor()` THAT chap
-      nhan. Xac nhan bind-token KHONG BAO GIO nhan/in raw token.
+      nhan. Xac nhan bind-token KHONG BAO GIO nhan/in raw token, va toan bo output KHONG chua
+      token/PIN/bcrypt hash that o bat ky buoc nao.
   [4] bind-token voi approval-id BUOC target khac (staff B) khi tu goi voi target-staff-id cua
       A -> tu choi cau truc (validate ca approval_id VA target_staff_id cung luc).
   [5] bind-token khong co approval nao khop (approval-id gia/khong ton tai) -> tu choi, khong
       tao token row.
-  [6] Approval bi thu hoi (revoke-bind-approval) -> bind-token sau do bi tu choi ngay.
-  [7] Approval het han (valid_until qua khu) -> bind-token bi tu choi.
+  [6] Approval bi thu hoi TRUOC KHI bind (revoke-bind-approval) -> bind-token sau do bi tu choi
+      ngay.
+  [7] Approval het han (valid_until qua khu) TRUOC KHI bind -> bind-token bi tu choi.
   [8] bind-token ttl-minutes ngoai [1,30] -> tu choi TRUOC KHI cham DB (ca 2 bien: qua thap/qua
-      cao).
+      cao), token-hash sai dinh dang cung vay.
   [9] Token da dung (consumed) -> lan 2 bi tu choi.
   [10] Token het han -> bi tu choi.
   [11] PIN mismatch/qua ngan -> tu choi NHUNG token VAN con dung duoc lai (khong bi tieu thu
        oan).
-  [12] Toan bo stdout/stderr cua CA quy trinh (generate-token/record-bind-approval/bind-token/
-       provision-pin) KHONG BAO GIO chua token that, PIN that, hay gia tri bcrypt hash."""
+  [12] F-M4-PIN-R3-01: bind THANH CONG truoc, SAU DO moi revoke approval -> provision-pin (voi
+       token da bind, van con "hop le" theo rieng no) van bi tu choi dung, khong credential nao
+       duoc tao — chung minh vong doi token gan voi approval XUYEN SUOT, khong chi luc bind.
+  [13] F-M4-PIN-R3-01: bind THANH CONG truoc, SAU DO approval moi het han (valid_until bi day ve
+       qua khu, token.expires_at cua rieng no VAN con trong tuong lai) -> provision-pin van bi
+       tu choi dung.
+  [14] F-M4-PIN-R3-01: approval con hieu luc ngan hon ttl-minutes yeu cau -> token.expires_at
+       THAT SU bi cap theo approval.valid_until (khong theo ttl yeu cau); approval sap het han
+       duoi 1 phut -> bind-token tu choi hoan toan (khong tao token row).
+  [15] F-M4-PIN-R3-01: race that giua revoke va consume qua 2 ket noi Postgres dong thoi — dung
+       CHINH XAC cau lenh JOIN+FOR UPDATE ma `provision_pin()` dung (khong hand-copy sai lech) de
+       chung minh revoke tu 1 connection khac THAT SU bi Postgres row-level lock CHAN toi khi
+       connection dang giu lock (dang "consume") commit/rollback — khong co trang thai vua-
+       revoked-vua-provisioned, va sau khi lock duoc nha, revoke hoan tat + provision-pin sau do
+       bi tu choi dung."""
 
 import asyncio
 import hashlib
@@ -36,6 +51,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import asyncpg
@@ -442,6 +458,215 @@ async def scenario_11_pin_mismatch_does_not_burn_token() -> None:
     check(r2.returncode == 0, "dung LAI CUNG token (sau mismatch) thanh cong lan nay")
 
 
+async def scenario_12_revoke_after_bind_invalidates_token() -> None:
+    print("== [12] bind THANH CONG truoc, SAU DO revoke approval -> provision-pin bi tu choi "
+          "dung (F-M4-PIN-R3-01) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approver_id = await _make_staff(admin, "provision-pin-test-postrevoke-approver")
+        target_id = await _make_staff(admin, "provision-pin-test-postrevoke-target")
+    finally:
+        await admin.close()
+
+    gen = _run_generate_token()
+    token = _extract_field(gen.stdout, "TOKEN=")
+    token_hash = _extract_field(gen.stdout, "TOKEN_HASH=")
+    approve = _run_record_bind_approval(target_id, approver_id, "test-approval-postrevoke")
+    approval_id = _extract_approval_id(approve.stdout)
+    bind = _run_bind_token(token_hash, target_id, approval_id)
+    check(bind.returncode == 0, "bind-token thanh cong TRUOC khi revoke (chuan bi)")
+
+    revoke = _run_revoke_bind_approval(approval_id, "danh gia lai SAU khi da bind")
+    check(revoke.returncode == 0, f"revoke-bind-approval SAU bind exit 0 (thuc te {revoke.returncode})")
+
+    r = _run_provision_pin(f"{token}\npostrevoke-pin-value-1\npostrevoke-pin-value-1\n")
+    check(r.returncode != 0,
+          "provision-pin voi token DA bind nhung approval bi revoke SAU do van bi tu choi")
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        row = await verify_conn.fetchrow(
+            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", target_id)
+        check(row is None, "KHONG co credential nao duoc tao tu token co approval bi revoke sau bind")
+        token_row = await verify_conn.fetchrow(
+            "SELECT consumed_at FROM m4_stage0p_pin_bootstrap_tokens WHERE token_hash = $1",
+            hashlib.sha256(token.encode()).hexdigest())
+        check(token_row is not None and token_row["consumed_at"] is None,
+              "token BAN THAN no khong bi danh dau consumed (bi chan boi approval, khong phai "
+              "boi chinh no)")
+    finally:
+        await verify_conn.close()
+
+
+async def scenario_13_approval_expiry_after_bind_invalidates_token() -> None:
+    print("== [13] bind THANH CONG truoc, SAU DO approval het han (token.expires_at rieng no "
+          "VAN con tuong lai) -> provision-pin van bi tu choi dung (F-M4-PIN-R3-01) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approver_id = await _make_staff(admin, "provision-pin-test-postexpiry-approver")
+        target_id = await _make_staff(admin, "provision-pin-test-postexpiry-target")
+    finally:
+        await admin.close()
+
+    gen = _run_generate_token()
+    token = _extract_field(gen.stdout, "TOKEN=")
+    token_hash = _extract_field(gen.stdout, "TOKEN_HASH=")
+    # valid-minutes du dai (60p) de token.expires_at (cap boi MIN(ttl, valid_until)) khong bi
+    # anh huong boi buoc lui valid_until ve qua khu O DUOI - no da duoc GHI CO DINH luc bind.
+    approve = _run_record_bind_approval(target_id, approver_id, "test-approval-postexpiry",
+                                         valid_minutes=60)
+    approval_id = _extract_approval_id(approve.stdout)
+    bind = _run_bind_token(token_hash, target_id, approval_id, ttl_minutes=30)
+    check(bind.returncode == 0, "bind-token thanh cong TRUOC khi approval het han (chuan bi)")
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        token_expires_at = await verify_conn.fetchval(
+            "SELECT expires_at FROM m4_stage0p_pin_bootstrap_tokens WHERE token_hash = $1",
+            token_hash)
+    finally:
+        await verify_conn.close()
+
+    admin2 = await asyncpg.connect(DB_URL)
+    try:
+        await admin2.execute(
+            "UPDATE m4_stage0p_pin_bind_approvals SET "
+            "valid_from = now() - interval '2 hours', valid_until = now() - interval '1 hour' "
+            "WHERE id = $1", approval_id)
+    finally:
+        await admin2.close()
+
+    r = _run_provision_pin(f"{token}\npostexpiry-pin-value-1\npostexpiry-pin-value-1\n")
+    check(r.returncode != 0,
+          "provision-pin voi token co approval het han SAU bind van bi tu choi, "
+          "MAC DU token.expires_at rieng no van con trong tuong lai")
+
+    check(token_expires_at > datetime.now(timezone.utc),
+          "xac nhan gia thiet: token.expires_at rieng no THAT SU van con trong tuong lai luc "
+          "test nay chay (nen viec bi tu choi la NHO join lai approval, khong phai tinh co)")
+
+
+async def scenario_14_ttl_capped_by_approval_window() -> None:
+    print("== [14] token.expires_at bi CAP theo approval.valid_until khi ngan hon ttl yeu cau; "
+          "approval sap het han duoi 1 phut -> bind-token tu choi hoan toan (F-M4-PIN-R3-01) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approver_id = await _make_staff(admin, "provision-pin-test-ttlcap-approver")
+        target_id = await _make_staff(admin, "provision-pin-test-ttlcap-target")
+    finally:
+        await admin.close()
+
+    gen = _run_generate_token()
+    token_hash = _extract_field(gen.stdout, "TOKEN_HASH=")
+    approve = _run_record_bind_approval(target_id, approver_id, "test-approval-ttlcap",
+                                         valid_minutes=5)
+    approval_id = _extract_approval_id(approve.stdout)
+
+    bind = _run_bind_token(token_hash, target_id, approval_id, ttl_minutes=30)
+    check(bind.returncode == 0, "bind-token thanh cong (approval con hieu luc ~5p, yeu cau 30p)")
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        row = await verify_conn.fetchrow(
+            "SELECT t.expires_at, a.valid_until FROM m4_stage0p_pin_bootstrap_tokens t "
+            "JOIN m4_stage0p_pin_bind_approvals a ON a.id = t.approval_id "
+            "WHERE t.token_hash = $1", token_hash)
+    finally:
+        await verify_conn.close()
+    delta_seconds = abs((row["expires_at"] - row["valid_until"]).total_seconds())
+    check(delta_seconds < 2,
+          f"token.expires_at ({row['expires_at'].isoformat()}) khop approval.valid_until "
+          f"({row['valid_until'].isoformat()}) trong sai so <2s - CAP dung, KHONG dung ttl "
+          f"30p yeu cau")
+
+    admin2 = await asyncpg.connect(DB_URL)
+    try:
+        approve2 = _run_record_bind_approval(target_id, approver_id, "test-approval-ttlcap-tiny",
+                                              valid_minutes=5)
+        approval_id2 = _extract_approval_id(approve2.stdout)
+        await admin2.execute(
+            "UPDATE m4_stage0p_pin_bind_approvals SET valid_until = now() + interval '30 seconds' "
+            "WHERE id = $1", approval_id2)
+    finally:
+        await admin2.close()
+
+    gen2 = _run_generate_token()
+    token_hash2 = _extract_field(gen2.stdout, "TOKEN_HASH=")
+    bind2 = _run_bind_token(token_hash2, target_id, approval_id2, ttl_minutes=30)
+    check(bind2.returncode != 0,
+          "bind-token tu choi khi approval con lai duoi 1 phut - khong du thoi gian toi thieu")
+
+    verify_conn2 = await asyncpg.connect(DB_URL)
+    try:
+        row2 = await verify_conn2.fetchrow(
+            "SELECT 1 FROM m4_stage0p_pin_bootstrap_tokens WHERE token_hash = $1", token_hash2)
+        check(row2 is None, "KHONG co token row nao duoc tao khi approval sap het han")
+    finally:
+        await verify_conn2.close()
+
+
+async def scenario_15_revoke_consume_race_locking() -> None:
+    print("== [15] Race THAT giua revoke va consume qua 2 ket noi Postgres dong thoi - dung "
+          "CHINH XAC cau lenh JOIN+FOR UPDATE ma provision_pin() dung (F-M4-PIN-R3-01) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approver_id = await _make_staff(admin, "provision-pin-test-race-approver")
+        target_id = await _make_staff(admin, "provision-pin-test-race-target")
+    finally:
+        await admin.close()
+
+    gen = _run_generate_token()
+    token = _extract_field(gen.stdout, "TOKEN=")
+    token_hash = _extract_field(gen.stdout, "TOKEN_HASH=")
+    approve = _run_record_bind_approval(target_id, approver_id, "test-approval-race")
+    approval_id = _extract_approval_id(approve.stdout)
+    bind = _run_bind_token(token_hash, target_id, approval_id)
+    check(bind.returncode == 0, "bind-token thanh cong (chuan bi cho test race)")
+
+    conn_a = await asyncpg.connect(DB_URL)
+    conn_b = await asyncpg.connect(DB_URL)
+    tx = conn_a.transaction()
+    await tx.start()
+    try:
+        # CHINH XAC cung 1 cau lenh provision_pin() dung o buoc consume (xem
+        # m4_stage0p_provision_pin.py) - khoa CA HAI bang cung luc.
+        locked = await conn_a.fetchrow(
+            "SELECT t.staff_id FROM m4_stage0p_pin_bootstrap_tokens t "
+            "JOIN m4_stage0p_pin_bind_approvals a ON a.id = t.approval_id "
+            "WHERE t.token_hash = $1 AND t.consumed_at IS NULL AND t.expires_at > now() "
+            "AND a.revoked_at IS NULL AND now() < a.valid_until "
+            "FOR UPDATE OF t, a",
+            token_hash)
+        check(locked is not None, "connection A lay duoc lock (approval van hop le luc do)")
+
+        task_b = asyncio.create_task(conn_b.execute(
+            "UPDATE m4_stage0p_pin_bind_approvals SET revoked_at = now(), "
+            "revoke_reason = 'test-race-scenario-15' WHERE id = $1", approval_id))
+        blocked = False
+        try:
+            await asyncio.wait_for(asyncio.shield(task_b), timeout=1.5)
+        except asyncio.TimeoutError:
+            blocked = True
+        check(blocked, "revoke tu connection B THAT SU bi Postgres CHAN boi FOR UPDATE cua "
+              "connection A (row-level lock that, khong phai gia lap bang code)")
+
+        await tx.commit()  # nha lock - KHONG tu tieu thu token o day, chi kiem tra lock
+        await asyncio.wait_for(task_b, timeout=5)
+    finally:
+        await conn_a.close()
+
+    revoked_row = await conn_b.fetchrow(
+        "SELECT revoked_at FROM m4_stage0p_pin_bind_approvals WHERE id = $1", approval_id)
+    check(revoked_row is not None and revoked_row["revoked_at"] is not None,
+          "SAU KHI A nha lock, revoke cua B hoan tat thanh cong (bi tri hoan, khong bi mat)")
+    await conn_b.close()
+
+    r_after = _run_provision_pin(f"{token}\nrace-after-value-123\nrace-after-value-123\n")
+    check(r_after.returncode != 0,
+          "provision-pin SAU race that (approval da revoke) van bi tu choi dung - khong co "
+          "trang thai vua-revoked-vua-provisioned")
+
+
 async def main() -> int:
     await scenario_1_no_staff_id_input_surface()
     await scenario_2_generate_token_local_only()
@@ -454,6 +679,10 @@ async def main() -> int:
     await scenario_9_token_reuse_rejected()
     await scenario_10_expired_token_rejected()
     await scenario_11_pin_mismatch_does_not_burn_token()
+    await scenario_12_revoke_after_bind_invalidates_token()
+    await scenario_13_approval_expiry_after_bind_invalidates_token()
+    await scenario_14_ttl_capped_by_approval_window()
+    await scenario_15_revoke_consume_race_locking()
 
     print()
     if _fail:
