@@ -11,6 +11,15 @@ name: CI/CD
 on:
   push:
     branches: [main]
+    # F-PF-R3-01 (M4): docs-only/README-only push khong duoc tu trigger deploy len production
+    # (tung xay ra 3 lan, gay commit drift cho cac gate "exact deployed commit" cua M4). Chi bo
+    # qua TOAN BO workflow (ca lint-test lan deploy) neu TAT CA file thay doi deu khop pattern
+    # duoi day - 1 file code/workflow/bat ky thu gi khac xen vao la workflow van chay binh
+    # thuong (dung ngu nghia paths-ignore cua GitHub Actions). KHONG ap dung cho `pull_request`
+    # ben duoi - PR van luon chay lint-test du chi doi docs.
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
   pull_request:
     branches: [main]   # CR-07: PR chạy lint+test -> status check (KHÔNG deploy)
 
