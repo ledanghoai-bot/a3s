@@ -25,6 +25,13 @@ Kich ban:
       synthetic ngay sau khi seed, buoc purge THAT SU that bai vi FK conflict. Ca 2 xac nhan:
       exit code khac 0, log CLEANUP_FAILED, va trang thai DB doc lap THAT SU nguy hiem (capture
       con ON / residual con lai) — khong bao gio bao cao thanh cong trong tinh huong nay.
+  [11] F-EX-B2-01/02/04 (Amendment 07 Execution Blocker 1): integration THAT voi DATABASE_URL
+      dang production (`postgresql+asyncpg://...`) di qua CLI runner that (`retire-keys`,
+      idempotent/an toan) — chung minh runner gio dung chung `m4_dsn_utils.normalized_db_url`
+      voi PIN tool va thuc su ket noi duoc, khong con bi ClientConfigurationError nhu blocker.
+  [12] F-EX-B2-01/02/04: DATABASE_URL malformed (phan "scheme" tinh co chua fake secret VA ky tu
+      dieu khien/xuong dong) qua CLI runner that — tu choi sach, khong leak, khong traceback,
+      khong log injection, khong DB call/write.
 """
 
 import asyncio
@@ -783,6 +790,48 @@ async def scenario_10_verifier_itself_fails_closed() -> None:
         await pool.close()
 
 
+async def scenario_11_dsn_production_shaped_integration() -> None:
+    print("== [11] F-EX-B2-01/02/04: integration THAT voi DATABASE_URL dang production "
+          "(postgresql+asyncpg://) di qua CLI runner that (retire-keys, idempotent/an toan) ==")
+    assert DB_URL.startswith("postgresql://"), "gia dinh sandbox DB_URL dang postgresql://"
+    production_shaped_dsn = "postgresql+asyncpg://" + DB_URL[len("postgresql://"):]
+
+    r = _run_cli("retire-keys", env_extra={"DATABASE_URL": production_shaped_dsn})
+    check(r.returncode == 0,
+          f"retire-keys THANH CONG qua DATABASE_URL dang production 'postgresql+asyncpg://...' "
+          f"(thuc te exit={r.returncode}, stderr={r.stderr!r})")
+    check("postgresql+asyncpg" not in (r.stdout + r.stderr),
+          "output khong echo lai chuoi DSN goc")
+
+
+async def scenario_12_dsn_malformed_scheme_failclosed() -> None:
+    print("== [12] F-EX-B2-01/02/04: DATABASE_URL malformed (fake secret + ky tu dieu khien "
+          "trong phan scheme) bi tu choi SACH, khong leak, khong DB call, qua CLI runner that ==")
+    marker = "RUNNER_LEAKED_MARKER_778899"
+    malformed_scheme = f"oops{marker}\n\r\tstill-not-a-scheme"
+    malformed_dsn = f"{malformed_scheme}://testuser:{marker}@db:5432/alpha3s"
+
+    r = _run_cli("retire-keys", env_extra={"DATABASE_URL": malformed_dsn})
+    combined = r.stdout + r.stderr
+    check(r.returncode != 0, "retire-keys voi DATABASE_URL malformed exit != 0")
+    check(marker not in combined, "marker gia (ke ca phan trong 'scheme' malformed) KHONG xuat "
+          "hien trong stdout/stderr")
+    check(malformed_dsn not in combined, "toan bo DSN malformed goc KHONG xuat hien trong output")
+    check("Traceback" not in r.stderr, "tu choi SACH bang thong bao hang so, khong traceback")
+    check(r.stderr.strip().count("\n") <= 1,
+          "thong bao loi la 1 dong hang so - khong phan chieu ky tu xuong dong tu input malformed "
+          "(chong log injection)")
+
+
+async def scenario_13_dsn_shared_module_identity_regression() -> None:
+    print("== [13] F-EX-B2-02: regression - runner._db_url la CHINH m4_dsn_utils.normalized_db_url "
+          "(khong phai ban sao rieng co the lech voi PIN tool trong tuong lai) ==")
+    import m4_dsn_utils
+    check(runner._db_url is m4_dsn_utils.normalized_db_url,
+          "runner._db_url va m4_dsn_utils.normalized_db_url la CUNG 1 ham object (identity "
+          "check) - dam bao khong con logic normalize DSN nao rieng, lech trong runner")
+
+
 async def main() -> int:
     await scenario_1_happy_path_e2e()
     await scenario_2_hard_fence()
@@ -795,6 +844,9 @@ async def main() -> int:
     await scenario_8_capture_off_ignores_stale_flag()
     await scenario_9_redis_postcheck_is_mandatory()
     await scenario_10_verifier_itself_fails_closed()
+    await scenario_11_dsn_production_shaped_integration()
+    await scenario_12_dsn_malformed_scheme_failclosed()
+    await scenario_13_dsn_shared_module_identity_regression()
 
     print()
     if _fail:

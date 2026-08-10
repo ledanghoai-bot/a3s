@@ -81,7 +81,6 @@ import argparse
 import asyncio
 import getpass
 import hashlib
-import os
 import re
 import secrets
 import sys
@@ -93,47 +92,18 @@ import asyncpg
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# F-EX-B2-02: normalization DSN nay gio nam trong 1 module dung CHUNG (m4_dsn_utils.py) voi
+# scripts/m4_stage0p_rehearsal_runner.py - truoc day moi tool co 1 ban sao rieng cua CUNG 1 logic,
+# dan toi runner bi bo sot khi PIN tool duoc sua o PR #9. Alias lai ten cu (_db_url) de khong doi
+# API noi bo hien co (`_db_url()` van goi duoc y het truoc day).
+from m4_dsn_utils import normalized_db_url as _db_url  # noqa: E402
+
 MIN_PIN_LEN = 8
 TOKEN_TTL_MIN_MINUTES = 1
 TOKEN_TTL_MAX_MINUTES = 30
 APPROVAL_TTL_MIN_MINUTES = 1
 APPROVAL_TTL_MAX_MINUTES = 1440
 _TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-
-# F-EX-B1-01: asyncpg.connect() chi hieu "postgresql"/"postgres" - KHONG hieu scheme co driver
-# suffix kieu SQLAlchemy (vd "postgresql+asyncpg") ma production DATABASE_URL dang dung (app
-# chinh dung SQLAlchemy async engine). Allowlist tuong minh, CHI thay phan scheme (truoc "://"
-# dau tien) - khong dung replace() khong gioi han vi mat khau/query string co the chua chuoi
-# trung ten scheme mot cach tinh co.
-_DB_SCHEME_NORMALIZE = {
-    "postgresql": "postgresql",
-    "postgres": "postgres",
-    "postgresql+asyncpg": "postgresql",
-}
-
-
-_DB_URL_MISSING_SCHEME_SEP_MSG = (
-    "LOI: DATABASE_URL khong hop le (thieu '://') - tu choi truoc khi ket noi DB "
-    "(fail-closed). Ho tro: postgresql://, postgres://, postgresql+asyncpg://.")
-_DB_URL_UNSUPPORTED_SCHEME_MSG = (
-    "LOI: DATABASE_URL scheme khong duoc ho tro - tu choi truoc khi ket noi DB (fail-closed). "
-    "Ho tro: postgresql://, postgres://, postgresql+asyncpg://.")
-
-
-def _db_url() -> str:
-    # F-DSN-R1-01: 2 thong bao loi tren la HANG SO co dinh - KHONG bao gio duoc noi suy bat ky
-    # phan nao cua `raw`/`scheme` (kha nang truoc do chi in `scheme`) vao trong do. Ly do: neu
-    # DATABASE_URL bi malformed/gia mao, phan duoc tach ra lam "scheme" van co the tinh co chua
-    # secret hoac ky tu dieu khien/xuong dong - phan an toan duy nhat la KHONG phan chieu bat ky
-    # phan nao cua input goc trong thong bao loi, du la phan tuong nhu vo hai.
-    raw = os.environ.get("DATABASE_URL") or "postgresql://alpha3s:alpha3s@db:5432/alpha3s"
-    if "://" not in raw:
-        sys.exit(_DB_URL_MISSING_SCHEME_SEP_MSG)
-    scheme, rest = raw.split("://", 1)
-    normalized = _DB_SCHEME_NORMALIZE.get(scheme)
-    if normalized is None:
-        sys.exit(_DB_URL_UNSUPPORTED_SCHEME_MSG)
-    return f"{normalized}://{rest}"
 
 
 def _hash_token(token: str) -> str:
@@ -371,6 +341,54 @@ async def provision_pin(*, token_reader=getpass.getpass, pin_reader=getpass.getp
         await conn.close()
 
 
+async def revoke_credential(target_staff_id: int, actor_staff_id: int, reason: str) -> int:
+    """F-EX-B2-03 (Amendment 07 Execution Blocker 1): supported, audited, fail-closed cach de
+    thu hoi 1 PIN credential da provision - khong con raw SQL ad hoc. XOA HANG (khong chi danh
+    dau) vi bang m4_stage0p_actor_credentials khong co cot "revoked"/"active" va them cot se can
+    1 migration (CA yeu cau tranh migration neu khong that su can) - `m4_stage0p_pin_actor()` da
+    tu RAISE EXCEPTION ro rang ("chua duoc provisioning pin_secret") khi khong tim thay hang,
+    nen xoa hang dat dung hieu qua "revoked" ma khong can schema change. Ghi 1 dong vao
+    `audit_log` (bang da co san, khong migration moi) de giu vet kiem toan ben ngoai bang M4 du
+    hang credential da bi xoa hoan toan."""
+    conn = await asyncpg.connect(_db_url())
+    try:
+        target = await conn.fetchrow(
+            "SELECT id, username, is_active FROM staff_users WHERE id = $1", target_staff_id)
+        if target is None or not target["is_active"]:
+            print(f"LOI: target-staff-id {target_staff_id} khong ton tai/khong active",
+                  file=sys.stderr)
+            return 1
+        actor = await conn.fetchrow(
+            "SELECT id, username, is_active FROM staff_users WHERE id = $1", actor_staff_id)
+        if actor is None or not actor["is_active"]:
+            print(f"LOI: actor-staff-id {actor_staff_id} khong ton tai/khong active",
+                  file=sys.stderr)
+            return 1
+
+        async with conn.transaction():
+            deleted = await conn.fetchrow(
+                "DELETE FROM m4_stage0p_actor_credentials WHERE staff_id = $1 "
+                "RETURNING staff_id", target_staff_id)
+            await conn.execute(
+                "INSERT INTO audit_log "
+                "  (actor_type, actor_staff_id, action, entity_type, entity_id, reason) "
+                "VALUES ('staff', $1, 'm4_stage0p.pin_credential.revoke', "
+                "        'm4_stage0p_actor_credentials', $2, $3)",
+                actor_staff_id, str(target_staff_id), reason)
+
+        if deleted is None:
+            print(f"Khong co credential nao cho staff_id={target_staff_id} (da revoke truoc do "
+                  "hoac chua tung provision) - idempotent, coi la thanh cong.")
+        else:
+            print(f"Credential cho staff_id={target_staff_id} (username={target['username']!r}) "
+                  f"da bi xoa boi actor_staff_id={actor_staff_id} "
+                  f"(username={actor['username']!r}). Ly do da ghi vao audit_log.")
+        print("(KHONG in pin_secret_hash - hang da bi xoa hoan toan, khong con gi de in)")
+        return 0
+    finally:
+        await conn.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Dat PIN M4 nghiep vu qua single-use bootstrap token, principal tu sinh "
@@ -402,6 +420,14 @@ def main() -> int:
 
     sub.add_parser("provision-pin", help="Nguoi dam nhan vai tro TU chay - chi hoi token + PIN")
 
+    p_revoke_cred = sub.add_parser(
+        "revoke-credential",
+        help="F-EX-B2-03: thu hoi/xoa 1 PIN credential da provision (supported, audited, "
+             "idempotent, khong raw SQL)")
+    p_revoke_cred.add_argument("--target-staff-id", type=int, required=True)
+    p_revoke_cred.add_argument("--actor-staff-id", type=int, required=True)
+    p_revoke_cred.add_argument("--reason", type=str, required=True)
+
     args = parser.parse_args()
     if args.command == "generate-token":
         return generate_token()
@@ -413,6 +439,9 @@ def main() -> int:
     if args.command == "bind-token":
         return asyncio.run(bind_token(
             args.token_hash, args.target_staff_id, args.approval_id, args.ttl_minutes))
+    if args.command == "revoke-credential":
+        return asyncio.run(revoke_credential(
+            args.target_staff_id, args.actor_staff_id, args.reason))
     return asyncio.run(provision_pin())
 
 

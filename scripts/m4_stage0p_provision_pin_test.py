@@ -58,7 +58,16 @@ Kich ban:
        dau tien tinh co chua fake secret VA ky tu dieu khien/xuong dong (\\n\\r\\t) - xac nhan
        thong bao loi la HANG SO CO DINH, khong phan chieu BAT KY phan nao cua input goc (khac
        [17] chi test 1 ten scheme "sach" nhu tu dien), khong traceback, khong log injection qua
-       nhieu dong, va khong tao partial write."""
+       nhieu dong, va khong tao partial write.
+  [20] F-EX-B2-02 (Amendment 07 Execution Blocker 1): regression - PIN tool._db_url la CHINH
+       m4_dsn_utils.normalized_db_url (identity check), khong phai ban sao rieng co the lech voi
+       runner trong tuong lai.
+  [21] F-EX-B2-03: `revoke-credential` xoa hang credential that su, khong in pin_secret_hash/PIN
+       that trong output, va `m4_stage0p_pin_actor()` tu choi dung ngay lap tuc voi PIN cu sau
+       revoke (RAISE EXCEPTION that, khong phai gia lap).
+  [22] F-EX-B2-03: goi `revoke-credential` lan 2 tren staff_id da revoke van exit 0 - idempotent.
+  [23] F-EX-B2-03/04: `revoke-credential` voi actor-staff-id hoac target-staff-id khong ton tai
+       bi tu choi TRUOC khi dung DB, va KHONG anh huong toi credential hop le khac."""
 
 import asyncio
 import hashlib
@@ -161,6 +170,27 @@ async def _make_staff(admin, username: str) -> int:
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ($1, 'x', 'x', true) RETURNING id", username)
     return row["id"]
+
+
+async def _provision_pin_secret_directly(admin, *, staff_id: int, pin_secret: str) -> None:
+    """Test-only setup helper (dung truc tiep ket noi admin cua bo test, KHONG phai tool CLI) -
+    tao san 1 credential de cac kich ban revoke-credential co gi de thu hoi, khong can lap lai
+    toan bo ceremony 4 buoc (da duoc chung minh rieng o kich ban [3])."""
+    await admin.execute(
+        "INSERT INTO m4_stage0p_actor_credentials (staff_id, pin_secret_hash, provisioned_by) "
+        "VALUES ($1, crypt($2, gen_salt('bf')), $1) "
+        "ON CONFLICT (staff_id) DO UPDATE SET pin_secret_hash=crypt($2, gen_salt('bf')), "
+        "failed_attempts=0, locked_until=NULL", staff_id, pin_secret)
+
+
+def _run_revoke_credential(target_staff_id: int, actor_staff_id: int,
+                            reason: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "scripts/m4_stage0p_provision_pin.py", "revoke-credential",
+         "--target-staff-id", str(target_staff_id), "--actor-staff-id", str(actor_staff_id),
+         "--reason", reason],
+        cwd=str(ROOT), env={**os.environ, "DATABASE_URL": DB_URL},
+        capture_output=True, text=True, timeout=30)
 
 
 async def scenario_1_no_staff_id_input_surface() -> None:
@@ -697,6 +727,7 @@ def _load_pin_tool_module():
 async def scenario_16_dsn_scheme_normalize_unit() -> None:
     print("== [16] F-EX-B1-01/02: _db_url() normalize dung scheme SQLAlchemy async, giu "
           "nguyen DSN thuan, tu choi scheme la (unit-level, khong qua subprocess) ==")
+    import m4_dsn_utils
     pin_tool = _load_pin_tool_module()
     original = os.environ.get("DATABASE_URL")
     try:
@@ -726,7 +757,7 @@ async def scenario_16_dsn_scheme_normalize_unit() -> None:
         # F-DSN-R1-01: kiem CHINH XAC bang hang so cua module (khong chi "khong chua marker") -
         # chung minh thong bao loi la HANG SO CO DINH, khong noi suy BAT KY phan nao cua input
         # goc (ke ca phan "scheme" tuong nhu vo hai) vao thong diep.
-        check(exc_text == pin_tool._DB_URL_UNSUPPORTED_SCHEME_MSG,
+        check(exc_text == m4_dsn_utils.DB_URL_UNSUPPORTED_SCHEME_MSG,
               "thong bao loi tu choi scheme la HANG SO CO DINH tu module - khong noi suy bat ky "
               "phan nao cua DATABASE_URL goc (khong chi rieng FAKESECRET4)")
     finally:
@@ -858,6 +889,108 @@ async def scenario_19_malformed_scheme_with_secret_and_control_chars_no_leak() -
         await verify.close()
 
 
+async def scenario_20_dsn_shared_module_identity_regression() -> None:
+    print("== [20] F-EX-B2-02: regression - PIN tool._db_url la CHINH m4_dsn_utils."
+          "normalized_db_url (khong phai ban sao rieng co the lech voi runner trong tuong lai) ==")
+    import m4_dsn_utils
+    pin_tool = _load_pin_tool_module()
+    check(pin_tool._db_url is m4_dsn_utils.normalized_db_url,
+          "PIN tool._db_url va m4_dsn_utils.normalized_db_url la CUNG 1 ham object (identity "
+          "check) - dam bao khong con logic normalize DSN nao rieng, lech trong PIN tool")
+
+
+async def scenario_21_revoke_credential_success_and_pin_actor_rejects() -> None:
+    print("== [21] F-EX-B2-03: revoke-credential thanh cong -> credential bi xoa -> "
+          "m4_stage0p_pin_actor() tu choi PIN cu ngay lap tuc ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        recorder_id = await _make_staff(admin, "provision-pin-test-revcred21-recorder")
+        target_id = await _make_staff(admin, "provision-pin-test-revcred21-target")
+        test_pin = "revoke-test-pin-value-999"
+        await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret=test_pin)
+
+        before = await admin.fetchrow(
+            "SELECT * FROM m4_stage0p_pin_actor($1, $2)", target_id, test_pin)
+        check(before["pinned_staff_id"] == target_id,
+              "PIN con hop le TRUOC khi revoke (xac nhan setup dung, khong phai false positive)")
+
+        r = _run_revoke_credential(target_id, recorder_id, "test-revoke-scenario-21")
+        check(r.returncode == 0, f"revoke-credential exit 0 (thuc te {r.returncode}, "
+              f"stderr={r.stderr!r})")
+        # Luu y: output CO the (va nen) chua chuoi CHU "pin_secret_hash" trong 1 cau xac nhan
+        # dang "(KHONG in pin_secret_hash - ...)" - dung quy uoc da co san o provision_pin(). Cai
+        # can kiem la GIA TRI hash/PIN that khong bao gio xuat hien, khong phai ten cot.
+        check(test_pin not in (r.stdout + r.stderr), "output KHONG chua gia tri PIN that")
+        check("$2a$" not in (r.stdout + r.stderr) and "$2b$" not in (r.stdout + r.stderr),
+              "output KHONG chua gia tri bcrypt hash that (prefix $2a$/$2b$)")
+
+        row_after = await admin.fetchrow(
+            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", target_id)
+        check(row_after is None, "hang credential THAT SU khong con trong DB sau revoke")
+
+        # m4_stage0p_pin_actor() RAISE EXCEPTION thuc su (khong tra ve NULL row) khi khong tim
+        # thay credential - phai bat exception That, khong mong doi gia tri tra ve.
+        raised_correctly = False
+        try:
+            await admin.fetchrow(
+                "SELECT * FROM m4_stage0p_pin_actor($1, $2)", target_id, test_pin)
+        except asyncpg.exceptions.PostgresError as e:
+            raised_correctly = "provisioning" in str(e).lower()
+        check(raised_correctly,
+              "m4_stage0p_pin_actor() RAISE EXCEPTION ('chua duoc provisioning') dung cho "
+              "staff_id vua bi revoke - PIN cu khong con dung duoc nua")
+    finally:
+        await admin.close()
+
+
+async def scenario_22_revoke_credential_idempotent_repeat() -> None:
+    print("== [22] F-EX-B2-03: revoke-credential goi LAN 2 tren CUNG staff_id (da revoke) van "
+          "exit 0 - idempotent, khong loi ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        recorder_id = await _make_staff(admin, "provision-pin-test-revcred22-recorder")
+        target_id = await _make_staff(admin, "provision-pin-test-revcred22-target")
+        await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret="idem-pin-value")
+
+        r1 = _run_revoke_credential(target_id, recorder_id, "first-revoke")
+        check(r1.returncode == 0, f"lan 1 revoke exit 0 (thuc te {r1.returncode})")
+
+        r2 = _run_revoke_credential(target_id, recorder_id, "second-revoke-idempotent")
+        check(r2.returncode == 0,
+              f"lan 2 revoke (khong con gi de xoa) VAN exit 0 - idempotent (thuc te {r2.returncode})")
+        check("idempotent" in r2.stdout.lower(),
+              "output lan 2 neu ro day la truong hop idempotent (khong co gi de xoa)")
+    finally:
+        await admin.close()
+
+
+async def scenario_23_revoke_credential_wrong_actor_target_failclosed() -> None:
+    print("== [23] F-EX-B2-03/04: revoke-credential voi actor/target khong ton tai hoac khong "
+          "active bi tu choi TRUOC khi dung toi DB write ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        recorder_id = await _make_staff(admin, "provision-pin-test-revcred23-recorder")
+        target_id = await _make_staff(admin, "provision-pin-test-revcred23-target")
+        await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret="wrongat-pin")
+
+        nonexistent_id = 9_999_000_111
+        r_bad_target = _run_revoke_credential(nonexistent_id, recorder_id, "bad-target")
+        check(r_bad_target.returncode != 0,
+              "target-staff-id khong ton tai bi tu choi (exit != 0)")
+
+        r_bad_actor = _run_revoke_credential(target_id, nonexistent_id, "bad-actor")
+        check(r_bad_actor.returncode != 0,
+              "actor-staff-id khong ton tai bi tu choi (exit != 0)")
+
+        # Xac nhan credential THAT (target_id hop le) KHONG bi dung toi boi 2 lan goi sai o tren.
+        row = await admin.fetchrow(
+            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", target_id)
+        check(row is not None,
+              "credential hop le KHONG bi xoa boi cac lan goi that bai voi actor/target sai")
+    finally:
+        await admin.close()
+
+
 async def main() -> int:
     await scenario_1_no_staff_id_input_surface()
     await scenario_2_generate_token_local_only()
@@ -878,6 +1011,10 @@ async def main() -> int:
     await scenario_17_unknown_scheme_failclosed_subprocess_no_secret_leak()
     await scenario_18_production_shaped_dsn_integration()
     await scenario_19_malformed_scheme_with_secret_and_control_chars_no_leak()
+    await scenario_20_dsn_shared_module_identity_regression()
+    await scenario_21_revoke_credential_success_and_pin_actor_rejects()
+    await scenario_22_revoke_credential_idempotent_repeat()
+    await scenario_23_revoke_credential_wrong_actor_target_failclosed()
 
     print()
     if _fail:

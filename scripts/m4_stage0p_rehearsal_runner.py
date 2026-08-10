@@ -139,9 +139,11 @@ def _log(event: str, **fields) -> None:
                                                   ensure_ascii=False, sort_keys=True, default=str))
 
 
-def _db_url() -> str:
-    return (os.environ.get("DATABASE_URL")
-            or "postgresql://alpha3s:alpha3s@db:5432/alpha3s")
+# F-EX-B2-01/02 (Amendment 07 Execution Blocker 1): truoc day ham nay tra nguyen DATABASE_URL
+# cho asyncpg.connect()/create_pool() - loi giong het `m4_stage0p_provision_pin.py` truoc PR #9,
+# nhung bi bo sot vi 2 tool co 2 ban sao rieng cua cung 1 logic. Gio dung CHUNG 1 nguon
+# (m4_dsn_utils.py) voi PIN tool - sua 1 lan, ca 2 tool tu dong nhat quan.
+from m4_dsn_utils import normalized_db_url as _db_url  # noqa: E402
 
 
 def _redis_url() -> str:
