@@ -299,6 +299,14 @@ root@vps:# docker compose -f docker-compose.prod.yml up -d
 > Biến bắt đầu bằng `NEXT_PUBLIC_` (dashboard) được "nướng" vào lúc build — đổi xong phải
 > `up -d dashboard` để nó build lại.
 
+**KHÔNG tạo bản sao/backup của `.env` ngay trong `/srv/alpha3s`** (ví dụ `.env.bak`,
+`.env.bak.<gì đó>`, `.env.old`) — dù `.gitignore` đã chặn `.env.*` (trừ `.env.example`) không cho
+lọt vào git, file backup vẫn nằm trên đĩa production dưới dạng plaintext secret, không được theo
+dõi bởi bất kỳ công cụ nào. Nếu cần backup `.env` để đối chiếu tạm thời, copy ra NGOÀI
+`/srv/alpha3s` (ví dụ `/root/`), xoá ngay sau khi dùng xong, không để sót lại — bài học từ
+F-PROD-FS-01 (`.env.bak.pre-llmfix` bị bỏ quên gần nửa tháng trước khi phát hiện qua `git status`
+lúc review 1 PR không liên quan).
+
 ---
 
 ## 8. Domain & HTTPS (Caddy)

@@ -301,6 +301,14 @@ root@vps:# docker compose -f docker-compose.prod.yml up -d
 > Variables starting with `NEXT_PUBLIC_` (dashboard) are baked in at build time — after
 > changing them run `up -d dashboard` to rebuild.
 
+**Do NOT create `.env` backup copies inside `/srv/alpha3s`** (e.g. `.env.bak`, `.env.bak.<x>`,
+`.env.old`) — even though `.gitignore` now blocks `.env.*` (except `.env.example`) from ever
+reaching git, a backup file still sits on the production disk as plaintext secret material,
+untracked by any tooling. If you need a temporary `.env` copy for comparison, copy it OUTSIDE
+`/srv/alpha3s` (e.g. `/root/`) and delete it right after — lesson from F-PROD-FS-01
+(`.env.bak.pre-llmfix` sat forgotten for nearly two weeks before being caught via `git status`
+during an unrelated PR review).
+
 ---
 
 ## 8. Domains & HTTPS (Caddy)
