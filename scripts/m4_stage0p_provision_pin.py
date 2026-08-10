@@ -100,9 +100,31 @@ APPROVAL_TTL_MIN_MINUTES = 1
 APPROVAL_TTL_MAX_MINUTES = 1440
 _TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# F-EX-B1-01: asyncpg.connect() chi hieu "postgresql"/"postgres" - KHONG hieu scheme co driver
+# suffix kieu SQLAlchemy (vd "postgresql+asyncpg") ma production DATABASE_URL dang dung (app
+# chinh dung SQLAlchemy async engine). Allowlist tuong minh, CHI thay phan scheme (truoc "://"
+# dau tien) - khong dung replace() khong gioi han vi mat khau/query string co the chua chuoi
+# trung ten scheme mot cach tinh co.
+_DB_SCHEME_NORMALIZE = {
+    "postgresql": "postgresql",
+    "postgres": "postgres",
+    "postgresql+asyncpg": "postgresql",
+}
+
 
 def _db_url() -> str:
-    return os.environ.get("DATABASE_URL") or "postgresql://alpha3s:alpha3s@db:5432/alpha3s"
+    raw = os.environ.get("DATABASE_URL") or "postgresql://alpha3s:alpha3s@db:5432/alpha3s"
+    if "://" not in raw:
+        sys.exit("LOI: DATABASE_URL khong hop le - thieu '://' - tu choi truoc khi ket noi DB")
+    scheme, rest = raw.split("://", 1)
+    normalized = _DB_SCHEME_NORMALIZE.get(scheme)
+    if normalized is None:
+        # KHONG in `raw`/`rest` ra day - co the chua mat khau. Chi in ten scheme (khong phai
+        # secret) de chan-doan duoc ma khong lo credential.
+        sys.exit(f"LOI: DATABASE_URL scheme khong duoc ho tro: {scheme!r} - tu choi truoc khi "
+                 "ket noi DB (fail-closed). Ho tro: postgresql://, postgres://, "
+                 "postgresql+asyncpg://.")
+    return f"{normalized}://{rest}"
 
 
 def _hash_token(token: str) -> str:
