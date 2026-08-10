@@ -299,6 +299,19 @@ root@vps:# docker compose -f docker-compose.prod.yml up -d
 > Biến bắt đầu bằng `NEXT_PUBLIC_` (dashboard) được "nướng" vào lúc build — đổi xong phải
 > `up -d dashboard` để nó build lại.
 
+**KHÔNG tạo bản sao/backup của `.env` ngay trong `/srv/alpha3s`** (ví dụ `.env.bak`,
+`.env.bak.<gì đó>`, `.env.old`). `.gitignore` có rule `.env.*` (trừ `.env.example`), nhưng rule
+này chỉ **giảm nguy cơ** bị `git add`/commit nhầm trong thao tác thông thường — **không phải rào
+chắn bảo mật**: `git add -f` vẫn bypass được, và ignore rule không bảo vệ gì trên filesystem, file
+backup vẫn nằm trên đĩa production dưới dạng plaintext secret dù có bị git bỏ qua hay không. Ignore
+rule không thay thế cho secret scanning hay review định kỳ.
+
+Tốt nhất là **không tạo bản sao plaintext nào cả**. Nếu thực sự cần backup `.env` để đối chiếu,
+KHÔNG copy tuỳ tiện ra `/root/` rồi "nhớ xoá sau" — đó chính là cách `.env.bak.pre-llmfix` (finding
+F-PROD-FS-01) bị bỏ quên gần nửa tháng trước khi phát hiện tình cờ qua `git status` lúc review 1 PR
+không liên quan. Chỉ dùng quy trình backup secret đã được duyệt (có encryption, kiểm soát truy cập,
+thời hạn lưu trữ tường minh, và xác nhận đã xoá xong) — chưa có quy trình này thì không tạo backup.
+
 ---
 
 ## 8. Domain & HTTPS (Caddy)
