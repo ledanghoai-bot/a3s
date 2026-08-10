@@ -53,7 +53,12 @@ Kich ban:
        traceback), khong lo mat khau/DSN goc ra stdout/stderr, va KHONG tao partial write nao.
   [18] F-EX-B1-02 muc 5: integration THAT — DATABASE_URL dang production
        (`postgresql+asyncpg://...`) di qua toan bo duong `record-bind-approval` tren sandbox,
-       xac nhan row THAT SU duoc ghi dung du DSN da duoc normalize."""
+       xac nhan row THAT SU duoc ghi dung du DSN da duoc normalize.
+  [19] F-DSN-R1-01 (PIN Tool DSN Compat Review 1): DATABASE_URL malformed ma phan truoc "://"
+       dau tien tinh co chua fake secret VA ky tu dieu khien/xuong dong (\\n\\r\\t) - xac nhan
+       thong bao loi la HANG SO CO DINH, khong phan chieu BAT KY phan nao cua input goc (khac
+       [17] chi test 1 ten scheme "sach" nhu tu dien), khong traceback, khong log injection qua
+       nhieu dong, va khong tao partial write."""
 
 import asyncio
 import hashlib
@@ -718,8 +723,12 @@ async def scenario_16_dsn_scheme_normalize_unit() -> None:
             exc_text = str(e.code)
         check(raised, "scheme khong nam trong allowlist (vd 'mysql') bi tu choi bang SystemExit "
               "TRUOC khi co the goi asyncpg.connect (fail-closed)")
-        check("FAKESECRET4" not in exc_text,
-              "thong bao loi tu choi scheme la KHONG chua mat khau/credential tu DSN goc")
+        # F-DSN-R1-01: kiem CHINH XAC bang hang so cua module (khong chi "khong chua marker") -
+        # chung minh thong bao loi la HANG SO CO DINH, khong noi suy BAT KY phan nao cua input
+        # goc (ke ca phan "scheme" tuong nhu vo hai) vao thong diep.
+        check(exc_text == pin_tool._DB_URL_UNSUPPORTED_SCHEME_MSG,
+              "thong bao loi tu choi scheme la HANG SO CO DINH tu module - khong noi suy bat ky "
+              "phan nao cua DATABASE_URL goc (khong chi rieng FAKESECRET4)")
     finally:
         if original is None:
             os.environ.pop("DATABASE_URL", None)
@@ -808,6 +817,47 @@ async def scenario_18_production_shaped_dsn_integration() -> None:
         await verify.close()
 
 
+async def scenario_19_malformed_scheme_with_secret_and_control_chars_no_leak() -> None:
+    print("== [19] F-DSN-R1-01: DATABASE_URL malformed - phan truoc '://' dau tien tinh co "
+          "chua fake secret VA ky tu dieu khien/xuong dong - van khong lo gi, khong goi DB ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approver_id = await _make_staff(admin, "provision-pin-test-malformed-approver")
+        target_id = await _make_staff(admin, "provision-pin-test-malformed-target")
+    finally:
+        await admin.close()
+
+    marker = "LEAKED_CREDENTIAL_MARKER_445566"
+    # Phan "scheme" (truoc "://" dau tien) o day KHONG phai 1 scheme hop le - no la 1 chuoi
+    # trong tinh huong DATABASE_URL bi cau hinh sai/gia mao, co chua marker bi ro ri VA ky tu
+    # dieu khien (\n, \r, \t) - dung de xac nhan _db_url() khong bao gio phan chieu bat ky phan
+    # nao cua no (F-DSN-R1-01), khac voi test [17] (chi test 1 ten scheme "sach" nhu tu dien).
+    malformed_scheme = f"oops{marker}\n\r\tstill-not-a-scheme"
+    malformed_dsn = f"{malformed_scheme}://testuser:{marker}@db:5432/alpha3s"
+    r = _run_record_bind_approval_with_env(
+        target_id, approver_id, "test-approval-malformed-scheme", malformed_dsn)
+    combined = r.stdout + r.stderr
+    check(r.returncode != 0, "record-bind-approval voi DATABASE_URL malformed exit != 0")
+    check(marker not in combined,
+          "marker bi ro ri gia (xuat hien CA trong scheme LAN password) KHONG xuat hien o "
+          "stdout/stderr du la 1 phan cua 'scheme' malformed")
+    check(malformed_dsn not in combined, "toan bo DSN malformed goc KHONG xuat hien trong output")
+    check("Traceback" not in r.stderr, "tu choi SACH bang thong bao hang so, khong traceback")
+    check(r.stderr.strip().count("\n") <= 1,
+          "thong bao loi la 1 dong hang so - khong phan chieu ky tu xuong dong tu input malformed "
+          "vao stderr (chong log injection)")
+
+    verify = await asyncpg.connect(DB_URL)
+    try:
+        row = await verify.fetchrow(
+            "SELECT id FROM m4_stage0p_pin_bind_approvals WHERE approval_ref = $1",
+            "test-approval-malformed-scheme")
+        check(row is None, "KHONG co approval row nao duoc tao tu DATABASE_URL malformed (khong "
+              "partial write)")
+    finally:
+        await verify.close()
+
+
 async def main() -> int:
     await scenario_1_no_staff_id_input_surface()
     await scenario_2_generate_token_local_only()
@@ -827,6 +877,7 @@ async def main() -> int:
     await scenario_16_dsn_scheme_normalize_unit()
     await scenario_17_unknown_scheme_failclosed_subprocess_no_secret_leak()
     await scenario_18_production_shaped_dsn_integration()
+    await scenario_19_malformed_scheme_with_secret_and_control_chars_no_leak()
 
     print()
     if _fail:

@@ -112,18 +112,27 @@ _DB_SCHEME_NORMALIZE = {
 }
 
 
+_DB_URL_MISSING_SCHEME_SEP_MSG = (
+    "LOI: DATABASE_URL khong hop le (thieu '://') - tu choi truoc khi ket noi DB "
+    "(fail-closed). Ho tro: postgresql://, postgres://, postgresql+asyncpg://.")
+_DB_URL_UNSUPPORTED_SCHEME_MSG = (
+    "LOI: DATABASE_URL scheme khong duoc ho tro - tu choi truoc khi ket noi DB (fail-closed). "
+    "Ho tro: postgresql://, postgres://, postgresql+asyncpg://.")
+
+
 def _db_url() -> str:
+    # F-DSN-R1-01: 2 thong bao loi tren la HANG SO co dinh - KHONG bao gio duoc noi suy bat ky
+    # phan nao cua `raw`/`scheme` (kha nang truoc do chi in `scheme`) vao trong do. Ly do: neu
+    # DATABASE_URL bi malformed/gia mao, phan duoc tach ra lam "scheme" van co the tinh co chua
+    # secret hoac ky tu dieu khien/xuong dong - phan an toan duy nhat la KHONG phan chieu bat ky
+    # phan nao cua input goc trong thong bao loi, du la phan tuong nhu vo hai.
     raw = os.environ.get("DATABASE_URL") or "postgresql://alpha3s:alpha3s@db:5432/alpha3s"
     if "://" not in raw:
-        sys.exit("LOI: DATABASE_URL khong hop le - thieu '://' - tu choi truoc khi ket noi DB")
+        sys.exit(_DB_URL_MISSING_SCHEME_SEP_MSG)
     scheme, rest = raw.split("://", 1)
     normalized = _DB_SCHEME_NORMALIZE.get(scheme)
     if normalized is None:
-        # KHONG in `raw`/`rest` ra day - co the chua mat khau. Chi in ten scheme (khong phai
-        # secret) de chan-doan duoc ma khong lo credential.
-        sys.exit(f"LOI: DATABASE_URL scheme khong duoc ho tro: {scheme!r} - tu choi truoc khi "
-                 "ket noi DB (fail-closed). Ho tro: postgresql://, postgres://, "
-                 "postgresql+asyncpg://.")
+        sys.exit(_DB_URL_UNSUPPORTED_SCHEME_MSG)
     return f"{normalized}://{rest}"
 
 
