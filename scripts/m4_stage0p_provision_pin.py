@@ -100,9 +100,40 @@ APPROVAL_TTL_MIN_MINUTES = 1
 APPROVAL_TTL_MAX_MINUTES = 1440
 _TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# F-EX-B1-01: asyncpg.connect() chi hieu "postgresql"/"postgres" - KHONG hieu scheme co driver
+# suffix kieu SQLAlchemy (vd "postgresql+asyncpg") ma production DATABASE_URL dang dung (app
+# chinh dung SQLAlchemy async engine). Allowlist tuong minh, CHI thay phan scheme (truoc "://"
+# dau tien) - khong dung replace() khong gioi han vi mat khau/query string co the chua chuoi
+# trung ten scheme mot cach tinh co.
+_DB_SCHEME_NORMALIZE = {
+    "postgresql": "postgresql",
+    "postgres": "postgres",
+    "postgresql+asyncpg": "postgresql",
+}
+
+
+_DB_URL_MISSING_SCHEME_SEP_MSG = (
+    "LOI: DATABASE_URL khong hop le (thieu '://') - tu choi truoc khi ket noi DB "
+    "(fail-closed). Ho tro: postgresql://, postgres://, postgresql+asyncpg://.")
+_DB_URL_UNSUPPORTED_SCHEME_MSG = (
+    "LOI: DATABASE_URL scheme khong duoc ho tro - tu choi truoc khi ket noi DB (fail-closed). "
+    "Ho tro: postgresql://, postgres://, postgresql+asyncpg://.")
+
 
 def _db_url() -> str:
-    return os.environ.get("DATABASE_URL") or "postgresql://alpha3s:alpha3s@db:5432/alpha3s"
+    # F-DSN-R1-01: 2 thong bao loi tren la HANG SO co dinh - KHONG bao gio duoc noi suy bat ky
+    # phan nao cua `raw`/`scheme` (kha nang truoc do chi in `scheme`) vao trong do. Ly do: neu
+    # DATABASE_URL bi malformed/gia mao, phan duoc tach ra lam "scheme" van co the tinh co chua
+    # secret hoac ky tu dieu khien/xuong dong - phan an toan duy nhat la KHONG phan chieu bat ky
+    # phan nao cua input goc trong thong bao loi, du la phan tuong nhu vo hai.
+    raw = os.environ.get("DATABASE_URL") or "postgresql://alpha3s:alpha3s@db:5432/alpha3s"
+    if "://" not in raw:
+        sys.exit(_DB_URL_MISSING_SCHEME_SEP_MSG)
+    scheme, rest = raw.split("://", 1)
+    normalized = _DB_SCHEME_NORMALIZE.get(scheme)
+    if normalized is None:
+        sys.exit(_DB_URL_UNSUPPORTED_SCHEME_MSG)
+    return f"{normalized}://{rest}"
 
 
 def _hash_token(token: str) -> str:
