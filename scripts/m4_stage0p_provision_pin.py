@@ -341,6 +341,10 @@ async def provision_pin(*, token_reader=getpass.getpass, pin_reader=getpass.getp
         await conn.close()
 
 
+REVOKE_CREDENTIAL_PERMISSION = "m4.stage0p.approve"
+_REASON_MAX_LEN = 500
+
+
 async def revoke_credential(target_staff_id: int, actor_staff_id: int, reason: str) -> int:
     """F-EX-B2-03 (Amendment 07 Execution Blocker 1): supported, audited, fail-closed cach de
     thu hoi 1 PIN credential da provision - khong con raw SQL ad hoc. XOA HANG (khong chi danh
@@ -349,20 +353,46 @@ async def revoke_credential(target_staff_id: int, actor_staff_id: int, reason: s
     tu RAISE EXCEPTION ro rang ("chua duoc provisioning pin_secret") khi khong tim thay hang,
     nen xoa hang dat dung hieu qua "revoked" ma khong can schema change. Ghi 1 dong vao
     `audit_log` (bang da co san, khong migration moi) de giu vet kiem toan ben ngoai bang M4 du
-    hang credential da bi xoa hoan toan."""
+    hang credential da bi xoa hoan toan.
+
+    F-RCR-R1-01 (Runner DSN/Credential Revocation Review 1): actor PHAI co quyen
+    `m4.stage0p.approve` (`m4_stage0p_staff_permissions`) moi duoc revoke - truoc day chi kiem
+    actor ton tai/active, nghia la BAT KY active staff nao cung tu revoke duoc credential cua
+    nguoi khac. Target KHONG con bat buoc active - staff da bi deactivate lai CANG can duoc dat
+    ra cleanup, khong phai truong hop ngoai le.
+
+    F-RCR-R1-04: `reason` phai duoc trim va khong duoc rong sau trim, gioi han do dai hop ly
+    (chong audit_log bi lam day bang input khong gioi han) - tu choi TRUOC khi cham DB."""
+    reason = reason.strip()
+    if not reason:
+        print("LOI: --reason khong duoc rong/toan khoang trang sau khi trim - tu choi truoc "
+              "khi ket noi DB", file=sys.stderr)
+        return 1
+    if len(reason) > _REASON_MAX_LEN:
+        print(f"LOI: --reason vuot qua {_REASON_MAX_LEN} ky tu - tu choi truoc khi ket noi DB",
+              file=sys.stderr)
+        return 1
+
     conn = await asyncpg.connect(_db_url())
     try:
         target = await conn.fetchrow(
-            "SELECT id, username, is_active FROM staff_users WHERE id = $1", target_staff_id)
-        if target is None or not target["is_active"]:
-            print(f"LOI: target-staff-id {target_staff_id} khong ton tai/khong active",
-                  file=sys.stderr)
+            "SELECT id, username FROM staff_users WHERE id = $1", target_staff_id)
+        if target is None:
+            print(f"LOI: target-staff-id {target_staff_id} khong ton tai", file=sys.stderr)
             return 1
         actor = await conn.fetchrow(
             "SELECT id, username, is_active FROM staff_users WHERE id = $1", actor_staff_id)
         if actor is None or not actor["is_active"]:
             print(f"LOI: actor-staff-id {actor_staff_id} khong ton tai/khong active",
                   file=sys.stderr)
+            return 1
+        has_permission = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM m4_stage0p_staff_permissions "
+            "WHERE staff_id = $1 AND permission = $2)",
+            actor_staff_id, REVOKE_CREDENTIAL_PERMISSION)
+        if not has_permission:
+            print(f"LOI: actor-staff-id {actor_staff_id} khong co quyen "
+                  f"{REVOKE_CREDENTIAL_PERMISSION!r} - tu choi", file=sys.stderr)
             return 1
 
         async with conn.transaction():

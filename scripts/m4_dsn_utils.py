@@ -30,13 +30,25 @@ DB_URL_MISSING_SCHEME_SEP_MSG = (
 DB_URL_UNSUPPORTED_SCHEME_MSG = (
     "LOI: DATABASE_URL scheme khong duoc ho tro - tu choi truoc khi ket noi DB (fail-closed). "
     "Ho tro: postgresql://, postgres://, postgresql+asyncpg://.")
+DB_URL_EMPTY_MSG = (
+    "LOI: DATABASE_URL duoc set nhung rong/toan khoang trang - tu choi truoc khi ket noi DB "
+    "(fail-closed). Khong tu dong dung gia tri mac dinh khi bien MOI TRUONG da ton tai.")
 
 
 def normalized_db_url(default: str = "postgresql://alpha3s:alpha3s@db:5432/alpha3s") -> str:
-    """Doc DATABASE_URL tu moi truong, normalize scheme cho asyncpg. `default` chi dung khi
-    KHONG co DATABASE_URL nao duoc set (vd chay local khong co env) - khong bao gio duoc dung
-    de che giau 1 gia tri rong/sai thuc su tu production."""
-    raw = os.environ.get("DATABASE_URL") or default
+    """Doc DATABASE_URL tu moi truong, normalize scheme cho asyncpg.
+
+    F-RCR-R1-02: phai phan biet bien moi truong ABSENT (chua tung set - khi do `default` moi
+    duoc dung, danh cho chay local khong co env) voi bien PRESENT-BUT-EMPTY (da set nhung la
+    chuoi rong/toan khoang trang - truong hop nay la fail-closed, KHONG duoc am tham chuyen sang
+    `default` vi co the che giau 1 loi cau hinh that su tren production khien tool ket noi nham
+    DB thay vi dung lai)."""
+    if "DATABASE_URL" not in os.environ:
+        raw = default
+    else:
+        raw = os.environ["DATABASE_URL"]
+        if not raw.strip():
+            sys.exit(DB_URL_EMPTY_MSG)
     if "://" not in raw:
         sys.exit(DB_URL_MISSING_SCHEME_SEP_MSG)
     scheme, rest = raw.split("://", 1)

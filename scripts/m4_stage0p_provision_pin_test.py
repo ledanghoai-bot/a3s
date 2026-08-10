@@ -67,7 +67,23 @@ Kich ban:
        revoke (RAISE EXCEPTION that, khong phai gia lap).
   [22] F-EX-B2-03: goi `revoke-credential` lan 2 tren staff_id da revoke van exit 0 - idempotent.
   [23] F-EX-B2-03/04: `revoke-credential` voi actor-staff-id hoac target-staff-id khong ton tai
-       bi tu choi TRUOC khi dung DB, va KHONG anh huong toi credential hop le khac."""
+       bi tu choi TRUOC khi dung DB, va KHONG anh huong toi credential hop le khac.
+  [24] F-RCR-R1-01 (Runner DSN/Credential Revocation Review 1): actor ACTIVE nhung KHONG co
+       quyen `m4.stage0p.approve` bi tu choi (khac [23] la actor khong ton tai) - credential/
+       audit_log khong doi.
+  [25] F-RCR-R1-01: actor co dung quyen THANH CONG; target DA deactivate van revoke duoc (staff
+       da deactivate cang can duoc cleanup, khong phai truong hop loai tru).
+  [26] F-RCR-R1-04: `--reason` rong/toan khoang trang/qua 500 ky tu bi tu choi TRUOC khi cham DB
+       - khong xoa credential, khong ghi audit_log; reason hop le (co khoang trang thua) van
+       thanh cong sau trim.
+  [27] F-RCR-R1-02: DATABASE_URL duoc SET nhung rong/toan khoang trang phai bi tu choi (KHONG
+       am tham dung default) - phan biet ABSENT (dung default, khong regression) voi
+       PRESENT-BUT-EMPTY (fail-closed) - ca unit-level lan qua CLI that.
+  [28] F-RCR-R1-03: static scan machine-verifiable tren toan repo (`scripts/`, `app/`) - MOI file
+       goi `asyncpg.connect`/`create_pool` phai co trong manifest tuong minh voi disposition
+       (`shared_helper`/`bounded_legacy_replace`/`parameter_only`/`hardcoded_constant`) VA
+       disposition do phai khop pattern that trong source - fail neu xuat hien entry point moi
+       chua phan loai hoac manifest bi loi thoi."""
 
 import asyncio
 import hashlib
@@ -170,6 +186,12 @@ async def _make_staff(admin, username: str) -> int:
         "INSERT INTO staff_users (username, password_hash, password_salt, is_active) "
         "VALUES ($1, 'x', 'x', true) RETURNING id", username)
     return row["id"]
+
+
+async def _grant_permission(admin, *, staff_id: int, permission: str) -> None:
+    await admin.execute(
+        "INSERT INTO m4_stage0p_staff_permissions (staff_id, permission, granted_by) "
+        "VALUES ($1, $2, $1) ON CONFLICT DO NOTHING", staff_id, permission)
 
 
 async def _provision_pin_secret_directly(admin, *, staff_id: int, pin_secret: str) -> None:
@@ -905,6 +927,7 @@ async def scenario_21_revoke_credential_success_and_pin_actor_rejects() -> None:
     admin = await asyncpg.connect(DB_URL)
     try:
         recorder_id = await _make_staff(admin, "provision-pin-test-revcred21-recorder")
+        await _grant_permission(admin, staff_id=recorder_id, permission="m4.stage0p.approve")
         target_id = await _make_staff(admin, "provision-pin-test-revcred21-target")
         test_pin = "revoke-test-pin-value-999"
         await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret=test_pin)
@@ -949,6 +972,7 @@ async def scenario_22_revoke_credential_idempotent_repeat() -> None:
     admin = await asyncpg.connect(DB_URL)
     try:
         recorder_id = await _make_staff(admin, "provision-pin-test-revcred22-recorder")
+        await _grant_permission(admin, staff_id=recorder_id, permission="m4.stage0p.approve")
         target_id = await _make_staff(admin, "provision-pin-test-revcred22-target")
         await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret="idem-pin-value")
 
@@ -970,6 +994,7 @@ async def scenario_23_revoke_credential_wrong_actor_target_failclosed() -> None:
     admin = await asyncpg.connect(DB_URL)
     try:
         recorder_id = await _make_staff(admin, "provision-pin-test-revcred23-recorder")
+        await _grant_permission(admin, staff_id=recorder_id, permission="m4.stage0p.approve")
         target_id = await _make_staff(admin, "provision-pin-test-revcred23-target")
         await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret="wrongat-pin")
 
@@ -989,6 +1014,234 @@ async def scenario_23_revoke_credential_wrong_actor_target_failclosed() -> None:
               "credential hop le KHONG bi xoa boi cac lan goi that bai voi actor/target sai")
     finally:
         await admin.close()
+
+
+async def scenario_24_revoke_credential_unauthorized_active_actor_failclosed() -> None:
+    print("== [24] F-RCR-R1-01: actor ACTIVE nhung KHONG co quyen m4.stage0p.approve bi tu choi "
+          "- khac voi kich ban [23] (actor khong ton tai) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        # Actor active, TON TAI that, nhung KHONG duoc grant quyen m4.stage0p.approve.
+        unauthorized_actor_id = await _make_staff(admin, "provision-pin-test-revcred24-noperm")
+        target_id = await _make_staff(admin, "provision-pin-test-revcred24-target")
+        await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret="noperm-pin")
+
+        r = _run_revoke_credential(target_id, unauthorized_actor_id, "unauthorized-attempt")
+        check(r.returncode != 0,
+              "actor active nhung KHONG co quyen m4.stage0p.approve bi tu choi (exit != 0)")
+
+        row = await admin.fetchrow(
+            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", target_id)
+        check(row is not None, "credential KHONG bi xoa boi actor khong co quyen")
+
+        audit_count = await admin.fetchval(
+            "SELECT count(*) FROM audit_log WHERE action = 'm4_stage0p.pin_credential.revoke' "
+            "AND entity_id = $1", str(target_id))
+        check(audit_count == 0, "KHONG co audit_log row nao duoc ghi tu lan goi bi tu choi nay")
+    finally:
+        await admin.close()
+
+
+async def scenario_25_revoke_credential_authorized_actor_and_inactive_target_succeed() -> None:
+    print("== [25] F-RCR-R1-01: actor co dung quyen m4.stage0p.approve THANH CONG; target da "
+          "DEACTIVATE van revoke duoc (deactivated staff cang can duoc cleanup, khong phai ngoai "
+          "le) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        authorized_actor_id = await _make_staff(admin, "provision-pin-test-revcred25-recorder")
+        await _grant_permission(admin, staff_id=authorized_actor_id,
+                                 permission="m4.stage0p.approve")
+        target_id = await _make_staff(admin, "provision-pin-test-revcred25-target")
+        await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret="inactive-pin")
+        await admin.execute("UPDATE staff_users SET is_active = false WHERE id = $1", target_id)
+
+        r = _run_revoke_credential(target_id, authorized_actor_id, "cleanup-deactivated-staff")
+        check(r.returncode == 0,
+              f"revoke-credential THANH CONG cho target DA deactivate (thuc te exit={r.returncode}, "
+              f"stderr={r.stderr!r})")
+
+        row = await admin.fetchrow(
+            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", target_id)
+        check(row is None, "credential cua target da deactivate THAT SU bi xoa")
+    finally:
+        await admin.close()
+
+
+async def scenario_26_revoke_credential_reason_validation() -> None:
+    print("== [26] F-RCR-R1-04: --reason rong/toan khoang trang/qua dai bi tu choi TRUOC khi cham "
+          "DB - khong xoa, khong ghi audit ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        actor_id = await _make_staff(admin, "provision-pin-test-revcred26-recorder")
+        await _grant_permission(admin, staff_id=actor_id, permission="m4.stage0p.approve")
+        target_id = await _make_staff(admin, "provision-pin-test-revcred26-target")
+        await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret="reason-pin")
+
+        r_empty = _run_revoke_credential(target_id, actor_id, "")
+        check(r_empty.returncode != 0, "reason rong bi tu choi (exit != 0)")
+
+        r_whitespace = _run_revoke_credential(target_id, actor_id, "   \t  ")
+        check(r_whitespace.returncode != 0, "reason toan khoang trang bi tu choi sau trim")
+
+        r_oversized = _run_revoke_credential(target_id, actor_id, "x" * 501)
+        check(r_oversized.returncode != 0, "reason vuot qua gioi han do dai bi tu choi")
+
+        row = await admin.fetchrow(
+            "SELECT 1 FROM m4_stage0p_actor_credentials WHERE staff_id = $1", target_id)
+        check(row is not None, "credential KHONG bi xoa boi bat ky lan goi reason khong hop le nao")
+        audit_count = await admin.fetchval(
+            "SELECT count(*) FROM audit_log WHERE action = 'm4_stage0p.pin_credential.revoke' "
+            "AND entity_id = $1", str(target_id))
+        check(audit_count == 0, "KHONG co audit_log row nao tu cac lan reason khong hop le")
+
+        r_valid = _run_revoke_credential(target_id, actor_id, "  valid reason after trim  ")
+        check(r_valid.returncode == 0,
+              f"reason hop le (co khoang trang thua o 2 dau, se duoc trim) THANH CONG "
+              f"(thuc te exit={r_valid.returncode})")
+    finally:
+        await admin.close()
+
+
+async def scenario_27_dsn_present_but_empty_failclosed() -> None:
+    print("== [27] F-RCR-R1-02: DATABASE_URL duoc SET nhung rong/toan khoang trang phai tu choi "
+          "- KHONG duoc am tham dung default (phan biet ABSENT voi PRESENT-BUT-EMPTY) ==")
+    import m4_dsn_utils
+    original = os.environ.get("DATABASE_URL")
+    original_present = "DATABASE_URL" in os.environ
+    try:
+        os.environ["DATABASE_URL"] = ""
+        raised_empty = False
+        exc_text = ""
+        try:
+            m4_dsn_utils.normalized_db_url()
+        except SystemExit as e:
+            raised_empty = True
+            exc_text = str(e.code)
+        check(raised_empty, "DATABASE_URL='' (rong) bi tu choi bang SystemExit, KHONG am tham "
+              "dung default")
+        check(exc_text == m4_dsn_utils.DB_URL_EMPTY_MSG,
+              "thong bao loi la HANG SO rieng cho truong hop rong (DB_URL_EMPTY_MSG)")
+
+        os.environ["DATABASE_URL"] = "   \t  "
+        raised_whitespace = False
+        try:
+            m4_dsn_utils.normalized_db_url()
+        except SystemExit:
+            raised_whitespace = True
+        check(raised_whitespace, "DATABASE_URL toan khoang trang cung bi tu choi (khong chi "
+              "chuoi rong tuyet doi)")
+
+        os.environ.pop("DATABASE_URL", None)
+        check(m4_dsn_utils.normalized_db_url() == "postgresql://alpha3s:alpha3s@db:5432/alpha3s",
+              "DATABASE_URL HOAN TOAN ABSENT (chua tung set) van dung default nhu cu - khong "
+              "regression cho truong hop chay local khong co env")
+
+        r_subprocess = subprocess.run(
+            [sys.executable, "scripts/m4_stage0p_provision_pin.py", "revoke-credential",
+             "--target-staff-id", "1", "--actor-staff-id", "1", "--reason", "dsn-empty-test"],
+            cwd=str(ROOT), env={**os.environ, "DATABASE_URL": ""},
+            capture_output=True, text=True, timeout=30)
+        check(r_subprocess.returncode != 0,
+              "qua CLI that: DATABASE_URL='' cung bi tu choi TRUOC khi goi asyncpg.connect")
+        check("Traceback" not in r_subprocess.stderr,
+              "tu choi SACH bang thong bao hang so, khong traceback")
+    finally:
+        if original_present:
+            os.environ["DATABASE_URL"] = original
+        else:
+            os.environ.pop("DATABASE_URL", None)
+
+
+# F-RCR-R1-03: manifest tuong minh cho MOI file trong repo goi asyncpg.connect()/create_pool() -
+# scanner o kich ban [28] fail neu tim thay 1 call site KHONG nam trong danh sach nay (drift
+# trong tuong lai) HOAC 1 entry trong manifest khong con dung disposition da khai bao.
+_DSN_INVENTORY_MANIFEST = {
+    "scripts/m4_stage0p_provision_pin.py": "shared_helper",
+    "scripts/m4_stage0p_rehearsal_runner.py": "shared_helper",
+    "app/db_pool.py": "bounded_legacy_replace",
+    "app/api/dashboard.py": "bounded_legacy_replace",
+    "app/services/audit_service.py": "bounded_legacy_replace",
+    # auth_router.py goi asyncpg.connect() truc tiep nhung KHONG tu doc DATABASE_URL - no de
+    # cho auth_service._db_url() (file khac) normalize ho, nen kiem tra phai doi chieu CA HAI
+    # file: call site (o day) VA noi thuc su implement (auth_service.py, id 1 cua tuple).
+    "app/api/auth_router.py": ("external_service_helper", "app/services/auth_service.py"),
+    "scripts/migrate.py": "bounded_legacy_replace",
+    "scripts/assign_staff_roles.py": "bounded_legacy_replace",
+    "scripts/kb_ingest.py": "bounded_legacy_replace",
+    "scripts/ingest.py": "bounded_legacy_replace",
+    "scripts/m0_foundation_validation.py": "bounded_legacy_replace",
+    "scripts/m2_backfill.py": "bounded_legacy_replace",
+    "app/services/pii/stage0p_pool.py": "parameter_only",
+    "scripts/m2_backfill_prod_dryrun.py": "hardcoded_constant",
+    "scripts/m2_existing_apply_rehearsal.py": "hardcoded_constant",
+    "scripts/m3_existing_apply_rehearsal.py": "hardcoded_constant",
+}
+
+
+async def scenario_28_dsn_inventory_regression_machine_verifiable() -> None:
+    print("== [28] F-RCR-R1-03: machine-verifiable static scan - MOI file trong repo goi "
+          "asyncpg.connect()/create_pool() phai duoc phan loai ro rang trong manifest, va "
+          "disposition khai bao phai khop pattern that trong source ==")
+    scan_re = re.compile(r"asyncpg\.(?:connect|create_pool)\s*\(")
+    exclude_name_suffixes = ("_test.py",)
+    exclude_names = {"m4_dsn_utils.py"}
+    found: dict[str, str] = {}
+    for subdir in ("scripts", "app"):
+        for path in (ROOT / subdir).rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            if path.name.endswith(exclude_name_suffixes) or path.name in exclude_names:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if scan_re.search(text):
+                found[path.relative_to(ROOT).as_posix()] = text
+
+    unclassified = sorted(set(found) - set(_DSN_INVENTORY_MANIFEST))
+    check(not unclassified,
+          f"KHONG co file nao goi asyncpg.connect/create_pool ma chua co trong manifest - "
+          f"phat hien entry point MOI can duoc phan loai (thuc te: {unclassified})")
+
+    stale_manifest_entries = sorted(set(_DSN_INVENTORY_MANIFEST) - set(found))
+    check(not stale_manifest_entries,
+          f"moi entry trong manifest van con ton tai va con goi asyncpg trong repo THAT (khong "
+          f"co entry 'chet' hoac sai duong dan - thuc te thieu: {stale_manifest_entries})")
+
+    for rel, text in sorted(found.items()):
+        disposition = _DSN_INVENTORY_MANIFEST.get(rel)
+        if isinstance(disposition, tuple) and disposition[0] == "external_service_helper":
+            helper_rel = disposition[1]
+            helper_module = helper_rel.rsplit("/", 1)[-1].removesuffix(".py")
+            check(f"{helper_module}._db_url()" in text,
+                  f"{rel}: khai bao 'external_service_helper' nhung KHONG thay goi "
+                  f"{helper_module}._db_url() nhu mo ta")
+            helper_text = (ROOT / helper_rel).read_text(encoding="utf-8")
+            check('.replace("+asyncpg"' in helper_text or ".replace('+asyncpg'" in helper_text,
+                  f"{rel}: file duoc tro toi ({helper_rel}) KHONG con dung "
+                  f".replace(\"+asyncpg\"...) nhu mo ta - external_service_helper khong con dung")
+            continue
+        if disposition == "shared_helper":
+            check("from m4_dsn_utils import" in text or "import m4_dsn_utils" in text,
+                  f"{rel}: khai bao 'shared_helper' nhung KHONG import m4_dsn_utils")
+        elif disposition == "bounded_legacy_replace":
+            check('.replace("+asyncpg"' in text or ".replace('+asyncpg'" in text,
+                  f"{rel}: khai bao 'bounded_legacy_replace' nhung KHONG dung "
+                  f".replace(\"+asyncpg\"...) nhu mo ta")
+        elif disposition == "parameter_only":
+            check("DATABASE_URL" not in text,
+                  f"{rel}: khai bao 'parameter_only' nhung co tham chieu DATABASE_URL truc tiep "
+                  f"trong file (khong con thuan la tham so)")
+        elif disposition == "hardcoded_constant":
+            check('os.environ.get("DATABASE_URL")' not in text
+                  and "os.environ['DATABASE_URL']" not in text
+                  and 'os.environ["DATABASE_URL"]' not in text,
+                  f"{rel}: khai bao 'hardcoded_constant' nhung co doc DATABASE_URL tu env "
+                  f"(khong con dung hang so cung nhu mo ta)")
+        else:
+            check(False, f"{rel}: disposition khong hop le/khong xac dinh trong manifest "
+                  f"({disposition!r})")
+
+    print(f"  (thong ke: {len(found)} file goi asyncpg.connect/create_pool, tat ca da duoc phan "
+          f"loai)")
 
 
 async def main() -> int:
@@ -1015,6 +1268,11 @@ async def main() -> int:
     await scenario_21_revoke_credential_success_and_pin_actor_rejects()
     await scenario_22_revoke_credential_idempotent_repeat()
     await scenario_23_revoke_credential_wrong_actor_target_failclosed()
+    await scenario_24_revoke_credential_unauthorized_active_actor_failclosed()
+    await scenario_25_revoke_credential_authorized_actor_and_inactive_target_succeed()
+    await scenario_26_revoke_credential_reason_validation()
+    await scenario_27_dsn_present_but_empty_failclosed()
+    await scenario_28_dsn_inventory_regression_machine_verifiable()
 
     print()
     if _fail:
