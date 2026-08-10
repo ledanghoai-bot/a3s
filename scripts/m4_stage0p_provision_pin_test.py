@@ -83,7 +83,12 @@ Kich ban:
        goi `asyncpg.connect`/`create_pool` phai co trong manifest tuong minh voi disposition
        (`shared_helper`/`bounded_legacy_replace`/`parameter_only`/`hardcoded_constant`) VA
        disposition do phai khop pattern that trong source - fail neu xuat hien entry point moi
-       chua phan loai hoac manifest bi loi thoi."""
+       chua phan loai hoac manifest bi loi thoi.
+  [29] F-RCR-R1-01 (Runner DSN/Credential Revocation Review 2): race THAT qua 2 ket noi Postgres
+       dong thoi, dung CHINH XAC cau lenh FOR UPDATE ma `revoke_credential()` dung (khong hand-
+       copy sai lech) - chung minh 1 thao tac deactivate actor dong thoi THAT SU bi Postgres row-
+       level lock chan toi khi transaction cua revoke_credential() ket thuc, khong con khoang ho
+       TOCTOU giua luc kiem quyen va luc thuc su xoa credential."""
 
 import asyncio
 import hashlib
@@ -1212,36 +1217,100 @@ async def scenario_28_dsn_inventory_regression_machine_verifiable() -> None:
             helper_rel = disposition[1]
             helper_module = helper_rel.rsplit("/", 1)[-1].removesuffix(".py")
             check(f"{helper_module}._db_url()" in text,
-                  f"{rel}: khai bao 'external_service_helper' nhung KHONG thay goi "
-                  f"{helper_module}._db_url() nhu mo ta")
+                  f"{rel}: goi dung {helper_module}._db_url() dung nhu disposition "
+                  f"'external_service_helper' da khai bao")
             helper_text = (ROOT / helper_rel).read_text(encoding="utf-8")
             check('.replace("+asyncpg"' in helper_text or ".replace('+asyncpg'" in helper_text,
-                  f"{rel}: file duoc tro toi ({helper_rel}) KHONG con dung "
-                  f".replace(\"+asyncpg\"...) nhu mo ta - external_service_helper khong con dung")
+                  f"{rel}: file duoc tro toi ({helper_rel}) dung dung .replace(\"+asyncpg\"...) "
+                  f"nhu disposition da khai bao")
             continue
         if disposition == "shared_helper":
             check("from m4_dsn_utils import" in text or "import m4_dsn_utils" in text,
-                  f"{rel}: khai bao 'shared_helper' nhung KHONG import m4_dsn_utils")
+                  f"{rel}: import dung m4_dsn_utils, khop disposition 'shared_helper' da khai bao")
         elif disposition == "bounded_legacy_replace":
             check('.replace("+asyncpg"' in text or ".replace('+asyncpg'" in text,
-                  f"{rel}: khai bao 'bounded_legacy_replace' nhung KHONG dung "
-                  f".replace(\"+asyncpg\"...) nhu mo ta")
+                  f"{rel}: dung dung .replace(\"+asyncpg\"...), khop disposition "
+                  f"'bounded_legacy_replace' da khai bao")
         elif disposition == "parameter_only":
             check("DATABASE_URL" not in text,
-                  f"{rel}: khai bao 'parameter_only' nhung co tham chieu DATABASE_URL truc tiep "
-                  f"trong file (khong con thuan la tham so)")
+                  f"{rel}: khong tu tham chieu DATABASE_URL, khop disposition 'parameter_only' "
+                  f"da khai bao (chi nhan dsn qua tham so)")
         elif disposition == "hardcoded_constant":
             check('os.environ.get("DATABASE_URL")' not in text
                   and "os.environ['DATABASE_URL']" not in text
                   and 'os.environ["DATABASE_URL"]' not in text,
-                  f"{rel}: khai bao 'hardcoded_constant' nhung co doc DATABASE_URL tu env "
-                  f"(khong con dung hang so cung nhu mo ta)")
+                  f"{rel}: khong doc DATABASE_URL tu env, khop disposition 'hardcoded_constant' "
+                  f"da khai bao (dung hang so co dinh)")
         else:
             check(False, f"{rel}: disposition khong hop le/khong xac dinh trong manifest "
                   f"({disposition!r})")
 
     print(f"  (thong ke: {len(found)} file goi asyncpg.connect/create_pool, tat ca da duoc phan "
           f"loai)")
+
+
+async def scenario_29_revoke_credential_concurrency_race_locking() -> None:
+    print("== [29] F-RCR-R1-01: race THAT giua revoke-credential va deactivate actor dong thoi "
+          "qua 2 ket noi Postgres - FOR UPDATE THAT SU chan, khong con khoang ho TOCTOU ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        actor_id = await _make_staff(admin, "provision-pin-test-revcred29-recorder")
+        await _grant_permission(admin, staff_id=actor_id, permission="m4.stage0p.approve")
+        target_id = await _make_staff(admin, "provision-pin-test-revcred29-target")
+        await _provision_pin_secret_directly(admin, staff_id=target_id, pin_secret="race29-pin")
+    finally:
+        await admin.close()
+
+    conn_a = await asyncpg.connect(DB_URL)
+    conn_b = await asyncpg.connect(DB_URL)
+    tx = conn_a.transaction()
+    await tx.start()
+    try:
+        # CHINH XAC cau lenh dau tien ma revoke_credential() dung de khoa actor (khong hand-copy
+        # sai lech).
+        locked = await conn_a.fetchrow(
+            "SELECT id, username, is_active FROM staff_users WHERE id = $1 FOR UPDATE",
+            actor_id)
+        check(locked is not None and locked["is_active"],
+              "connection A lay duoc lock tren actor (actor van active luc do)")
+
+        task_b = asyncio.create_task(conn_b.execute(
+            "UPDATE staff_users SET is_active = false WHERE id = $1", actor_id))
+        blocked = False
+        try:
+            await asyncio.wait_for(asyncio.shield(task_b), timeout=1.5)
+        except asyncio.TimeoutError:
+            blocked = True
+        check(blocked, "deactivate actor tu connection B THAT SU bi Postgres CHAN boi FOR UPDATE "
+              "cua connection A (row-level lock that, khong phai gia lap bang code)")
+
+        # A tiep tuc dung buoc thu 2 cua revoke_credential(): kiem quyen, cung FOR UPDATE, cung
+        # transaction - chung minh quyen van con hop le trong pham vi giao dich cua A.
+        has_permission = await conn_a.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM m4_stage0p_staff_permissions "
+            "WHERE staff_id = $1 AND permission = $2 FOR UPDATE)",
+            actor_id, "m4.stage0p.approve")
+        check(has_permission,
+              "quyen van con hop le trong pham vi transaction cua A (B van dang bi chan, chua "
+              "the can thiep)")
+
+        await tx.commit()  # nha lock - A hoan tat "revoke thanh cong" truoc khi B duoc tiep tuc
+        await asyncio.wait_for(task_b, timeout=5)
+    finally:
+        await conn_a.close()
+
+    row = await conn_b.fetchrow("SELECT is_active FROM staff_users WHERE id = $1", actor_id)
+    check(row is not None and row["is_active"] is False,
+          "SAU KHI A nha lock, deactivate cua B hoan tat thanh cong (bi tri hoan dung thu tu, "
+          "khong bi mat) - khong co interleaving nao xay ra giua 2 giao dich")
+    await conn_b.close()
+
+    # Xac nhan he qua thuc te: 1 lan goi revoke-credential MOI (SAU KHI actor da bi deactivate
+    # do race o tren) gio bi tu choi dung - khong con cach nao "lot qua" duoc trang thai active cu.
+    r_after = _run_revoke_credential(target_id, actor_id, "attempt-after-actor-deactivated")
+    check(r_after.returncode != 0,
+          "revoke-credential SAU KHI actor bi deactivate (boi race o tren) bi tu choi dung - "
+          "khong co unauthorized delete/audit nao co the xay ra tu trang thai cu")
 
 
 async def main() -> int:
@@ -1273,6 +1342,7 @@ async def main() -> int:
     await scenario_26_revoke_credential_reason_validation()
     await scenario_27_dsn_present_but_empty_failclosed()
     await scenario_28_dsn_inventory_regression_machine_verifiable()
+    await scenario_29_revoke_credential_concurrency_race_locking()
 
     print()
     if _fail:

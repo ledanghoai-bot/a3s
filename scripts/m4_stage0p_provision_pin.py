@@ -81,6 +81,7 @@ import argparse
 import asyncio
 import getpass
 import hashlib
+import json
 import re
 import secrets
 import sys
@@ -345,6 +346,11 @@ REVOKE_CREDENTIAL_PERMISSION = "m4.stage0p.approve"
 _REASON_MAX_LEN = 500
 
 
+REVOKE_CREDENTIAL_TRUST_MODEL = (
+    "privileged_operator_procedural"  # xem docstring revoke_credential() muc "Trust model"
+)
+
+
 async def revoke_credential(target_staff_id: int, actor_staff_id: int, reason: str) -> int:
     """F-EX-B2-03 (Amendment 07 Execution Blocker 1): supported, audited, fail-closed cach de
     thu hoi 1 PIN credential da provision - khong con raw SQL ad hoc. XOA HANG (khong chi danh
@@ -359,10 +365,25 @@ async def revoke_credential(target_staff_id: int, actor_staff_id: int, reason: s
     `m4.stage0p.approve` (`m4_stage0p_staff_permissions`) moi duoc revoke - truoc day chi kiem
     actor ton tai/active, nghia la BAT KY active staff nao cung tu revoke duoc credential cua
     nguoi khac. Target KHONG con bat buoc active - staff da bi deactivate lai CANG can duoc dat
-    ra cleanup, khong phai truong hop ngoai le.
+    ra cleanup, khong phai truong hop ngoai le. TOAN BO lookup (target/actor/permission) + DELETE
+    + audit INSERT nam trong CUNG 1 transaction, khoa `FOR UPDATE` tren staff_users (actor) va
+    m4_stage0p_staff_permissions - neu 1 thao tac khac dang revoke quyen actor hoac deactivate
+    actor DONG THOI, thao tac do se THAT SU bi Postgres row-level lock chan toi khi transaction
+    nay ket thuc (khong con khoang ho TOCTOU giua luc kiem quyen va luc thuc su xoa).
 
     F-RCR-R1-04: `reason` phai duoc trim va khong duoc rong sau trim, gioi han do dai hop ly
-    (chong audit_log bi lam day bang input khong gioi han) - tu choi TRUOC khi cham DB."""
+    (chong audit_log bi lam day bang input khong gioi han) - tu choi TRUOC khi cham DB.
+
+    F-RCR-R2-01: Trust model cho `actor-staff-id` — CHON "privileged operator procedural trust"
+    (huong 2 CA de xuat), CUNG mo hinh da duoc CA chap nhan cho `record-bind-approval`'s
+    `recorded_by` (xem migration 041 comment F-M4-PIN-R2-02): moi truong CLI nay KHONG co
+    authenticated session/SSO, va cong cu nay se duoc dung boi PO/nguoi duoc PO uy quyen TU chay
+    tren SSH session cua chinh ho (dung tien le cac subcommand khac cua chinh tool nay). Khong
+    chon huong "authenticated principal" (bat actor tu nhap PIN qua pin_actor()) vi se tao vong
+    lap chicken-and-egg khi can revoke CHINH credential cua actor dang thuc thi lenh, va vuot
+    pham vi delta nho CA yeu cau cho PR nay. `actor_staff_id` o day la 1 KHAI BAO qua CLI flag,
+    KHONG phai 1 khang dinh danh tinh da duoc cong cu xac thuc - ghi ro trong `audit_log.after`
+    (truong `trust_model`) de khong bi hieu nham la 1 phien lam viec staff da dang nhap that."""
     reason = reason.strip()
     if not reason:
         print("LOI: --reason khong duoc rong/toan khoang trang sau khi trim - tu choi truoc "
@@ -375,36 +396,48 @@ async def revoke_credential(target_staff_id: int, actor_staff_id: int, reason: s
 
     conn = await asyncpg.connect(_db_url())
     try:
-        target = await conn.fetchrow(
-            "SELECT id, username FROM staff_users WHERE id = $1", target_staff_id)
-        if target is None:
-            print(f"LOI: target-staff-id {target_staff_id} khong ton tai", file=sys.stderr)
-            return 1
-        actor = await conn.fetchrow(
-            "SELECT id, username, is_active FROM staff_users WHERE id = $1", actor_staff_id)
-        if actor is None or not actor["is_active"]:
-            print(f"LOI: actor-staff-id {actor_staff_id} khong ton tai/khong active",
-                  file=sys.stderr)
-            return 1
-        has_permission = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM m4_stage0p_staff_permissions "
-            "WHERE staff_id = $1 AND permission = $2)",
-            actor_staff_id, REVOKE_CREDENTIAL_PERMISSION)
-        if not has_permission:
-            print(f"LOI: actor-staff-id {actor_staff_id} khong co quyen "
-                  f"{REVOKE_CREDENTIAL_PERMISSION!r} - tu choi", file=sys.stderr)
-            return 1
-
         async with conn.transaction():
+            # F-RCR-R1-01: FOR UPDATE khoa CA HAI: hang staff_users cua actor VA hang permission
+            # - toan bo check + write nam trong 1 transaction nen 1 revoke-quyen/deactivate dong
+            # thoi tren actor nay THAT SU bi chan toi khi transaction nay commit/rollback.
+            actor = await conn.fetchrow(
+                "SELECT id, username, is_active FROM staff_users WHERE id = $1 FOR UPDATE",
+                actor_staff_id)
+            if actor is None or not actor["is_active"]:
+                print(f"LOI: actor-staff-id {actor_staff_id} khong ton tai/khong active",
+                      file=sys.stderr)
+                return 1
+            has_permission = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM m4_stage0p_staff_permissions "
+                "WHERE staff_id = $1 AND permission = $2 FOR UPDATE)",
+                actor_staff_id, REVOKE_CREDENTIAL_PERMISSION)
+            if not has_permission:
+                print(f"LOI: actor-staff-id {actor_staff_id} khong co quyen "
+                      f"{REVOKE_CREDENTIAL_PERMISSION!r} - tu choi", file=sys.stderr)
+                return 1
+
+            target = await conn.fetchrow(
+                "SELECT id, username FROM staff_users WHERE id = $1 FOR UPDATE", target_staff_id)
+            if target is None:
+                print(f"LOI: target-staff-id {target_staff_id} khong ton tai", file=sys.stderr)
+                return 1
+
             deleted = await conn.fetchrow(
                 "DELETE FROM m4_stage0p_actor_credentials WHERE staff_id = $1 "
                 "RETURNING staff_id", target_staff_id)
+            audit_after = json.dumps({
+                "trust_model": REVOKE_CREDENTIAL_TRUST_MODEL,
+                "actor_identity_authenticated": False,
+                "note": "actor_staff_id la khai bao qua CLI flag trong 1 phien SSH da co quyen "
+                        "quan tri production, KHONG duoc cong cu nay xac thuc bang PIN/session "
+                        "(cung mo hinh voi record-bind-approval recorded_by).",
+            })
             await conn.execute(
                 "INSERT INTO audit_log "
-                "  (actor_type, actor_staff_id, action, entity_type, entity_id, reason) "
+                "  (actor_type, actor_staff_id, action, entity_type, entity_id, reason, after) "
                 "VALUES ('staff', $1, 'm4_stage0p.pin_credential.revoke', "
-                "        'm4_stage0p_actor_credentials', $2, $3)",
-                actor_staff_id, str(target_staff_id), reason)
+                "        'm4_stage0p_actor_credentials', $2, $3, $4::jsonb)",
+                actor_staff_id, str(target_staff_id), reason, audit_after)
 
         if deleted is None:
             print(f"Khong co credential nao cho staff_id={target_staff_id} (da revoke truoc do "
@@ -453,9 +486,15 @@ def main() -> int:
     p_revoke_cred = sub.add_parser(
         "revoke-credential",
         help="F-EX-B2-03: thu hoi/xoa 1 PIN credential da provision (supported, audited, "
-             "idempotent, khong raw SQL)")
+             "idempotent, khong raw SQL). Doi hoi actor co quyen m4.stage0p.approve "
+             "(F-RCR-R1-01).")
     p_revoke_cred.add_argument("--target-staff-id", type=int, required=True)
-    p_revoke_cred.add_argument("--actor-staff-id", type=int, required=True)
+    p_revoke_cred.add_argument(
+        "--actor-staff-id", type=int, required=True,
+        help="F-RCR-R2-01: KHAI BAO qua flag, KHONG duoc cong cu nay xac thuc bang PIN/session - "
+             "phai la staff_id THAT SU dang chay lenh nay tren SSH session cua ho (procedural "
+             "trust, cung mo hinh voi record-bind-approval --recorded-by). Actor phai active va "
+             "co quyen m4.stage0p.approve.")
     p_revoke_cred.add_argument("--reason", type=str, required=True)
 
     args = parser.parse_args()
