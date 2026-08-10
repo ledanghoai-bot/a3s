@@ -300,12 +300,17 @@ root@vps:# docker compose -f docker-compose.prod.yml up -d
 > `up -d dashboard` để nó build lại.
 
 **KHÔNG tạo bản sao/backup của `.env` ngay trong `/srv/alpha3s`** (ví dụ `.env.bak`,
-`.env.bak.<gì đó>`, `.env.old`) — dù `.gitignore` đã chặn `.env.*` (trừ `.env.example`) không cho
-lọt vào git, file backup vẫn nằm trên đĩa production dưới dạng plaintext secret, không được theo
-dõi bởi bất kỳ công cụ nào. Nếu cần backup `.env` để đối chiếu tạm thời, copy ra NGOÀI
-`/srv/alpha3s` (ví dụ `/root/`), xoá ngay sau khi dùng xong, không để sót lại — bài học từ
-F-PROD-FS-01 (`.env.bak.pre-llmfix` bị bỏ quên gần nửa tháng trước khi phát hiện qua `git status`
-lúc review 1 PR không liên quan).
+`.env.bak.<gì đó>`, `.env.old`). `.gitignore` có rule `.env.*` (trừ `.env.example`), nhưng rule
+này chỉ **giảm nguy cơ** bị `git add`/commit nhầm trong thao tác thông thường — **không phải rào
+chắn bảo mật**: `git add -f` vẫn bypass được, và ignore rule không bảo vệ gì trên filesystem, file
+backup vẫn nằm trên đĩa production dưới dạng plaintext secret dù có bị git bỏ qua hay không. Ignore
+rule không thay thế cho secret scanning hay review định kỳ.
+
+Tốt nhất là **không tạo bản sao plaintext nào cả**. Nếu thực sự cần backup `.env` để đối chiếu,
+KHÔNG copy tuỳ tiện ra `/root/` rồi "nhớ xoá sau" — đó chính là cách `.env.bak.pre-llmfix` (finding
+F-PROD-FS-01) bị bỏ quên gần nửa tháng trước khi phát hiện tình cờ qua `git status` lúc review 1 PR
+không liên quan. Chỉ dùng quy trình backup secret đã được duyệt (có encryption, kiểm soát truy cập,
+thời hạn lưu trữ tường minh, và xác nhận đã xoá xong) — chưa có quy trình này thì không tạo backup.
 
 ---
 

@@ -302,12 +302,18 @@ root@vps:# docker compose -f docker-compose.prod.yml up -d
 > changing them run `up -d dashboard` to rebuild.
 
 **Do NOT create `.env` backup copies inside `/srv/alpha3s`** (e.g. `.env.bak`, `.env.bak.<x>`,
-`.env.old`) — even though `.gitignore` now blocks `.env.*` (except `.env.example`) from ever
-reaching git, a backup file still sits on the production disk as plaintext secret material,
-untracked by any tooling. If you need a temporary `.env` copy for comparison, copy it OUTSIDE
-`/srv/alpha3s` (e.g. `/root/`) and delete it right after — lesson from F-PROD-FS-01
-(`.env.bak.pre-llmfix` sat forgotten for nearly two weeks before being caught via `git status`
-during an unrelated PR review).
+`.env.old`). `.gitignore` has an `.env.*` rule (except `.env.example`), but that rule only
+**reduces the risk** of an accidental `git add`/commit during normal workflow — it is **not a
+security boundary**: `git add -f` still bypasses it, and an ignore rule protects nothing on the
+filesystem itself; a backup file still sits on the production disk as plaintext secret material
+whether or not git ignores it. The rule does not substitute for secret scanning or periodic review.
+
+The best option is to **not create a plaintext copy at all**. If you genuinely need to back up
+`.env`, do not just copy it to `/root/` and "remember to delete it later" — that is exactly how
+`.env.bak.pre-llmfix` (finding F-PROD-FS-01) sat forgotten for nearly two weeks before being
+caught incidentally via `git status` during an unrelated PR review. Only use an approved secret
+backup process (encrypted, access-controlled, with an explicit retention/expiry window and
+verified deletion) — without that process in place, don't create a backup.
 
 ---
 
