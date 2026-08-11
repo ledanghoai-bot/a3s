@@ -32,6 +32,14 @@ Kich ban:
   [12] F-EX-B2-01/02/04: DATABASE_URL malformed (phan "scheme" tinh co chua fake secret VA ky tu
       dieu khien/xuong dong) qua CLI runner that — tu choi sach, khong leak, khong traceback,
       khong log injection, khong DB call/write.
+  [14] F-A08-EXEC-02/A08-COR-02/03: verifier phat hien 1 batch bi bo quen o 'locked' sau lifecycle
+      that bai — regression truc tiep cho chinh lop bug da lot qua o Amendment 08 (round truoc,
+      postcondition verifier khong biet gi ve bang m4_selection_batches).
+  [15] A08-COR-02: _terminalize_batch() tuyet doi khong dong 1 batch DA 'evaluation_completed'
+      sang 'aborted', ke ca neu bi goi nham.
+  [16] Tai hien DUNG kich ban Amendment 08 that bai that (execute qua CLI that, khong signing
+      service) — xac nhan lan nay ket thuc dormant-clean THAT SU: batch tracked o 'aborted' (khong
+      con orphan 'locked'), 0 residual, key retired, capture OFF.
 """
 
 import asyncio
@@ -713,7 +721,7 @@ async def scenario_8_capture_off_ignores_stale_flag() -> None:
 
         cleanup_step_ok = await runner._do_cleanup(
             admin_conn, pool, operator_staff_id=operator_staff, operator_pin="operator-pin-8",
-            state=stale_state)
+            state=stale_state, lifecycle_failed=False)
         check(cleanup_step_ok.get("capture_off") is True, "_do_cleanup() bao capture_off=True")
 
         capture_after = await runner.read_capture_enabled(admin_conn)
@@ -739,7 +747,7 @@ async def scenario_9_redis_postcheck_is_mandatory() -> None:
         try:
             postcondition_ok, problems, cleanup_step_ok = await runner._do_cleanup_and_verify(
                 admin_conn, pool, operator_staff_id=0, operator_pin="unused-no-capture-to-turn-off",
-                state=empty_state)
+                state=empty_state, lifecycle_failed=False)
         finally:
             if original_redis_url is not None:
                 os.environ["REDIS_URL"] = original_redis_url
@@ -775,7 +783,7 @@ async def scenario_10_verifier_itself_fails_closed() -> None:
         try:
             postcondition_ok, problems, cleanup_step_ok = await runner._do_cleanup_and_verify(
                 closed_conn, pool, operator_staff_id=0, operator_pin="unused-no-capture-to-turn-off",
-                state=empty_state)
+                state=empty_state, lifecycle_failed=False)
         except Exception:  # noqa: BLE001 — chinh dieu KHONG duoc xay ra, day la assertion
             raised = True
 
@@ -832,6 +840,187 @@ async def scenario_13_dsn_shared_module_identity_regression() -> None:
           "check) - dam bao khong con logic normalize DSN nao rieng, lech trong runner")
 
 
+async def scenario_14_verifier_catches_orphan_batch() -> None:
+    """F-A08-EXEC-02/A08-COR-02/03: regression truc tiep cho chinh lop bug da lot qua o Amendment
+    08 — mo phong 1 batch bi 'bo quen' o trang thai 'locked' (dung CHINH ham `_do_cleanup` NHUNG
+    danh lua no bang cach chi goi cac buoc KHAC, khong terminalize — tuc la tai hien dung y het
+    Amendment 08: cleanup 'thanh cong' o cac buoc con lai nhung batch van con locked), roi xac
+    nhan `_verify_cleanup_postconditions(..., lifecycle_failed=True)` GIO ĐAY phat hien duoc
+    (truoc round nay se PASS sai, day la finding CA chi ra)."""
+    print("== [14] A08-COR-02/03: verifier phat hien batch con 'locked' sau lifecycle that bai "
+          "(regression cho chinh bug Amendment 08) ==")
+    admin_conn = await asyncpg.connect(DB_URL)
+    try:
+        state = runner.RehearsalState()
+        row = await admin_conn.fetchrow(
+            "INSERT INTO m4_selection_batches "
+            "  (window_start, window_end, eligible_count, selected_count, algorithm_seed, "
+            "   locked_conversation_ids, purpose_code, status, retention_days, normalization_version) "
+            "VALUES (now(), now() + interval '1 second', 0, 0, 'test-seed-14', '{}', "
+            "        $1, 'locked', 45, "
+            "        (SELECT version FROM m4_stage0p_normalization_registry LIMIT 1)) "
+            "RETURNING batch_id", runner.PURPOSE_CODE)
+        state.batch_id = row["batch_id"]
+
+        # CO Y KHONG goi _terminalize_batch - mo phong dung lop bug Amendment 08 (cac buoc cleanup
+        # khac deu "thanh cong" nhung batch bi bo quen o 'locked').
+        ok, problems = await runner._verify_cleanup_postconditions(
+            admin_conn, state, lifecycle_failed=True)
+        check(ok is False,
+              "postcondition_ok=False khi batch tracked van 'locked' sau lifecycle that bai - "
+              "day CHINH LA residual da lot qua khong bi phat hien o Amendment 08")
+        check(any("locked" in p and str(state.batch_id) in p for p in problems),
+              f"problems neu ro batch_id + trang thai sai lech (thuc te {problems})")
+
+        # Xac nhan nguoc lai: SAU KHI terminalize dung, verifier PASS cho phan batch (cac phan
+        # khac cua state deu rong nen trivially sach).
+        terminal_status = await runner._terminalize_batch(admin_conn, state)
+        check(terminal_status == "aborted",
+              f"_terminalize_batch() doi batch sang 'aborted' (thuc te {terminal_status!r})")
+        ok2, problems2 = await runner._verify_cleanup_postconditions(
+            admin_conn, state, lifecycle_failed=True)
+        check(ok2 is True,
+              f"sau terminalize dung, verifier PASS (thuc te ok={ok2}, problems={problems2})")
+
+        await admin_conn.execute("DELETE FROM m4_selection_batches WHERE batch_id = $1",
+                                 state.batch_id)
+    finally:
+        await admin_conn.close()
+
+
+async def scenario_15_terminalize_never_touches_success_batch() -> None:
+    """A08-COR-02: `_terminalize_batch` tuyet doi khong duoc dong 1 batch DA toi
+    'evaluation_completed' (thanh cong that su) sang 'aborted' - ke ca neu bi goi nham (vd loi
+    logic goi cleanup 2 lan). Predicate WHERE status NOT IN (...) la lop bao ve duy nhat can vi
+    batch_id la PK - kiem truc tiep bang 1 batch da o 'evaluation_completed'."""
+    print("== [15] A08-COR-02: terminalize KHONG BAO GIO dong batch da evaluation_completed ==")
+    admin_conn = await asyncpg.connect(DB_URL)
+    try:
+        state = runner.RehearsalState()
+        row = await admin_conn.fetchrow(
+            "INSERT INTO m4_selection_batches "
+            "  (window_start, window_end, eligible_count, selected_count, algorithm_seed, "
+            "   locked_conversation_ids, purpose_code, status, retention_days, normalization_version, "
+            "   collection_closed_at, labels_sealed_at, labels_sealed_hash, predictions_written_at, "
+            "   result_hash, evaluation_completed_at, evaluation_report_hash) "
+            "VALUES (now(), now() + interval '1 second', 0, 0, 'test-seed-15', '{}', "
+            "        $1, 'evaluation_completed', 45, "
+            "        (SELECT version FROM m4_stage0p_normalization_registry LIMIT 1), "
+            "        now(), now(), 'x', now(), 'x', now(), 'x') "
+            "RETURNING batch_id, status", runner.PURPOSE_CODE)
+        state.batch_id = row["batch_id"]
+
+        terminal_status = await runner._terminalize_batch(admin_conn, state)
+        check(terminal_status == "evaluation_completed",
+              f"_terminalize_batch() GIU NGUYEN 'evaluation_completed', khong dong sang 'aborted' "
+              f"(thuc te {terminal_status!r})")
+        real_status = await admin_conn.fetchval(
+            "SELECT status FROM m4_selection_batches WHERE batch_id = $1", state.batch_id)
+        check(real_status == "evaluation_completed",
+              f"xac nhan DOC LAP trong DB: status van 'evaluation_completed' (thuc te {real_status!r})")
+
+        await admin_conn.execute("DELETE FROM m4_selection_batches WHERE batch_id = $1",
+                                 state.batch_id)
+    finally:
+        await admin_conn.close()
+
+
+async def scenario_16_reproduce_amendment08_ends_dormant_clean() -> None:
+    """Tai hien DUNG kich ban Amendment 08 that bai that (11/8): execute that (khong --dry-run)
+    KHONG co signing service nao dang chay (M4_STAGE0P_SIGNING_SOCKET rong/khong duoc set, dung
+    trang thai production truoc khi A08-COR-01 duoc trien khai) - collector se fail-closed 3 lan
+    roi runner tu abort. Khac voi lan that (chua co A08-COR-02/03), lan nay xac nhan runner ket
+    thuc DORMANT-CLEAN THAT SU: capture OFF, 0 synthetic residual, key retired, VA batch tracked
+    o dung trang thai 'aborted' (khong con 'locked' bi bo quen)."""
+    print("== [16] Tai hien Amendment 08 (signing service khong san sang) - xac nhan ket thuc "
+          "dormant-clean THAT SU (batch 'aborted', khong con orphan) ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approval_staff = await _make_staff(
+            admin, username="rehearsal-test-16-approver", permissions=["m4.stage0p.approve"],
+            pin_secret="approver-pin-16")
+        operator_staff = await _make_staff(
+            admin, username="rehearsal-test-16-operator", permissions=["m4.stage0p.operate"],
+            pin_secret="operator-pin-16")
+        reviewer_staff = await _make_staff(
+            admin, username="rehearsal-test-16-reviewer",
+            permissions=["m4.stage0p.review", "m4.stage0p.evaluate"], pin_secret="reviewer-pin-16")
+    finally:
+        await admin.close()
+
+    approval_ref = "m4-rehearsal-test-16-no-signer"
+    r = _run_cli("record-approval", "--approval-staff-id", str(approval_staff),
+                "--approval-ref", approval_ref,
+                "--valid-from", "2020-01-01T00:00:00+00:00",
+                "--valid-until", "2099-01-01T00:00:00+00:00",
+                env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-16"})
+    check(r.returncode == 0, "setup: record-approval thanh cong")
+
+    sample_key = _gen_key_b64()
+    transcript_key = _gen_key_b64()
+    auth_key = _gen_key_b64()
+    r = _run_cli("provision-keys", env_extra={
+        "M4_SAMPLE_KEY_B64": sample_key, "M4_TRANSCRIPT_HMAC_KEY_B64": transcript_key,
+        "M4_SIGNING_AUTH_VERIFY_KEY_B64": auth_key}, expect_rc=0)
+    check(r.returncode == 0, "setup: provision-keys thanh cong")
+
+    manifest_path = _write_small_manifest(3, "16")
+    env = {**os.environ, "DATABASE_URL": DB_URL, "REDIS_URL": REDIS_URL,
+          "STAGE0P_REHEARSAL_OPERATOR_PIN": "operator-pin-16",
+          "STAGE0P_REHEARSAL_REVIEWER_PIN": "reviewer-pin-16"}
+    env.pop("M4_STAGE0P_SIGNING_SOCKET", None)  # dam bao dung trang thai "chua cau hinh" that
+    # COLLECTOR_MAX_ATTEMPTS/BACKOFF trong runner qua lon cho 1 test nhanh (11s/lan, 40 lan) - dung
+    # monkeypatch qua bien moi truong khong ton tai la khong du, nen chay subprocess that nhung
+    # chi doi 2 lan stall (~22s) roi runner TU abort dung thiet ke stall-detection cua no.
+    proc = subprocess.Popen(
+        [sys.executable, "scripts/m4_stage0p_rehearsal_runner.py", "run",
+         "--manifest", str(manifest_path), "--approval-ref", approval_ref,
+         "--operator-staff-id", str(operator_staff), "--reviewer-staff-id", str(reviewer_staff)],
+        cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        check(False, "subprocess KHONG thoat trong 60s - treo bat thuong")
+        stdout = stdout or ""
+
+    check(proc.returncode != 0,
+          f"lifecycle THAT BAI dung nhu Amendment 08 that (signing service khong san sang, "
+          f"thuc te exit={proc.returncode})")
+    check('"SigningServiceError"' in stdout or "signing_socket" in stdout,
+          "log xac nhan nguyen nhan la signing service/socket, dung nhu su co that")
+    check('"batch_terminalized"' in stdout, "log co dong 'batch_terminalized' (buoc MOI, khong "
+                                            "ton tai luc Amendment 08 that bai that)")
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        capture_off = not bool(await verify_conn.fetchval(
+            "SELECT capture_enabled FROM m4_stage0p_control WHERE id = 1"))
+        check(capture_off, "post-failure: capture_enabled = False")
+        residual = await verify_conn.fetchval(
+            "SELECT count(*) FROM customers WHERE psid LIKE $1", f"{runner.PSID_PREFIX}%")
+        check(residual == 0, f"post-failure: 0 synthetic customer sot lai (thuc te {residual})")
+        batch_row = await verify_conn.fetchrow(
+            "SELECT batch_id, status, aborted_at FROM m4_selection_batches "
+            "WHERE algorithm_seed LIKE '%rehearsal-v1' ORDER BY locked_at DESC LIMIT 1")
+        check(batch_row is not None and batch_row["status"] == "aborted"
+              and batch_row["aborted_at"] is not None,
+              f"batch cua chinh lan chay nay o dung trang thai 'aborted' voi aborted_at co gia tri "
+              f"- KHONG con la orphan 'locked' nhu Amendment 08 that (thuc te {dict(batch_row) if batch_row else None})")
+        keys_retired = await verify_conn.fetchval(
+            "SELECT count(*) FROM m4_stage0p_transcript_signing_keys "
+            "WHERE key_version = $1 AND retired_at IS NULL", runner.TRANSCRIPT_KEY_VERSION)
+        check(keys_retired == 0, "post-failure: transcript signing key da retired")
+
+        if batch_row is not None:
+            await verify_conn.execute("DELETE FROM m4_selection_batches WHERE batch_id = $1",
+                                      batch_row["batch_id"])
+    finally:
+        await verify_conn.close()
+    manifest_path.unlink(missing_ok=True)
+
+
 async def main() -> int:
     await scenario_1_happy_path_e2e()
     await scenario_2_hard_fence()
@@ -847,6 +1036,9 @@ async def main() -> int:
     await scenario_11_dsn_production_shaped_integration()
     await scenario_12_dsn_malformed_scheme_failclosed()
     await scenario_13_dsn_shared_module_identity_regression()
+    await scenario_14_verifier_catches_orphan_batch()
+    await scenario_15_terminalize_never_touches_success_batch()
+    await scenario_16_reproduce_amendment08_ends_dormant_clean()
 
     print()
     if _fail:

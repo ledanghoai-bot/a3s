@@ -100,7 +100,8 @@ async def start_signing_service(
         sample_key: bytes | None = None, hmac_key: bytes | None = None,
         auth_verify_key: bytes | None = None,
         run_as_uid: int | None = None,
-        shared_gid: int | None = None) -> tuple[asyncio.subprocess.Process, bytes, bytes, bytes]:
+        shared_gid: int | None = None,
+        detach: bool = False) -> tuple[asyncio.subprocess.Process, bytes, bytes, bytes]:
     """Khoi dong tien trinh signing service, tra ve
     (process, sample_key_bytes, hmac_key_bytes, auth_verify_key_bytes). Cho toi khi socket THAT SU
     xuat hien truoc khi tra ve (khong doan thoi gian sleep co dinh).
@@ -114,7 +115,12 @@ async def start_signing_service(
 
     `shared_gid`: neu duoc truyen (cung voi `run_as_uid` khac uid tien trinh goi), thu muc socket
     duoc tao mode 0710 + chown ve (run_as_uid, shared_gid) — cho phep 1 UID KHAC (thanh vien cung
-    group) mo duoc socket file (T12-01, xem `stage0p_signing_service.py` docstring)."""
+    group) mo duoc socket file (T12-01, xem `stage0p_signing_service.py` docstring).
+
+    `detach`: A08-COR-01 (production launcher) — khi True, spawn voi `start_new_session=True` de
+    tien trinh con SONG SOT sau khi tien trinh GOI thoat (vd 1 lenh CLI ngan chay xong roi ket
+    thuc) — khong anh huong hanh vi cac test hien co (mac dinh False, giu nguyen tien trinh con
+    gan voi process group cua tien trinh test cha nhu truoc gio)."""
     sample_key = sample_key or os.urandom(32)
     hmac_key = hmac_key or os.urandom(32)
     auth_verify_key = auth_verify_key or os.urandom(32)
@@ -149,6 +155,8 @@ async def start_signing_service(
         # gid THAT cua user do.
         kwargs["user"] = run_as_uid
         kwargs["group"] = pwd.getpwuid(run_as_uid).pw_gid
+    if detach:
+        kwargs["start_new_session"] = True
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "app.services.pii.stage0p_signing_service",
         cwd=str(ROOT), env=env,

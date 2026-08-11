@@ -152,11 +152,23 @@ async def record_bind_approval(target_staff_id: int, recorded_by: int, approval_
 
         valid_from = datetime.now(timezone.utc)
         valid_until = valid_from + timedelta(minutes=valid_minutes)
-        row = await conn.fetchrow(
-            "INSERT INTO m4_stage0p_pin_bind_approvals "
-            "  (approval_ref, target_staff_id, recorded_by, valid_from, valid_until) "
-            "VALUES ($1, $2, $3, $4, $5) RETURNING id",
-            approval_ref, target_staff_id, recorded_by, valid_from, valid_until)
+        try:
+            row = await conn.fetchrow(
+                "INSERT INTO m4_stage0p_pin_bind_approvals "
+                "  (approval_ref, target_staff_id, recorded_by, valid_from, valid_until) "
+                "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                approval_ref, target_staff_id, recorded_by, valid_from, valid_until)
+        except asyncpg.exceptions.UniqueViolationError:
+            # F-A08-EXEC-04/A08-COR-04: mot bind approval CON HIEU LUC (chua revoke) da ton tai cho
+            # dung cap (approval_ref, target_staff_id) nay (migration 043) -- chan duplicate ceremony
+            # do lap lenh/race o CSDL, khong chi dua vao caller tu can than. KHONG in gia tri nao cua
+            # approval cu (khong phai secret nhung khong lien quan yeu cau nay) -- chi bao ro nguyen
+            # nhan va huong xu ly.
+            print(f"LOI: da co 1 bind approval CON HIEU LUC (chua revoke) cho approval_ref={approval_ref!r} "
+                  f"target_staff_id={target_staff_id} -- khong tao duplicate. Neu day la lap lenh "
+                  "ngoai y muon, dung approval id da co (xem lai output lenh truoc). Neu that su can "
+                  "1 approval MOI cho dung cap nay, `revoke-bind-approval` cai cu truoc.", file=sys.stderr)
+            return 1
 
         print(f"Approval id={row['id']} da ghi: approval_ref={approval_ref!r} "
               f"target_staff_id={target_staff_id} (username={target['username']!r}) "

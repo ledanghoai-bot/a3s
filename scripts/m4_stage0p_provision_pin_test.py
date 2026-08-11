@@ -88,7 +88,12 @@ Kich ban:
        dong thoi, dung CHINH XAC cau lenh FOR UPDATE ma `revoke_credential()` dung (khong hand-
        copy sai lech) - chung minh 1 thao tac deactivate actor dong thoi THAT SU bi Postgres row-
        level lock chan toi khi transaction cua revoke_credential() ket thuc, khong con khoang ho
-       TOCTOU giua luc kiem quyen va luc thuc su xoa credential."""
+       TOCTOU giua luc kiem quyen va luc thuc su xoa credential.
+  [30] F-A08-EXEC-04/A08-COR-04 (Amendment 08 Execution Attempt 1 Review): duplicate
+       `record-bind-approval` cung (approval_ref, target_staff_id) CON HIEU LUC bi CHINH DB tu
+       choi sach (migration 043 partial unique index), khong chi dua vao CLI can than - tai hien
+       dung su co Amendment 08 (1 lenh bi lap 2 lan tao approval id 4 va 7). Sau khi revoke, 1
+       approval MOI cho DUNG cap van tao duoc binh thuong."""
 
 import asyncio
 import hashlib
@@ -1313,6 +1318,57 @@ async def scenario_29_revoke_credential_concurrency_race_locking() -> None:
           "khong co unauthorized delete/audit nao co the xay ra tu trang thai cu")
 
 
+async def scenario_30_duplicate_bind_approval_rejected_by_db() -> None:
+    """F-A08-EXEC-04/A08-COR-04: duplicate `record-bind-approval` CUNG (approval_ref,
+    target_staff_id) bi CSDL tu choi sach (migration 043 partial unique index) - dung tai hien
+    dung su co Amendment 08 (1 lenh bi go/paste lap 2 lan tao ra approval id 4 VA 7). Sau khi
+    revoke ban dau, mot approval MOI cho DUNG cap nay van tao duoc (revoke lam no roi khoi pham vi
+    partial index) - khong lam mat kha nang re-issue that su can thiet."""
+    print("== [30] A08-COR-04: duplicate bind approval (cung ref+target) bi DB tu choi sach ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approver_id = await _make_staff(admin, "provision-pin-test-dupguard-approver")
+        target_id = await _make_staff(admin, "provision-pin-test-dupguard-target")
+    finally:
+        await admin.close()
+
+    approval_ref = "test-dupguard-amendment-x-bind-target"
+    first = _run_record_bind_approval(target_id, approver_id, approval_ref)
+    check(first.returncode == 0, f"lan 1: record-bind-approval thanh cong (exit {first.returncode})")
+    first_id = _extract_approval_id(first.stdout)
+
+    second = _run_record_bind_approval(target_id, approver_id, approval_ref)
+    check(second.returncode != 0,
+          f"lan 2 (CUNG approval_ref+target_staff_id, con hieu luc): bi tu choi (exit "
+          f"{second.returncode}, ky vong != 0)")
+    check("Traceback" not in second.stderr,
+          "tu choi SACH bang thong bao ro rang, khong phai raw traceback/UniqueViolationError "
+          "lot ra ngoai")
+    check("CON HIEU LUC" in second.stdout + second.stderr or "khong tao duplicate" in (second.stdout + second.stderr),
+          f"thong bao loi giai thich ro nguyen nhan duplicate (thuc te stdout={second.stdout!r} "
+          f"stderr={second.stderr!r})")
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        count = await verify_conn.fetchval(
+            "SELECT count(*) FROM m4_stage0p_pin_bind_approvals "
+            "WHERE approval_ref = $1 AND target_staff_id = $2", approval_ref, target_id)
+        check(count == 1,
+              f"chi DUNG 1 hang ton tai cho cap (approval_ref, target_staff_id) nay trong DB "
+              f"(thuc te {count}) - lan 2 khong tao duplicate row du CLI co the da thu INSERT")
+    finally:
+        await verify_conn.close()
+
+    revoke = _run_revoke_bind_approval(first_id, "test-dupguard: mo pham vi cho approval moi")
+    check(revoke.returncode == 0, f"revoke approval dau tien thanh cong (exit {revoke.returncode})")
+
+    third = _run_record_bind_approval(target_id, approver_id, approval_ref)
+    check(third.returncode == 0,
+          f"SAU KHI revoke, 1 approval MOI cho DUNG cap (ref, target) van tao duoc binh thuong "
+          f"(exit {third.returncode}) - partial unique index chi chan hang CON hieu luc, khong "
+          "chan tai su dung ref sau khi da revoke")
+
+
 async def main() -> int:
     await scenario_1_no_staff_id_input_surface()
     await scenario_2_generate_token_local_only()
@@ -1343,6 +1399,7 @@ async def main() -> int:
     await scenario_27_dsn_present_but_empty_failclosed()
     await scenario_28_dsn_inventory_regression_machine_verifiable()
     await scenario_29_revoke_credential_concurrency_race_locking()
+    await scenario_30_duplicate_bind_approval_rejected_by_db()
 
     print()
     if _fail:

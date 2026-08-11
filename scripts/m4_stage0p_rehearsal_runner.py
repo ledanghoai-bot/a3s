@@ -472,6 +472,27 @@ async def _postcheck_redis_nonces(window_seconds: float) -> dict:
         await redis.aclose()
 
 
+async def _terminalize_batch(admin_conn, state: RehearsalState) -> str | None:
+    """F-A08-EXEC-02/A08-COR-02: doi batch TRACKED (chi dung state.batch_id, khong wildcard) sang
+    trang thai terminal 'aborted' khi lifecycle THAT BAI truoc khi toi 'evaluation_completed' —
+    KHONG xoa hang (giu lam audit trail, cung triet ly voi approval/token lich su), va tuyet doi
+    khong dong vao 1 batch DA thanh cong that su (status<>'evaluation_completed' trong WHERE la
+    fail-closed predicate duy nhat can, vi batch_id la PK nen toi da 1 hang khop). Idempotent
+    (status<>'aborted' tranh ghi de aborted_at neu goi lai). Tra ve status SAU cung (None neu
+    khong co batch_id hoac khong hang nao khop - vd batch da 'evaluation_completed')."""
+    if not state.batch_id:
+        return None
+    row = await admin_conn.fetchrow(
+        "UPDATE m4_selection_batches SET status = 'aborted', aborted_at = now() "
+        "WHERE batch_id = $1 AND status NOT IN ('evaluation_completed', 'aborted') "
+        "RETURNING status",
+        state.batch_id)
+    if row is not None:
+        return row["status"]
+    return await admin_conn.fetchval(
+        "SELECT status FROM m4_selection_batches WHERE batch_id = $1", state.batch_id)
+
+
 async def _purge_synthetic(admin_conn, state: RehearsalState) -> dict:
     """Purge THEO DANH SACH ID TRACKED (khong phai truy van marker-based rong lai) — an toan du
     batch dang o bat ky trang thai nao (idempotent, chay duoc kha ca khi 1 buoc truoc do that
@@ -573,11 +594,19 @@ async def _run_collector_with_retry(batch_id) -> dict:
                      "chua xu ly xong - abort")
 
 
-async def _verify_cleanup_postconditions(admin_conn, state: RehearsalState) -> tuple[bool, list[str]]:
+async def _verify_cleanup_postconditions(
+        admin_conn, state: RehearsalState, *, lifecycle_failed: bool) -> tuple[bool, list[str]]:
     """F-M4-RH-R2-01: xac minh HAU DIEU KIEN bat buoc bang truy van DOC LAP sau khi cleanup da
     chay — KHONG tin vao viec tung buoc cleanup "khong nem loi" (buoc do co the tu no thanh cong
     nhung van de lai residual vi ly do khac, hoac nguoc lai bi nuot loi ma khong ai biet). Day la
-    nguon su that DUY NHAT quyet dinh cleanup co THAT SU dat trang thai an toan hay khong."""
+    nguon su that DUY NHAT quyet dinh cleanup co THAT SU dat trang thai an toan hay khong.
+
+    F-A08-EXEC-02/A08-COR-03: them kiem tra batch TRACKED phai o dung trang thai terminal — neu
+    `lifecycle_failed`, batch (neu co) PHAI la 'aborted' (khong con 'locked'/'collecting'/... —
+    day CHINH LA lop kiem da bi thieu o Amendment 08, khien residual 'locked' lot qua ma khong ai
+    biet). Neu lifecycle THANH CONG, batch phai la 'evaluation_completed' — bat ky trang thai
+    khac deu la dau hieu 1 buoc nao do trong luong thanh cong khong thuc su hoan tat du khong
+    raise loi ro rang."""
     problems: list[str] = []
     if await read_capture_enabled(admin_conn):
         problems.append("capture_enabled VAN la true sau cleanup")
@@ -597,6 +626,13 @@ async def _verify_cleanup_postconditions(admin_conn, state: RehearsalState) -> t
             "SELECT count(*) FROM m4_shadow_review_samples WHERE selection_batch = $1", state.batch_id)
         if n:
             problems.append(f"con {n} sample chua bi purge cho batch {state.batch_id}")
+        batch_status = await admin_conn.fetchval(
+            "SELECT status FROM m4_selection_batches WHERE batch_id = $1", state.batch_id)
+        expected_status = "aborted" if lifecycle_failed else "evaluation_completed"
+        if batch_status != expected_status:
+            problems.append(
+                f"batch {state.batch_id} o trang thai {batch_status!r}, ky vong {expected_status!r} "
+                f"(lifecycle_failed={lifecycle_failed}) - residual batch chua terminalize dung")
     n = await admin_conn.fetchval(
         "SELECT count(*) FROM m4_stage0p_transcript_signing_keys "
         "WHERE key_version = $1 AND retired_at IS NULL", TRANSCRIPT_KEY_VERSION)
@@ -611,8 +647,8 @@ async def _verify_cleanup_postconditions(admin_conn, state: RehearsalState) -> t
 
 
 async def _do_cleanup(admin_conn, pool, *, operator_staff_id: int, operator_pin: str,
-                      state: RehearsalState) -> dict[str, bool]:
-    """4 buoc cleanup, best-effort — tra dict step->bool. TACH RIENG khoi _run_execute() (F-M4-
+                      state: RehearsalState, lifecycle_failed: bool) -> dict[str, bool]:
+    """5 buoc cleanup, best-effort — tra dict step->bool. TACH RIENG khoi _run_execute() (F-M4-
     RH-R3-02/05) de co the goi TRUC TIEP tu test that (khong phai copy tay logic).
 
     F-M4-RH-R3-02: capture-off doc TRANG THAI THAT tu DB (`read_capture_enabled`) — KHONG con
@@ -658,6 +694,17 @@ async def _do_cleanup(admin_conn, pool, *, operator_staff_id: int, operator_pin:
         _log("cleanup_purge_failed", error_type=type(e).__name__, error=str(e))
 
     try:
+        if lifecycle_failed:
+            terminal_status = await _terminalize_batch(admin_conn, state)
+            _log("batch_terminalized", batch_id=str(state.batch_id) if state.batch_id else None,
+                 status=terminal_status)
+        cleanup_step_ok["batch_terminalized"] = True
+    except Exception as e:  # noqa: BLE001 — F-A08-EXEC-02: buoc nay THIEU hoan toan o Amendment 08,
+        # gio la 1 buoc cleanup doc lap co the that bai rieng ma khong lam mat cac buoc khac.
+        cleanup_step_ok["batch_terminalized"] = False
+        _log("cleanup_batch_terminalize_failed", error_type=type(e).__name__, error=str(e))
+
+    try:
         redis_check = await _postcheck_redis_nonces(window_seconds=120)
         _log("redis_nonce_postcheck", **redis_check)
         cleanup_step_ok["redis_postcheck"] = True
@@ -668,8 +715,9 @@ async def _do_cleanup(admin_conn, pool, *, operator_staff_id: int, operator_pin:
     return cleanup_step_ok
 
 
-async def _do_cleanup_and_verify(admin_conn, pool, *, operator_staff_id: int, operator_pin: str,
-                                 state: RehearsalState) -> tuple[bool, list[str], dict[str, bool]]:
+async def _do_cleanup_and_verify(
+        admin_conn, pool, *, operator_staff_id: int, operator_pin: str, state: RehearsalState,
+        lifecycle_failed: bool) -> tuple[bool, list[str], dict[str, bool]]:
     """F-M4-RH-R3-03/04: chay `_do_cleanup()` roi xac minh hau dieu kien qua
     `_verify_cleanup_postconditions()` — nhung KHONG con tin 2 nguon nay mot cach ngay tho:
 
@@ -679,13 +727,18 @@ async def _do_cleanup_and_verify(admin_conn, pool, *, operator_staff_id: int, op
     - R3-04: ban than `_verify_cleanup_postconditions()` cung duoc boc trong try/except — neu NO
       tu loi (vd mat ket noi DB giua chung), coi la "KHONG THE XAC MINH duoc an toan" = that bai
       fail-closed, phat 1 alert chuan hoa, KHONG de traceback thoat thang ra ngoai ham nay ma
-      khong co ket luan CLEANUP_FAILED ro rang."""
+      khong co ket luan CLEANUP_FAILED ro rang.
+    - F-A08-EXEC-02/A08-COR-03: `lifecycle_failed` truyen xuong ca 2 ham — `_do_cleanup` chi
+      terminalize batch khi lifecycle THAT BAI, `_verify_cleanup_postconditions` doi chieu dung
+      trang thai terminal ky vong (aborted vs evaluation_completed) thay vi chi dem residual
+      content nhu truoc (dieu chinh xac da bo lot batch 'locked' o Amendment 08)."""
     cleanup_step_ok = await _do_cleanup(admin_conn, pool, operator_staff_id=operator_staff_id,
-                                        operator_pin=operator_pin, state=state)
+                                        operator_pin=operator_pin, state=state,
+                                        lifecycle_failed=lifecycle_failed)
 
     try:
         postcondition_ok, postcondition_problems = await _verify_cleanup_postconditions(
-            admin_conn, state)
+            admin_conn, state, lifecycle_failed=lifecycle_failed)
     except Exception as e:  # noqa: BLE001 — R3-04: verifier tu loi = khong the xac minh an toan
         postcondition_ok = False
         postcondition_problems = [
@@ -833,7 +886,7 @@ async def _run_execute(args, manifest: list[dict]) -> int:
     try:
         postcondition_ok, postcondition_problems, cleanup_step_ok = await _do_cleanup_and_verify(
             admin_conn, pool, operator_staff_id=args.operator_staff_id, operator_pin=operator_pin,
-            state=state)
+            state=state, lifecycle_failed=(main_exc is not None))
     finally:
         # F-M4-RH-R3-04: dong connection/pool bang finally VO DIEU KIEN - ke ca neu ban than
         # _do_cleanup_and_verify raise (khong ky vong, no da tu bao ve rieng, nhung day la lop
