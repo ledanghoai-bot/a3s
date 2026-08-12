@@ -71,7 +71,15 @@ services:
   # TU KIEM TRA LAI quyen file doc lap luc khoi dong (khong chi tin bind-mount host giu dung
   # permission), tu choi khoi dong neu file co bat ky bit group/other nao hoac sai chu so huu.
   m4-signer:
-    build: .
+    # I-B M4 image-freshness correction: GIT_COMMIT build-arg (dap
+    # PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md) - service nay khong nam trong
+    # deploy.sh SERVICES nen khong tu rebuild moi lan deploy thuong; operator PHAI tu build tuong
+    # minh truoc MOI lan `up -d` (xem docs/M4-STAGE0P-SIGNING-SERVICE-RUNBOOK-VI.md §2/§3) va xac
+    # minh label `git_commit` khop `git rev-parse HEAD` truoc khi tiep tuc - khong tin cache image cu.
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     profiles: ["m4-signing"]
     command: python -m app.services.pii.stage0p_signing_service
     user: "5001:5000"

@@ -55,10 +55,23 @@ F-A08-R3-01/02:
   operator nhưng chưa từng `unset` sau ceremony, mâu thuẫn với mô tả "chỉ tồn tại trong suốt
   ceremony". REV3 sửa cả hai — xem §4/§6.
 
+**REV4 (hiện tại)**, đáp `PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md`:
+
+- **Image-freshness gap (Amendment 10 Attempt 1, KHÔNG phải lỗi signer/collector boundary)**:
+  `m4-signer` dùng image riêng (`alpha3s-m4-signer`), build từ CÙNG `Dockerfile` với `api` nhưng
+  KHÔNG nằm trong `deploy.sh SERVICES` — deploy thường không bao giờ rebuild nó. `docker compose
+  up -d` (không `--build`) chỉ build image nếu image CHƯA từng tồn tại; sau lần build đầu tiên
+  (Amendment 09), mọi `up -d` sau đó ÂM THẦM tái sử dụng image cache cũ, dù `main`/deployed commit
+  đã có fix mới (PR #13's `.dockerignore`) — bug `.env` "tái phát" ở Amendment 10 Attempt 1 dù
+  code đã đúng từ lâu, chỉ vì image chưa từng được rebuild. REV4 thêm 1 `ARG GIT_COMMIT`/`LABEL
+  git_commit` vào `Dockerfile` + build tường minh + xác minh label khớp `git rev-parse HEAD`
+  BẮT BUỘC trước MỌI lần `up -d m4-signer` — xem §2/§3/§9.
+
 ## 1. Trình tự đầy đủ 1 ceremony (tóm tắt, chi tiết PIN/approval xem docstring runner)
 
 ```
 record-approval (staff 3, PIN riêng)
+  -> build m4-signer + xac minh label git_commit khop deployed HEAD    <-- bước MỚI (REV4)
   -> chuẩn bị 3 file khóa trong /run/m4-signing-secrets (chown/chmod)  <-- bước MỚI (F-A08-R2-01)
   -> provision-keys (3 khóa mới, tự sinh ngẫu nhiên, CÙNG giá trị vừa ghi vào file)
   -> docker compose --profile m4-signing up -d m4-signer   <-- bước MỚI (A08-COR-01)
@@ -82,7 +95,75 @@ Xác nhận: không có container `m4-signer` nào đang `Up` (nếu có, `stop`
 HEAD đúng commit CA đã accept (`git rev-parse HEAD`); `m4_stage0p_transcript_signing_keys`/
 `m4_stage0p_signing_auth_keys` không có active key cũ (nếu có, `retire-keys` trước).
 
+**REV4 — bắt buộc, đáp `PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md`**:
+`m4-signer` là service dormant/profile-only, **KHÔNG nằm trong `deploy.sh SERVICES`** — deploy
+thường (`api`/`worker`/bot/`dashboard`) KHÔNG BAO GIỜ rebuild image này. `docker compose ... up -d`
+(không `--build`) chỉ build image nếu image CHƯA từng tồn tại — nếu đã tồn tại (từ 1 ceremony
+trước), lệnh `up` sẽ **âm thầm tái sử dụng image cache cũ**, dù source/deployed commit đã đổi
+(Amendment 10 Attempt 1 chạy đúng cảnh này: image cache từ Amendment 09, trước PR #13, khiến bug
+`.env` đã fix "tái phát" dù merge/deploy đúng commit). **Do đó §3 dưới đây LUÔN build tường minh
++ xác minh label commit TRƯỚC MỌI lần `up -d m4-signer`, không có ngoại lệ, kể cả khi tin rằng
+image "chắc còn mới".**
+
 ## 3. Start — khởi động signing service qua docker compose
+
+**REV4 (Correction 2, đáp `PHASE1B-M4-SIGNER-IMAGE-FRESHNESS-CORRECTION-REVIEW-1-VI.md` F-IMG-01)
+— build tường minh TRƯỚC KHI `up`, xác minh ĐÚNG image mà Compose sẽ chạy khớp deployed commit
+(KHÔNG dùng `--pull`, KHÔNG đổi base image):**
+
+**F-IMG-01**: KHÔNG được hard-code tag `alpha3s-m4-signer:latest` — tên này do Compose suy ra từ
+project name (`COMPOSE_PROJECT_NAME`/tên thư mục/`name:` trong compose file), có thể khác nhau
+giữa các lần chạy. Nếu hard-code, guard có thể inspect nhầm 1 image cũ/không liên quan trong khi
+Compose thật sự dùng 1 image khác — false green, không còn chặn được đúng lỗi Amendment 10
+Attempt 1. **Lưu ý**: `docker compose config --images m4-signer` liệt kê CẢ image của dependency
+(`redis:7-alpine` qua `depends_on`), không CHỈ riêng `m4-signer` — không dùng trực tiếp giá trị đó.
+Lấy identifier chính xác qua `config --format json` (đòi hỏi `jq`, đã xác nhận có sẵn trên VPS):
+đọc `.services["m4-signer"].image` nếu Compose có set tường minh, nếu không (trường hợp thật — chỉ
+`build:`, không `image:`) thì ghép từ CHÍNH project name Compose đã resolve (`.name` trong CÙNG
+JSON, không phải giả định "alpha3s") theo đúng quy ước đặt tên mặc định của Compose
+(`${project}-${service}`):
+
+```bash
+GIT_COMMIT=$(git rev-parse HEAD)
+
+CONFIG_JSON=$(docker compose -f docker-compose.prod.yml --profile m4-signing config --format json)
+IMAGE_REF=$(echo "$CONFIG_JSON" | jq -r '.services["m4-signer"].image // empty')
+if [ -z "$IMAGE_REF" ]; then
+  PROJECT_NAME=$(echo "$CONFIG_JSON" | jq -r '.name')
+  if [ -z "$PROJECT_NAME" ] || [ "$PROJECT_NAME" = "null" ]; then
+    echo "LOI: khong resolve duoc project name tu Compose config - DUNG" >&2
+    exit 1
+  fi
+  IMAGE_REF="${PROJECT_NAME}-m4-signer"
+fi
+echo "resolved image_ref: $IMAGE_REF"
+
+GIT_COMMIT="$GIT_COMMIT" docker compose -f docker-compose.prod.yml --profile m4-signing build m4-signer
+
+IMAGE_COMMIT=$(docker inspect "$IMAGE_REF" --format '{{index .Config.Labels "git_commit"}}' 2>/dev/null)
+if [ -z "$IMAGE_COMMIT" ] || [ "$IMAGE_COMMIT" = "<no value>" ] || [ "$IMAGE_COMMIT" = "unknown" ] || [ "$IMAGE_COMMIT" != "$GIT_COMMIT" ]; then
+  echo "LOI: image m4-signer ($IMAGE_REF, label git_commit=$IMAGE_COMMIT) KHONG khop deployed HEAD ($GIT_COMMIT) - DUNG, khong up -d" >&2
+  exit 1
+fi
+echo "OK: image m4-signer ($IMAGE_REF) khop dung deployed commit $GIT_COMMIT"
+```
+
+`IMAGE_REF` luôn phản ánh ĐÚNG identifier mà `up -d m4-signer` (bước dưới) sẽ dùng, bất kể project
+name là gì — cả `.image` (nếu Compose từng set tường minh) lẫn phần fallback `${project}-service`
+đều đọc TỪ CHÍNH JSON output của CÙNG invocation context (`-f`/`--profile`/thư mục hiện tại) sẽ
+dùng để `build`/`up`, không phải 1 giá trị suy đoán tách biệt. Xác nhận thực tế trên VPS (không
+phải lý thuyết): `docker compose ... config --format json | jq -r '.name'` đổi đúng theo
+`COMPOSE_PROJECT_NAME`/`-p` (vd `alpha3s` → `differentproj` cho ra `differentproj-m4-signer`) —
+nếu vẫn hard-code `alpha3s-m4-signer:latest`, guard sẽ inspect nhầm 1 image không liên quan (hoặc
+không tồn tại) thay vì image Compose thực sự chọn.
+
+Guard fail-closed ở CẢ 3 tình huống: (a) không resolve được `IMAGE_REF` (rỗng), (b) label rỗng/
+`<no value>`/`unknown` (image chưa từng gắn label, vd build cũ trước REV4), (c) label có giá trị
+nhưng không khớp `git rev-parse HEAD`.
+
+Chỉ tiếp tục phần dưới (chuẩn bị secret + `up -d`) SAU KHI dòng `OK:` xuất hiện — nếu báo `LOI:`,
+dừng ngay, không `up -d` với image chưa xác minh, báo lại (không tự sửa bằng `--pull` hay đổi
+Dockerfile giữa ceremony).
 
 **F-A08-R2-01: 3 khóa PHẢI nằm trong FILE (không còn `environment:`/`${VAR}` như REV1)** — chuẩn
 bị thư mục + file TRƯỚC khi `up` (mọi lệnh dưới đây chạy với quyền root trên VPS, ví dụ SSH root
@@ -320,6 +401,7 @@ tiếp — không mở rộng bề mặt tấn công so với mức truy cập �
 
 | Tình huống | Xử lý |
 |---|---|
+| `git_commit` label mismatch ở bước build §3 (REV4) | Image `m4-signer` build từ commit cũ hơn deployed HEAD hiện tại — **KHÔNG** `up -d`; chạy lại đúng lệnh `build` §3 (không `--pull`, không sửa Dockerfile giữa ceremony); nếu vẫn mismatch, dừng và báo CA/PO — có thể deployed HEAD trên VPS chưa khớp gate đã accept |
 | `up -d m4-signer` báo `signing service tu choi khoi dong: ... chua duoc dat day du` | File khóa chưa tồn tại ở `/run/m4-signing-secrets/` — chạy lại §3 (`openssl rand` + `chown`/`chmod`) |
 | `up -d m4-signer` báo `... qua rong quyen (mode=...)` | 1 trong 3 file có bit group/other — `chmod 0400 /run/m4-signing-secrets/*` rồi thử lại |
 | `up -d m4-signer` báo `... khong thuoc so huu tien trinh nay` | 1 trong 3 file sai chủ sở hữu — `chown 5001:5000 /run/m4-signing-secrets/*` rồi thử lại |
@@ -333,6 +415,23 @@ tiếp — không mở rộng bề mặt tấn công so với mức truy cập �
 | `m4-signer` crash giữa lúc đang chạy rehearsal | **KHÔNG tự phục hồi** (`restart: "no"` chủ ý) — collector sẽ tự fail-closed sau vài lần retry (xem `COLLECTOR_MAX_ATTEMPTS`/`_run_collector_with_retry` trong runner), runner tự cleanup + terminalize batch `'aborted'`. Xem log `m4-signer` (nếu container còn giữ lại, `docker compose logs`) để tìm nguyên nhân crash trước khi thử ceremony mới — không `up -d` lại giữa chừng 1 gate đang mở |
 
 ## 9. Evidence commands (không lộ secret)
+
+**REV4 — bằng chứng image freshness (chạy SAU §3 build, TRƯỚC `up -d`; F-IMG-01: resolve identifier
+qua `config --format json`/`jq`, KHÔNG hard-code tag, KHÔNG dùng `config --images <service>` trực
+tiếp vì lệnh đó gộp cả image của dependency như `redis:7-alpine`):**
+
+```bash
+CONFIG_JSON=$(docker compose -f docker-compose.prod.yml --profile m4-signing config --format json)
+IMAGE_REF=$(echo "$CONFIG_JSON" | jq -r '.services["m4-signer"].image // empty')
+if [ -z "$IMAGE_REF" ]; then
+  IMAGE_REF="$(echo "$CONFIG_JSON" | jq -r '.name')-m4-signer"
+fi
+echo "image_ref=$IMAGE_REF"
+docker inspect "$IMAGE_REF" --format 'git_commit={{index .Config.Labels "git_commit"}}'
+git rev-parse HEAD
+# 2 gia tri (label vs git rev-parse HEAD) PHAI khop nhau tuyet doi - day la bang chung image KHONG
+# phai cache cu VA la DUNG image ma Compose se dung (khong phai 1 tag doan/hard-code).
+```
 
 ```bash
 docker compose -f docker-compose.prod.yml --profile m4-signing ps m4-signer
