@@ -534,6 +534,36 @@ async def run_signing_service(socket_path: str, *, allowed_uid: int | None = Non
 _SECRET_FILE_FORBIDDEN_MODE_BITS = 0o077  # group/other: khong duoc co bat ky bit nao
 
 
+def _validate_secret_parent_directory(file_path: str) -> None:
+    """F-A08-R3-01 (dap PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-3-VI.md): thu
+    muc CHA cua secret file PHAI thuoc so huu CHINH tien trinh nay va khong duoc co bat ky bit
+    group/other nao — CUNG triet ly va CUNG pattern voi `_validate_socket_directory()` o tren, ap
+    dung rieng cho thu muc chua 3 file khoa (F-A08-R2-01).
+
+    Neu chi kiem tung FILE (nhu REV2 lam) ma bo qua thu muc CHA, 1 runbook vo y tao thu muc cha
+    `root:root 0700` (chi root traverse duoc) van khien tien trinh signer (UID 5001) KHONG BAO GIO
+    mo duoc file du file ban than co permission dung 0400/5001:5000 — day CHINH LA lo hong that su
+    (khong phai ly thuyet) CA Review 3 phat hien trong chinh runbook REV2. `os.stat(directory)` o
+    day THANH CONG du process khong traverse duoc VAO thu muc (stat 1 doi tuong chi can quyen tren
+    THU MUC CHA CUA NO, khong phai tren chinh no) — nen kiem duoc TRUOC KHI thu mo file ben trong,
+    cho ra thong bao loi dung nguyen nhan thay vi "khong ton tai" gay nham lan."""
+    directory = os.path.dirname(file_path) or "."
+    if not os.path.isdir(directory):
+        raise RuntimeError(f"thu muc cha cua secret file khong ton tai: {directory}")
+    if os.path.islink(directory):
+        raise RuntimeError(f"thu muc cha cua secret file la symlink - tu choi doc: {directory}")
+    st = os.stat(directory)
+    if st.st_uid != os.getuid():
+        raise RuntimeError(
+            f"thu muc cha cua secret file khong thuoc so huu tien trinh nay (dir uid={st.st_uid}, "
+            f"process uid={os.getuid()}): {directory}")
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & _SECRET_FILE_FORBIDDEN_MODE_BITS:
+        raise RuntimeError(
+            f"thu muc cha cua secret file qua rong quyen (mode={oct(mode)}, phai loai bo "
+            f"group/other access): {directory}")
+
+
 def _read_secret_env_or_file(name: str) -> str:
     """F-A08-R2-01 (dap PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-2-VI.md): doc
     secret tu FILE (bien `<NAME>_FILE` tro toi duong dan, vd bind-mount tu 1 thu muc host operator
@@ -549,12 +579,20 @@ def _read_secret_env_or_file(name: str) -> str:
     tren: tu choi khoi dong NGAY neu file co BAT KY bit group/other nao (mode & 0o077 != 0) hoac
     khong thuoc so huu CHINH tien trinh nay.
 
+    F-A08-R3-01 (dap PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-3-VI.md): TRUOC KHI
+    dung toi CHINH file, tu kiem THU MUC CHA rieng (`_validate_secret_parent_directory()`) — neu
+    thu muc cha khong thuoc so huu tien trinh nay hoac qua rong quyen, `os.path.isfile(file_path)`
+    o duoi se am tham tra `False` (Python nuot `OSError`/`PermissionError` ben trong ham nay) va
+    bao loi SAI ly do ("khong ton tai" thay vi "khong the traverse vao thu muc cha") — kiem thu muc
+    cha TRUOC, DOC LAP voi kiem file, cho ra thong bao loi dung nguyen nhan.
+
     Fallback ve bien `<NAME>` THO (gia tri truc tiep, hanh vi REV1/REV0 cu) neu `<NAME>_FILE`
     khong duoc dat — GIU NGUYEN duong sandbox test hien co (khong phai security boundary, khong
     thay doi hanh vi da duoc kiem qua nhieu vong review truoc do)."""
     file_path = os.environ.get(f"{name}_FILE")
     if not file_path:
         return os.environ.get(name, "")
+    _validate_secret_parent_directory(file_path)
     if not os.path.isfile(file_path):
         raise RuntimeError(f"{name}_FILE tro toi duong dan khong ton tai/khong phai file thuong: "
                            f"{file_path}")

@@ -2,8 +2,9 @@
 
 > Answers `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-DIRECTIVE-VI.md` A08-COR-01,
 > revised per `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-1-VI.md`
-> F-A08-R1-01/02/03 and `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-2-VI.md`
-> F-A08-R2-01/02. Read alongside `docs/VPS-RUNBOOK-EN.md` (general VPS ops) and the
+> F-A08-R1-01/02/03, `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-2-VI.md`
+> F-A08-R2-01/02, and `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-3-VI.md`
+> F-A08-R3-01/02. Read alongside `docs/VPS-RUNBOOK-EN.md` (general VPS ops) and the
 > `scripts/m4_stage0p_rehearsal_runner.py` docstring (full PIN/approval ceremony cycle). This
 > document covers ONLY the signing service — a separate OS process holding the signing/encryption
 > keys, fully isolated from the collector.
@@ -26,7 +27,7 @@ image build time** (Dockerfile, version-controlled, identical on every container
 image), and there is no longer any Python script spawning a process at all — no more GC warning,
 no more hand-rolled pidfile.
 
-**REV2 (current)**, answering `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-2-VI.md`
+**REV2**, answering `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-2-VI.md`
 F-A08-R2-01/02:
 
 - **F-A08-R2-01**: REV1 still put the 3 real keys into `m4-signer`'s `environment:` (`${VAR}`
@@ -44,6 +45,23 @@ F-A08-R2-01/02:
   identity, HOLDS the key) + `submit` (the REAL `m4-collector` identity, NEVER receives the key —
   only a pre-signed, single-use token good for 20 seconds and valid only for the fixed canary
   content) — see §4.
+
+**REV3 (current)**, answering `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-3-VI.md`
+F-A08-R3-01/02:
+
+- **F-A08-R3-01 (a real bug in REV2's own runbook, not theoretical)**: REV2 created
+  `/run/m4-signing-secrets` with `install -d -o root -g root` (only root can traverse it) while
+  `m4-signer` runs as UID `5001` — signer could NEVER open any file inside, even with correct
+  per-file permissions, because it lacked `--x` on the PARENT directory itself. REV3 fixes the
+  `install -d` command to chown the directory to the CORRECT UID `5001`/GID `5000`, and adds a
+  dedicated fail-closed check for the parent directory
+  (`_validate_secret_parent_directory()`, same pattern as `_validate_socket_directory()`) — not
+  just per-file checks like REV2.
+- **F-A08-R3-02**: two operational gaps — (a) `submit` still used `-e NAME="$TOKEN"` (with `=`)
+  for the token instead of the bare form used for every other secret; (b) the runbook exported the
+  3 keys/2 PINs/token into the operator's shell but never instructed `unset` after the ceremony,
+  contradicting the "only exists for the ceremony's duration" description. REV3 fixes both — see
+  §4/§6.
 
 ## 1. Full ceremony sequence (summary — see runner docstring for PIN/approval detail)
 
@@ -80,7 +98,12 @@ prepare the directory + files BEFORE `up` (every command below runs as root on t
 confirmed root SSH access — see `docs/VPS-RUNBOOK-EN.md`):
 
 ```bash
-install -d -m 0700 -o root -g root /run/m4-signing-secrets   # /run is tmpfs (RAM) - no disk touched
+# F-A08-R3-01: the directory MUST be chowned to the CORRECT m4-signer UID (5001)/m4-signing-ipc
+# GID (5000) - do NOT leave it root:root (this was a real REV2 bug: signer couldn't traverse INTO
+# the directory even with correct per-file permissions, and the service now refuses to start at a
+# dedicated parent-directory check, see _validate_secret_parent_directory() in
+# stage0p_signing_service.py).
+install -d -m 0700 -o 5001 -g 5000 /run/m4-signing-secrets   # /run is tmpfs (RAM) - no disk touched
 
 umask 077
 openssl rand -base64 32 > /run/m4-signing-secrets/sample_key
@@ -126,13 +149,18 @@ works).
 `m4-signer` runs under the fixed UID `5001` (group `5000`, both baked into the image via the
 `Dockerfile`) — no more runtime `useradd` at all.
 
-If the `chown`/`chmod` above was skipped or wrong (e.g. a world-readable file, or the wrong
-owner), `m4-signer` **detects this itself and refuses to start**
+If the `chown`/`chmod` above was skipped or wrong (e.g. a world-readable file, or the wrong owner)
+— **OR if the `/run/m4-signing-secrets` directory itself has the wrong owner/permissions**
+(F-A08-R3-01: this was a real REV2 bug — a `root:root` directory left signer unable to even
+traverse INTO it despite correct per-file permissions) — `m4-signer` **detects this itself and
+refuses to start**, at BOTH layers: the parent directory
+(`_validate_secret_parent_directory()`, checked BEFORE touching any file) and each file
 (`_read_secret_env_or_file()` re-`stat()`s each file — not just trusting the host bind-mount to
 preserve permissions, the same defense-in-depth philosophy already applied to the socket
-directory): `docker compose logs m4-signer` will show `"...qua rong quyen..."` (too permissive)
-or `"...khong thuoc so huu tien trinh nay..."` (wrong owner) — fix the file permissions and `up
--d m4-signer` again.
+directory): `docker compose logs m4-signer` will show `"...thu muc cha ... khong thuoc so
+huu..."`/`"...thu muc cha ... qua rong quyen..."` (directory error) or `"...qua rong quyen..."`/
+`"...khong thuoc so huu tien trinh nay..."` (per-file error) — fix the directory/file permissions
+and `up -d m4-signer` again.
 
 ## 4. Canary probe — confirm the REAL signing path works (F-A08-R1-03/F-A08-R2-02)
 
@@ -147,7 +175,7 @@ never letting `m4-collector` hold the key):
 **Step 1 — `mint-token`, operator identity (NOT `--user m4-collector`), NEEDS the key:**
 
 ```bash
-TOKEN=$(docker compose -f docker-compose.prod.yml exec \
+export M4_SIGNING_PROBE_TOKEN=$(docker compose -f docker-compose.prod.yml exec \
   -e M4_SIGNING_AUTH_VERIFY_KEY_B64 \
   api python scripts/m4_stage0p_signing_probe.py mint-token)
 ```
@@ -155,34 +183,35 @@ TOKEN=$(docker compose -f docker-compose.prod.yml exec \
 Signs a SINGLE `signing_authorization` for the fixed canary content (20-second TTL, single-use —
 consumes a Redis nonce exactly like a real request), printing one base64(JSON) line with the token
 plus the request's descriptive fields (sample_id/txid/canonical_digest_hex/...) — NEVER containing
-the key in any form.
+the key in any form. **F-A08-R3-02**: `export` DIRECTLY into `M4_SIGNING_PROBE_TOKEN` (not a
+separate temp variable like REV2's `TOKEN`) — same name `submit` reads, letting step 2 use the
+same bare `-e` form as everything else (no need to keep 2 names for 1 value).
 
 **Step 2 — `submit`, the REAL `m4-collector` identity, does NOT need and must NOT be given the
 key:**
 
 ```bash
 docker compose -f docker-compose.prod.yml exec --user m4-collector \
-  -e M4_SIGNING_PROBE_TOKEN="$TOKEN" \
+  -e M4_SIGNING_PROBE_TOKEN \
   api python scripts/m4_stage0p_signing_probe.py submit
 ```
 
 `submit` has no code path that reads `M4_SIGNING_AUTH_VERIFY_KEY_B64` (proven by an automated
 static audit, `scripts/m4_stage0p_signing_probe_test.py` [P-08]) — even if that value were
 accidentally present in the `exec` command's environment, `submit` never uses it (evidence
-[P-09]). If anyone tampers with a field in `$TOKEN` before `submit` (e.g. changing `sample_id`),
-the service rejects it because the signature no longer matches — `m4-collector` can only replay
-the EXACT token it was given, never mint a different one (evidence [P-10]).
+[P-09]). If anyone tampers with a field in `$M4_SIGNING_PROBE_TOKEN` before `submit` (e.g.
+changing `sample_id`), the service rejects it because the signature no longer matches —
+`m4-collector` can only replay the EXACT token it was given, never mint a different one (evidence
+[P-10]).
 
-**Note the `-e NAME` form (NO `=value`, F-A08-R1-02)** — this is deliberate, not a typo. The `-e
-NAME="$NAME"` form puts the value as a literal argv token of the `docker`/`docker compose` client
-process on the host (readable by anyone with `ps aux`/`/proc/<pid>/cmdline` access on the host
-while the command is running). The bare `-e NAME` form tells the Docker client to read the value
-from its OWN environment and forward it over the Docker API — the value is never an argv token
-(empirically verified: `docker exec -e VAR <container> printenv VAR` returns the correct value
-even though `VAR` never appears with `=value` on the command line). `$TOKEN` in step 2 uses
-`-e ...="$TOKEN"` (with `=`) because that value comes from a local shell variable (not a
-long-lived secret — a single-use, 20-second-TTL token, much lower argv-exposure risk than the raw
-key).
+**Note the `-e NAME` form (NO `=value`, F-A08-R1-02, applied CONSISTENTLY to every value including
+the token — F-A08-R3-02 fixes the one place REV2 still used `=`)** — this is deliberate, not a
+typo. The `-e NAME="$NAME"` form puts the value as a literal argv token of the `docker`/`docker
+compose` client process on the host (readable by anyone with `ps aux`/`/proc/<pid>/cmdline` access
+on the host while the command is running). The bare `-e NAME` form tells the Docker client to read
+the value from its OWN environment and forward it over the Docker API — the value is never an
+argv token (empirically verified: `docker exec -e VAR <container> printenv VAR` returns the
+correct value even though `VAR` never appears with `=value` on the command line).
 
 A `{"event": "m4_signing_probe_ok", "ok": true, ...}` JSON output confirms: the `m4-collector`
 peer UID is accepted by the service, the rate-limit/nonce/`signing_authorization` signature all
@@ -245,6 +274,28 @@ rm -f /run/m4-signing-secrets/sample_key /run/m4-signing-secrets/transcript_hmac
   /run/m4-signing-secrets/signing_auth_key
 ```
 
+**F-A08-R3-02: `unset` ALL operator shell variables RIGHT AFTER** — the runbook previously exported
+these but never instructed cleaning them from the shell, contradicting the "only exists for the
+ceremony's duration" description (§7). Run this in the SAME shell session that `export`ed them
+(REQUIRED whether the ceremony **succeeded, failed, or was emergency-stopped** — no exception):
+
+```bash
+unset M4_SAMPLE_KEY_B64 M4_TRANSCRIPT_HMAC_KEY_B64 M4_SIGNING_AUTH_VERIFY_KEY_B64 \
+  M4_SIGNING_PROBE_TOKEN STAGE0P_REHEARSAL_OPERATOR_PIN STAGE0P_REHEARSAL_REVIEWER_PIN
+```
+
+Confirm clean (name + `absent`/`SET` status only, NEVER the value — see §9):
+
+```bash
+for VAR in M4_SAMPLE_KEY_B64 M4_TRANSCRIPT_HMAC_KEY_B64 M4_SIGNING_AUTH_VERIFY_KEY_B64 \
+           M4_SIGNING_PROBE_TOKEN STAGE0P_REHEARSAL_OPERATOR_PIN STAGE0P_REHEARSAL_REVIEWER_PIN; do
+  if [ -z "${!VAR+x}" ]; then echo "$VAR: absent"; else echo "$VAR: STILL SET - unset again"; fi
+done
+```
+
+If the ceremony stops in an emergency (§8) — run BOTH blocks here (delete the files above + the
+`unset` above) as the final cleanup step, no matter which step it stopped at.
+
 ## 7. Key lifecycle summary
 
 | Key | Generated where | Lives where | Retired when |
@@ -260,10 +311,11 @@ permissions/ownership at startup (§3). The files live in `/run` (tmpfs, RAM-bac
 persistence, cleared on reboot) — they only exist for the ceremony's duration, explicitly deleted
 after `stop` (§6).
 
-The 3 keys ONLY ever exist: (a) in the files `/run/m4-signing-secrets/*` (read by `m4-signer`),
-and (b) in the operator's shell environment (given to `provision-keys`/`mint-token`/`run` via
-`exec -e <NAME>` in bare form, no `=value` — see §4/§5) — never written to `.env`, a log, or an
-evidence artifact.
+The 3 keys ONLY ever exist: (a) in the files `/run/m4-signing-secrets/*` (read by `m4-signer`,
+deleted in §6), and (b) in the operator's shell environment (given to
+`provision-keys`/`mint-token`/`run` via `exec -e <NAME>` in bare form, no `=value` — see §4/§5,
+**`unset` required in §6 after the ceremony, F-A08-R3-02**) — never written to `.env`, a log, or
+an evidence artifact.
 
 **Remaining inherent limitations, stated plainly — 2 DIFFERENT channels, do not conflate them**:
 
@@ -273,11 +325,12 @@ evidence artifact.
    ownership + tmpfs (no long-lived on-disk persistence) + explicit deletion after `stop`.
 2. **Secrets passed at `exec` time** (§3/§4/§5: `M4_SAMPLE_KEY_B64`/`M4_TRANSCRIPT_HMAC_KEY_B64`/
    `M4_SIGNING_AUTH_VERIFY_KEY_B64` for `provision-keys`, `M4_SIGNING_AUTH_VERIFY_KEY_B64` for
-   `mint-token`, `STAGE0P_REHEARSAL_OPERATOR_PIN`/`STAGE0P_REHEARSAL_REVIEWER_PIN`/
-   `M4_SAMPLE_KEY_B64` for execute) are NOT part of the container's `Config.Env` (`docker exec -e`
-   is a per-exec-session override, not persisted), so `docker inspect` does NOT reveal these —
-   the bare `-e NAME` form (already applied in §3/§4/§5) closes the one remaining leak channel
-   (the host-side client process's own argv).
+   `mint-token`, `M4_SIGNING_PROBE_TOKEN` for `submit`,
+   `STAGE0P_REHEARSAL_OPERATOR_PIN`/`STAGE0P_REHEARSAL_REVIEWER_PIN`/`M4_SAMPLE_KEY_B64` for
+   execute) are NOT part of the container's `Config.Env` (`docker exec -e` is a per-exec-session
+   override, not persisted), so `docker inspect` does NOT reveal these — the bare `-e NAME` form
+   (F-A08-R3-02: now applied CONSISTENTLY across §3/§4/§5, including the token) closes the one
+   remaining leak channel (the host-side client process's own argv).
 
 Both cases: anyone with root/Docker API access on the host already has the ability to read `.env`
 or connect to the DB directly — neither expands the attack surface beyond that existing access
@@ -290,8 +343,10 @@ level.
 | `up -d m4-signer` reports `signing service tu choi khoi dong: ... chua duoc dat day du` | The key files don't exist yet under `/run/m4-signing-secrets/` — redo §3 (`openssl rand` + `chown`/`chmod`) |
 | `up -d m4-signer` reports `... qua rong quyen (mode=...)` | One of the 3 files has a group/other bit — `chmod 0400 /run/m4-signing-secrets/*` and retry |
 | `up -d m4-signer` reports `... khong thuoc so huu tien trinh nay` | One of the 3 files has the wrong owner — `chown 5001:5000 /run/m4-signing-secrets/*` and retry |
-| `ps m4-signer` shows `Exited`/`unhealthy` | `docker compose logs m4-signer --tail 50` to read the REAL reason (e.g. `_validate_socket_directory` or `_read_secret_env_or_file` refusal) — do NOT retry blindly |
-| `mint-token`/`submit` reports `ok: false` | Check `docker compose ps m4-signer` is still `Up`; confirm `M4_SIGNING_AUTH_VERIFY_KEY_B64` passed to `mint-token` EXACTLY matches the value written to `/run/m4-signing-secrets/signing_auth_key` (a mismatch = signature fails, safe but useless); if `submit` fails after `mint-token` succeeded, check `$TOKEN` wasn't truncated/corrupted passing between the 2 commands |
+| `up -d m4-signer` reports `thu muc cha cua secret file khong thuoc so huu tien trinh nay` (F-A08-R3-01) | The `/run/m4-signing-secrets` directory itself has the wrong owner (e.g. still `root:root` from an old `install -d`) — `chown 5001:5000 /run/m4-signing-secrets` (the directory, NOT just the files inside) and retry; confirm §3's `install -d -m 0700 -o 5001 -g 5000` command was used |
+| `up -d m4-signer` reports `thu muc cha cua secret file qua rong quyen` | The directory has a group/other bit — `chmod 0700 /run/m4-signing-secrets` and retry |
+| `ps m4-signer` shows `Exited`/`unhealthy` | `docker compose logs m4-signer --tail 50` to read the REAL reason (e.g. `_validate_socket_directory` or `_read_secret_env_or_file`/`_validate_secret_parent_directory` refusal) — do NOT retry blindly |
+| `mint-token`/`submit` reports `ok: false` | Check `docker compose ps m4-signer` is still `Up`; confirm `M4_SIGNING_AUTH_VERIFY_KEY_B64` passed to `mint-token` EXACTLY matches the value written to `/run/m4-signing-secrets/signing_auth_key` (a mismatch = signature fails, safe but useless); if `submit` fails after `mint-token` succeeded, check `$M4_SIGNING_PROBE_TOKEN` wasn't truncated/corrupted (`echo -n "$M4_SIGNING_PROBE_TOKEN" | wc -c` to check length, NEVER print the value) |
 | Execute reports `SigningServiceError: khong ket noi duoc signing service` | Confirm `ps m4-signer` is still `Up`; confirm `--user m4-collector` and `M4_STAGE0P_SIGNING_SOCKET` were passed correctly to the `exec` command |
 | Execute reports "chua co signing_auth_key hieu luc" | The keys given to `provision-keys` (DB) and the ones in `/run/m4-signing-secrets/` (given to `up -d m4-signer`) do NOT match (e.g. a `retire-keys` ran in between) — `stop`, `retire-keys`, generate FRESH keys (overwrite both the 3 files and the DB), redo from `provision-keys` |
 | Need an emergency stop | `docker compose --profile m4-signing stop m4-signer` (SIGTERM, Docker sends SIGKILL after its default timeout if needed) — safe to call any time |
@@ -317,3 +372,18 @@ The `printenv` line is an important independent proof: run inside `api` (where t
 runner live), the 3 key variables MUST **not appear** — if they do, stop immediately and report to
 CA. The `docker inspect` line confirms `m4-signer`'s OWN `Config.Env` no longer holds a plaintext
 value either (F-A08-R2-01) — only a file path remains.
+
+**F-A08-R3-02 — operator shell cleanup proof** (run AFTER the `unset` in §6, name + status only,
+NEVER the value even if still `SET`):
+
+```bash
+for VAR in M4_SAMPLE_KEY_B64 M4_TRANSCRIPT_HMAC_KEY_B64 M4_SIGNING_AUTH_VERIFY_KEY_B64 \
+           M4_SIGNING_PROBE_TOKEN STAGE0P_REHEARSAL_OPERATOR_PIN STAGE0P_REHEARSAL_REVIEWER_PIN; do
+  if [ -z "${!VAR+x}" ]; then echo "$VAR: absent"; else echo "$VAR: STILL SET"; fi
+done
+ls -la /run/m4-signing-secrets/ 2>&1   # MUST report "No such file or directory" or an empty
+                                        # directory (all 3 files deleted) after §6
+```
+
+All 6 variables MUST report `absent` AND `/run/m4-signing-secrets/` MUST be empty/gone — if not,
+`unset`/`rm -f` again immediately (§6), never carry over into the next SSH session.
