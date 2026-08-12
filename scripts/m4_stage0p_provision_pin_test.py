@@ -88,7 +88,12 @@ Kich ban:
        dong thoi, dung CHINH XAC cau lenh FOR UPDATE ma `revoke_credential()` dung (khong hand-
        copy sai lech) - chung minh 1 thao tac deactivate actor dong thoi THAT SU bi Postgres row-
        level lock chan toi khi transaction cua revoke_credential() ket thuc, khong con khoang ho
-       TOCTOU giua luc kiem quyen va luc thuc su xoa credential."""
+       TOCTOU giua luc kiem quyen va luc thuc su xoa credential.
+  [30] F-A08-EXEC-04/A08-COR-04 (Amendment 08 Execution Attempt 1 Review): duplicate
+       `record-bind-approval` cung (approval_ref, target_staff_id) CON HIEU LUC bi CHINH DB tu
+       choi sach (migration 043 partial unique index), khong chi dua vao CLI can than - tai hien
+       dung su co Amendment 08 (1 lenh bi lap 2 lan tao approval id 4 va 7). Sau khi revoke, 1
+       approval MOI cho DUNG cap van tao duoc binh thuong."""
 
 import asyncio
 import hashlib
@@ -1313,6 +1318,104 @@ async def scenario_29_revoke_credential_concurrency_race_locking() -> None:
           "khong co unauthorized delete/audit nao co the xay ra tu trang thai cu")
 
 
+async def scenario_30_duplicate_bind_approval_rejected_by_db() -> None:
+    """F-A08-EXEC-04/A08-COR-04 (REV1, dap F-A08-R1-05): duplicate `record-bind-approval` CUNG
+    (approval_ref, target_staff_id) bi CSDL tu choi sach qua TRIGGER (migration 043) - dung tai
+    hien dung su co Amendment 08 (1 lenh bi go/paste lap 2 lan tao ra approval id 4 VA 7). Khac
+    REV0 (partial unique index WHERE revoked_at IS NULL), lan nay chan TUYET DOI: SAU KHI revoke
+    hang dau tien, 1 approval MOI cho CUNG cap (ref, target) VAN bi tu choi - chi tao duoc khi
+    dung 1 approval_ref KHAC (ceremony/amendment moi)."""
+    print("== [30] A08-COR-04 REV1: duplicate bind approval (cung ref+target) bi DB tu choi "
+          "TUYET DOI, ke ca sau khi revoke - chi approval_ref MOI moi tao lai duoc ==")
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approver_id = await _make_staff(admin, "provision-pin-test-dupguard-approver")
+        target_id = await _make_staff(admin, "provision-pin-test-dupguard-target")
+    finally:
+        await admin.close()
+
+    approval_ref = "test-dupguard-amendment-x-bind-target"
+    first = _run_record_bind_approval(target_id, approver_id, approval_ref)
+    check(first.returncode == 0, f"lan 1: record-bind-approval thanh cong (exit {first.returncode})")
+    first_id = _extract_approval_id(first.stdout)
+
+    second = _run_record_bind_approval(target_id, approver_id, approval_ref)
+    check(second.returncode != 0,
+          f"lan 2 (CUNG approval_ref+target_staff_id, con hieu luc): bi tu choi (exit "
+          f"{second.returncode}, ky vong != 0)")
+    check("Traceback" not in second.stderr,
+          "tu choi SACH bang thong bao ro rang tu trigger, khong phai raw traceback lot ra ngoai")
+    check("khong tao duplicate" in (second.stdout + second.stderr),
+          f"thong bao loi giai thich ro nguyen nhan duplicate (thuc te stdout={second.stdout!r} "
+          f"stderr={second.stderr!r})")
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        count = await verify_conn.fetchval(
+            "SELECT count(*) FROM m4_stage0p_pin_bind_approvals "
+            "WHERE approval_ref = $1 AND target_staff_id = $2", approval_ref, target_id)
+        check(count == 1,
+              f"chi DUNG 1 hang ton tai cho cap (approval_ref, target_staff_id) nay trong DB "
+              f"(thuc te {count}) - lan 2 khong tao duplicate row du CLI co the da thu INSERT")
+    finally:
+        await verify_conn.close()
+
+    revoke = _run_revoke_bind_approval(first_id, "test-dupguard: xac nhan revoke KHONG mo lai pham vi")
+    check(revoke.returncode == 0, f"revoke approval dau tien thanh cong (exit {revoke.returncode})")
+
+    third = _run_record_bind_approval(target_id, approver_id, approval_ref)
+    check(third.returncode != 0,
+          f"SAU KHI revoke, 1 approval MOI cho CUNG cap (ref, target) VAN bi tu choi (exit "
+          f"{third.returncode}, ky vong != 0) - F-A08-R1-05: chan tuyet doi, khong con "
+          "revoke-roi-tao-lai duoc nua")
+
+    new_ref = approval_ref + "-amendment-y"
+    fourth = _run_record_bind_approval(target_id, approver_id, new_ref)
+    check(fourth.returncode == 0,
+          f"Voi 1 approval_ref MOI HOAN TOAN (amendment khac), CUNG target_staff_id van tao duoc "
+          f"binh thuong (exit {fourth.returncode}) - khong mat kha nang ceremony moi that su can")
+
+    concurrent_conn_a = await asyncpg.connect(DB_URL)
+    concurrent_conn_b = await asyncpg.connect(DB_URL)
+    try:
+        race_ref = approval_ref + "-race"
+        tx_a = concurrent_conn_a.transaction()
+        await tx_a.start()
+        await concurrent_conn_a.execute(
+            "INSERT INTO m4_stage0p_pin_bind_approvals "
+            "  (approval_ref, target_staff_id, recorded_by, valid_from, valid_until) "
+            "VALUES ($1, $2, $3, now(), now() + interval '1 hour')",
+            race_ref, target_id, approver_id)
+
+        task_b = asyncio.create_task(concurrent_conn_b.execute(
+            "INSERT INTO m4_stage0p_pin_bind_approvals "
+            "  (approval_ref, target_staff_id, recorded_by, valid_from, valid_until) "
+            "VALUES ($1, $2, $3, now(), now() + interval '1 hour')",
+            race_ref, target_id, approver_id))
+        blocked = False
+        try:
+            await asyncio.wait_for(asyncio.shield(task_b), timeout=1.5)
+        except asyncio.TimeoutError:
+            blocked = True
+        check(blocked,
+              "F-A08-R1-05 race-safety: INSERT dong thoi thu 2 cho CUNG cap (ref, target) THAT SU "
+              "bi chan boi advisory lock cua trigger (transaction A chua commit), khong phai gia "
+              "lap - dong khoang ho TOCTOU giua kiem tra va ghi")
+
+        await tx_a.commit()
+        b_rejected = False
+        try:
+            await asyncio.wait_for(task_b, timeout=5)
+        except asyncpg.exceptions.RaiseError:
+            b_rejected = True
+        check(b_rejected,
+              "SAU KHI A commit, B tiep tuc va bi trigger tu choi dung (thay hang A vua ghi qua "
+              "EXISTS check) - khong co duplicate nao lot qua du chay dong thoi that")
+    finally:
+        await concurrent_conn_a.close()
+        await concurrent_conn_b.close()
+
+
 async def main() -> int:
     await scenario_1_no_staff_id_input_surface()
     await scenario_2_generate_token_local_only()
@@ -1343,6 +1446,7 @@ async def main() -> int:
     await scenario_27_dsn_present_but_empty_failclosed()
     await scenario_28_dsn_inventory_regression_machine_verifiable()
     await scenario_29_revoke_credential_concurrency_race_locking()
+    await scenario_30_duplicate_bind_approval_rejected_by_db()
 
     print()
     if _fail:

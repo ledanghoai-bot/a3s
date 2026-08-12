@@ -152,11 +152,25 @@ async def record_bind_approval(target_staff_id: int, recorded_by: int, approval_
 
         valid_from = datetime.now(timezone.utc)
         valid_until = valid_from + timedelta(minutes=valid_minutes)
-        row = await conn.fetchrow(
-            "INSERT INTO m4_stage0p_pin_bind_approvals "
-            "  (approval_ref, target_staff_id, recorded_by, valid_from, valid_until) "
-            "VALUES ($1, $2, $3, $4, $5) RETURNING id",
-            approval_ref, target_staff_id, recorded_by, valid_from, valid_until)
+        try:
+            row = await conn.fetchrow(
+                "INSERT INTO m4_stage0p_pin_bind_approvals "
+                "  (approval_ref, target_staff_id, recorded_by, valid_from, valid_until) "
+                "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                approval_ref, target_staff_id, recorded_by, valid_from, valid_until)
+        except asyncpg.exceptions.RaiseError:
+            # F-A08-EXEC-04/A08-COR-04 (REV1, F-A08-R1-05): trigger CSDL (migration 043) tu choi
+            # INSERT vi da co IT NHAT 1 hang (BAT KY trang thai, ke ca da revoke) cho dung cap
+            # (approval_ref, target_staff_id) nay -- khac REV0 (partial unique index), lan nay
+            # chan TUYET DOI, khong con cach nao tao lai duoc CUNG cap sau khi revoke. KHONG in
+            # gia tri nao cua approval cu -- chi bao ro nguyen nhan va huong xu ly THAT (approval_ref
+            # MOI, khong phai revoke-roi-tao-lai).
+            print(f"LOI: da co it nhat 1 bind approval (bat ky trang thai) cho approval_ref="
+                  f"{approval_ref!r} target_staff_id={target_staff_id} -- khong tao duplicate "
+                  "(chan tuyet doi, ke ca sau khi revoke). Neu day la lap lenh ngoai y muon, dung "
+                  "approval id da co (xem lai output lenh truoc). Neu that su can ceremony moi cho "
+                  "staff nay, dung 1 approval_ref MOI.", file=sys.stderr)
+            return 1
 
         print(f"Approval id={row['id']} da ghi: approval_ref={approval_ref!r} "
               f"target_staff_id={target_staff_id} (username={target['username']!r}) "
