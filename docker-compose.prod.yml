@@ -38,10 +38,57 @@ services:
     env_file: .env
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - m4_signing_socket:/run/m4-signing
     depends_on:
       - db
       - redis
     restart: unless-stopped
+
+  # I-B M4 Stage 0P (A08-COR-01/F-A08-R1-01): tien trinh signing service THAT, tach biet hoan
+  # toan khoi api/worker (2 UID he dieu hanh khac nhau, xem Dockerfile). Day la topology duoc
+  # supervise/version-control (thay the launcher tu spawn process bang asyncio truoc day) --
+  # docker compose la supervisor that: quan ly lifecycle/log/restart, khong con GC warning hay
+  # pidfile tu viet tay.
+  #
+  # KHONG bao gio khoi dong boi `docker compose up -d` thuong — nam trong profile `m4-signing`
+  # rieng, chi chay khi operator CHU DONG goi voi `--profile m4-signing`, dung yeu cau "dormant
+  # deploy khong tu bat capture/service". Xem docs/M4-STAGE0P-SIGNING-SERVICE-RUNBOOK-VI.md cho
+  # chu ky start/probe/stop day du.
+  #
+  # `restart: "no"` LA CO Y (khong phai thieu sot): day la tien trinh giu khoa ky nhay cam
+  # trong bo nho gan voi 1 ceremony rehearsal cu the — auto-restart sau crash co the tai khoi
+  # dong voi trang thai khong ro rang hoac am tham che giau 1 crash-loop dang bi khai thac.
+  # Operator PHAI tu quyet dinh restart tuong minh (`docker compose --profile m4-signing up -d
+  # m4-signer` lai, voi cung 3 khoa da dua cho `provision-keys`).
+  m4-signer:
+    build: .
+    profiles: ["m4-signing"]
+    command: python -m app.services.pii.stage0p_signing_service
+    user: "5001:5000"
+    environment:
+      - STAGE0P_SIGNING_SOCKET=/run/m4-signing/signing.sock
+      - STAGE0P_SIGNING_ALLOWED_UID=5002
+      - STAGE0P_SIGNING_SHARED_GID=5000
+      - REDIS_URL=redis://redis:6379/0
+      - M4_SAMPLE_KEY_B64=${M4_SAMPLE_KEY_B64:?Phai dat M4_SAMPLE_KEY_B64 trong shell TRUOC khi 'up' service nay (xem runbook) - KHONG dat trong .env/file nao}
+      - M4_TRANSCRIPT_HMAC_KEY_B64=${M4_TRANSCRIPT_HMAC_KEY_B64:?Phai dat M4_TRANSCRIPT_HMAC_KEY_B64 trong shell TRUOC khi 'up' service nay - KHONG dat trong .env/file nao}
+      - M4_SIGNING_AUTH_VERIFY_KEY_B64=${M4_SIGNING_AUTH_VERIFY_KEY_B64:?Phai dat M4_SIGNING_AUTH_VERIFY_KEY_B64 trong shell TRUOC khi 'up' service nay - KHONG dat trong .env/file nao}
+    volumes:
+      - m4_signing_socket:/run/m4-signing
+    depends_on:
+      - redis
+    restart: "no"
+    healthcheck:
+      # Chi kiem tra socket file TON TAI dung mode (lop song lop) - KHONG phai canary ky that
+      # (F-A08-R1-03 canary that phai chay TU phia collector, xem
+      # `scripts/m4_stage0p_signing_probe.py` va runbook §4) - self-check tu trong signer
+      # KHONG chung minh duoc gi ve peer-UID path vi no khong PHAI collector.
+      test: ["CMD", "test", "-S", "/run/m4-signing/signing.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   worker:
     build: .
@@ -119,3 +166,4 @@ volumes:
   pgdata:
   caddy_data:
   caddy_config:
+  m4_signing_socket:

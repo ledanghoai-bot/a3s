@@ -40,6 +40,12 @@ Kich ban:
   [16] Tai hien DUNG kich ban Amendment 08 that bai that (execute qua CLI that, khong signing
       service) — xac nhan lan nay ket thuc dormant-clean THAT SU: batch tracked o 'aborted' (khong
       con orphan 'locked'), 0 residual, key retired, capture OFF.
+  [17] F-A08-R1-04: full 225-conversation manifest THANH CONG qua DUNG topology 2-UID he dieu
+      hanh that (m4-signer/m4-collector, khop docker-compose.prod.yml + Dockerfile) - lenh `run`
+      THAT SU chay duoi UID m4-collector (khong phai mo hinh 1-UID don gian cua scenario [6]).
+  [18] F-A08-R1-04 (negative test): signer bi GIET GIUA LUC dang capture (khac [16] - chua bao
+      gio khoi dong) - collector tu phat hien qua stall-detect, runner cleanup + terminalize
+      batch 'aborted', khong bao gio bao cao thanh cong gia.
 """
 
 import asyncio
@@ -109,11 +115,24 @@ async def _make_staff(admin, *, username: str, permissions: list[str], pin_secre
     return staff_id
 
 
-def _run_cli(*args, env_extra: dict | None = None, expect_rc: int | None = None) -> subprocess.CompletedProcess:
+def _run_cli(*args, env_extra: dict | None = None, expect_rc: int | None = None,
+            run_as_uid: int | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
     env = {**os.environ, "DATABASE_URL": DB_URL, "REDIS_URL": REDIS_URL, **(env_extra or {})}
+    kwargs = {}
+    if run_as_uid is not None:
+        import pwd  # noqa: PLC0415
+        kwargs["user"] = run_as_uid
+        kwargs["group"] = pwd.getpwuid(run_as_uid).pw_gid
+        # subprocess's user= chi doi UID/GID thuc thi (setreuid/setregid), KHONG tu doi HOME --
+        # neu khong ghi de, tien trinh con ke thua HOME=/root tu cha (root), va asyncpg se PermissionError
+        # khi stat() '/root/.postgresql/postgresql.key' (thu muc /root khong the truy cap tu UID khac).
+        # `docker compose exec --user <name>` THAT SU dat HOME theo /etc/passwd cua user do -- mo phong
+        # dung hanh vi that bang cach doc pw_dir (du thu muc chua duoc tao vi useradd -M, path.exists()
+        # se tra ve False sach, khong loi).
+        env["HOME"] = pwd.getpwuid(run_as_uid).pw_dir
     result = subprocess.run(
         [sys.executable, "scripts/m4_stage0p_rehearsal_runner.py", *args],
-        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=120)
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=timeout, **kwargs)
     if expect_rc is not None and result.returncode != expect_rc:
         print("STDOUT:", result.stdout[-4000:])
         print("STDERR:", result.stderr[-4000:])
@@ -1021,6 +1040,238 @@ async def scenario_16_reproduce_amendment08_ends_dormant_clean() -> None:
     manifest_path.unlink(missing_ok=True)
 
 
+async def scenario_17_full_lifecycle_real_two_uid_topology() -> None:
+    """F-A08-R1-04: chung minh TOAN BO 225-conversation manifest chay THANH CONG qua dung
+    topology 2-UID he dieu hanh THAT (m4-signer/m4-collector, khop chinh xac
+    docker-compose.prod.yml service m4-signer + Dockerfile UID co dinh) — khac scenario [6] (van
+    dung mo hinh 1-UID don gian REV11/REV12 cho tien loi) — o day toan bo lenh `run` THAT SU chay
+    duoi UID m4-collector (khop dung `docker compose exec --user m4-collector`), signing service
+    chay duoi UID m4-signer rieng biet, qua het collector->label->seal->predict->evaluate."""
+    print("== [17] A08-COR-01/F-A08-R1-04: full lifecycle 225 conversation qua DUNG topology "
+          "2-UID that (m4-signer/m4-collector), khong phai mo hinh 1-UID don gian ==")
+    from scripts._stage0p_signing_service_helper import (  # noqa: PLC0415
+        ensure_service_accounts,
+        start_signing_service,
+        stop_signing_service,
+    )
+
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approval_staff = await _make_staff(
+            admin, username="rehearsal-test-17-approver", permissions=["m4.stage0p.approve"],
+            pin_secret="approver-pin-17")
+        operator_staff = await _make_staff(
+            admin, username="rehearsal-test-17-operator", permissions=["m4.stage0p.operate"],
+            pin_secret="operator-pin-17")
+        reviewer_staff = await _make_staff(
+            admin, username="rehearsal-test-17-reviewer",
+            permissions=["m4.stage0p.review", "m4.stage0p.evaluate"], pin_secret="reviewer-pin-17")
+    finally:
+        await admin.close()
+
+    approval_ref = "m4-rehearsal-test-17-two-uid-topology"
+    r = _run_cli("record-approval", "--approval-staff-id", str(approval_staff),
+                "--approval-ref", approval_ref,
+                "--valid-from", "2020-01-01T00:00:00+00:00",
+                "--valid-until", "2099-01-01T00:00:00+00:00",
+                env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-17"})
+    check(r.returncode == 0, "setup: record-approval thanh cong")
+
+    signer_uid, collector_uid, _other_uid, shared_gid = ensure_service_accounts()
+    # /var/tmp (khong phai /tmp) CO Y: scenario [6] (chay truoc trong CUNG suite) dung socket
+    # path "/tmp/m4-rehearsal-test-signer.sock" KHONG co thu muc con - start_signing_service()
+    # (mo hinh 1-UID) chmod THANG /tmp ve 0700 lam side-effect (coi /tmp la "thu muc socket" cua
+    # no), pha permission /tmp cho moi scenario 2-UID chay SAU do trong cung suite. Day la side-
+    # effect co san, ngoai pham vi PR nay - dung /var/tmp de khong phu thuoc thu tu chay.
+    socket_path = f"/var/tmp/m4-rehearsal-test-17-signer-{os.getpid()}/sock"
+    proc, sample_key, hmac_key, auth_key = await start_signing_service(
+        socket_path=socket_path, allowed_uid=collector_uid,
+        run_as_uid=signer_uid, shared_gid=shared_gid)
+    try:
+        r = _run_cli("provision-keys", env_extra={
+            "M4_SAMPLE_KEY_B64": base64.b64encode(sample_key).decode(),
+            "M4_TRANSCRIPT_HMAC_KEY_B64": base64.b64encode(hmac_key).decode(),
+            "M4_SIGNING_AUTH_VERIFY_KEY_B64": base64.b64encode(auth_key).decode()})
+        check(r.returncode == 0, "setup: provision-keys thanh cong")
+
+        # Socket path nam trong /tmp voi thu muc chu mode 0710 owner=signer_uid group=shared_gid
+        # (xem start_signing_service) - collector_uid la thanh vien shared_gid nen `--x` du de
+        # mo duoc socket file, khop CHINH XAC mo hinh docker-compose.prod.yml (thu muc mount
+        # dung chia se giua 2 container).
+        manifest_path = ROOT / "datasets" / "pii" / "m4_stage0p_rehearsal_manifest_v2.jsonl"
+        r = _run_cli("run", "--manifest", str(manifest_path),
+                    "--approval-ref", approval_ref,
+                    "--operator-staff-id", str(operator_staff),
+                    "--reviewer-staff-id", str(reviewer_staff),
+                    env_extra={"STAGE0P_REHEARSAL_OPERATOR_PIN": "operator-pin-17",
+                              "STAGE0P_REHEARSAL_REVIEWER_PIN": "reviewer-pin-17",
+                              "M4_STAGE0P_SIGNING_SOCKET": socket_path,
+                              "M4_SAMPLE_KEY_B64": base64.b64encode(sample_key).decode()},
+                    run_as_uid=collector_uid, timeout=180)
+        check(r.returncode == 0,
+              f"run (execute, DUOI UID m4-collector THAT SU) EXIT=0 - toan bo lifecycle qua "
+              f"collector->label->seal->predict->evaluate thanh cong voi 2-UID topology that "
+              f"(thuc te {r.returncode}, stderr={r.stderr[-2000:]!r})")
+        check('"rehearsal_execute_succeeded"' in r.stdout,
+              "log xac nhan rehearsal_execute_succeeded")
+        check('"evaluation_completed"' in r.stdout,
+              "log xac nhan evaluation_completed - full lifecycle THAT chay toi cung qua 2-UID "
+              "topology, khong dung o seal")
+    finally:
+        await stop_signing_service(proc, socket_path)
+
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        capture_now = await runner.read_capture_enabled(admin)
+        check(capture_now is False, "post-execute: capture_enabled = False")
+        residual = await admin.fetchval(
+            "SELECT count(*) FROM customers WHERE psid LIKE $1", f"{runner.PSID_PREFIX}%")
+        check(residual == 0, f"post-execute: 0 synthetic customer con sot lai (thuc te {residual})")
+        eval_row = await admin.fetchrow(
+            "SELECT status, evaluation_completed_at FROM m4_selection_batches "
+            "WHERE algorithm_seed LIKE '%rehearsal-v1' ORDER BY locked_at DESC LIMIT 1")
+        check(eval_row is not None and eval_row["status"] == "evaluation_completed"
+              and eval_row["evaluation_completed_at"] is not None,
+              f"batch cuoi cung dat status evaluation_completed that su qua 2-UID topology "
+              f"(thuc te {dict(eval_row) if eval_row else None})")
+    finally:
+        await admin.close()
+
+
+async def scenario_18_signer_crash_mid_run() -> None:
+    """F-A08-R1-04 (negative test): signing service BI GIET giua luc dang capture (KHONG PHAI
+    truong hop chua bao gio khoi dong nhu scenario [16]) - xac nhan collector tu phat hien (retry
+    roi stall-detect), runner tu cleanup + terminalize batch 'aborted', KHONG co capture thanh
+    cong 1 phan nao bi bao cao nham la thanh cong."""
+    print("== [18] F-A08-R1-04: signer CRASH GIUA LUC dang chay - collector tu phat hien, "
+          "cleanup dung, khong bao cao thanh cong gia ==")
+    from scripts._stage0p_signing_service_helper import (  # noqa: PLC0415
+        ensure_service_accounts,
+        start_signing_service,
+    )
+
+    admin = await asyncpg.connect(DB_URL)
+    try:
+        approval_staff = await _make_staff(
+            admin, username="rehearsal-test-18-approver", permissions=["m4.stage0p.approve"],
+            pin_secret="approver-pin-18")
+        operator_staff = await _make_staff(
+            admin, username="rehearsal-test-18-operator", permissions=["m4.stage0p.operate"],
+            pin_secret="operator-pin-18")
+        reviewer_staff = await _make_staff(
+            admin, username="rehearsal-test-18-reviewer",
+            permissions=["m4.stage0p.review", "m4.stage0p.evaluate"], pin_secret="reviewer-pin-18")
+    finally:
+        await admin.close()
+
+    approval_ref = "m4-rehearsal-test-18-signer-crash"
+    r = _run_cli("record-approval", "--approval-staff-id", str(approval_staff),
+                "--approval-ref", approval_ref,
+                "--valid-from", "2020-01-01T00:00:00+00:00",
+                "--valid-until", "2099-01-01T00:00:00+00:00",
+                env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-18"})
+    check(r.returncode == 0, "setup: record-approval thanh cong")
+
+    signer_uid, collector_uid, _other_uid, shared_gid = ensure_service_accounts()
+    socket_path = f"/var/tmp/m4-rehearsal-test-18-signer-{os.getpid()}/sock"  # xem ghi chu [17]
+    signer_proc, sample_key, hmac_key, auth_key = await start_signing_service(
+        socket_path=socket_path, allowed_uid=collector_uid,
+        run_as_uid=signer_uid, shared_gid=shared_gid)
+    signer_alive = True
+    try:
+        r = _run_cli("provision-keys", env_extra={
+            "M4_SAMPLE_KEY_B64": base64.b64encode(sample_key).decode(),
+            "M4_TRANSCRIPT_HMAC_KEY_B64": base64.b64encode(hmac_key).decode(),
+            "M4_SIGNING_AUTH_VERIFY_KEY_B64": base64.b64encode(auth_key).decode()})
+        check(r.returncode == 0, "setup: provision-keys thanh cong")
+
+        manifest_path = _write_small_manifest(10, "18")
+        import pwd  # noqa: PLC0415
+        env = {**os.environ, "DATABASE_URL": DB_URL, "REDIS_URL": REDIS_URL,
+              "STAGE0P_REHEARSAL_OPERATOR_PIN": "operator-pin-18",
+              "STAGE0P_REHEARSAL_REVIEWER_PIN": "reviewer-pin-18",
+              "M4_STAGE0P_SIGNING_SOCKET": socket_path,
+              "M4_SAMPLE_KEY_B64": base64.b64encode(sample_key).decode(),
+              # xem ghi chu trong _run_cli(): user= khong tu doi HOME, phai tu ghi de khop dung
+              # hanh vi `docker compose exec --user <name>` that (F-A08-R1-04 regression - thieu
+              # dong nay lam scenario nay crash NGAY tai asyncpg.connect() truoc ca khi collector
+              # kip bat dau, khien no khong con la 1 phep thu "crash GIUA luc dang chay" nua).
+              "HOME": pwd.getpwuid(collector_uid).pw_dir}
+        run_proc = subprocess.Popen(
+            [sys.executable, "scripts/m4_stage0p_rehearsal_runner.py", "run",
+             "--manifest", str(manifest_path), "--approval-ref", approval_ref,
+             "--operator-staff-id", str(operator_staff), "--reviewer-staff-id", str(reviewer_staff)],
+            cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            user=collector_uid, group=pwd.getpwuid(collector_uid).pw_gid)
+
+        poll_conn = await asyncpg.connect(DB_URL)
+        try:
+            async def _capture_progress_started():
+                return bool(await poll_conn.fetchval(
+                    "SELECT count(*) FROM m4_stage0p_capture_progress"))
+            observed = await _poll_until(_capture_progress_started, timeout=20.0)
+            check(observed, "quan sat duoc capture_progress bat dau xuat hien (collector dang "
+                            "lam viec voi signer that) truoc khi giet signer")
+        finally:
+            await poll_conn.close()
+
+        # Giet signer NGAY GIUA luc collector dang xu ly - mo phong crash that (khong phai
+        # "chua bao gio khoi dong" nhu scenario [16]).
+        signer_proc.kill()
+        try:
+            await asyncio.wait_for(signer_proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+        signer_alive = False
+
+        try:
+            stdout, stderr = run_proc.communicate(timeout=90)
+        except subprocess.TimeoutExpired:
+            run_proc.kill()
+            stdout, stderr = run_proc.communicate()
+            check(False, "runner subprocess KHONG thoat trong 90s sau khi signer bi giet - treo "
+                         "bat thuong")
+            stdout = stdout or ""
+
+        check(run_proc.returncode != 0,
+              f"runner tu phat hien signer chet giua chung -> exit khac 0 (thuc te "
+              f"{run_proc.returncode})")
+        check('"rehearsal_lifecycle_failed"' in stdout or "COLLECTOR FAIL" in stdout,
+              "log xac nhan lifecycle that bai dung nguyen nhan (collector tu stall-detect)")
+        check('"evaluation_completed"' not in stdout,
+              "KHONG co bao cao evaluation_completed nao - khong bao gio bao cao thanh cong gia "
+              "sau khi signer chet giua chung")
+        check('"batch_terminalized"' in stdout,
+              "log co buoc batch_terminalized (cleanup moi A08-COR-02 van chay du signer da chet)")
+    finally:
+        if signer_alive:
+            signer_proc.kill()
+            try:
+                await asyncio.wait_for(signer_proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+
+    verify_conn = await asyncpg.connect(DB_URL)
+    try:
+        capture_off = not bool(await verify_conn.fetchval(
+            "SELECT capture_enabled FROM m4_stage0p_control WHERE id = 1"))
+        check(capture_off, "post-crash: capture_enabled = False (cleanup tu tat dung du signer "
+                           "da chet)")
+        residual = await verify_conn.fetchval(
+            "SELECT count(*) FROM customers WHERE psid LIKE $1", f"{runner.PSID_PREFIX}%")
+        check(residual == 0, f"post-crash: 0 synthetic customer sot lai (thuc te {residual})")
+        batch_row = await verify_conn.fetchrow(
+            "SELECT status, aborted_at FROM m4_selection_batches "
+            "WHERE algorithm_seed LIKE '%rehearsal-v1' ORDER BY locked_at DESC LIMIT 1")
+        check(batch_row is not None and batch_row["status"] == "aborted"
+              and batch_row["aborted_at"] is not None,
+              f"batch terminalize dung 'aborted' du signer chet GIUA CHUNG (khong phai chua bao "
+              f"gio khoi dong) - thuc te {dict(batch_row) if batch_row else None}")
+    finally:
+        await verify_conn.close()
+    manifest_path.unlink(missing_ok=True)
+
+
 async def main() -> int:
     await scenario_1_happy_path_e2e()
     await scenario_2_hard_fence()
@@ -1039,6 +1290,8 @@ async def main() -> int:
     await scenario_14_verifier_catches_orphan_batch()
     await scenario_15_terminalize_never_touches_success_batch()
     await scenario_16_reproduce_amendment08_ends_dormant_clean()
+    await scenario_17_full_lifecycle_real_two_uid_topology()
+    await scenario_18_signer_crash_mid_run()
 
     print()
     if _fail:

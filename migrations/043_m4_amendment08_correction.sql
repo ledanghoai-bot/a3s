@@ -56,20 +56,51 @@ COMMENT ON COLUMN m4_selection_batches.aborted_at IS
    dung cho batch da toi evaluation_completed) - giu batch lam audit trail thay vi xoa.';
 
 -- ===========================================================================
--- A08-COR-04: chan duplicate bind approval CUNG approval_ref + target_staff_id o trang thai CON
--- HIEU LUC (chua revoke) bang DB-enforced partial unique index - khong con chi dua vao CLI
--- precheck (de rang buoc bang race, dung xay ra dung nhu vay o Amendment 08). Partial (WHERE
--- revoked_at IS NULL) de: (a) row lich su da revoke KHONG bi tinh, khong can xoa gi de dat duoc
--- uniqueness; (b) van tao duoc approval MOI cho amendment/approval_ref KHAC bat cu luc nao.
+-- A08-COR-04 (REV1, dap F-A08-R1-05): chan duplicate bind approval CUNG approval_ref +
+-- target_staff_id cho DU BAT KY trang thai nao (ke ca hang lich su DA revoke) - REV0 (partial
+-- unique index WHERE revoked_at IS NULL) chi chan hang CON hieu luc, van cho tao lai CUNG cap
+-- (ref, target) sau khi revoke - CA yeu cau chan tuyet doi hon: 1 cap (ref, target) chi duoc
+-- dung DUNG 1 lan trong toan bo lich su, muon ceremony lai PHAI dung approval_ref MOI (vd
+-- amendment khac).
+--
+-- KHONG dung UNIQUE INDEX thuong: production DA CO 2 hang lich su trung nhau that su (approval id
+-- 4 va 7, Amendment 08, ca hai DA revoke) - 1 UNIQUE INDEX thuong se FAIL NGAY luc tao migration
+-- vi du lieu cu vi pham no, va yeu cau nay CAM xoa/sua du lieu lich su do. Dung TRIGGER + advisory
+-- lock: chi ap dung cho INSERT MOI (khong retroactive kiem tra hang cu), rieng du lieu cu van giu
+-- nguyen 100%. `pg_advisory_xact_lock(hashtext(ref), hashtext(target::text))` khoa theo CAP
+-- (ref, target) trong PHAM VI transaction hien tai - dong bo hoa 2 INSERT dong thoi cho CUNG cap
+-- (transaction thu 2 phai doi transaction thu nhat COMMIT/ROLLBACK truoc khi duoc tiep tuc, luc
+-- do EXISTS check cua no se THAY hang vua duoc INSERT boi transaction thu nhat va tu choi dung) -
+-- dong hoan toan khoang ho TOCTOU giua luc kiem tra va luc ghi that su xay ra o Amendment 08.
 -- ===========================================================================
-CREATE UNIQUE INDEX IF NOT EXISTS m4_pin_bind_approval_active_unique
-  ON m4_stage0p_pin_bind_approvals (approval_ref, target_staff_id)
-  WHERE revoked_at IS NULL;
+DROP INDEX IF EXISTS m4_pin_bind_approval_active_unique;
 
-COMMENT ON INDEX m4_pin_bind_approval_active_unique IS
-  'F-A08-EXEC-04/A08-COR-04: toi da 1 bind approval CON HIEU LUC (chua revoke) cho 1 cap
-   (approval_ref, target_staff_id) - chan duplicate ceremony do lap lenh/race, khong anh huong
-   row lich su da revoke.';
+CREATE OR REPLACE FUNCTION m4_pin_bind_approval_prevent_duplicate() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext(NEW.approval_ref), hashtext(NEW.target_staff_id::text));
+  IF EXISTS (
+    SELECT 1 FROM m4_stage0p_pin_bind_approvals
+    WHERE approval_ref = NEW.approval_ref AND target_staff_id = NEW.target_staff_id
+  ) THEN
+    RAISE EXCEPTION 'm4_stage0p_pin_bind_approvals: da co it nhat 1 hang (bat ky trang thai, ke '
+      'ca da revoke) cho approval_ref=% target_staff_id=% - khong tao duplicate '
+      '(F-A08-EXEC-04/A08-COR-04). Dung approval_ref MOI de tao ceremony moi cho staff nay.',
+      NEW.approval_ref, NEW.target_staff_id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS m4_pin_bind_approval_dedup_trigger ON m4_stage0p_pin_bind_approvals;
+CREATE TRIGGER m4_pin_bind_approval_dedup_trigger
+  BEFORE INSERT ON m4_stage0p_pin_bind_approvals
+  FOR EACH ROW EXECUTE FUNCTION m4_pin_bind_approval_prevent_duplicate();
+
+COMMENT ON TRIGGER m4_pin_bind_approval_dedup_trigger ON m4_stage0p_pin_bind_approvals IS
+  'F-A08-EXEC-04/A08-COR-04 (REV1): chan MOI INSERT trung (approval_ref, target_staff_id) voi BAT
+   KY hang nao da ton tai (ke ca da revoke) - khong retroactive, khong xoa/sua du lieu lich su
+   (vd approval id 4/7 tren production). Advisory lock (2 tham so, khoa theo cap ref+target) dong
+   khoang ho TOCTOU giua 2 INSERT dong thoi cho cung 1 cap.';
 
 -- ===========================================================================
 -- Postcondition fail-closed
@@ -84,9 +115,14 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                  WHERE table_name = 'm4_selection_batches' AND column_name = 'aborted_at') THEN
     problems := problems || ' aborted_at_column_missing'; END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public'
-                 AND indexname = 'm4_pin_bind_approval_active_unique') THEN
-    problems := problems || ' bind_approval_active_unique_index_missing'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public'
+             AND indexname = 'm4_pin_bind_approval_active_unique') THEN
+    problems := problems || ' stale_partial_unique_index_still_present'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'm4_pin_bind_approval_prevent_duplicate') THEN
+    problems := problems || ' dedup_trigger_function_missing'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'm4_pin_bind_approval_dedup_trigger'
+                 AND NOT tgisinternal) THEN
+    problems := problems || ' dedup_trigger_missing'; END IF;
   IF problems <> '' THEN
     RAISE EXCEPTION '043 postcondition FAIL —%', problems; END IF;
 END $$;
