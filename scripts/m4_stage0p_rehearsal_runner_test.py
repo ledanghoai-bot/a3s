@@ -588,7 +588,13 @@ async def scenario_6_real_full_lifecycle() -> None:
                 env_extra={"STAGE0P_REHEARSAL_APPROVAL_PIN": "approver-pin-6"})
     check(r.returncode == 0, "setup: record-approval thanh cong")
 
-    socket_path = "/tmp/m4-rehearsal-test-signer.sock"
+    # F-A08-R2-03: socket path PHAI nam trong 1 thu muc con RIENG (khong phai "/tmp" thang) -
+    # start_signing_service() (mo hinh 1-UID) coi os.path.dirname(socket_path) la "thu muc socket"
+    # cua no va chmod/rmdir CHINH thu muc do; neu dirname = "/tmp" thi no chmod thang /tmp ve 0700,
+    # lam o nhiem moi truong sandbox cho MOI scenario/suite khac chay SAU no trong cung phien (day
+    # chinh la nguyen nhan goc CA Review 2 F-A08-R2-03 chi ra, khong phai suy doan) - dung 1 thu
+    # muc rieng + pid de chi CHINH thu muc do bi chmod/rmdir, khong bao gio dung /tmp lam socket_dir.
+    socket_path = f"/tmp/m4-rehearsal-test-6-signer-{os.getpid()}/sock"
     proc, sample_key, hmac_key, auth_key = await start_signing_service(
         socket_path=socket_path, allowed_uid=os.getuid())
     try:

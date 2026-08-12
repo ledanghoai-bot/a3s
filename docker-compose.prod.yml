@@ -61,6 +61,15 @@ services:
   # dong voi trang thai khong ro rang hoac am tham che giau 1 crash-loop dang bi khai thac.
   # Operator PHAI tu quyet dinh restart tuong minh (`docker compose --profile m4-signing up -d
   # m4-signer` lai, voi cung 3 khoa da dua cho `provision-keys`).
+  # F-A08-R2-01 (dap PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-2-VI.md): REV1 dua
+  # 3 khoa THAT vao `environment:` ($:?...} interpolation) - `docker inspect m4-signer` hien duoc
+  # gia tri o Config.Env. REV2 nay CHI con truyen DUONG DAN FILE (`..._FILE`, khong phai gia tri
+  # THAT) qua environment - 3 khoa THAT nam trong 1 bind-mount READ-ONLY tu 1 thu muc host operator
+  # tu chuan bi (chown dung UID 5001/GID 5000 - CUNG UID/GID Dockerfile tao co dinh - + chmod 0400/
+  # 0440, xem runbook §3) - `docker inspect` se KHONG con hien gia tri o bat ky truong nao (chi
+  # hien DUONG DAN mount, khong phai secret). `stage0p_signing_service.py` (_read_secret_env_or_file)
+  # TU KIEM TRA LAI quyen file doc lap luc khoi dong (khong chi tin bind-mount host giu dung
+  # permission), tu choi khoi dong neu file co bat ky bit group/other nao hoac sai chu so huu.
   m4-signer:
     build: .
     profiles: ["m4-signing"]
@@ -71,11 +80,12 @@ services:
       - STAGE0P_SIGNING_ALLOWED_UID=5002
       - STAGE0P_SIGNING_SHARED_GID=5000
       - REDIS_URL=redis://redis:6379/0
-      - M4_SAMPLE_KEY_B64=${M4_SAMPLE_KEY_B64:?Phai dat M4_SAMPLE_KEY_B64 trong shell TRUOC khi 'up' service nay (xem runbook) - KHONG dat trong .env/file nao}
-      - M4_TRANSCRIPT_HMAC_KEY_B64=${M4_TRANSCRIPT_HMAC_KEY_B64:?Phai dat M4_TRANSCRIPT_HMAC_KEY_B64 trong shell TRUOC khi 'up' service nay - KHONG dat trong .env/file nao}
-      - M4_SIGNING_AUTH_VERIFY_KEY_B64=${M4_SIGNING_AUTH_VERIFY_KEY_B64:?Phai dat M4_SIGNING_AUTH_VERIFY_KEY_B64 trong shell TRUOC khi 'up' service nay - KHONG dat trong .env/file nao}
+      - M4_SAMPLE_KEY_B64_FILE=/run/m4-signing-secrets/sample_key
+      - M4_TRANSCRIPT_HMAC_KEY_B64_FILE=/run/m4-signing-secrets/transcript_hmac_key
+      - M4_SIGNING_AUTH_VERIFY_KEY_B64_FILE=/run/m4-signing-secrets/signing_auth_key
     volumes:
       - m4_signing_socket:/run/m4-signing
+      - /run/m4-signing-secrets:/run/m4-signing-secrets:ro
     depends_on:
       - redis
     restart: "no"

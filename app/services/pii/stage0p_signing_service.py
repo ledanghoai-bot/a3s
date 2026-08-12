@@ -531,23 +531,55 @@ async def run_signing_service(socket_path: str, *, allowed_uid: int | None = Non
         await server.serve_forever()
 
 
+_SECRET_FILE_FORBIDDEN_MODE_BITS = 0o077  # group/other: khong duoc co bat ky bit nao
+
+
+def _read_secret_env_or_file(name: str) -> str:
+    """F-A08-R2-01 (dap PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-2-VI.md): doc
+    secret tu FILE (bien `<NAME>_FILE` tro toi duong dan, vd bind-mount tu 1 thu muc host operator
+    tu chuan bi voi chown/chmod dung UID cua tien trinh nay) NEU CO — khong con bake gia tri THAT
+    vao `environment:` cua docker-compose (REV1 cu lam vay, `docker inspect m4-signer` se hien gia
+    tri o `Config.Env`; REV2 nay chi con thay 1 duong dan file, khong con gia tri).
+
+    TU KIEM TRA quyen file doc lap (KHONG chi tin bind-mount host giu dung permission — do la hanh
+    vi Linux chuan nhung KHONG the tu kiem chung tu ben trong 1 tien trinh dang chay, va moi truong
+    sandbox non-Linux/Windows-host-bind-mount da CHUNG MINH THUC TE co the bo qua permission hoan
+    toan, xem `scripts/m4_stage0p_signing_service_test.py` kich ban [22]/[23]) — cung triet ly
+    phong thu-o-nhieu-lop da qua 14 vong CA Technical Review cho `_validate_socket_directory()` o
+    tren: tu choi khoi dong NGAY neu file co BAT KY bit group/other nao (mode & 0o077 != 0) hoac
+    khong thuoc so huu CHINH tien trinh nay.
+
+    Fallback ve bien `<NAME>` THO (gia tri truc tiep, hanh vi REV1/REV0 cu) neu `<NAME>_FILE`
+    khong duoc dat — GIU NGUYEN duong sandbox test hien co (khong phai security boundary, khong
+    thay doi hanh vi da duoc kiem qua nhieu vong review truoc do)."""
+    file_path = os.environ.get(f"{name}_FILE")
+    if not file_path:
+        return os.environ.get(name, "")
+    if not os.path.isfile(file_path):
+        raise RuntimeError(f"{name}_FILE tro toi duong dan khong ton tai/khong phai file thuong: "
+                           f"{file_path}")
+    if os.path.islink(file_path):
+        raise RuntimeError(f"{name}_FILE la symlink - tu choi doc (chong tan cong symlink): "
+                           f"{file_path}")
+    st = os.stat(file_path)
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & _SECRET_FILE_FORBIDDEN_MODE_BITS:
+        raise RuntimeError(
+            f"{name}_FILE qua rong quyen (mode={oct(mode)}, phai loai bo group/other access): "
+            f"{file_path}")
+    if st.st_uid != os.getuid():
+        raise RuntimeError(
+            f"{name}_FILE khong thuoc so huu tien trinh nay (file uid={st.st_uid}, process "
+            f"uid={os.getuid()}): {file_path}")
+    with open(file_path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
 def main() -> int:
     socket_path = os.environ.get("STAGE0P_SIGNING_SOCKET")
     if not socket_path:
         print("STAGE0P_SIGNING_SOCKET chua duoc dat", file=sys.stderr)
         return 2
-    sample_key_b64 = os.environ.get("M4_SAMPLE_KEY_B64", "")
-    hmac_key_b64 = os.environ.get("M4_TRANSCRIPT_HMAC_KEY_B64", "")
-    auth_verify_key_b64 = os.environ.get("M4_SIGNING_AUTH_VERIFY_KEY_B64", "")
-    if not sample_key_b64 or not hmac_key_b64 or not auth_verify_key_b64:
-        print("M4_SAMPLE_KEY_B64/M4_TRANSCRIPT_HMAC_KEY_B64/M4_SIGNING_AUTH_VERIFY_KEY_B64 "
-              "chua duoc dat day du", file=sys.stderr)
-        return 2
-    # REV11 T10-02/REV13 T12-02: 3 khoa nay CHI ton tai trong settings cua CHINH tien trinh nay -
-    # collector khong bao gio dat 3 bien moi truong nay trong process cua no (xem evidence scripts).
-    settings.m4_sample_key_b64 = sample_key_b64
-    settings.m4_transcript_hmac_key_b64 = hmac_key_b64
-    settings.m4_signing_auth_verify_key_b64 = auth_verify_key_b64
     # T13-02: Redis dung cho tieu thu nonce 1-lan (_consume_nonce_once) - KHONG phai secret, chi la
     # ha tang dung chung (cung instance moi collector/pending-check khac) - doc tu moi truong CUA
     # CHINH tien trinh nay, mac dinh ve gia tri chung cua settings neu khong ghi de.
@@ -555,11 +587,25 @@ def main() -> int:
     shared_gid_s = os.environ.get("STAGE0P_SIGNING_SHARED_GID")
     shared_gid = int(shared_gid_s) if shared_gid_s else None
     try:
+        sample_key_b64 = _read_secret_env_or_file("M4_SAMPLE_KEY_B64")
+        hmac_key_b64 = _read_secret_env_or_file("M4_TRANSCRIPT_HMAC_KEY_B64")
+        auth_verify_key_b64 = _read_secret_env_or_file("M4_SIGNING_AUTH_VERIFY_KEY_B64")
+        if not sample_key_b64 or not hmac_key_b64 or not auth_verify_key_b64:
+            raise RuntimeError(
+                "M4_SAMPLE_KEY_B64/M4_TRANSCRIPT_HMAC_KEY_B64/M4_SIGNING_AUTH_VERIFY_KEY_B64 (hoac "
+                "cac bien _FILE tuong ung) chua duoc dat day du")
+        # REV11 T10-02/REV13 T12-02: 3 khoa nay CHI ton tai trong settings cua CHINH tien trinh nay
+        # - collector khong bao gio dat 3 bien moi truong/file nay trong process cua no (xem
+        # evidence scripts).
+        settings.m4_sample_key_b64 = sample_key_b64
+        settings.m4_transcript_hmac_key_b64 = hmac_key_b64
+        settings.m4_signing_auth_verify_key_b64 = auth_verify_key_b64
         allowed_uid = _allowed_uid()
         asyncio.run(run_signing_service(socket_path, allowed_uid=allowed_uid, shared_gid=shared_gid))
     except RuntimeError as e:
         # T11-02/T12-01: startup fail neu socket directory/path khong an toan
-        # (_validate_socket_directory) hoac STAGE0P_SIGNING_ALLOWED_UID chua cau hinh (_allowed_uid).
+        # (_validate_socket_directory) hoac STAGE0P_SIGNING_ALLOWED_UID chua cau hinh (_allowed_uid);
+        # F-A08-R2-01: hoac secret file khong an toan/thieu (_read_secret_env_or_file).
         print(f"signing service tu choi khoi dong: {e}", file=sys.stderr)
         return 2
     return 0

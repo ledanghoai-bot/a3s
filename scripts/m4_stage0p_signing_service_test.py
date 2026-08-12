@@ -54,7 +54,15 @@ THAT ky/Redis THAT, script nay tap trung vao lop access-control + xac minh token
   [19] T13-02: 2 signer instance KHAC NHAU (socket khac, CUNG Redis+auth key) nhan CUNG 1 token
        DONG THOI -> DUNG 1 thanh cong (Redis SET NX PX dung CHUNG giua cac instance).
   [20] T13-03: burst vuot ngan sach rate-limit -> mot phan bi tu choi TRUOC khi doc frame (khong
-       co response), tu phuc hoi co kiem soat sau khi cua so lan sau bat dau."""
+       co response), tu phuc hoi co kiem soat sau khi cua so lan sau bat dau.
+  [21] F-A08-R2-01: khoi dong THAT qua 3 khoa dang FILE (`<NAME>_FILE`, khong con gia tri THO
+       trong environment) voi permission dung (0400, chinh chu so huu) -> thanh cong, round-trip
+       ky/ma hoa/giai ma day du.
+  [22] F-A08-R2-01: file khoa co bit group/other (world-readable, mo phong bind-mount host khong
+       giu dung permission - xem evidence Windows-host POC trong correction report) -> service TU
+       CHOI khoi dong, khong bao gio doc noi dung/lang nghe socket.
+  [23] F-A08-R2-01: file khoa KHONG thuoc so huu tien trinh signing service (chu so huu khac, du
+       permission mode dung) -> service TU CHOI khoi dong."""
 
 import asyncio
 import base64
@@ -62,6 +70,7 @@ import hashlib
 import hmac as hmac_module
 import json
 import os
+import stat
 import sys
 import time
 import uuid
@@ -71,6 +80,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from _stage0p_signing_service_helper import (  # noqa: E402
+    _SOCKET_FILE_MODE,
     ensure_service_accounts,
     request_signature_as_uid,
     start_signing_service,
@@ -210,6 +220,64 @@ async def _spawn_raw_process(socket_path: str, *, sample_key: bytes, hmac_key: b
         cwd=str(ROOT), env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
+
+
+async def _spawn_with_secret_files(socket_path: str, *, sample_key: bytes, hmac_key: bytes,
+                                   auth_verify_key: bytes, allowed_uid: int, secret_dir: str,
+                                   file_mode: int = 0o400, owner_uid: int | None = None,
+                                   wait_ready: bool = True) -> asyncio.subprocess.Process:
+    """F-A08-R2-01: spawn service doc 3 khoa qua `<NAME>_FILE` (thay vi gia tri THO qua env truc
+    tiep nhu `_spawn_raw_process`) - ghi 3 file TRONG `secret_dir`, chmod/chown NGAY sau moi lan
+    ghi (TRUOC KHI spawn tien trinh - quan trong: chmod SAU KHI spawn se co RACE that, service co
+    the doc file truoc khi permission kip sua) roi tro `_FILE` toi dung duong dan. `file_mode`/
+    `owner_uid` cho phep kich ban [22]/[23] dung SAI permission/chu so huu tu dau, khong can sua
+    lai sau khi tien trinh da chay."""
+    def _write(name: str, value: bytes) -> str:
+        path = os.path.join(secret_dir, name)
+        with open(path, "wb") as f:
+            f.write(base64.b64encode(value))
+        os.chmod(path, file_mode)
+        if owner_uid is not None:
+            os.chown(path, owner_uid, -1)
+        return path
+    sample_path = _write("sample_key", sample_key)
+    hmac_path = _write("transcript_hmac_key", hmac_key)
+    auth_path = _write("signing_auth_key", auth_verify_key)
+    env = os.environ.copy()
+    env["STAGE0P_SIGNING_SOCKET"] = socket_path
+    env["M4_SAMPLE_KEY_B64_FILE"] = sample_path
+    env["M4_TRANSCRIPT_HMAC_KEY_B64_FILE"] = hmac_path
+    env["M4_SIGNING_AUTH_VERIFY_KEY_B64_FILE"] = auth_path
+    env["STAGE0P_SIGNING_ALLOWED_UID"] = str(allowed_uid)
+    for name in ("M4_SAMPLE_KEY_B64", "M4_TRANSCRIPT_HMAC_KEY_B64", "M4_SIGNING_AUTH_VERIFY_KEY_B64"):
+        env.pop(name, None)  # dam bao KHONG con gia tri THO nao trong env - chi con duong dan file
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "app.services.pii.stage0p_signing_service",
+        cwd=str(ROOT), env=env,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    if not wait_ready:
+        return proc
+    # Khop dung logic doi san sang cua start_signing_service() (helper da qua nhieu vong review) -
+    # doi CA socket ton tai LAN dung mode cuoi cung, khong chi "file ton tai" (tranh race voi
+    # os.chmod() ben trong service chay SAU bind()).
+    deadline = time.monotonic() + 5.0
+    while True:
+        if os.path.exists(socket_path):
+            try:
+                if stat.S_IMODE(os.stat(socket_path).st_mode) == _SOCKET_FILE_MODE:
+                    break
+            except OSError:
+                pass
+        if proc.returncode is not None:
+            out = await proc.stdout.read()
+            raise RuntimeError(
+                f"signing service thoat som (exit={proc.returncode}): {out.decode(errors='replace')}")
+        if time.monotonic() > deadline:
+            proc.terminate()
+            raise RuntimeError("signing service khong tao socket (dung mode) trong 5s")
+        await asyncio.sleep(0.05)
+    return proc
 
 
 async def main() -> int:
@@ -555,6 +623,104 @@ async def main() -> int:
               f"(thuc te: {resp_recover})")
     finally:
         await stop_signing_service(proc_20, socket_20)
+
+    print("== [21] F-A08-R2-01: khoi dong THAT qua 3 khoa dang FILE (khong con gia tri THO trong "
+          "env) voi permission dung (0400, chinh chu) -> thanh cong, round-trip day du ==")
+    signer_uid_21, _collector_uid_21, _other_21, _shared_21 = ensure_service_accounts()
+    dir_21 = f"/tmp/m4-sst-21-{os.getpid()}"
+    secrets_dir_21 = f"{dir_21}/secrets"
+    socket_dir_21 = f"{dir_21}/sock-dir"
+    os.makedirs(secrets_dir_21, mode=0o700, exist_ok=True)
+    os.makedirs(socket_dir_21, mode=0o700, exist_ok=True)
+    os.chmod(secrets_dir_21, 0o700)
+    os.chmod(socket_dir_21, 0o700)
+    socket_21 = f"{socket_dir_21}/sock"
+    sample_key_21, hmac_key_21, auth_key_21 = os.urandom(32), os.urandom(32), os.urandom(32)
+    proc_21 = await _spawn_with_secret_files(
+        socket_21, sample_key=sample_key_21, hmac_key=hmac_key_21, auth_verify_key=auth_key_21,
+        allowed_uid=os.getuid(), secret_dir=secrets_dir_21, file_mode=0o400)
+    try:
+        req_21 = _build_request(auth_key_21, sample_id="s21-file-secrets",
+                                raw_content="noi dung test khoa dang file")
+        result_21 = await request_signature(
+            socket_21, batch_id=req_21["batch_id"], conversation_id=req_21["conversation_id"],
+            message_id=req_21["message_id"], sample_id=req_21["sample_id"],
+            raw_content=req_21["raw_content"], customer_ref=req_21["customer_ref"],
+            conversation_ref=req_21["conversation_ref"], purpose_code=req_21["purpose_code"],
+            txid=req_21["txid"], signing_authorization=req_21["signing_authorization"])
+        check(bool(result_21.key_version),
+              f"[21] service khoi dong THANH CONG qua khoa dang FILE va ky DUNG (round-trip khong "
+              f"loi, thuc te key_version={result_21.key_version!r})")
+        settings.m4_sample_key_b64 = base64.b64encode(sample_key_21).decode()
+        plaintext_21 = decrypt_sample_value(result_21.ciphertext, customer_ref="cust-1",
+                                            conversation_ref="1", sample_id="s21-file-secrets")
+        canonical_text_21, _t21 = canonicalize("noi dung test khoa dang file")
+        check(plaintext_21 == canonical_text_21,
+              "[21] giai ma lai (bang chinh sample_key da doc tu FILE) ra DUNG canonical_text")
+    finally:
+        await stop_signing_service(proc_21, socket_21)
+        for path_21 in os.listdir(secrets_dir_21):
+            os.unlink(os.path.join(secrets_dir_21, path_21))
+        os.rmdir(secrets_dir_21)
+        os.rmdir(dir_21)
+
+    print("== [22] F-A08-R2-01: 1 file khoa co bit group/other (world-readable, mo phong bind-mount "
+          "khong giu dung permission) -> service TU CHOI khoi dong, KHONG bao gio doc noi dung ==")
+    dir_22 = f"/tmp/m4-sst-22-{os.getpid()}"
+    secrets_dir_22 = f"{dir_22}/secrets"
+    socket_dir_22 = f"{dir_22}/sock-dir"
+    os.makedirs(secrets_dir_22, mode=0o700, exist_ok=True)
+    os.makedirs(socket_dir_22, mode=0o700, exist_ok=True)
+    os.chmod(secrets_dir_22, 0o700)
+    os.chmod(socket_dir_22, 0o700)
+    socket_22 = f"{socket_dir_22}/sock"
+    proc_22 = await _spawn_with_secret_files(
+        socket_22, sample_key=os.urandom(32), hmac_key=os.urandom(32),
+        auth_verify_key=os.urandom(32), allowed_uid=os.getuid(), secret_dir=secrets_dir_22,
+        file_mode=0o644,  # CO Y qua rong (world-readable) - mo phong bind-mount hong permission
+        wait_ready=False)  # mong doi THAT BAI - dung wait_signing_service_exit rieng ben duoi
+    paths_22 = [os.path.join(secrets_dir_22, p) for p in os.listdir(secrets_dir_22)]
+    rc_22, out_22 = await wait_signing_service_exit(proc_22, timeout=5.0)
+    check(rc_22 != 0, "[22] file khoa mode 0644 (world-readable) -> service thoat KHONG THANH CONG")
+    check(not os.path.exists(socket_22), "[22] KHONG co socket nao duoc tao (service chua bao gio "
+                                        "lang nghe/dung khoa)")
+    check("rong quyen" in out_22 or "qua rong quyen" in out_22,
+          f"[22] thong diep loi de cap 'qua rong quyen' (thuc te: {out_22.strip()[:200]!r})")
+    for p in paths_22:
+        os.unlink(p)
+    os.rmdir(secrets_dir_22)
+    os.rmdir(socket_dir_22)
+    os.rmdir(dir_22)
+
+    print("== [23] F-A08-R2-01: 1 file khoa KHONG thuoc so huu tien trinh signing service (chu so "
+          "huu khac) -> service TU CHOI khoi dong ==")
+    _signer_uid_23, collector_uid_23, _other_23, _shared_23 = ensure_service_accounts()
+    dir_23 = f"/tmp/m4-sst-23-{os.getpid()}"
+    secrets_dir_23 = f"{dir_23}/secrets"
+    socket_dir_23 = f"{dir_23}/sock-dir"
+    os.makedirs(secrets_dir_23, mode=0o700, exist_ok=True)
+    os.makedirs(socket_dir_23, mode=0o700, exist_ok=True)
+    os.chmod(secrets_dir_23, 0o700)
+    os.chmod(socket_dir_23, 0o700)
+    socket_23 = f"{socket_dir_23}/sock"
+    proc_23 = await _spawn_with_secret_files(
+        socket_23, sample_key=os.urandom(32), hmac_key=os.urandom(32),
+        auth_verify_key=os.urandom(32), allowed_uid=os.getuid(), secret_dir=secrets_dir_23,
+        file_mode=0o400,  # dung permission...
+        owner_uid=collector_uid_23,  # ...nhung SAI chu so huu (khong phai UID service dang chay)
+        wait_ready=False)  # mong doi THAT BAI - dung wait_signing_service_exit rieng ben duoi
+    paths_23 = [os.path.join(secrets_dir_23, p) for p in os.listdir(secrets_dir_23)]
+    rc_23, out_23 = await wait_signing_service_exit(proc_23, timeout=5.0)
+    check(rc_23 != 0, "[23] file khoa sai chu so huu -> service thoat KHONG THANH CONG")
+    check(not os.path.exists(socket_23), "[23] KHONG co socket nao duoc tao")
+    check("khong thuoc so huu" in out_23,
+          f"[23] thong diep loi de cap sai chu so huu (thuc te: {out_23.strip()[:200]!r})")
+    for p in paths_23:
+        os.chown(p, os.getuid(), -1)  # tra lai quyen root de xoa duoc
+        os.unlink(p)
+    os.rmdir(secrets_dir_23)
+    os.rmdir(socket_dir_23)
+    os.rmdir(dir_23)
 
     print()
     if _fail:

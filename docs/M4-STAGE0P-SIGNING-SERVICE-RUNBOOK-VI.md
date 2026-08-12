@@ -18,22 +18,43 @@ process qua `asyncio` + tự `useradd` lúc container đang chạy. CA Review 1 
 hướng này: UID tạo lúc runtime là **mutable, ephemeral state** (mất khi container bị tạo lại),
 không có supervisor/restart policy/log sink thật.
 
-**REV1 (hiện tại)**: chuyển sang **docker-compose profile service** — `docker compose` chính là
-supervisor (quản lý lifecycle/log/restart), UID `m4-signer`/`m4-collector` được tạo **lúc build
-image** (Dockerfile, version-controlled, giống hệt trên mọi container tạo từ image), không còn
-script Python tự spawn process nào cả — không còn cảnh báo GC, không còn pidfile tự viết tay.
+**REV1**: chuyển sang **docker-compose profile service** — `docker compose` chính là supervisor
+(quản lý lifecycle/log/restart), UID `m4-signer`/`m4-collector` được tạo **lúc build image**
+(Dockerfile, version-controlled, giống hệt trên mọi container tạo từ image), không còn script
+Python tự spawn process nào cả — không còn cảnh báo GC, không còn pidfile tự viết tay.
+
+**REV2 (hiện tại)**, đáp `PHASE1B-M4-AMENDMENT-08-SIGNING-CLEANUP-CORRECTION-REVIEW-2-VI.md`
+F-A08-R2-01/02:
+
+- **F-A08-R2-01**: REV1 vẫn đưa 3 khóa THẬT vào `environment:` của `m4-signer` (`${VAR}`
+  interpolation) — `docker inspect m4-signer` hiện được giá trị plaintext ở `Config.Env`. REV2
+  chuyển 3 khóa sang **file, bind-mount READ-ONLY** từ 1 thư mục host operator tự chuẩn bị (chown
+  đúng UID `m4-signer`=5001/GID `m4-signing-ipc`=5000, chmod owner-only) — `environment:` chỉ còn
+  chứa ĐƯỜNG DẪN file (`..._FILE`), không còn giá trị. `stage0p_signing_service.py`
+  (`_read_secret_env_or_file`) TỰ KIỂM TRA LẠI quyền file lúc khởi động (không chỉ tin bind-mount
+  host giữ đúng permission — xem §3), từ chối khởi động nếu file có bit group/other hoặc sai chủ
+  sở hữu.
+- **F-A08-R2-02**: REV1's `signing_probe.py` trao `M4_SIGNING_AUTH_VERIFY_KEY_B64` (khóa đối xứng)
+  cho chính danh tính `m4-collector` để tự ký canary — về lý thuyết collector có thể tự mint 1
+  authorization cho NỘI DUNG BẤT KỲ, vô hiệu hóa ranh giới signer/collector. REV2 tách `probe`
+  thành 2 subcommand chạy ở 2 danh tính khác nhau: `mint-token` (danh tinh operator, GIỮ khóa) +
+  `submit` (danh tính `m4-collector` THẬT, KHÔNG BAO GIỜ nhận khóa — chỉ nhận 1 token đã-ký-sẵn,
+  dùng được ĐÚNG 1 lần, TTL 20 giây, chỉ hợp lệ cho canary nội dung cố định) — xem §4.
 
 ## 1. Trình tự đầy đủ 1 ceremony (tóm tắt, chi tiết PIN/approval xem docstring runner)
 
 ```
 record-approval (staff 3, PIN riêng)
-  -> provision-keys (3 khóa mới, tự sinh ngẫu nhiên)
+  -> chuẩn bị 3 file khóa trong /run/m4-signing-secrets (chown/chmod)  <-- bước MỚI (F-A08-R2-01)
+  -> provision-keys (3 khóa mới, tự sinh ngẫu nhiên, CÙNG giá trị vừa ghi vào file)
   -> docker compose --profile m4-signing up -d m4-signer   <-- bước MỚI (A08-COR-01)
-  -> signing_probe.py (canary, xác nhận signing path THẬT hoạt động)  <-- bước MỚI (F-A08-R1-03)
+  -> mint-token (danh tính operator, giữ khóa)             <-- bước MỚI (F-A08-R2-02)
+  -> submit (canary, danh tính m4-collector, KHÔNG giữ khóa) <-- bước MỚI (F-A08-R1-03/F-A08-R2-02)
   -> run --dry-run (xác nhận preflight)
   -> run (execute thật, chạy DƯỚI UID m4-collector)         <-- bước MỚI (A08-COR-01)
   -> docker compose --profile m4-signing stop m4-signer     <-- bước MỚI (A08-COR-01)
   -> retire-keys
+  -> xóa 3 file khóa trong /run/m4-signing-secrets           <-- bước MỚI (F-A08-R2-01)
   -> record-approval --revoke
 ```
 
@@ -49,15 +70,40 @@ HEAD đúng commit CA đã accept (`git rev-parse HEAD`); `m4_stage0p_transcript
 
 ## 3. Start — khởi động signing service qua docker compose
 
-**Khóa PHẢI được export trong session shell hiện tại TRƯỚC khi gọi `up`** — `docker compose` đọc
-`${VAR}` từ biến môi trường của chính shell đang gọi nó, KHÔNG cần và KHÔNG được ghi vào `.env`
-hay bất kỳ file nào:
+**F-A08-R2-01: 3 khóa PHẢI nằm trong FILE (không còn `environment:`/`${VAR}` như REV1)** — chuẩn
+bị thư mục + file TRƯỚC khi `up` (mọi lệnh dưới đây chạy với quyền root trên VPS, ví dụ SSH root
+đã xác nhận — xem `docs/VPS-RUNBOOK-VI.md`):
 
 ```bash
-export M4_SAMPLE_KEY_B64="..."             # CÙNG giá trị đã đưa cho provision-keys
-export M4_TRANSCRIPT_HMAC_KEY_B64="..."    # CÙNG giá trị đã đưa cho provision-keys
-export M4_SIGNING_AUTH_VERIFY_KEY_B64="..." # CÙNG giá trị đã đưa cho provision-keys
+install -d -m 0700 -o root -g root /run/m4-signing-secrets   # /run la tmpfs (RAM) - khong dong dia
 
+umask 077
+openssl rand -base64 32 > /run/m4-signing-secrets/sample_key
+openssl rand -base64 32 > /run/m4-signing-secrets/transcript_hmac_key
+openssl rand -base64 32 > /run/m4-signing-secrets/signing_auth_key
+
+# 5001 = UID m4-signer, 5000 = GID m4-signing-ipc (Dockerfile, CO DINH, khong doi) - CHI UID nay
+# doc duoc file (owner-only, mode 0400 - khong group/other du group co khop).
+chown 5001:5000 /run/m4-signing-secrets/*
+chmod 0400 /run/m4-signing-secrets/*
+```
+
+Đưa CÙNG 3 giá trị vừa sinh cho `provision-keys` (đọc file lại để lấy giá trị, dùng dạng bare
+`-e TEN` — xem §5 giải thích tại sao):
+
+```bash
+export M4_SAMPLE_KEY_B64=$(cat /run/m4-signing-secrets/sample_key)
+export M4_TRANSCRIPT_HMAC_KEY_B64=$(cat /run/m4-signing-secrets/transcript_hmac_key)
+export M4_SIGNING_AUTH_VERIFY_KEY_B64=$(cat /run/m4-signing-secrets/signing_auth_key)
+docker compose -f docker-compose.prod.yml exec \
+  -e M4_SAMPLE_KEY_B64 -e M4_TRANSCRIPT_HMAC_KEY_B64 -e M4_SIGNING_AUTH_VERIFY_KEY_B64 \
+  api python scripts/m4_stage0p_rehearsal_runner.py provision-keys
+```
+
+**Không cần `export` gì thêm để `up`** — `docker-compose.prod.yml` đã trỏ sẵn `..._FILE` tới
+đường dẫn cố định ở trên, không đọc `${VAR}` nào từ shell nữa (khác REV1):
+
+```bash
 docker compose -f docker-compose.prod.yml --profile m4-signing up -d m4-signer
 ```
 
@@ -74,32 +120,64 @@ mode — xem §4 để xác nhận sâu hơn signing path THẬT SỰ dùng đư
 `m4-signer` chạy dưới UID cố định `5001` (group `5000`, cả hai bake sẵn trong image qua
 `Dockerfile`) — không còn `useradd` lúc runtime nào cả.
 
-## 4. Canary probe — xác nhận signing path THẬT hoạt động (F-A08-R1-03)
+Nếu `chown`/`chmod` ở trên bị bỏ sót hoặc sai (vd file world-readable, hoặc thuộc sai UID),
+`m4-signer` **tự phát hiện VÀ từ chối khởi động** (`_read_secret_env_or_file()` tự `stat()` lại
+từng file — không chỉ tin bind-mount host giữ đúng permission, cùng triết lý phòng thủ-nhiều-lớp
+đã áp dụng cho thư mục socket): `docker compose logs m4-signer` sẽ hiện `"...qua rong quyen..."`
+hoặc `"...khong thuoc so huu tien trinh nay..."` — sửa quyền file rồi `up -d m4-signer` lại.
+
+## 4. Canary probe — xác nhận signing path THẬT hoạt động (F-A08-R1-03/F-A08-R2-02)
 
 `healthcheck` của compose chỉ chứng minh **tiến trình đang lắng nghe** (socket file tồn tại đúng
 mode) — KHÔNG chứng minh peer-UID/rate-limit/nonce/chữ ký/canonicalize/mã hóa/ký THẬT SỰ hoạt
-động đúng. Chạy canary probe THẬT (dữ liệu hoàn toàn giả lập, không ghi DB, không chạm dữ liệu
-rehearsal/khách hàng) từ ĐÚNG danh tính collector:
+động đúng. Canary probe THẬT (dữ liệu hoàn toàn giả lập, không ghi DB, không chạm dữ liệu
+rehearsal/khách hàng) — **tách làm 2 bước, chạy ở 2 danh tính KHÁC NHAU** (F-A08-R2-02: REV1 trao
+khóa cho chính danh tính `m4-collector`, để collector có thể tự mint authorization cho nội dung
+bất kỳ — vô hiệu hóa ranh giới signer/collector; REV2 sửa bằng cách KHÔNG BAO GIỜ để `m4-collector`
+nắm giữ khóa):
+
+**Bước 1 — `mint-token`, danh tính operator (KHÔNG `--user m4-collector`), CẦN khóa:**
+
+```bash
+TOKEN=$(docker compose -f docker-compose.prod.yml exec \
+  -e M4_SIGNING_AUTH_VERIFY_KEY_B64 \
+  api python scripts/m4_stage0p_signing_probe.py mint-token)
+```
+
+Ký 1 `signing_authorization` DUY NHẤT cho nội dung canary cố định (TTL 20 giây, dùng được ĐÚNG 1
+lần — tiêu thụ nonce qua Redis giống mọi request thật), in ra 1 dòng base64(JSON) chứa token +
+các trường mô tả request (sample_id/txid/canonical_digest_hex/...) — KHÔNG chứa khóa dưới bất kỳ
+dạng nào.
+
+**Bước 2 — `submit`, danh tính `m4-collector` THẬT, KHÔNG cần và KHÔNG được đưa khóa:**
 
 ```bash
 docker compose -f docker-compose.prod.yml exec --user m4-collector \
-  -e M4_SIGNING_AUTH_VERIFY_KEY_B64 \
-  api python scripts/m4_stage0p_signing_probe.py
+  -e M4_SIGNING_PROBE_TOKEN="$TOKEN" \
+  api python scripts/m4_stage0p_signing_probe.py submit
 ```
 
+`submit` KHÔNG có code path nào đọc `M4_SIGNING_AUTH_VERIFY_KEY_B64` (xác nhận bằng static audit
+tự động, `scripts/m4_stage0p_signing_probe_test.py` [P-08]) — dù giá trị này có lỡ bị đặt vào env
+của lệnh `exec` (vd thao tác nhầm), `submit` cũng không dùng tới (evidence [P-09]). Nếu ai đó thử
+sửa 1 trường trong `$TOKEN` trước khi `submit` (vd đổi `sample_id`), service từ chối vì chữ ký
+không còn khớp — `m4-collector` chỉ có thể replay ĐÚNG NGUYÊN token được cấp, không tự tạo được
+authorization khác (evidence [P-10]).
+
 **Lưu ý dạng `-e TEN_BIEN` (KHÔNG có `=gia_tri`, F-A08-R1-02)**: đây KHÔNG phải thiếu sót đánh
-máy — dạng có `=` (`-e TEN="$TEN"`) khiến giá trị secret xuất hiện làm 1 token literal trong chính
-argv của tiến trình `docker`/`docker compose` client trên host (ai có quyền `ps aux`/đọc
+máy — dạng có `=` (`-e TEN="$TEN"`) khiến giá trị xuất hiện làm 1 token literal trong chính argv
+của tiến trình `docker`/`docker compose` client trên host (ai có quyền `ps aux`/đọc
 `/proc/<pid>/cmdline` trên host TRONG lúc lệnh đang chạy đều đọc được). Dạng bare `-e TEN` yêu cầu
-Docker client tự đọc giá trị từ MÔI TRƯỜNG CỦA CHÍNH CLIENT (đã `export` ở §3) rồi chuyển qua
-Docker API — secret không bao giờ là 1 token argv (đã kiểm chứng thực tế: `docker exec -e VAR
-<container> printenv VAR` cho ra đúng giá trị dù `VAR` không hề có `=value` trên command line).
+Docker client tự đọc giá trị từ MÔI TRƯỜNG CỦA CHÍNH CLIENT rồi chuyển qua Docker API — giá trị
+không bao giờ là 1 token argv (đã kiểm chứng thực tế: `docker exec -e VAR <container> printenv
+VAR` cho ra đúng giá trị dù `VAR` không hề có `=value` trên command line). `$TOKEN` ở bước 2 dùng
+`-e ...="$TOKEN"` (có `=`) vì giá trị này ĐẾN TỪ 1 biến shell cục bộ (không phải secret dài hạn —
+1 token dùng-một-lần TTL 20s, rủi ro argv-exposure thấp hơn nhiều so với khóa gốc).
 
 Output JSON `{"event": "m4_signing_probe_ok", "ok": true, ...}` xác nhận: peer UID `m4-collector`
-được service chấp nhận, rate-limit/nonce/chữ ký `signing_authorization` (tự ký bằng CHÍNH khóa
-`M4_SIGNING_AUTH_VERIFY_KEY_B64`, thuật toán import trực tiếp từ `stage0p_signing_service.py`,
-không copy tay) đều hợp lệ, và service THẬT SỰ canonicalize + mã hóa + ký thành công. `ok: false`
-→ xem §6 (rollback/xử lý sự cố), **không tiến hành ceremony**.
+được service chấp nhận, rate-limit/nonce/chữ ký `signing_authorization` đều hợp lệ, và service
+THẬT SỰ canonicalize + mã hóa + ký thành công. `ok: false` → xem §8 (rollback/xử lý sự cố),
+**không tiến hành ceremony**.
 
 ## 5. Execute — chạy rehearsal DƯỚI UID m4-collector
 
@@ -146,33 +224,45 @@ docker compose -f docker-compose.prod.yml --profile m4-signing rm -f m4-signer
 comment trong `docker-compose.prod.yml`). `rm -f` dọn hẳn container đã dừng (không bắt buộc nhưng
 khuyến nghị, tránh nhầm lẫn ở lần `ps` sau).
 
+**F-A08-R2-01: xóa 3 file khóa NGAY SAU KHI `stop`** (dù `/run` là tmpfs — không đụng đĩa — vẫn
+đóng cửa sổ đọc được sớm nhất có thể, cùng triết lý "chỉ tồn tại trong suốt ceremony" như REV1
+dùng cho biến môi trường):
+
+```bash
+rm -f /run/m4-signing-secrets/sample_key /run/m4-signing-secrets/transcript_hmac_key \
+  /run/m4-signing-secrets/signing_auth_key
+```
+
 ## 7. Key lifecycle — tóm tắt vòng đời 3 khóa
 
 | Khóa | Sinh ở đâu | Sống ở đâu | Retire khi nào |
 |---|---|---|---|
-| `M4_SAMPLE_KEY_B64` | Operator tự `openssl rand -base64 32` trước `provision-keys` | Biến môi trường shell của operator trong suốt ceremony (đưa cho `provision-keys`, `m4-signer` service, và `run`/prediction writer) — KHÔNG bảng DB nào lưu | Không cần "retire" DB — chỉ ngừng dùng lại giá trị sau `stop` |
-| `M4_TRANSCRIPT_HMAC_KEY_B64` | Cùng lúc | `m4_stage0p_transcript_signing_keys` (DB) + môi trường container `m4-signer` | `retire-keys` (DB) SAU KHI `stop` |
-| `M4_SIGNING_AUTH_VERIFY_KEY_B64` | Cùng lúc | `m4_stage0p_signing_auth_keys` (DB) + môi trường container `m4-signer` (+ operator tự giữ để chạy canary probe §4) | `retire-keys` (DB) SAU KHI `stop` |
+| `M4_SAMPLE_KEY_B64` | Operator tự `openssl rand -base64 32` trước `provision-keys` (§3) | `/run/m4-signing-secrets/sample_key` (file, chown 5001:5000/chmod 0400, bind-mount READ-ONLY vào `m4-signer`) + biến môi trường shell của operator (đưa cho `provision-keys`, `run`/prediction writer — xem §5) — KHÔNG bảng DB nào lưu | Không cần "retire" DB — xóa file + ngừng dùng lại giá trị sau `stop` (§6) |
+| `M4_TRANSCRIPT_HMAC_KEY_B64` | Cùng lúc | `m4_stage0p_transcript_signing_keys` (DB) + `/run/m4-signing-secrets/transcript_hmac_key` (file) | `retire-keys` (DB) SAU KHI `stop`, xóa file (§6) |
+| `M4_SIGNING_AUTH_VERIFY_KEY_B64` | Cùng lúc | `m4_stage0p_signing_auth_keys` (DB) + `/run/m4-signing-secrets/signing_auth_key` (file) + operator tự giữ trong shell để chạy `mint-token` (§4) | `retire-keys` (DB) SAU KHI `stop`, xóa file (§6) |
 
-**3 khóa CHỈ tồn tại trong biến môi trường shell của operator** trong suốt ceremony — không bao
-giờ ghi vào file, `.env`, log hay evidence. `docker compose up`/`exec -e <TEN>` (dạng bare, không
-`=giá trị` — xem §4/§5) đọc trực tiếp từ shell environment của operator, không cần và không tạo
-file trung gian nào, và (khác REV0 của tài liệu này) không còn để giá trị lọt vào argv của tiến
-trình `docker`/`docker compose` client trên host nữa.
+**F-A08-R2-01 (REV2)**: `m4-signer` KHÔNG còn nhận giá trị khóa qua `environment:`/`${VAR}` (REV1
+cũ) — CHỈ nhận 3 ĐƯỜNG DẪN FILE (`..._FILE`, xem `docker-compose.prod.yml`), đọc qua
+`_read_secret_env_or_file()` (`stage0p_signing_service.py`) tự kiểm tra lại quyền/chủ sở hữu file
+lúc khởi động (§3). File sống trong `/run` (tmpfs, RAM-backed, không đụng đĩa, tự mất khi reboot)
+— chỉ tồn tại trong suốt ceremony, xóa tường minh sau `stop` (§6).
 
-**Giới hạn cố hữu còn lại (F-A08-R1-02), không che giấu — 2 kênh KHÁC NHAU, không nhầm lẫn**:
+3 khóa CHỈ tồn tại: (a) trong file `/run/m4-signing-secrets/*` (đọc bởi `m4-signer`), và (b) trong
+biến môi trường shell của operator (đưa cho `provision-keys`/`mint-token`/`run` qua `exec -e <TEN>`
+dạng bare, không `=giá trị` — xem §4/§5) — không bao giờ ghi vào `.env`, log hay evidence.
 
-1. **`m4-signer` container's OWN environment** (`M4_SAMPLE_KEY_B64`/`M4_TRANSCRIPT_HMAC_KEY_B64`/
-   `M4_SIGNING_AUTH_VERIFY_KEY_B64` khai báo qua `environment:` trong `docker-compose.prod.yml`,
-   đọc `${VAR}` lúc `up`) THẬT SỰ được Docker bake vào `Config.Env` của container lúc tạo, và
-   `docker inspect m4-signer` hiện được dạng plaintext cho bất kỳ ai có quyền Docker API/root trên
-   host — đây là giới hạn cố hữu của CHÍNH CƠ CHẾ biến môi trường container Docker (không riêng gì
-   thiết kế này, áp dụng cho MỌI service dùng `environment:` với secret), không phải lỗ hổng do
-   runbook này tạo ra.
-2. **Secret truyền lúc `exec`** (3 giá trị ở §4/§5: `M4_SIGNING_AUTH_VERIFY_KEY_B64` cho probe,
-   `STAGE0P_REHEARSAL_OPERATOR_PIN`/`STAGE0P_REHEARSAL_REVIEWER_PIN`/`M4_SAMPLE_KEY_B64` cho
-   execute) KHÔNG thuộc `Config.Env` của container (`docker exec -e` là override tạm thời cho
-   riêng tiến trình exec, không persist) nên `docker inspect` KHÔNG hiện được các giá trị này —
+**Giới hạn cố hữu còn lại, không che giấu — 2 kênh KHÁC NHAU, không nhầm lẫn**:
+
+1. **File secret trên host** (`/run/m4-signing-secrets/*`): bất kỳ ai có quyền root trên host đọc
+   được trực tiếp (`cat` file) — đây là giới hạn cố hữu của MỌI thiết kế secret-qua-file trên máy
+   chủ chia sẻ (không riêng gì thiết kế này); giảm thiểu bằng permission 0400/chown đúng UID +
+   tmpfs (không tồn tại lâu dài trên đĩa) + xóa tường minh sau `stop`.
+2. **Secret truyền lúc `exec`** (§3/§4/§5: `M4_SAMPLE_KEY_B64`/`M4_TRANSCRIPT_HMAC_KEY_B64`/
+   `M4_SIGNING_AUTH_VERIFY_KEY_B64` cho `provision-keys`, `M4_SIGNING_AUTH_VERIFY_KEY_B64` cho
+   `mint-token`, `STAGE0P_REHEARSAL_OPERATOR_PIN`/`STAGE0P_REHEARSAL_REVIEWER_PIN`/
+   `M4_SAMPLE_KEY_B64` cho execute) KHÔNG thuộc `Config.Env` của container (`docker exec -e` là
+   override tạm thời cho riêng tiến trình exec, không persist) nên `docker inspect` KHÔNG hiện
+   được các giá trị này —
    dạng bare `-e TEN` (đã áp dụng ở §4/§5) đóng luôn kênh rò rỉ còn lại (argv của tiến trình
    client trên host).
 
@@ -183,11 +273,13 @@ tiếp — không mở rộng bề mặt tấn công so với mức truy cập �
 
 | Tình huống | Xử lý |
 |---|---|
-| `up -d m4-signer` báo thiếu biến môi trường (`Phai dat M4_...`) | Chưa `export` đủ 3 khóa trong shell hiện tại — export rồi thử lại |
-| `ps m4-signer` báo `Exited`/`unhealthy` | `docker compose logs m4-signer --tail 50` đọc lý do THẬT (vd `_validate_socket_directory` từ chối) — KHÔNG retry mù quáng |
-| `signing_probe.py` báo `ok: false` | Kiểm `docker compose ps m4-signer` còn `Up` không; xác nhận `M4_SIGNING_AUTH_VERIFY_KEY_B64` truyền cho probe ĐÚNG bằng giá trị đã đưa cho `up -d m4-signer` (khác khóa = chữ ký không khớp, an toàn nhưng vô dụng) |
+| `up -d m4-signer` báo `signing service tu choi khoi dong: ... chua duoc dat day du` | File khóa chưa tồn tại ở `/run/m4-signing-secrets/` — chạy lại §3 (`openssl rand` + `chown`/`chmod`) |
+| `up -d m4-signer` báo `... qua rong quyen (mode=...)` | 1 trong 3 file có bit group/other — `chmod 0400 /run/m4-signing-secrets/*` rồi thử lại |
+| `up -d m4-signer` báo `... khong thuoc so huu tien trinh nay` | 1 trong 3 file sai chủ sở hữu — `chown 5001:5000 /run/m4-signing-secrets/*` rồi thử lại |
+| `ps m4-signer` báo `Exited`/`unhealthy` | `docker compose logs m4-signer --tail 50` đọc lý do THẬT (vd `_validate_socket_directory` hoặc `_read_secret_env_or_file` từ chối) — KHÔNG retry mù quáng |
+| `mint-token`/`submit` báo `ok: false` | Kiểm `docker compose ps m4-signer` còn `Up` không; xác nhận `M4_SIGNING_AUTH_VERIFY_KEY_B64` truyền cho `mint-token` ĐÚNG bằng giá trị đã ghi vào `/run/m4-signing-secrets/signing_auth_key` (khác khóa = chữ ký không khớp, an toàn nhưng vô dụng); nếu `submit` báo lỗi mà `mint-token` đã thành công, kiểm `$TOKEN` có bị cắt/hỏng lúc truyền giữa 2 lệnh không |
 | Execute báo `SigningServiceError: khong ket noi duoc signing service` | `ps m4-signer` xác nhận còn `Up`; xác nhận `--user m4-collector` và `M4_STAGE0P_SIGNING_SOCKET` truyền đúng cho lệnh `exec` |
-| Execute báo "chua co signing_auth_key hieu luc" | Khóa `provision-keys` (DB) và khóa đưa cho `up -d m4-signer` KHÔNG khớp (vd `retire-keys` chạy giữa chừng) — `stop`, `retire-keys`, sinh khóa MỚI, làm lại từ `provision-keys` |
+| Execute báo "chua co signing_auth_key hieu luc" | Khóa `provision-keys` (DB) và khóa trong `/run/m4-signing-secrets/` (đưa cho `up -d m4-signer`) KHÔNG khớp (vd `retire-keys` chạy giữa chừng) — `stop`, `retire-keys`, sinh khóa MỚI (ghi đè cả 3 file lẫn DB), làm lại từ `provision-keys` |
 | Cần dừng khẩn cấp | `docker compose --profile m4-signing stop m4-signer` (SIGTERM, Docker tự SIGKILL sau timeout mặc định nếu cần) — an toàn gọi bất kỳ lúc nào |
 | `m4-signer` crash giữa lúc đang chạy rehearsal | **KHÔNG tự phục hồi** (`restart: "no"` chủ ý) — collector sẽ tự fail-closed sau vài lần retry (xem `COLLECTOR_MAX_ATTEMPTS`/`_run_collector_with_retry` trong runner), runner tự cleanup + terminalize batch `'aborted'`. Xem log `m4-signer` (nếu container còn giữ lại, `docker compose logs`) để tìm nguyên nhân crash trước khi thử ceremony mới — không `up -d` lại giữa chừng 1 gate đang mở |
 
@@ -196,8 +288,18 @@ tiếp — không mở rộng bề mặt tấn công so với mức truy cập �
 ```bash
 docker compose -f docker-compose.prod.yml --profile m4-signing ps m4-signer
 docker compose -f docker-compose.prod.yml logs m4-signer --tail 50
-docker compose -f docker-compose.prod.yml exec api printenv | grep -iE "M4_SAMPLE_KEY|TRANSCRIPT_HMAC_KEY|SIGNING_AUTH_VERIFY_KEY"  # PHAI rong trong container api - key CHI trong tien trinh m4-signer
+docker compose -f docker-compose.prod.yml exec api printenv | grep -iE "M4_SAMPLE_KEY|TRANSCRIPT_HMAC_KEY|SIGNING_AUTH_VERIFY_KEY"  # PHAI rong trong container api - key CHI trong file mount cua m4-signer
+
+# F-A08-R2-01: xac nhan docker inspect KHONG hien gia tri khoa (chi hien duong dan mount, khong
+# phai secret) - grep tim base64 KHONG khop (khong co gia tri THAT nao de tim, chi list lenh nay
+# de xac nhan Config.Env/Mounts KHONG chua ky tu la ("=" ngay sau ten bien khoa).
+docker inspect $(docker compose -f docker-compose.prod.yml --profile m4-signing ps -q m4-signer) \
+  --format '{{json .Config.Env}}' | grep -oE "M4_(SAMPLE|TRANSCRIPT_HMAC|SIGNING_AUTH_VERIFY)_KEY_B64=[^,\"]+"
+# PHAI khong co dong nao o tren (Config.Env chi con "..._FILE=/run/m4-signing-secrets/..." - duong
+# dan, khong phai gia tri) - neu co dong nao khop pattern tren, dung ngay va bao CA.
 ```
 
-Dòng cuối là bằng chứng độc lập quan trọng: chạy trong `api` (nơi collector/runner sống), 3 biến
-khóa PHẢI **không xuất hiện** — nếu có, dừng ngay và báo CA.
+Dòng `printenv` là bằng chứng độc lập quan trọng: chạy trong `api` (nơi collector/runner sống), 3
+biến khóa PHẢI **không xuất hiện** — nếu có, dừng ngay và báo CA. Dòng `docker inspect` xác nhận
+`Config.Env` của CHÍNH `m4-signer` cũng không còn giá trị plaintext (F-A08-R2-01) — chỉ còn đường
+dẫn file.
