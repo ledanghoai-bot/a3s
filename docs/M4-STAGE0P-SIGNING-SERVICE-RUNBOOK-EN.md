@@ -118,20 +118,59 @@ fresh".**
 
 ## 3. Start — launch the signing service via docker compose
 
-**REV4 — build explicitly BEFORE `up`, verify the image matches the deployed commit exactly (NO
-`--pull`, NO changing the base image):**
+**REV4 (Correction 2, answering `PHASE1B-M4-SIGNER-IMAGE-FRESHNESS-CORRECTION-REVIEW-1-VI.md`
+F-IMG-01) — build explicitly BEFORE `up`, verify the EXACT image Compose will run matches the
+deployed commit (NO `--pull`, NO changing the base image):**
+
+**F-IMG-01**: do NOT hard-code the tag `alpha3s-m4-signer:latest` — this name is derived by
+Compose from the project name (`COMPOSE_PROJECT_NAME`/directory name/compose file `name:`), which
+can differ between runs. Hard-coding it risks the guard inspecting a stale/unrelated old image
+while Compose actually runs a different one — a false green that no longer catches the Amendment
+10 Attempt 1 failure mode. **Note**: `docker compose config --images m4-signer` lists the
+dependency's image too (`redis:7-alpine`, via `depends_on`), NOT only `m4-signer` — do not use that
+value directly. Resolve the exact identifier via `config --format json`/`jq` (confirmed present on
+the VPS): read `.services["m4-signer"].image` if Compose ever sets it explicitly, otherwise
+(today's real case — only `build:`, no `image:`) construct it from the project name Compose itself
+resolved (`.name` in the SAME JSON, not an assumed `"alpha3s"`) following Compose's documented
+default naming convention (`${project}-${service}`):
 
 ```bash
 GIT_COMMIT=$(git rev-parse HEAD)
+
+CONFIG_JSON=$(docker compose -f docker-compose.prod.yml --profile m4-signing config --format json)
+IMAGE_REF=$(echo "$CONFIG_JSON" | jq -r '.services["m4-signer"].image // empty')
+if [ -z "$IMAGE_REF" ]; then
+  PROJECT_NAME=$(echo "$CONFIG_JSON" | jq -r '.name')
+  if [ -z "$PROJECT_NAME" ] || [ "$PROJECT_NAME" = "null" ]; then
+    echo "ERROR: could not resolve the Compose project name - STOP" >&2
+    exit 1
+  fi
+  IMAGE_REF="${PROJECT_NAME}-m4-signer"
+fi
+echo "resolved image_ref: $IMAGE_REF"
+
 GIT_COMMIT="$GIT_COMMIT" docker compose -f docker-compose.prod.yml --profile m4-signing build m4-signer
 
-IMAGE_COMMIT=$(docker inspect alpha3s-m4-signer:latest --format '{{index .Config.Labels "git_commit"}}')
-if [ "$IMAGE_COMMIT" != "$GIT_COMMIT" ]; then
-  echo "ERROR: m4-signer image (label git_commit=$IMAGE_COMMIT) does NOT match deployed HEAD ($GIT_COMMIT) - STOP, do not up -d" >&2
+IMAGE_COMMIT=$(docker inspect "$IMAGE_REF" --format '{{index .Config.Labels "git_commit"}}' 2>/dev/null)
+if [ -z "$IMAGE_COMMIT" ] || [ "$IMAGE_COMMIT" = "<no value>" ] || [ "$IMAGE_COMMIT" = "unknown" ] || [ "$IMAGE_COMMIT" != "$GIT_COMMIT" ]; then
+  echo "ERROR: m4-signer image ($IMAGE_REF, label git_commit=$IMAGE_COMMIT) does NOT match deployed HEAD ($GIT_COMMIT) - STOP, do not up -d" >&2
   exit 1
 fi
-echo "OK: m4-signer image matches deployed commit $GIT_COMMIT"
+echo "OK: m4-signer image ($IMAGE_REF) matches deployed commit $GIT_COMMIT"
 ```
+
+`IMAGE_REF` always reflects the EXACT identifier the `up -d m4-signer` step below will use,
+regardless of project name — both the `.image` branch (if Compose ever sets it explicitly) and the
+`${project}-service` fallback are read FROM the SAME JSON output of the SAME invocation context
+(`-f`/`--profile`/current directory) that will run `build`/`up`, never a separately guessed value.
+Verified in practice on the VPS (not theoretical): `docker compose ... config --format json | jq
+-r '.name'` correctly tracks `COMPOSE_PROJECT_NAME`/`-p` (e.g. `alpha3s` → `differentproj` yields
+`differentproj-m4-signer`) — hard-coding `alpha3s-m4-signer:latest` would have made the guard
+inspect an unrelated (or nonexistent) image instead of the one Compose actually selected.
+
+The guard fails closed in all 3 cases: (a) `IMAGE_REF` doesn't resolve (empty), (b) the label is
+empty/`<no value>`/`unknown` (an image built before REV4, never labeled), (c) the label has a
+value but it doesn't match `git rev-parse HEAD`.
 
 Only proceed to the rest below (secret prep + `up -d`) AFTER the `OK:` line appears — if it prints
 `ERROR:`, stop immediately, do not `up -d` an unverified image, and report back (do not self-fix
@@ -399,12 +438,21 @@ level.
 
 ## 9. Evidence commands (no secret leakage)
 
-**REV4 — image-freshness proof (run AFTER §3's build, BEFORE `up -d`):**
+**REV4 — image-freshness proof (run AFTER §3's build, BEFORE `up -d`; F-IMG-01: resolve the
+identifier via `config --format json`/`jq`, do NOT hard-code a tag, do NOT use `config --images
+<service>` directly since it also lists the dependency's image `redis:7-alpine`):**
 
 ```bash
-docker inspect alpha3s-m4-signer:latest --format 'git_commit={{index .Config.Labels "git_commit"}}'
+CONFIG_JSON=$(docker compose -f docker-compose.prod.yml --profile m4-signing config --format json)
+IMAGE_REF=$(echo "$CONFIG_JSON" | jq -r '.services["m4-signer"].image // empty')
+if [ -z "$IMAGE_REF" ]; then
+  IMAGE_REF="$(echo "$CONFIG_JSON" | jq -r '.name')-m4-signer"
+fi
+echo "image_ref=$IMAGE_REF"
+docker inspect "$IMAGE_REF" --format 'git_commit={{index .Config.Labels "git_commit"}}'
 git rev-parse HEAD
-# The 2 values MUST match exactly - this is the proof the image is not a stale cache.
+# The label vs git rev-parse HEAD MUST match exactly - proof the image is not a stale cache AND is
+# the actual image Compose will run (not a guessed/hard-coded tag).
 ```
 
 ```bash
