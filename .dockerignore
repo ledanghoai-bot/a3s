@@ -1,0 +1,24 @@
+# Correction PR (dap CA closure "PHASE1B-M4-AMENDMENT-09-EXECUTION-ATTEMPT-1-CLOSURE-VI.md"):
+# root cause that su cua m4-signer crash luc Amendment 09 attempt 1 (PermissionError doc '.env')
+# la KHONG CO .dockerignore nao ca truoc PR nay - COPY . . trong Dockerfile bake nguyen ca '.env'
+# (mode 0600 root:root tren host) vao MOI image dung chung Dockerfile goc (api/worker/telegram
+# bots/m4-signer), giu nguyen permission qua COPY. api/worker/telegram_bot/telegram_customer_bot
+# deu chay UID mac dinh (root) NEN doc duoc, nhung KHONG CAN doc file nay ben trong container o
+# ca -  gia tri THAT cua ho den tu `env_file: .env` trong docker-compose.prod.yml (Compose doc
+# .env TREN HOST, bom thang vao os.environ cua container luc tao - file .env vat ly BEN TRONG
+# container la THUA, khong dung toi, vi pydantic-settings uu tien bien moi truong THAT hon gia tri
+# tu file .env). m4-signer la service DUY NHAT chay UID rieng (5001, khong phai root) va la
+# service DUY NHAT khong co `env_file: .env` (co y, tach biet secret app chinh) - loai .env khoi
+# chinh image giai quyet dung goc van de nay ma KHONG doi hanh vi cua bat ky service nao khac.
+.env
+.env.*
+!.env.example
+
+# Chuan Docker hygiene (khong lien quan truc tiep bug tren, nhung nen co san - giam kich thuoc
+# build context + khong bake lich su git/cache vao image):
+.git
+.gitignore
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
