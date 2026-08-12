@@ -1,8 +1,31 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ENV_FILE = ".env"
+
+
+def _readable_env_file() -> str | None:
+    """Correction PR (dap CA closure Amendment 09 attempt 1): `.env` gio da loai khoi image qua
+    `.dockerignore` (fix goc), nhung ham nay la 1 lop phong thu THEM — tu kiem file THAT SU doc
+    duoc (khong chi dua vao .dockerignore mai mai dung, hoac vao 1 file nhay cam khac lo bake vao
+    image sau nay) TRUOC khi giao cho pydantic-settings, thay vi de no tu mo file va crash luc
+    import module neu UID hien tai (vd m4-signer, UID 5001 rieng, khong phai root) khong doc
+    duoc. Rong/khong ton tai/khong doc duoc deu tra `None` — pydantic-settings coi nhu KHONG co
+    file .env nao, chi dung bien moi truong that + gia tri mac dinh (hanh vi giong het truong hop
+    .env khong ton tai, KHONG doi gi cho cac service da doc duoc file binh thuong)."""
+    try:
+        path = Path(_ENV_FILE)
+        if not path.is_file():
+            return None
+        path.read_text(encoding="utf-8")
+        return _ENV_FILE
+    except OSError:
+        return None
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_readable_env_file(), extra="ignore")
 
     app_env: str = "development"
 
