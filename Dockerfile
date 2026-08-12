@@ -1,13 +1,6 @@
 FROM python:3.12-slim
 WORKDIR /srv
 
-# I-B M4 image-freshness correction (dap PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md):
-# nhan commit git luc BUILD vao image, de co the xac minh 1 image dormant/profile-only (vd m4-signer,
-# khong nam trong deploy.sh SERVICES nen khong tu rebuild) co dung tu SOURCE moi nhat hay dang la cache
-# cu truoc 1 fix da merge (day chinh la nguyen nhan Amendment 10 Attempt 1 crash lai loi .env da fix).
-ARG GIT_COMMIT=unknown
-LABEL git_commit=$GIT_COMMIT
-
 # Cai torch CPU-only truoc (nhe hon ~800MB so voi full torch)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
@@ -26,5 +19,19 @@ RUN groupadd -g 5000 m4-signing-ipc \
     && useradd -r -M -s /usr/sbin/nologin -u 5002 -g m4-signing-ipc m4-collector
 
 COPY . .
+
+# I-B M4 image-freshness correction (dap PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md):
+# nhan commit git luc BUILD vao image, de co the xac minh 1 image dormant/profile-only (vd m4-signer,
+# khong nam trong deploy.sh SERVICES nen khong tu rebuild) co dung tu SOURCE moi nhat hay dang la cache
+# cu truoc 1 fix da merge (day chinh la nguyen nhan Amendment 10 Attempt 1 crash lai loi .env da fix).
+#
+# VI TRI CO Y dat SAU TAT CA cac layer nang (pip torch/requirements) va SAU `COPY . .`: `ARG` lam
+# INVALIDATE CACHE cua MOI layer dung sau no, nen neu dat ARG o dau file thi MOI lan doi GIT_COMMIT
+# (tuc MOI ceremony) se build lai tu dau -- tai lai ~800MB torch + toan bo pip, va sinh them ~2GB
+# layer moi moi lan tren VPS 60GB. Dat cuoi file: doi GIT_COMMIT chi rebuild layer metadata LABEL
+# (tuc thi), con cac layer pip van CACHED khi requirements.txt khong doi.
+ARG GIT_COMMIT=unknown
+LABEL git_commit=$GIT_COMMIT
+
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
