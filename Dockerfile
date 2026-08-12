@@ -1,6 +1,13 @@
 FROM python:3.12-slim
 WORKDIR /srv
 
+# I-B M4 image-freshness correction (dap PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md):
+# nhan commit git luc BUILD vao image, de co the xac minh 1 image dormant/profile-only (vd m4-signer,
+# khong nam trong deploy.sh SERVICES nen khong tu rebuild) co dung tu SOURCE moi nhat hay dang la cache
+# cu truoc 1 fix da merge (day chinh la nguyen nhan Amendment 10 Attempt 1 crash lai loi .env da fix).
+ARG GIT_COMMIT=unknown
+LABEL git_commit=$GIT_COMMIT
+
 # Cai torch CPU-only truoc (nhe hon ~800MB so voi full torch)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 

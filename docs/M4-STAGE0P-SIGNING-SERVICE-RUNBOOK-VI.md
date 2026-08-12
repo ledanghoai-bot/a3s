@@ -55,10 +55,23 @@ F-A08-R3-01/02:
   operator nhưng chưa từng `unset` sau ceremony, mâu thuẫn với mô tả "chỉ tồn tại trong suốt
   ceremony". REV3 sửa cả hai — xem §4/§6.
 
+**REV4 (hiện tại)**, đáp `PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md`:
+
+- **Image-freshness gap (Amendment 10 Attempt 1, KHÔNG phải lỗi signer/collector boundary)**:
+  `m4-signer` dùng image riêng (`alpha3s-m4-signer`), build từ CÙNG `Dockerfile` với `api` nhưng
+  KHÔNG nằm trong `deploy.sh SERVICES` — deploy thường không bao giờ rebuild nó. `docker compose
+  up -d` (không `--build`) chỉ build image nếu image CHƯA từng tồn tại; sau lần build đầu tiên
+  (Amendment 09), mọi `up -d` sau đó ÂM THẦM tái sử dụng image cache cũ, dù `main`/deployed commit
+  đã có fix mới (PR #13's `.dockerignore`) — bug `.env` "tái phát" ở Amendment 10 Attempt 1 dù
+  code đã đúng từ lâu, chỉ vì image chưa từng được rebuild. REV4 thêm 1 `ARG GIT_COMMIT`/`LABEL
+  git_commit` vào `Dockerfile` + build tường minh + xác minh label khớp `git rev-parse HEAD`
+  BẮT BUỘC trước MỌI lần `up -d m4-signer` — xem §2/§3/§9.
+
 ## 1. Trình tự đầy đủ 1 ceremony (tóm tắt, chi tiết PIN/approval xem docstring runner)
 
 ```
 record-approval (staff 3, PIN riêng)
+  -> build m4-signer + xac minh label git_commit khop deployed HEAD    <-- bước MỚI (REV4)
   -> chuẩn bị 3 file khóa trong /run/m4-signing-secrets (chown/chmod)  <-- bước MỚI (F-A08-R2-01)
   -> provision-keys (3 khóa mới, tự sinh ngẫu nhiên, CÙNG giá trị vừa ghi vào file)
   -> docker compose --profile m4-signing up -d m4-signer   <-- bước MỚI (A08-COR-01)
@@ -82,7 +95,36 @@ Xác nhận: không có container `m4-signer` nào đang `Up` (nếu có, `stop`
 HEAD đúng commit CA đã accept (`git rev-parse HEAD`); `m4_stage0p_transcript_signing_keys`/
 `m4_stage0p_signing_auth_keys` không có active key cũ (nếu có, `retire-keys` trước).
 
+**REV4 — bắt buộc, đáp `PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md`**:
+`m4-signer` là service dormant/profile-only, **KHÔNG nằm trong `deploy.sh SERVICES`** — deploy
+thường (`api`/`worker`/bot/`dashboard`) KHÔNG BAO GIỜ rebuild image này. `docker compose ... up -d`
+(không `--build`) chỉ build image nếu image CHƯA từng tồn tại — nếu đã tồn tại (từ 1 ceremony
+trước), lệnh `up` sẽ **âm thầm tái sử dụng image cache cũ**, dù source/deployed commit đã đổi
+(Amendment 10 Attempt 1 chạy đúng cảnh này: image cache từ Amendment 09, trước PR #13, khiến bug
+`.env` đã fix "tái phát" dù merge/deploy đúng commit). **Do đó §3 dưới đây LUÔN build tường minh
++ xác minh label commit TRƯỚC MỌI lần `up -d m4-signer`, không có ngoại lệ, kể cả khi tin rằng
+image "chắc còn mới".**
+
 ## 3. Start — khởi động signing service qua docker compose
+
+**REV4 — build tường minh TRƯỚC KHI `up`, xác minh image khớp đúng deployed commit (KHÔNG dùng
+`--pull`, KHÔNG đổi base image):**
+
+```bash
+GIT_COMMIT=$(git rev-parse HEAD)
+GIT_COMMIT="$GIT_COMMIT" docker compose -f docker-compose.prod.yml --profile m4-signing build m4-signer
+
+IMAGE_COMMIT=$(docker inspect alpha3s-m4-signer:latest --format '{{index .Config.Labels "git_commit"}}')
+if [ "$IMAGE_COMMIT" != "$GIT_COMMIT" ]; then
+  echo "LOI: image m4-signer (label git_commit=$IMAGE_COMMIT) KHONG khop deployed HEAD ($GIT_COMMIT) - DUNG, khong up -d" >&2
+  exit 1
+fi
+echo "OK: image m4-signer khop dung deployed commit $GIT_COMMIT"
+```
+
+Chỉ tiếp tục phần dưới (chuẩn bị secret + `up -d`) SAU KHI dòng `OK:` xuất hiện — nếu báo `LOI:`,
+dừng ngay, không `up -d` với image chưa xác minh, báo lại (không tự sửa bằng `--pull` hay đổi
+Dockerfile giữa ceremony).
 
 **F-A08-R2-01: 3 khóa PHẢI nằm trong FILE (không còn `environment:`/`${VAR}` như REV1)** — chuẩn
 bị thư mục + file TRƯỚC khi `up` (mọi lệnh dưới đây chạy với quyền root trên VPS, ví dụ SSH root
@@ -320,6 +362,7 @@ tiếp — không mở rộng bề mặt tấn công so với mức truy cập �
 
 | Tình huống | Xử lý |
 |---|---|
+| `git_commit` label mismatch ở bước build §3 (REV4) | Image `m4-signer` build từ commit cũ hơn deployed HEAD hiện tại — **KHÔNG** `up -d`; chạy lại đúng lệnh `build` §3 (không `--pull`, không sửa Dockerfile giữa ceremony); nếu vẫn mismatch, dừng và báo CA/PO — có thể deployed HEAD trên VPS chưa khớp gate đã accept |
 | `up -d m4-signer` báo `signing service tu choi khoi dong: ... chua duoc dat day du` | File khóa chưa tồn tại ở `/run/m4-signing-secrets/` — chạy lại §3 (`openssl rand` + `chown`/`chmod`) |
 | `up -d m4-signer` báo `... qua rong quyen (mode=...)` | 1 trong 3 file có bit group/other — `chmod 0400 /run/m4-signing-secrets/*` rồi thử lại |
 | `up -d m4-signer` báo `... khong thuoc so huu tien trinh nay` | 1 trong 3 file sai chủ sở hữu — `chown 5001:5000 /run/m4-signing-secrets/*` rồi thử lại |
@@ -333,6 +376,14 @@ tiếp — không mở rộng bề mặt tấn công so với mức truy cập �
 | `m4-signer` crash giữa lúc đang chạy rehearsal | **KHÔNG tự phục hồi** (`restart: "no"` chủ ý) — collector sẽ tự fail-closed sau vài lần retry (xem `COLLECTOR_MAX_ATTEMPTS`/`_run_collector_with_retry` trong runner), runner tự cleanup + terminalize batch `'aborted'`. Xem log `m4-signer` (nếu container còn giữ lại, `docker compose logs`) để tìm nguyên nhân crash trước khi thử ceremony mới — không `up -d` lại giữa chừng 1 gate đang mở |
 
 ## 9. Evidence commands (không lộ secret)
+
+**REV4 — bằng chứng image freshness (chạy SAU §3 build, TRƯỚC `up -d`):**
+
+```bash
+docker inspect alpha3s-m4-signer:latest --format 'git_commit={{index .Config.Labels "git_commit"}}'
+git rev-parse HEAD
+# 2 gia tri PHAI khop nhau tuyet doi - day la bang chung image KHONG phai cache cu.
+```
 
 ```bash
 docker compose -f docker-compose.prod.yml --profile m4-signing ps m4-signer

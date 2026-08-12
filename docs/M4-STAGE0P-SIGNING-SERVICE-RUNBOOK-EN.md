@@ -63,10 +63,24 @@ F-A08-R3-01/02:
   contradicting the "only exists for the ceremony's duration" description. REV3 fixes both — see
   §4/§6.
 
+**REV4 (current)**, answering `PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md`:
+
+- **Image-freshness gap (Amendment 10 Attempt 1, NOT a signer/collector boundary bug)**:
+  `m4-signer` uses its own image (`alpha3s-m4-signer`), built from the SAME `Dockerfile` as `api`
+  but NOT listed in `deploy.sh SERVICES` — a normal deploy never rebuilds it. `docker compose up
+  -d` (without `--build`) only builds an image if it doesn't already exist; after the first build
+  (Amendment 09), every subsequent `up -d` SILENTLY reused the stale cached image, even after
+  `main`/the deployed commit had a fix (PR #13's `.dockerignore`) — the `.env` bug "recurred" in
+  Amendment 10 Attempt 1 despite the code having been correct for hours, purely because the image
+  was never rebuilt. REV4 adds an `ARG GIT_COMMIT`/`LABEL git_commit` to the `Dockerfile` plus a
+  mandatory explicit build + label-match verification against `git rev-parse HEAD` before EVERY
+  `up -d m4-signer` — see §2/§3/§9.
+
 ## 1. Full ceremony sequence (summary — see runner docstring for PIN/approval detail)
 
 ```
 record-approval (staff 3, own PIN)
+  -> build m4-signer + verify git_commit label matches deployed HEAD  <-- NEW step (REV4)
   -> prepare 3 key files in /run/m4-signing-secrets (chown/chmod)   <-- NEW step (F-A08-R2-01)
   -> provision-keys (3 fresh, randomly generated keys, SAME values just written to file)
   -> docker compose --profile m4-signing up -d m4-signer   <-- NEW step (A08-COR-01)
@@ -91,7 +105,37 @@ deployed HEAD matches the CA-accepted commit (`git rev-parse HEAD`);
 `m4_stage0p_transcript_signing_keys`/`m4_stage0p_signing_auth_keys` have no active old key (if
 any, `retire-keys` first).
 
+**REV4 — mandatory, answering `PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md`**:
+`m4-signer` is a dormant/profile-only service, **NOT listed in `deploy.sh SERVICES`** — a normal
+deploy (`api`/`worker`/bots/`dashboard`) NEVER rebuilds this image. `docker compose ... up -d`
+(without `--build`) only builds an image if it doesn't already exist — if it does (from a prior
+ceremony), `up` will **silently reuse the old cached image**, regardless of whether source/the
+deployed commit changed since (Amendment 10 Attempt 1 hit exactly this: an image cached from
+Amendment 09, before PR #13, made the already-fixed `.env` bug "recur" despite merging/deploying
+the right commit). **§3 below therefore ALWAYS builds explicitly + verifies the commit label
+BEFORE every `up -d m4-signer`, no exceptions, even if you believe the image "should still be
+fresh".**
+
 ## 3. Start — launch the signing service via docker compose
+
+**REV4 — build explicitly BEFORE `up`, verify the image matches the deployed commit exactly (NO
+`--pull`, NO changing the base image):**
+
+```bash
+GIT_COMMIT=$(git rev-parse HEAD)
+GIT_COMMIT="$GIT_COMMIT" docker compose -f docker-compose.prod.yml --profile m4-signing build m4-signer
+
+IMAGE_COMMIT=$(docker inspect alpha3s-m4-signer:latest --format '{{index .Config.Labels "git_commit"}}')
+if [ "$IMAGE_COMMIT" != "$GIT_COMMIT" ]; then
+  echo "ERROR: m4-signer image (label git_commit=$IMAGE_COMMIT) does NOT match deployed HEAD ($GIT_COMMIT) - STOP, do not up -d" >&2
+  exit 1
+fi
+echo "OK: m4-signer image matches deployed commit $GIT_COMMIT"
+```
+
+Only proceed to the rest below (secret prep + `up -d`) AFTER the `OK:` line appears — if it prints
+`ERROR:`, stop immediately, do not `up -d` an unverified image, and report back (do not self-fix
+with `--pull` or by editing the Dockerfile mid-ceremony).
 
 **F-A08-R2-01: the 3 keys MUST live in FILES (no longer `environment:`/`${VAR}` like REV1)** —
 prepare the directory + files BEFORE `up` (every command below runs as root on the VPS, e.g. the
@@ -340,6 +384,7 @@ level.
 
 | Situation | Action |
 |---|---|
+| `git_commit` label mismatch at the §3 build step (REV4) | The `m4-signer` image was built from a commit older than the current deployed HEAD — do **NOT** `up -d`; rerun exactly the `build` command in §3 (no `--pull`, no editing the Dockerfile mid-ceremony); if it still mismatches, stop and report to CA/PO — the VPS deployed HEAD may not match the accepted gate |
 | `up -d m4-signer` reports `signing service tu choi khoi dong: ... chua duoc dat day du` | The key files don't exist yet under `/run/m4-signing-secrets/` — redo §3 (`openssl rand` + `chown`/`chmod`) |
 | `up -d m4-signer` reports `... qua rong quyen (mode=...)` | One of the 3 files has a group/other bit — `chmod 0400 /run/m4-signing-secrets/*` and retry |
 | `up -d m4-signer` reports `... khong thuoc so huu tien trinh nay` | One of the 3 files has the wrong owner — `chown 5001:5000 /run/m4-signing-secrets/*` and retry |
@@ -353,6 +398,14 @@ level.
 | `m4-signer` crashes mid-rehearsal | **Does NOT auto-recover** (`restart: "no"` is deliberate) — the collector fails closed on its own after a few retries (see `COLLECTOR_MAX_ATTEMPTS`/`_run_collector_with_retry` in the runner), and the runner's own cleanup terminalizes the batch to `'aborted'`. Check `m4-signer`'s logs (if the container is still around, `docker compose logs`) to find the crash cause before attempting a new ceremony — do not `up -d` again mid-gate |
 
 ## 9. Evidence commands (no secret leakage)
+
+**REV4 — image-freshness proof (run AFTER §3's build, BEFORE `up -d`):**
+
+```bash
+docker inspect alpha3s-m4-signer:latest --format 'git_commit={{index .Config.Labels "git_commit"}}'
+git rev-parse HEAD
+# The 2 values MUST match exactly - this is the proof the image is not a stale cache.
+```
 
 ```bash
 docker compose -f docker-compose.prod.yml --profile m4-signing ps m4-signer
