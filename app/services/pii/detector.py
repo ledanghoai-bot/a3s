@@ -76,6 +76,13 @@ _PHONE_CUES = ("sdt", "so dien thoai", "dien thoai", "phone", "zalo", "lien he",
                "hotline", "goi", "so may", "dt")
 _NID_CUES = ("cmnd", "cccd", "can cuoc", "chung minh", "ho chieu", "passport")
 _BANK_CUES = ("stk", "so tai khoan", "tai khoan", "so the")
+# F-NUM-02: cue cho thay day so la MA DON/MA GIAO DICH — KHONG phai giay to tuy than. Ap dung DUY
+# NHAT cho nhanh fallback "12 so khong cue" (xem `_detect_numeric_slots`), nen cue CCCD/CMND tuong
+# minh van thang (khach noi "cccd 0790..." thi van la national_id du cau co chu "don hang").
+#
+# Cac chuoi o day la dang DA FOLD (bo dau, chu thuong) vi `_has_cue` so khop tren `folded` — nho do
+# "đơn hàng"/"Đơn Hàng"/"DON HANG" deu quy ve "don hang", khong can liet ke bien the hoa/dau.
+_NID_EXCLUSION_CUES = ("don hang", "ma don", "ma giao dich", "order", "transaction")
 
 # Thanh phan dia chi (fold). "pho" dong am "phở" (fold ca hai = "pho") — chap nhan
 # vi 1 thanh phan don le KHONG bao gio tao span (can >=2 hoac so nha + duong).
@@ -222,13 +229,35 @@ def _detect_numeric_slots(text_nfc: str, folded: str, spans: list[PIISpan]) -> N
             continue
 
         # 1) CMND/CCCD: uu tien truoc phone (12 so de nham thanh "so dien thoai").
+        #
+        # F-NUM-01/F-NUM-02 (dap PHASE1B-M4-NUMERIC-SLOT-COLLISION-REVIEW-VI.md): nhanh 12 so nay
+        # TRUOC DAY nuot MOI day 12 chu so va `continue` ngay, nen:
+        #   - "STK 710001234567" (so tai khoan 12 so, CO cue bank) bi gan `national_id` va khong
+        #     bao gio toi duoc nhanh bank ben duoi -> bank fn + nid fp (F-NUM-01);
+        #   - "don hang 079000012345" (ma don 12 so) thanh `national_id` MEDIUM -> nid fp (F-NUM-02).
+        #
+        # THU TU UU TIEN moi (quyet dinh duoc, khong mo ho — CA yeu cau policy ro rang):
+        #   1. co cue CCCD/CMND        -> national_id HIGH   (khach noi ro la giay to)
+        #   2. co cue tai chinh        -> bank_account HIGH  (khach noi ro la tai khoan)
+        #   3. co cue don hang/giao dich -> KHONG gan slot nao (loai tru tuong minh)
+        #   4. khong cue nao           -> national_id MEDIUM (GIU fallback — CA chon huong (ii) de
+        #                                 khong lam tut recall khi khach chi gui so CCCD tran)
+        # Buoc 1 dat TRUOC buoc 2 la co y: neu cau co CA HAI cue thi cue giay to thang.
         if cleaned.isdigit() and len(cleaned) == 12:
             if _has_cue(folded, start, _NID_CUES):
                 spans.append(PIISpan(SlotType.NATIONAL_ID, start, end,
                                      Confidence.HIGH, ReasonCode.NID_CUE_DIGITS))
-            else:
-                spans.append(PIISpan(SlotType.NATIONAL_ID, start, end,
-                                     Confidence.MEDIUM, ReasonCode.NID_12_DIGITS))
+                continue
+            if _has_cue(folded, start, _BANK_CUES):
+                spans.append(PIISpan(SlotType.BANK_ACCOUNT, start, end,
+                                     Confidence.HIGH, ReasonCode.BANK_CUE_DIGITS))
+                continue
+            if _has_cue(folded, start, _NID_EXCLUSION_CUES):
+                # Ma don/ma giao dich: KHONG phai PII danh tinh -> khong gan slot, va cung khong
+                # de roi xuong cac nhanh duoi (phone) vi 12 so khong khop dinh dang phone VN.
+                continue
+            spans.append(PIISpan(SlotType.NATIONAL_ID, start, end,
+                                 Confidence.MEDIUM, ReasonCode.NID_12_DIGITS))
             continue
         if cleaned.isdigit() and len(cleaned) == 9 and _has_cue(folded, start, _NID_CUES):
             spans.append(PIISpan(SlotType.NATIONAL_ID, start, end,

@@ -60,6 +60,102 @@ class TestPhone:
         assert detect(text).spans == []
 
 
+class TestNumericSlotPrecedence:
+    """F-NUM-01/F-NUM-02 — thu tu uu tien cho day 12 chu so.
+
+    Truoc correction, nhanh "12 so -> national_id" nuot MOI day 12 chu so va `continue` ngay, nen
+    so tai khoan 12 so bi gan nham va ma don 12 so thanh false positive.
+
+    Thu tu duoc CA chot (quyet dinh duoc, khong mo ho):
+      1. cue CCCD/CMND        -> national_id HIGH
+      2. cue tai chinh        -> bank_account HIGH
+      3. cue don hang/giao dich -> khong gan slot nao
+      4. khong cue            -> national_id MEDIUM (GIU fallback, huong (ii) CA chon)
+    """
+
+    # --- F-NUM-01: bank account 8-19 chu so, GOM length 12 ---
+    @pytest.mark.parametrize("digits", [
+        "71000123",          # 8
+        "710001234",         # 9
+        "7100012345",        # 10
+        "71000123456",       # 11
+        "710001234567",      # 12  <- chinh la ca bi gan nham truoc day
+        "7100012345678",     # 13
+        "71000123456789",    # 14
+        "710001234567890",   # 15
+        "7100012345678901",  # 16
+    ])
+    def test_bank_account_moi_do_dai(self, digits):
+        spans = _slots(f"chuyen khoan toi STK {digits} nhe", SlotType.BANK_ACCOUNT)
+        assert len(spans) == 1
+        assert spans[0].confidence == Confidence.HIGH
+
+    @pytest.mark.parametrize("text", [
+        "chuyen khoan toi STK 710001234567 nhe",
+        "stk 710001234567 vietcombank nhe",
+        "STK 710001234567",
+        "so tai khoan 710001234567 nhe",
+        "tai khoan 710 001 234 567 nhe",   # co khoang trang
+    ])
+    def test_bank_12_so_khong_con_bi_gan_national_id(self, text):
+        assert len(_slots(text, SlotType.BANK_ACCOUNT)) == 1
+        assert _slots(text, SlotType.NATIONAL_ID) == []
+
+    # --- national_id CO cue van phai thang ---
+    @pytest.mark.parametrize("text", [
+        "CCCD cua toi la 079000012345 nhe",
+        "cccd cua toi la 079000012345 nhe",
+        "can cuoc 079000012345 nhe shop",
+        "CCCD cua toi la 079 000 012345 nhe",
+        "CCCD cua toi la 079.000.012345 nhe",
+    ])
+    def test_national_id_co_cue(self, text):
+        spans = _slots(text, SlotType.NATIONAL_ID)
+        assert len(spans) == 1 and spans[0].confidence == Confidence.HIGH
+
+    def test_conflict_policy_nid_cue_thang_bank_cue(self):
+        # Co CA HAI cue tren cung 1 day 12 so -> cue giay to thang (policy CA chot).
+        text = "CCCD va STK 079000012361 nhe"
+        assert len(_slots(text, SlotType.NATIONAL_ID)) == 1
+        assert _slots(text, SlotType.BANK_ACCOUNT) == []
+
+    # --- F-NUM-02: cue loai tru -> KHONG gan national_id ---
+    @pytest.mark.parametrize("text", [
+        "don hang 079000012352 toi chua shop",
+        "đơn hàng 079000012353 giao chua",
+        "ma don 079000012354 kiem tra giup",
+        "mã đơn 079000012355 sao roi shop",
+        "ma giao dich 079000012356 da chuyen",
+        "mã giao dịch 079000012357 nhe",
+        "order 079000012358 status the nao",
+        "transaction 079000012359 pending",
+        "ORDER 079000012360 chua toi",       # hoa - fold ve cung dang
+        "Đơn Hàng 079000012361 dau roi",     # hoa + dau
+    ])
+    def test_ma_don_giao_dich_khong_phai_national_id(self, text):
+        assert _slots(text, SlotType.NATIONAL_ID) == []
+
+    def test_bare_12_so_van_giu_fallback_national_id(self):
+        # CA chon huong (ii): GIU fallback de khong tut recall khi khach chi gui so CCCD tran.
+        spans = _slots("079000012350 la so cua minh", SlotType.NATIONAL_ID)
+        assert len(spans) == 1 and spans[0].confidence == Confidence.MEDIUM
+
+    def test_cmnd_9_so_co_cue_van_hoat_dong(self):
+        assert len(_slots("chung minh nhan dan 079000123 nhe", SlotType.NATIONAL_ID)) == 1
+
+    # --- non-regression ---
+    @pytest.mark.parametrize("text,slot", [
+        ("lien he 0301234567 nhe shop", SlotType.PHONE),
+        ("sdt cua minh 0912345678", SlotType.PHONE),
+        ("lien he +84 301234567 nhe", SlotType.PHONE),
+    ])
+    def test_phone_khong_regression(self, text, slot):
+        assert len(_slots(text, slot)) == 1
+
+    def test_so_tien_van_khong_bi_bat(self):
+        assert detect("chuyen 71000123456 dong nhe").spans == []
+
+
 class TestName:
     def test_cue_ho_viet_hoa(self):
         spans = _slots("tên mình là Nguyễn Văn An", SlotType.NAME)
