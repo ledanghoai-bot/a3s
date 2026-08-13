@@ -58,6 +58,7 @@ from app.services.pii.canonicalize import MAX_BYTES, MAX_CHARS  # noqa: F401
 from app.services.pii.canonicalize import truncate_canonical as _truncate  # noqa: F401
 from app.services.pii.stage0p_eligibility import is_pending_deletion
 from app.services.pii.stage0p_signing_client import (
+    SigningRateLimitedError,
     SigningServiceError,
     request_signature,
 )
@@ -78,6 +79,10 @@ DB_STATEMENT_TIMEOUT_SECONDS = 2.0
 PENDING_CHECK_TIMEOUT_SECONDS = 1.5   # kiem pending TRUOC khi giu fence
 PENDING_RECHECK_TIMEOUT_SECONDS = 0.5  # recheck NGAN BEN TRONG fence (dong Redis, phai nhanh)
 FENCE_UNIT_DEADLINE_SECONDS = 5.0     # tran TUYET DOI cho 1 don vi fenced (fetch+recheck+insert)
+# F-A12-01: so lan toi da chiu CHO khi signer bao rate_limited cho CUNG 1 unit. Moi lan cho toi da
+# ~1 cua so (10s) nen 12 lan la du rong cho 1 lifecycle 225 conversation (thuc te chi can ~5 lan
+# cho ca lifecycle), nhung van chan lap vo han neu signer ket vinh vien.
+MAX_RATE_LIMIT_WAITS = 12
 
 
 def _log(event: str, **fields) -> None:
@@ -228,6 +233,39 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
         return {"status": "ok", "truncated": signed.truncated}
 
 
+async def _run_fenced_unit_paced(collector_conn, pending_conn, *, batch_id, conversation_id,
+                                 message_id, customer_id) -> dict:
+    """F-A12-01: bao quanh `_run_fenced_unit` bang backoff XAC DINH cho rate limit cua signer.
+
+    Signing service co fixed-window admission budget (40 request/10s, T13-03). Truoc correction
+    nay, vuot han lam server dong ket noi cam -> collector nhan `ConnectionResetError` va NEM RA
+    KHOI `run_collector`, buoc runner phai khoi dong lai TOAN BO collector (Amendment 12 gap dung 5
+    lan, moi lan sau 40 conversation).
+
+    Gio server tra `retry_after_seconds` tuong minh, nen ta chi can NGU DUNG khoang do roi lam lai
+    CHINH unit vua roi. Quan trong: `sleep` xay ra SAU khi fence da thoat (unit that bai truoc khi
+    ghi gi), nen KHONG giu advisory lock/transaction nao trong luc cho — va KHONG mark outcome nao,
+    nen khong ton attempt_count va khong the sinh du lieu trung."""
+    waits = 0
+    while True:
+        try:
+            return await asyncio.wait_for(
+                _run_fenced_unit(collector_conn, pending_conn, batch_id=batch_id,
+                                 conversation_id=conversation_id, message_id=message_id,
+                                 customer_id=customer_id),
+                timeout=FENCE_UNIT_DEADLINE_SECONDS,
+            )
+        except SigningRateLimitedError as e:
+            waits += 1
+            if waits > MAX_RATE_LIMIT_WAITS:
+                # Cho qua nhieu lan ma van bi tu choi -> khong con la "cham lai 1 chut" nua, de noi
+                # nem ra ngoai nhu loi that (fail-closed, khong lap vo han).
+                raise
+            _log("m4_collector_rate_limited_backoff", conversation_id=conversation_id,
+                 message_id=message_id, wait_seconds=round(e.retry_after_seconds, 3), attempt=waits)
+            await asyncio.sleep(e.retry_after_seconds)
+
+
 async def _mark_outcome(collector_conn, *, batch_id, conversation_id, message_id, outcome, reason):
     """REV5 T4-03: goi `m4_stage0p_mark_candidate_outcome` — chuyen candidate progress row sang
     trang thai terminal/retry tuong ung. Tra ve row (new_status, attempt_count)."""
@@ -299,12 +337,11 @@ async def run_collector(collector_conn, pending_conn, *, batch_id) -> dict:
                 continue
 
             try:
-                unit = await asyncio.wait_for(
-                    _run_fenced_unit(collector_conn, pending_conn, batch_id=batch_id,
-                                     conversation_id=conv_id, message_id=msg_id,
-                                     customer_id=customer_id),
-                    timeout=FENCE_UNIT_DEADLINE_SECONDS,
-                )
+                # F-A12-01: rate limit cua signer duoc xu ly bang backoff xac dinh BEN TRONG
+                # helper nay (khong con lam vo ca vong lap collector nhu Amendment 12).
+                unit = await _run_fenced_unit_paced(
+                    collector_conn, pending_conn, batch_id=batch_id,
+                    conversation_id=conv_id, message_id=msg_id, customer_id=customer_id)
             except asyncio.TimeoutError:
                 fence_timeout_hit = True
                 outcome_row = await _mark_outcome(collector_conn, batch_id=batch_id,

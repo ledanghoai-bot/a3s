@@ -18,6 +18,24 @@ class SigningServiceError(Exception):
     """Signing service tu choi (canonicalize/encrypt/sign that bai) hoac loi giao thuc/ket noi."""
 
 
+class SigningRateLimitedError(SigningServiceError):
+    """F-A12-01: signing service tu choi vi VUOT NGAN SACH ADMISSION (fixed-window), KHONG phai
+    loi noi dung/chu ky/ha tang.
+
+    Tach rieng khoi `SigningServiceError` vi cach xu ly khac han: day la tin hieu "cham lai roi thu
+    lai", co `retry_after_seconds` XAC DINH tu server — caller nen `sleep` dung khoang do roi thu
+    lai chinh candidate do, thay vi coi la that bai/retry mu.
+
+    Truoc correction nay, server dong ket noi cam khi vuot han nen client chi thay
+    `ConnectionResetError` (loi transport mu, khong phan biet duoc voi signer crash) — Amendment 12
+    da gap dung 5 lan nhu vay."""
+
+    def __init__(self, retry_after_seconds: float) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(
+            f"signing service tu choi: rate_limited (thu lai sau {retry_after_seconds:.3f}s)")
+
+
 @dataclass(frozen=True)
 class SigningResult:
     ciphertext: bytes
@@ -83,6 +101,13 @@ async def request_signature(socket_path: str, *, batch_id, conversation_id: int,
         await asyncio.wait_for(
             _write_frame(writer, json.dumps(req).encode("utf-8")), timeout=timeout)
         raw_resp = await asyncio.wait_for(_read_frame(reader), timeout=timeout)
+    except (OSError, asyncio.IncompleteReadError, asyncio.TimeoutError) as e:
+        # F-A12-01: bao boc MOI loi transport/giao thuc thanh SigningServiceError. Truoc day chi
+        # buoc `open_unix_connection` duoc bao boc, nen `ConnectionResetError` luc write/read lot
+        # nguyen ven len tren - caller thay 1 exception la, khong ro tu dau (chinh la trieu chung
+        # Amendment 12).
+        raise SigningServiceError(
+            f"loi giao thuc/ket noi voi signing service: {type(e).__name__}: {e}") from e
     finally:
         writer.close()
         try:
@@ -91,6 +116,16 @@ async def request_signature(socket_path: str, *, batch_id, conversation_id: int,
             pass
     resp = json.loads(raw_resp.decode("utf-8"))
     if not resp.get("ok"):
+        if resp.get("error") == "rate_limited":
+            # F-A12-01: tin hieu backoff XAC DINH tu server - khong phai that bai.
+            raw_retry = resp.get("retry_after_seconds")
+            try:
+                retry_after = float(raw_retry)
+            except (TypeError, ValueError):
+                # Server luon gui truong nay, nhung neu thieu/hong thi lay ca cua so lam can tren
+                # AN TOAN (cho lau hon la thu lai qua som roi bi tu choi tiep).
+                retry_after = 10.0
+            raise SigningRateLimitedError(max(retry_after, 0.001))
         raise SigningServiceError(f"signing service tu choi: {resp.get('error', 'khong ro loi')}")
     return SigningResult(
         ciphertext=base64.b64decode(resp["ciphertext_b64"]),
