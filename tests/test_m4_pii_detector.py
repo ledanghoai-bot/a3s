@@ -95,23 +95,60 @@ class TestNumericSlotPrecedence:
         "712345678901234567",   # 18
         "7123456789012345678",  # 19
     ])
-    def test_bank_17_den_19_so_HIEN_TAI_khong_duoc_nhan(self, digits):
-        """GHI NHAN HANH VI HIEN TAI — KHONG phai khang dinh day la dung.
+    def test_bank_17_den_19_so_duoc_nhan(self, digits):
+        """PO policy B: bank account 8-19 so.
 
-        CA directive yeu cau test bank account 8-19 so. Do thuc te: nhanh bank trong
-        `_detect_numeric_slots` chan cung `6 <= len(cleaned) <= 16`, nen 17/18/19 so KHONG duoc gan
-        slot nao (du `_DIGITRUN_RE` van khop toi 20 ky tu).
+        Truoc do 17-19 so CO cue `STK` bi silent miss (nhanh bank chan cung <= 16). PO khong chap
+        nhan bo sot PII chi vi do dai, nen tran duoc nang len 19.
 
-        Theo dung chi dao CA ("khong noi/doi policy ngam: bao finding truoc"), Dev KHONG tu mo rong
-        tran 16 -> 19 trong PR nay. Test nay khoa hanh vi hien tai lai de:
-          - lam khoang trong hien ro thay vi an;
-          - bat ky thay doi nao ve sau deu phai sua test mot cach TUONG MINH, co review.
-        Xem PHASE1B-M4-BANK-ACCOUNT-LENGTH-RANGE-FINDING-VI.md — cho CA/PO quyet dinh pham vi.
+        Ban dau Dev khoa HANH VI CU lai bang test nay (assert khong nhan gi) theo dung chi dao CA
+        "khong noi policy ngam". Khi PO chot policy B, chinh test do FAIL va buoc phai sua tuong
+        minh — dung muc dich thiet ke: khong the doi hanh vi ma khong ai thay.
         """
         text = f"chuyen khoan toi STK {digits} nhe"
+        spans = _slots(text, SlotType.BANK_ACCOUNT)
+        assert len(spans) == 1
+        assert text[spans[0].start:spans[0].end] == digits
+        assert spans[0].confidence == Confidence.HIGH
+
+    @pytest.mark.parametrize("text,expected", [
+        ("STK 1234 5678 9012 34567 nhe", "1234 5678 9012 34567"),              # 17 so + khoang trang
+        ("so tai khoan 1234-5678-9012-345678 nhe", "1234-5678-9012-345678"),   # 18 so + gach
+        ("tai khoan 1234.5678.9012.3456789 nhe", "1234.5678.9012.3456789"),    # 19 so + cham
+    ])
+    def test_bank_17_den_19_so_co_dau_phan_tach(self, text, expected):
+        """Directive doi 'at least one separator variation' cho moi length 17/18/19.
+
+        Do duoc mot loi RIENG khi lam phan nay: noi rieng tran do dai (16->19) VAN CHUA DU, vi
+        `_DIGITRUN_RE` con chan TONG SO KY TU THO o 20. '1234-5678-9012-345678' (18 so + 3 gach =
+        21 ky tu) bi CAT thanh '1234-5678-9012'. Da noi `{6,18}` -> `{6,21}` (toi da 23 ky tu) de
+        du cho 19 so + 4 dau phan tach.
+        """
+        spans = _slots(text, SlotType.BANK_ACCOUNT)
+        assert len(spans) == 1
+        assert text[spans[0].start:spans[0].end] == expected
+
+    @pytest.mark.parametrize("text", [
+        "ma giao dich 12345678901234567 da chuyen tien",
+        "ma tham chieu chuyen khoan 123456789012345678 nhe",
+        "noi dung chuyen khoan 1234567890123456789 da gui",
+        "don hang 12345678901234567 thanh toan roi",
+        "ma don 123456789012345678 da chuyen khoan",
+        "order 1234567890123456789 paid",
+        "transaction 12345678901234567 pending",
+        "chuyen 123456789012345678 dong nhe",
+        "hoa don 1234567890123456789 da thanh toan",
+        "ma van don 12345678901234567 giao roi",
+    ])
+    def test_17_den_19_so_ngu_canh_tai_chinh_nhung_khong_phai_STK(self, text):
+        """Dieu kien DO PRECISION cua viec noi tran (Directive: "khong duoc ne").
+
+        Day la cac day 17-19 so nam trong ngu canh tai chinh/don hang nhung KHONG co cue trong
+        `_BANK_CUES`, nen luat moi KHONG duoc phep kich hoat. Neu mot ngay nao do chung bi bat,
+        nghia la viec noi tran da lam hong precision.
+        """
         assert _slots(text, SlotType.BANK_ACCOUNT) == []
         assert _slots(text, SlotType.NATIONAL_ID) == []
-        assert _slots(text, SlotType.PHONE) == []
 
     @pytest.mark.parametrize("text", [
         "chuyen khoan toi STK 710001234567 nhe",
@@ -135,6 +172,30 @@ class TestNumericSlotPrecedence:
     def test_national_id_co_cue(self, text):
         spans = _slots(text, SlotType.NATIONAL_ID)
         assert len(spans) == 1 and spans[0].confidence == Confidence.HIGH
+
+    @pytest.mark.parametrize("text,expect_bank", [
+        # cue bank NAM TRONG cua so 30 ky tu nhin lui -> hien tai bat
+        ("so tai khoan, ma giao dich 12345678901234567 nhe", True),
+        ("STK va ma don 123456789012345678 nhe", True),
+        ("ma giao dich cho STK 12345678901234567 nhe", True),
+        # cue bank nam NGOAI cua so 30 ky tu -> hien tai KHONG bat (silent miss)
+        ("tai khoan nhan tien, ma tham chieu 1234567890123456789 nhe", False),
+    ])
+    def test_conflict_bank_cue_va_reference_cue_HANH_VI_HIEN_TAI(self, text, expect_bank):
+        """GHI NHAN hanh vi hien tai cho ca co CA cue bank LAN cue reference/order.
+
+        Directive yeu cau test conflict policy va — neu semantic khong quyet dinh duoc tu text —
+        BAO ambiguity thay vi tu chon hidden precedence. Dev KHONG tu dat precedence moi.
+
+        Hanh vi hien tai KHONG dua tren ngu nghia ma dua tren KHOANG CACH: `_has_cue` chi quet 30
+        ky tu nhin lui, nen ket qua doi khi cue bank nam gan hay xa, du y nghia cau nhu nhau. Ca
+        thu 4 cho thay mot silent miss that. Xem
+        PHASE1B-M4-BANK-CUE-CONFLICT-AMBIGUITY-FINDING-VI.md — cho CA/PO quyet.
+
+        Test nay khoa hien trang lai de moi thay doi ve sau deu tuong minh, khong am tham.
+        """
+        got = _slots(text, SlotType.BANK_ACCOUNT)
+        assert (len(got) == 1) is expect_bank
 
     def test_conflict_policy_nid_cue_thang_bank_cue(self):
         # Co CA HAI cue tren cung 1 day 12 so -> cue giay to thang (policy CA chot).

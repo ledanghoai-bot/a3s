@@ -160,7 +160,11 @@ _SENSITIVE_RE = {
 }
 
 # Day so ung vien: cho phep khoang trang/cham/gach/ngoac giua cac cum so.
-_DIGITRUN_RE = re.compile(r"(?<![\d/])\+?\(?\+?\d[\d .\-()]{6,18}\d(?![\d])")
+# PO policy B: bank account toi 19 chu so. `{6,18}` cu chi cho TONG 20 KY TU THO, nen 19 chu so
+# KEM dau phan tach (vd "1234-5678-9012-345678" = 18 so + 3 gach = 21 ky tu) bi CAT giua chung —
+# do duoc that: fixture tra ve '1234-5678-9012' thay vi ca chuoi. Noi len `{6,21}` => toi da 23 ky
+# tu tho, du cho 19 chu so + 4 dau phan tach (nhom 4-4-4-4-3).
+_DIGITRUN_RE = re.compile(r"(?<![\d/])\+?\(?\+?\d[\d .\-()]{6,21}\d(?![\d])")
 _VN_MOBILE_RE = re.compile(r"^0[35789]\d{8}$")
 _VN_LANDLINE_RE = re.compile(r"^02\d{8,9}$")
 
@@ -265,7 +269,11 @@ def _detect_numeric_slots(text_nfc: str, folded: str, spans: list[PIISpan]) -> N
             continue
 
         # 2) STK: cue tai chinh thang prefix (vi "stk 0912..." la so tai khoan).
-        if cleaned.isdigit() and 6 <= len(cleaned) <= 16 and _has_cue(folded, start, _BANK_CUES):
+        #
+        # PO policy B (PHASE1B-M4-BANK-ACCOUNT-LENGTH-19-CORRECTION-DIRECTIVE-VI.md): tran tren nang
+        # 16 -> 19. Truoc do 17-19 chu so CO cue `STK` van khong duoc gan slot nao (silent miss) —
+        # PO khong chap nhan bo sot PII chi vi do dai. Gioi han duoi giu nguyen 6.
+        if cleaned.isdigit() and 6 <= len(cleaned) <= 19 and _has_cue(folded, start, _BANK_CUES):
             spans.append(PIISpan(SlotType.BANK_ACCOUNT, start, end,
                                  Confidence.HIGH, ReasonCode.BANK_CUE_DIGITS))
             continue
