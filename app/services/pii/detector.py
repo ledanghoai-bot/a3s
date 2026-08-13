@@ -92,6 +92,19 @@ _ADMIN_KW_RE = re.compile(
     r"\b(phuong|quan|huyen|xa|thi tran|thi xa|thanh pho|tp)\b\.?\s*(?=[\w])"
 )
 _HOUSE_NUM_RE = re.compile(r"\b(?:so nha|so)\s*\d+\w*|\b\d+[a-z]?(?:/\d+\w*)+")
+# F-A12-02 (chan doan ...DIAGNOSIS-1-VI.md loi 2.2): SO NHA TRAN ngay truoc tu khoa duong
+# ("45 duong Nguyen Trai") khong khop `_HOUSE_NUM_RE` (nhanh 1 doi tu "so", nhanh 2 doi gach cheo)
+# nen span bat dau tu "duong" va MAT so nha.
+#
+# CO Y khong them so nay vao `_HOUSE_NUM_RE`: lam vay bien no thanh 1 THANH PHAN doc lap, keo theo
+# 2 tac dung phu that su da xay ra khi thu:
+#   - `test_so_nha_cong_duong_don_le`: "123 duong Nguyen Trai" tu MEDIUM bi day len HIGH (2 thanh
+#     phan -> multi), trong khi house+street don thuan von chi la bang chung YEU;
+#   - `test_hai_dia_chi_mot_tin`: them 1 thanh phan o dau dia chi thu 2 lam khoang cach giua 2 cum
+#     lot xuong duoi `_ADDR_CLUSTER_GAP` -> 2 dia chi bi GOP thanh 1.
+# Vi vay so nha chi duoc dung de NOI BIEN (mo rong `start` lui lai), KHONG tinh la thanh phan/bang
+# chung, KHONG anh huong cluster hay confidence.
+_LEADING_HOUSE_NUM_RE = re.compile(r"(?:^|(?<=[\s,;:(]))(\d+[a-z]?)\s+$")
 _NUM_STREET_RE = re.compile(r"\b\d+[a-z]?\s+(?:duong|pho|ngo|hem|ngach)\s+[\w]")
 
 # Tinh/thanh (fold, kem ten goi thong dung). Ten tinh don le KHONG phai dia chi
@@ -276,7 +289,21 @@ def _name_tokens_after(text_nfc: str, folded: str, pos: int) -> list[tuple[str, 
         if any(ch in ",.;:!?()[]/\n" for ch in text_nfc[cursor:m.start()]):
             break
         tok = m.group(0)
-        if fold(nfc(tok)) in _NAME_STOPWORDS:
+        # F-A12-02 (chan doan ...DIAGNOSIS-1-VI.md loi 2.3) — DUNG lop bug tai phat nhieu nhat cua
+        # du an (CLAUDE.md muc 6: "bo dau de so khop gay dong am gia").
+        #
+        # `_NAME_STOPWORDS` chua "minh"/"anh"/"mai"/"chi"... — sau khi fold() thi:
+        #     "minh" = dai tu "mình"  VA  ten rieng "Minh"
+        #     "anh"  = dai tu "anh"   VA  ten rieng "Anh"/"Ánh"
+        #     "mai"  = "ngày mai"     VA  ten rieng "Mai"
+        # nen "Hoang Minh Tuan" bi cat con "Hoang", "Vu Duc Anh" con "Vu Duc". Day la dong am o cap
+        # TU HOAN CHINH — them `\b` KHONG cuu duoc (dung nhu CLAUDE.md da ghi).
+        #
+        # Cach tach: tin hieu HOA/THUONG trong ban NFC GOC. Dai tu/tu noi luon viet thuong ("mình",
+        # "anh", "nhé"); ten rieng viet hoa ("Minh", "Anh", "Mai"). Chi mien stopword khi token VIET
+        # HOA *va* da co it nhat 1 token truoc do (tuc dang giua 1 cum ten) — khong noi long cho
+        # token DAU tien, de "minh la ..." / "anh oi" khong bi hieu nham thanh ten.
+        if fold(nfc(tok)) in _NAME_STOPWORDS and not (tokens and tok[:1].isupper()):
             break
         tokens.append((tok, m.start(), m.end()))
         cursor = m.end()
@@ -343,6 +370,59 @@ def _detect_names(text_nfc: str, folded: str, spans: list[PIISpan]) -> None:
 # Address
 # ---------------------------------------------------------------------------
 
+_ADDR_TAIL_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)  # CHU hoac SO (khac _WORD_RE: loai chu so)
+
+
+def _extend_start_over_house_number(folded: str, start: int,
+                                    cluster: list[tuple[int, int, str]]) -> int:
+    """F-A12-02: keo `start` lui lai qua SO NHA TRAN dung ngay truoc tu khoa duong.
+
+    Chi ap dung khi thanh phan DAU cua cluster la "street" ("45 |duong Nguyen Trai" -> "|45 duong
+    Nguyen Trai"). KHONG tao thanh phan moi nen khong doi cluster/confidence (xem chu thich o
+    `_LEADING_HOUSE_NUM_RE` ve 2 regression that da gap khi lam theo huong kia)."""
+    if not cluster or cluster[0][2] != "street":
+        return start
+    prefix = folded[max(0, start - 8):start]
+    m = _LEADING_HOUSE_NUM_RE.search(prefix)
+    if not m:
+        return start
+    return start - (len(prefix) - m.start(1))
+
+
+def _extend_over_proper_nouns(text_nfc: str, end: int, *, max_tokens: int = 8) -> int:
+    """F-A12-02: keo `end` qua cac token TEN RIENG (viet hoa) hoac CHU SO lien tiep ngay sau.
+
+    Dung cho duoi cluster dia chi:
+        "...quan| Go Vap nhe shop"                  -> keo qua "Go Vap",   dung truoc "nhe"
+        "...quan| 3 nhe shop"                        -> keo qua "3",        dung truoc "nhe"
+        "...phuong Ngo Thi Nham|, Hai Ba Trung nhe"  -> keo qua ca cum sau dau phay, dung truoc "nhe"
+
+    Chi doc `text_nfc` GOC de con tin hieu HOA/THUONG — `folded` da mat tin hieu do (va mat dau),
+    dung lop bay "bo dau gay dong am gia" ma CLAUDE.md canh bao.
+
+    Quy tac dung: gap token THUONG dau tien thi dung ngay ("nhe shop", "gium em"...). Do do
+    `max_tokens` rong rai cung an toan — ranh gioi THAT su la tin hieu hoa/thuong, khong phai bo dem.
+    Cho phep bang qua DAU PHAY (dia chi VN hay viet "..., quan X, TP Y") nhung KHONG bang qua dau
+    ket cau manh (`.;:!?` xuong dong) va toi da 1 dau phay lien tiep.
+
+    Neu input viet thuong hoan toan (vd khong dau "phuong tan phong") thi khong keo gi -> giu
+    nguyen hanh vi cu, khong noi rong false positive.
+    """
+    cursor = end
+    for _ in range(max_tokens):
+        m = _ADDR_TAIL_TOKEN_RE.search(text_nfc, cursor)
+        if not m:
+            break
+        gap = text_nfc[cursor:m.start()]
+        if len(gap) > 2 or any(ch in ".;:!?()[]\n" for ch in gap) or gap.count(",") > 1:
+            break
+        tok = m.group(0)
+        if not (tok[:1].isupper() or tok.isdigit()):
+            break  # token viet thuong -> da sang phan duoi cau, dung lai
+        cursor = m.end()
+    return max(end, cursor)
+
+
 def _detect_addresses(text_nfc: str, folded: str, spans: list[PIISpan]) -> None:
     components: list[tuple[int, int, str]] = []
     province_hits = [(m.start(), m.end()) for m in _PROVINCE_RE.finditer(folded)]
@@ -374,12 +454,21 @@ def _detect_addresses(text_nfc: str, folded: str, spans: list[PIISpan]) -> None:
             clusters.append([comp])
 
     for cluster in clusters:
-        start = cluster[0][0]
+        start = _extend_start_over_house_number(folded, cluster[0][0], cluster)
         end = max(c[1] for c in cluster)
         # keo end het "tu" dang do (vd admin regex chi an 1 ky tu sau keyword)
         tail = _WORD_RE.match(folded, end - 1)
         if tail:
             end = max(end, tail.end())
+        # F-A12-02 (chan doan ...DIAGNOSIS-1-VI.md loi 2.1): thanh phan "admin" CHI la tu khoa
+        # ("quan"/"huyen"/"xa"...), KHONG bao gom TEN RIENG dung sau, nen span cu ket thuc o
+        # "...quan" va mat "Go Vap". Keo them cac tu VIET HOA (ban NFC GOC) hoac chu so ngay sau.
+        #
+        # Vi sao dung tin hieu VIET HOA thay vi danh sach tu: ten dia danh la tap mo (khong the liet
+        # ke het), trong khi duoi cau thuong la tu thuong ("nhe shop", "gium em"). Doc tren text_nfc
+        # GOC — KHONG dung `folded` — vi fold() da mat ca dau LAN thong tin hoa/thuong, dung lop bay
+        # "bo dau gay dong am gia" ma CLAUDE.md canh bao.
+        end = _extend_over_proper_nouns(text_nfc, end)
         strong = [c for c in cluster if c[2] != "admin_weak"]
         kinds = {c[2] for c in strong}
         digit_near = bool(re.search(r"\d", folded[max(0, start - 10):end + 20]))
