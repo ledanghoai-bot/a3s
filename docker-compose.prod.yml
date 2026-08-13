@@ -70,6 +70,53 @@ services:
   # hien DUONG DAN mount, khong phai secret). `stage0p_signing_service.py` (_read_secret_env_or_file)
   # TU KIEM TRA LAI quyen file doc lap luc khoi dong (khong chi tin bind-mount host giu dung
   # permission), tu choi khoi dong neu file co bat ky bit group/other nao hoac sai chu so huu.
+  # I-B M4 socket-volume init (dap PHASE1B-M4-AMENDMENT-11-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md):
+  # named volume `m4_signing_socket` duoc Docker tao mac dinh `root:root 0755`, trong khi m4-signer
+  # chay UID 5001 -- `_validate_socket_directory()` (stage0p_signing_service.py) TU CHOI KHOI DONG
+  # (fail-closed dung thiet ke) vi thu muc socket khong thuoc so huu tien trinh. Day la thieu sot
+  # provisioning topology: TRUOC correction nay khong co buoc nao (compose hay runbook) khoi tao
+  # owner/mode cho volume do -- Amendment 11 Attempt 1 abort chinh vi vay.
+  #
+  # Service init NGAN HAN nay chay MOT LAN, ngay truoc m4-signer (qua `depends_on` voi dieu kien
+  # `service_completed_successfully`), CHI mount dung volume socket (KHONG mount thu muc secret,
+  # KHONG cham DB/Redis), dat `5001:5000` + `0710`, TU XAC MINH lai bang `stat` roi thoat 0. Neu
+  # xac minh that bai -> exit 1 -> Compose KHONG start m4-signer (fail-closed o ca lop nay).
+  #
+  # Vi sao `0710`: owner (5001=m4-signer) `rwx` de tao/quan ly socket; group (5000=m4-signing-ipc)
+  # CHI `--x` -- m4-collector (UID 5002, cung group) di qua duoc thu muc de mo socket theo dung
+  # duong dan da biet, nhung KHONG liet ke duoc noi dung; other KHONG co bit nao. Khop chinh xac
+  # yeu cau `_validate_socket_directory(shared_gid=5000)`.
+  #
+  # Day la thao tac privileged DUY NHAT va HEP NHAT co the: chay `user: "0:0"` (can root de chown)
+  # nhung chi trong 1 container ngan han, chi thay doi 1 volume, version-controlled va review duoc
+  # -- thay vi bat operator tu tim Docker host mountpoint roi `chown` tay tren production.
+  m4-signer-init:
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    profiles: ["m4-signing"]
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        chown 5001:5000 /run/m4-signing
+        chmod 0710 /run/m4-signing
+        uid=$$(stat -c %u /run/m4-signing)
+        gid=$$(stat -c %g /run/m4-signing)
+        mode=$$(stat -c %a /run/m4-signing)
+        echo "m4-signer-init: /run/m4-signing uid=$$uid gid=$$gid mode=$$mode"
+        if [ "$$uid" != "5001" ] || [ "$$gid" != "5000" ] || [ "$$mode" != "710" ]; then
+          echo "m4-signer-init: FAIL - expected uid=5001 gid=5000 mode=710" >&2
+          exit 1
+        fi
+        echo "m4-signer-init: OK"
+    volumes:
+      - m4_signing_socket:/run/m4-signing
+    restart: "no"
+
   m4-signer:
     # I-B M4 image-freshness correction: GIT_COMMIT build-arg (dap
     # PHASE1B-M4-AMENDMENT-10-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md) - service nay khong nam trong
@@ -95,7 +142,14 @@ services:
       - m4_signing_socket:/run/m4-signing
       - /run/m4-signing-secrets:/run/m4-signing-secrets:ro
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      # Socket-volume init PHAI hoan tat THANH CONG truoc khi signer start (dap
+      # PHASE1B-M4-AMENDMENT-11-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md). `service_completed_successfully`
+      # nghia la: init exit 0 -> signer start; init exit khac 0 (vd `stat` xac minh khong khop) ->
+      # Compose KHONG start signer. Khong con phu thuoc thao tac tay cua operator tren host.
+      m4-signer-init:
+        condition: service_completed_successfully
     restart: "no"
     healthcheck:
       # Chi kiem tra socket file TON TAI dung mode (lop song lop) - KHONG phai canary ky that
