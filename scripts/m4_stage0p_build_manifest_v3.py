@@ -31,6 +31,32 @@ V3 = REPO / "datasets" / "pii" / "m4_stage0p_rehearsal_manifest_v3.jsonl"
 MANIFEST_VERSION = "m4-stage0p-rehearsal-manifest-v3"
 PSID_PREFIX = "m4synthrehearsalv1_"
 
+# ---------------------------------------------------------------------------
+# F-V3-01 — ground-truth override do STAFF 5 quyet (KHONG phai Dev tu chon)
+# ---------------------------------------------------------------------------
+# CA Review 1 tren PR #19 chan acceptance cho toi khi staff 5 (reviewer/evaluator doc lap) ra quyet
+# dinh bang van ban cho nhan cua RG004. Quyet dinh da nhan:
+#
+#     Reviewer : staff 5 (m4-reviewer-evaluator) — HOAI
+#     Thoi diem: 2026-08-13T11:13Z (18:13 ICT)
+#     Quyet dinh: phuong an (2) — GAN `name`, span (8, 14) = "Ut Nho"
+#     Ly do    : "Day la Ten co the dung duoc, da duoc viet hoa ky tu dau"
+#
+# Ban goc v2 ghi `labeled_slots: []` CO Y ("ten goi mien Tay khong ho, cue yeu"). Staff 5 doi lai o
+# v3. Override chi ap dung cho V3 — file v2 tren dia KHONG bi sua (giu byte-for-byte cho moi
+# evidence lich su Amendment 09-12 van doi chieu duoc).
+_V3_GROUND_TRUTH_OVERRIDES: dict[str, list[dict]] = {
+    "RG004": [{
+        "slot_type": "name",
+        "start": 8,
+        "end": 14,          # "tui ten Ut Nho o duoi que"[8:14] == "Ut Nho"
+        "confidence": "medium",
+        "reason": "name_cue_tokens",
+    }],
+}
+_V3_OVERRIDE_NOTE = ("F-V3-01: staff 5 (m4-reviewer-evaluator, HOAI) quyet 2026-08-13T11:13Z — "
+                     "gan 'Ut Nho' la name; v2 giu nguyen nhan rong")
+
 
 def _entry(seq: int, key: str, text: str, slots: list[dict], note: str,
            expect_gate: bool) -> dict:
@@ -252,10 +278,24 @@ def main() -> int:
         return 1
 
     out: list[str] = []
-    # Giu NGUYEN 225 dong v2, chi doi truong manifest_version de v3 tu mo ta dung phien ban.
+    overrides_applied = []
+    # Giu NGUYEN 225 dong v2, chi doi truong manifest_version de v3 tu mo ta dung phien ban,
+    # CONG THEM ground-truth override do staff 5 quyet (neu co) — xem _V3_GROUND_TRUTH_OVERRIDES.
     for line in v2_lines:
         rec = json.loads(line)
         rec["manifest_version"] = MANIFEST_VERSION
+        key = rec.get("conversation_key")
+        if key in _V3_GROUND_TRUTH_OVERRIDES:
+            new_slots = _V3_GROUND_TRUTH_OVERRIDES[key]
+            # Xac minh offset tro DUNG chuoi mong doi truoc khi ghi — khong tin so go tay.
+            text = rec["messages"][0]["canonical_text"]
+            for s in new_slots:
+                assert 0 <= s["start"] < s["end"] <= len(text), f"{key}: offset ngoai bien"
+            rec["messages"][0]["labeled_slots"] = [dict(s) for s in new_slots]
+            rec["expect_gate"] = True
+            rec["note"] = f'{rec.get("note", "")} | {_V3_OVERRIDE_NOTE}'.strip(" |")
+            overrides_applied.append(
+                (key, [(s["slot_type"], text[s["start"]:s["end"]]) for s in new_slots]))
         out.append(json.dumps(rec, ensure_ascii=False))
 
     seq = 225
@@ -297,6 +337,8 @@ def main() -> int:
             fh.write(line + "\n")
 
     print(f"v2 lines kept        : {len(v2_lines)}")
+    for key, slots in overrides_applied:
+        print(f"  F-V3-01 override   : {key} -> {slots}  (staff 5 decision)")
     print(f"national_id added    : {counts['national_id']}")
     print(f"bank_account added   : {counts['bank_account']}")
     print(f"negative added       : {counts['negative']}")
