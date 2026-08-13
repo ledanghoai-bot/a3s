@@ -76,6 +76,18 @@ F-A08-R3-01/02:
   mandatory explicit build + label-match verification against `git rev-parse HEAD` before EVERY
   `up -d m4-signer` — see §2/§3/§9.
 
+**REV5 (current)**, answering `PHASE1B-M4-AMENDMENT-11-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md`:
+
+- **Socket-volume ownership gap (Amendment 11 Attempt 1)**: Docker creates the named volume
+  `m4_signing_socket` as `root:root 0755`, while `m4-signer` runs as UID 5001 —
+  `_validate_socket_directory()` refuses to start (fail-closed, by design). Before REV5 **nothing**
+  (compose or runbook) ever initialised ownership/mode for this directory; runbook §3 only handled
+  the **secret** directory (F-A08-R3-01) — same class of bug, different directory. REV5 adds a
+  short-lived Compose service **`m4-signer-init`**: it mounts only the socket volume, sets
+  `5001:5000` + `0710`, re-verifies with `stat`, and exits 0; `m4-signer` `depends_on` it with
+  `condition: service_completed_successfully`, so it **never starts unless init succeeded**. The
+  operator never has to locate the Docker host mountpoint or `chown` by hand — see §3.
+
 ## 1. Full ceremony sequence (summary — see runner docstring for PIN/approval detail)
 
 ```
@@ -84,6 +96,8 @@ record-approval (staff 3, own PIN)
   -> prepare 3 key files in /run/m4-signing-secrets (chown/chmod)   <-- NEW step (F-A08-R2-01)
   -> provision-keys (3 fresh, randomly generated keys, SAME values just written to file)
   -> docker compose --profile m4-signing up -d m4-signer   <-- NEW step (A08-COR-01)
+       (Compose AUTOMATICALLY runs m4-signer-init first: chown/chmod the socket   <-- REV5
+        volume to 5001:5000/0710 + self-verify; if init fails, signer does NOT start)
   -> mint-token (operator identity, holds the key)          <-- NEW step (F-A08-R2-02)
   -> submit (canary, m4-collector identity, does NOT hold the key) <-- NEW step (F-A08-R1-03/F-A08-R2-02)
   -> run --dry-run (confirm preflight)
@@ -218,9 +232,25 @@ at the fixed path above, and no longer reads any `${VAR}` from the shell (unlike
 docker compose -f docker-compose.prod.yml --profile m4-signing up -d m4-signer
 ```
 
-Check status (no secret revealed):
+**REV5 — `m4-signer-init` runs automatically FIRST as part of that same command** (not a separate
+manual step): it mounts only the `m4_signing_socket` volume, `chown 5001:5000` + `chmod 0710` on
+`/run/m4-signing`, **re-verifies with `stat`**, then exits `0`. `m4-signer` declares
+`depends_on: {m4-signer-init: {condition: service_completed_successfully}}`, so:
+
+- init exits `0` → signer starts;
+- init exits non-zero (e.g. `stat` doesn't match `5001/5000/710`) → **Compose does NOT start the
+  signer**.
+
+Why it's needed: Docker creates named volumes as `root:root 0755` while the signer runs as UID
+5001, so `_validate_socket_directory()` refuses to start (by design). That was the Amendment 11
+Attempt 1 abort cause. Mode `0710` = owner (5001) `rwx`, group (5000) `--x` ONLY (m4-collector can
+traverse to open the socket by its known path but cannot list the directory), no `other` bits.
+
+Check status (no secret revealed) — check BOTH init and signer:
 
 ```bash
+docker compose -f docker-compose.prod.yml --profile m4-signing ps -a m4-signer-init   # MUST be "Exited (0)"
+docker compose -f docker-compose.prod.yml logs m4-signer-init --tail 5                # MUST contain "m4-signer-init: OK"
 docker compose -f docker-compose.prod.yml --profile m4-signing ps m4-signer
 docker compose -f docker-compose.prod.yml logs m4-signer --tail 20
 ```
@@ -423,6 +453,8 @@ level.
 
 | Situation | Action |
 |---|---|
+| `m4-signer` won't start and `docker compose ps -a m4-signer-init` shows `Exited (1)` (REV5) | Init's self-verification failed — read `docker compose logs m4-signer-init` (line `m4-signer-init: FAIL - expected uid=5001 gid=5000 mode=710`). This is correct fail-closed behaviour: the signer is NOT started. Do NOT `chown` the volume on the host; check whether the `m4_signing_socket` volume was overridden/mounted unusually, then rerun `up -d m4-signer`; if it still fails, stop and report to CA |
+| `m4-signer` reports the socket-directory error (`signing socket directory khong thuoc so huu tien trinh nay`) even though init `Exited (0)` | The socket volume's owner/mode changed AFTER init (e.g. a manual operation in between) — `docker compose --profile m4-signing rm -f m4-signer` then `up -d m4-signer` again (init re-runs and re-fixes it); do NOT `chown` by hand on the host |
 | `git_commit` label mismatch at the §3 build step (REV4) | The `m4-signer` image was built from a commit older than the current deployed HEAD — do **NOT** `up -d`; rerun exactly the `build` command in §3 (no `--pull`, no editing the Dockerfile mid-ceremony); if it still mismatches, stop and report to CA/PO — the VPS deployed HEAD may not match the accepted gate |
 | `up -d m4-signer` reports `signing service tu choi khoi dong: ... chua duoc dat day du` | The key files don't exist yet under `/run/m4-signing-secrets/` — redo §3 (`openssl rand` + `chown`/`chmod`) |
 | `up -d m4-signer` reports `... qua rong quyen (mode=...)` | One of the 3 files has a group/other bit — `chmod 0400 /run/m4-signing-secrets/*` and retry |
@@ -453,6 +485,16 @@ docker inspect "$IMAGE_REF" --format 'git_commit={{index .Config.Labels "git_com
 git rev-parse HEAD
 # The label vs git rev-parse HEAD MUST match exactly - proof the image is not a stale cache AND is
 # the actual image Compose will run (not a guessed/hard-coded tag).
+```
+
+**REV5 — socket-volume init proof (run after `up -d m4-signer`):**
+
+```bash
+docker compose -f docker-compose.prod.yml --profile m4-signing ps -a m4-signer-init   # MUST be Exited (0)
+docker compose -f docker-compose.prod.yml logs m4-signer-init --tail 5                # MUST contain "m4-signer-init: OK"
+# Independent confirmation straight from the volume (no need to enter the signer container):
+docker run --rm -v alpha3s_m4_signing_socket:/v alpine stat -c 'uid=%u gid=%g mode=%a' /v
+# MUST print: uid=5001 gid=5000 mode=710
 ```
 
 ```bash

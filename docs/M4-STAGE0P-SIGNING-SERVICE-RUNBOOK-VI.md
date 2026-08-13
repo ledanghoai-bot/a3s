@@ -67,6 +67,18 @@ F-A08-R3-01/02:
   git_commit` vào `Dockerfile` + build tường minh + xác minh label khớp `git rev-parse HEAD`
   BẮT BUỘC trước MỌI lần `up -d m4-signer` — xem §2/§3/§9.
 
+**REV5 (hiện tại)**, đáp `PHASE1B-M4-AMENDMENT-11-EXECUTION-ATTEMPT-1-ABORT-REVIEW-VI.md`:
+
+- **Socket-volume ownership gap (Amendment 11 Attempt 1)**: named volume `m4_signing_socket` được
+  Docker tạo mặc định `root:root 0755`, trong khi `m4-signer` chạy UID 5001 —
+  `_validate_socket_directory()` TỪ CHỐI khởi động (fail-closed đúng thiết kế). Trước REV5 **không
+  có bước nào** (compose hay runbook) khởi tạo owner/mode cho thư mục socket này; runbook §3 chỉ xử
+  lý thư mục **secret** (F-A08-R3-01) — cùng loại lỗi, khác thư mục. REV5 thêm service Compose
+  **`m4-signer-init`** ngắn hạn: chỉ mount volume socket, đặt `5001:5000` + `0710`, tự xác minh lại
+  bằng `stat` rồi thoát 0; `m4-signer` `depends_on` nó với điều kiện
+  `service_completed_successfully` nên **KHÔNG BAO GIỜ start nếu init chưa thành công**. Operator
+  KHÔNG phải tự tìm Docker host mountpoint hay `chown` tay — xem §3.
+
 ## 1. Trình tự đầy đủ 1 ceremony (tóm tắt, chi tiết PIN/approval xem docstring runner)
 
 ```
@@ -75,6 +87,8 @@ record-approval (staff 3, PIN riêng)
   -> chuẩn bị 3 file khóa trong /run/m4-signing-secrets (chown/chmod)  <-- bước MỚI (F-A08-R2-01)
   -> provision-keys (3 khóa mới, tự sinh ngẫu nhiên, CÙNG giá trị vừa ghi vào file)
   -> docker compose --profile m4-signing up -d m4-signer   <-- bước MỚI (A08-COR-01)
+       (Compose TU DONG chay m4-signer-init truoc: chown/chmod volume socket   <-- REV5
+        5001:5000/0710 + tu xac minh; init that bai => signer KHONG start)
   -> mint-token (danh tính operator, giữ khóa)             <-- bước MỚI (F-A08-R2-02)
   -> submit (canary, danh tính m4-collector, KHÔNG giữ khóa) <-- bước MỚI (F-A08-R1-03/F-A08-R2-02)
   -> run --dry-run (xác nhận preflight)
@@ -206,9 +220,24 @@ docker compose -f docker-compose.prod.yml exec \
 docker compose -f docker-compose.prod.yml --profile m4-signing up -d m4-signer
 ```
 
-Kiểm trạng thái (không secret nào hiện ra):
+**REV5 — `m4-signer-init` tự chạy TRƯỚC trong chính lệnh trên** (không phải bước tay riêng): service
+này chỉ mount volume socket `m4_signing_socket`, `chown 5001:5000` + `chmod 0710` thư mục
+`/run/m4-signing`, **tự xác minh lại bằng `stat`** rồi thoát `0`. `m4-signer` khai báo
+`depends_on: {m4-signer-init: {condition: service_completed_successfully}}` nên:
+
+- init thoát `0` → signer mới được start;
+- init thoát khác `0` (vd `stat` không khớp `5001/5000/710`) → **Compose KHÔNG start signer**.
+
+Vì sao cần: Docker tạo named volume mặc định `root:root 0755`, còn signer chạy UID 5001 —
+`_validate_socket_directory()` sẽ từ chối khởi động (đúng thiết kế). Đây là nguyên nhân abort
+Amendment 11 Attempt 1. Mode `0710` = owner (5001) `rwx`, group (5000) CHỈ `--x` (m4-collector đi
+qua được để mở socket theo đúng đường dẫn nhưng KHÔNG liệt kê được thư mục), other KHÔNG bit nào.
+
+Kiểm trạng thái (không secret nào hiện ra) — kiểm CẢ init lẫn signer:
 
 ```bash
+docker compose -f docker-compose.prod.yml --profile m4-signing ps -a m4-signer-init   # PHAI "Exited (0)"
+docker compose -f docker-compose.prod.yml logs m4-signer-init --tail 5                # PHAI co dong "m4-signer-init: OK"
 docker compose -f docker-compose.prod.yml --profile m4-signing ps m4-signer
 docker compose -f docker-compose.prod.yml logs m4-signer --tail 20
 ```
@@ -401,6 +430,8 @@ tiếp — không mở rộng bề mặt tấn công so với mức truy cập �
 
 | Tình huống | Xử lý |
 |---|---|
+| `m4-signer` không start, `docker compose ps -a m4-signer-init` báo `Exited (1)` (REV5) | Init tự xác minh thất bại — đọc `docker compose logs m4-signer-init` (dòng `m4-signer-init: FAIL - expected uid=5001 gid=5000 mode=710`). Đây là fail-closed đúng: signer KHÔNG được start. KHÔNG tự `chown` volume trên host; kiểm tra volume `m4_signing_socket` có bị ghi đè/mount lạ không, rồi chạy lại `up -d m4-signer`; nếu vẫn fail, dừng và báo CA |
+| `m4-signer` báo lỗi thư mục socket (`signing socket directory khong thuoc so huu tien trinh nay`) dù init đã `Exited (0)` | Volume socket bị đổi owner/mode SAU init (vd thao tác thủ công xen giữa) — `docker compose --profile m4-signing rm -f m4-signer` rồi `up -d m4-signer` lại (init sẽ chạy lại và tự sửa); KHÔNG `chown` tay trên host |
 | `git_commit` label mismatch ở bước build §3 (REV4) | Image `m4-signer` build từ commit cũ hơn deployed HEAD hiện tại — **KHÔNG** `up -d`; chạy lại đúng lệnh `build` §3 (không `--pull`, không sửa Dockerfile giữa ceremony); nếu vẫn mismatch, dừng và báo CA/PO — có thể deployed HEAD trên VPS chưa khớp gate đã accept |
 | `up -d m4-signer` báo `signing service tu choi khoi dong: ... chua duoc dat day du` | File khóa chưa tồn tại ở `/run/m4-signing-secrets/` — chạy lại §3 (`openssl rand` + `chown`/`chmod`) |
 | `up -d m4-signer` báo `... qua rong quyen (mode=...)` | 1 trong 3 file có bit group/other — `chmod 0400 /run/m4-signing-secrets/*` rồi thử lại |
@@ -431,6 +462,16 @@ docker inspect "$IMAGE_REF" --format 'git_commit={{index .Config.Labels "git_com
 git rev-parse HEAD
 # 2 gia tri (label vs git rev-parse HEAD) PHAI khop nhau tuyet doi - day la bang chung image KHONG
 # phai cache cu VA la DUNG image ma Compose se dung (khong phai 1 tag doan/hard-code).
+```
+
+**REV5 — bằng chứng socket-volume init (chạy sau `up -d m4-signer`):**
+
+```bash
+docker compose -f docker-compose.prod.yml --profile m4-signing ps -a m4-signer-init   # PHAI Exited (0)
+docker compose -f docker-compose.prod.yml logs m4-signer-init --tail 5                # PHAI co "m4-signer-init: OK"
+# Xac nhan doc lap tu chinh volume (khong can vao container signer):
+docker run --rm -v alpha3s_m4_signing_socket:/v alpine stat -c 'uid=%u gid=%g mode=%a' /v
+# PHAI ra: uid=5001 gid=5000 mode=710
 ```
 
 ```bash
