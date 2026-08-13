@@ -53,8 +53,9 @@ THAT ky/Redis THAT, script nay tap trung vao lop access-control + xac minh token
        token da dung TRUOC restart van bi tu choi (state Redis TON TAI qua restart).
   [19] T13-02: 2 signer instance KHAC NHAU (socket khac, CUNG Redis+auth key) nhan CUNG 1 token
        DONG THOI -> DUNG 1 thanh cong (Redis SET NX PX dung CHUNG giua cac instance).
-  [20] T13-03: burst vuot ngan sach rate-limit -> mot phan bi tu choi TRUOC khi doc frame (khong
-       co response), tu phuc hoi co kiem soat sau khi cua so lan sau bat dau.
+  [20] T13-03 + F-A12-01: burst vuot ngan sach rate-limit -> phan vuot han nhan RESPONSE TUONG
+       MINH `error=rate_limited` kem `retry_after_seconds` hop le (KHONG con bi dong ket noi cam),
+       moi request deu co ket qua ro rang, tu phuc hoi sau khi cua so lan sau bat dau.
   [21] F-A08-R2-01: khoi dong THAT qua 3 khoa dang FILE (`<NAME>_FILE`, khong con gia tri THO
        trong environment) voi permission dung (0400, chinh chu so huu) -> thanh cong, round-trip
        ky/ma hoa/giai ma day du.
@@ -69,7 +70,10 @@ THAT ky/Redis THAT, script nay tap trung vao lop access-control + xac minh token
        permission/chu so huu dung.
   [25] F-A08-R3-01: THU MUC CHA duoc chown dung cho UID signer (khop runbook DA SUA) -> service
        (UID signer THAT) khoi dong THANH CONG, round-trip day du - Linux evidence THAT (khong phai
-       hanh vi Windows bind-mount)."""
+       hanh vi Windows bind-mount).
+  [26] F-A12-01: CLIENT PRODUCTION (`request_signature`) gap rate limit -> nem
+       `SigningRateLimitedError` co `retry_after_seconds` hop le, KHONG con exception transport mu
+       (`ConnectionResetError`); khong mat request nao; cho het cua so roi goi lai -> THANH CONG."""
 
 import asyncio
 import base64
@@ -99,7 +103,10 @@ from _stage0p_signing_service_helper import (  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.services.pii.canonicalize import canonicalize  # noqa: E402
 from app.services.pii.crypto import decrypt_sample_value  # noqa: E402
-from app.services.pii.stage0p_signing_client import request_signature  # noqa: E402
+from app.services.pii.stage0p_signing_client import (  # noqa: E402
+    SigningRateLimitedError,
+    request_signature,
+)
 
 _fail: list[str] = []
 
@@ -626,11 +633,27 @@ async def main() -> int:
 
         results_20 = await asyncio.gather(*(_burst_one(i) for i in range(n_burst)))
         ok_20 = sum(1 for r in results_20 if r is not None and r.get("ok") is True)
+        limited_20 = [r for r in results_20
+                      if r is not None and r.get("ok") is False and r.get("error") == "rate_limited"]
         none_20 = sum(1 for r in results_20 if r is None)
         check(ok_20 <= 40, f"[20] burst {n_burst} request trong 1 cua so -> KHONG vuot ngan sach "
               f"40 request duoc XU LY (thuc te {ok_20} thanh cong)")
-        check(none_20 > 0, f"[20] it nhat 1 request bi tu choi boi rate-limit (khong co response - "
-              f"tu choi TRUOC khi doc frame) (thuc te {none_20}/{n_burst} khong co response)")
+        # F-A12-01: TRUOC correction, request vuot han bi dong ket noi CAM (client chi thay
+        # ConnectionResetError). GIO server PHAI tra 1 response TUONG MINH de client backoff.
+        check(len(limited_20) > 0,
+              f"[20] request vuot han nhan RESPONSE TUONG MINH error='rate_limited' (khong con bi "
+              f"dong ket noi cam) (thuc te {len(limited_20)}/{n_burst} co response rate_limited, "
+              f"{none_20} khong co response)")
+        check(len(limited_20) + ok_20 == n_burst,
+              f"[20] MOI request deu nhan duoc 1 ket qua ro rang (thanh cong hoac rate_limited) - "
+              f"khong con request nao bi bo roi im lang (thuc te ok={ok_20} limited={len(limited_20)} "
+              f"none={none_20} / {n_burst})")
+        bad_retry = [r for r in limited_20
+                     if not isinstance(r.get("retry_after_seconds"), (int, float))
+                     or not (0 < r["retry_after_seconds"] <= _RATE_LIMIT_WINDOW_SECONDS_REF)]
+        check(not bad_retry,
+              f"[20] moi response rate_limited deu kem retry_after_seconds HOP LE trong khoang "
+              f"(0, {_RATE_LIMIT_WINDOW_SECONDS_REF}] (so ban ghi sai: {len(bad_retry)})")
 
         await asyncio.sleep(_RATE_LIMIT_WINDOW_SECONDS_REF + 0.5)
         req_recover = _build_request(auth_key_20, sample_id="s20-recover",
@@ -819,6 +842,59 @@ async def main() -> int:
             os.unlink(os.path.join(secrets_dir_25, p))
         os.rmdir(secrets_dir_25)
         os.rmdir(dir_25)
+
+    print("== [26] F-A12-01: CLIENT THAT (request_signature) gap rate limit -> nhan "
+          "SigningRateLimitedError co retry_after_seconds, KHONG con ConnectionResetError ==")
+    socket_26 = f"/tmp/m4-sst-26-{os.getpid()}/sock"
+    proc_26, _sk26, _hk26, auth_key_26 = await start_signing_service(
+        socket_path=socket_26, allowed_uid=os.getuid())
+    try:
+        async def _client_one(i: int):
+            """Goi qua CHINH client production (khong phai _raw_request) de chung minh duong ma
+            collector that su di qua."""
+            req_i = _build_request(auth_key_26, sample_id=f"s26-{i}",
+                                   raw_content=f"noi dung client {i}",
+                                   message_id=3000 + i, txid=3000 + i)
+            try:
+                await request_signature(
+                    socket_26, batch_id=req_i["batch_id"],
+                    conversation_id=req_i["conversation_id"], message_id=req_i["message_id"],
+                    sample_id=req_i["sample_id"], raw_content=req_i["raw_content"],
+                    customer_ref=req_i["customer_ref"], conversation_ref=req_i["conversation_ref"],
+                    purpose_code=req_i["purpose_code"], txid=req_i["txid"],
+                    signing_authorization=req_i["signing_authorization"],
+                    db_char_truncated=req_i["db_char_truncated"], timeout=3.0)
+                return ("ok", None)
+            except SigningRateLimitedError as e:
+                return ("rate_limited", e.retry_after_seconds)
+            except Exception as e:  # noqa: BLE001
+                return (type(e).__name__, str(e))
+
+        results_26 = await asyncio.gather(*(_client_one(i) for i in range(60)))
+        ok_26 = sum(1 for kind, _ in results_26 if kind == "ok")
+        limited_26 = [v for kind, v in results_26 if kind == "rate_limited"]
+        other_26 = [(kind, v) for kind, v in results_26 if kind not in ("ok", "rate_limited")]
+        check(len(limited_26) > 0,
+              f"[26] client nhan SigningRateLimitedError khi vuot han (thuc te {len(limited_26)}/60)")
+        check(not other_26,
+              f"[26] KHONG con exception transport mu nao (ConnectionResetError/IncompleteRead/...) "
+              f"- moi ket qua deu la ok hoac rate_limited (thuc te loai khac: {other_26[:3]})")
+        check(all(isinstance(v, float) and 0 < v <= _RATE_LIMIT_WINDOW_SECONDS_REF
+                  for v in limited_26),
+              f"[26] moi SigningRateLimitedError deu mang retry_after_seconds HOP LE "
+              f"(mau: {limited_26[:3]})")
+        check(ok_26 + len(limited_26) == 60,
+              f"[26] tong ok + rate_limited = 60 (khong mat request nao) (thuc te {ok_26} + "
+              f"{len(limited_26)})")
+
+        # Negative -> positive: cho het cua so roi thu lai DUNG bang retry_after -> phai thanh cong.
+        await asyncio.sleep(_RATE_LIMIT_WINDOW_SECONDS_REF + 0.5)
+        kind_after, _ = await _client_one(999)
+        check(kind_after == "ok",
+              f"[26] sau khi cho het cua so, client goi lai THANH CONG (backoff xac dinh dung) "
+              f"(thuc te {kind_after})")
+    finally:
+        await stop_signing_service(proc_26, socket_26)
 
     print()
     if _fail:

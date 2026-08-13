@@ -165,7 +165,24 @@ T13-03 (P2, request-rate/admission budget):
   - `asyncio.Semaphore(_MAX_CONCURRENT_REQUESTS)` REV13 CHI gioi han so request DONG THOI, khong
     gioi han TOC DO request TUAN TU. Them `_check_rate_limit()` — fixed-window (10s, toi da 40
     request/cua so) TRUOC KHI xu ly 1 ket noi da qua peer-UID check — vuot han bi tu choi ngay
-    (`m4_signing_rate_limited`), tu phuc hoi khi cua so lan sau bat dau."""
+    (`m4_signing_rate_limited`), tu phuc hoi khi cua so lan sau bat dau.
+
+F-A12-01 (dap PHASE1B-M4-AMENDMENT-12-EXECUTION-CLOSURE-VI.md — quan sat tu lifecycle synthetic
+DAU TIEN chay that tren production):
+  - Trieu chung: Amendment 12 gap dung 5 lan `ConnectionResetError`, moi lan sau DUNG 40
+    conversation. Nguyen nhan: khi vuot ngan sach T13-03, service chi `return` -> dong ket noi ma
+    KHONG gui gi ca -> phia client dang ghi/doc nhan 1 loi transport MU, khong phan biet duoc voi
+    signer crash. Lifecycle van hoan tat 225/225 nho retry mu cua runner, nhung day khong phai
+    hanh vi production-ready (khong observable, khong the backoff dung).
+  - Sua: vuot han van tu choi NGAY va van KHONG canonicalize/ky/ma hoa gi (giu nguyen fail-closed),
+    nhung TRA VE 1 response tuong minh `{"ok": false, "error": "rate_limited",
+    "retry_after_seconds": N}` roi moi dong. `N` = so giay con lai toi khi slot cu nhat roi khoi
+    cua so, nen client biet CHINH XAC phai cho bao lau. Sau khi tra response, service doc-va-BO
+    frame yeu cau (`_drain_frame`, khong parse) de client hoan tat duoc `write` va doc duoc
+    response thay vi bi reset giua chung.
+  - Phia doi dien: `stage0p_signing_client.SigningRateLimitedError` (mang `retry_after_seconds`) va
+    `stage0p_sampling._run_fenced_unit_paced()` ngu dung khoang do roi lam lai CHINH unit vua roi —
+    backoff XAC DINH, khong con lam vo ca vong lap collector."""
 
 import asyncio
 import base64
@@ -199,6 +216,10 @@ _PEERCRED_STRUCT = struct.Struct("3i")  # pid, uid, gid (Linux SO_PEERCRED)
 # evidence cu) nhung van la 1 TRAN THAT, co the vuot va tu phuc hoi khi cua so lan sau bat dau.
 _RATE_LIMIT_WINDOW_SECONDS = 10.0
 _RATE_LIMIT_MAX_REQUESTS = 40
+# F-A12-01: sau khi da tra response `rate_limited`, doc-va-bo frame yeu cau cua client trong toi da
+# ngan nay de client hoan tat duoc `write` roi doc response (thay vi bi reset giua chung). Ngan hon
+# `_REQUEST_TIMEOUT_SECONDS` vi day KHONG phai duong xu ly that - chi la doc bo di.
+_RATE_LIMITED_DRAIN_SECONDS = 1.0
 
 # T12-02: PHAI khop CHINH XAC key_version DB dung khi ky (migration 039 provisioning) - khong ho
 # tro nhieu key_version dong thoi (dung mo hinh don-khoa-hoat-dong nhu m4_transcript_hmac_key_b64).
@@ -239,6 +260,20 @@ async def _read_frame(reader: asyncio.StreamReader) -> bytes:
 async def _write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
     writer.write(len(payload).to_bytes(4, "big") + payload)
     await writer.drain()
+
+
+async def _drain_frame(reader: asyncio.StreamReader) -> None:
+    """F-A12-01: doc HET 1 frame roi BO DI, KHONG parse/xu ly gi ca.
+
+    Chi dung o duong rate-limited: sau khi da tra response tu choi, ta van doc not frame yeu cau de
+    phia client hoan tat duoc `write` (neu frame lon hon buffer socket) va doc duoc response, thay
+    vi bi `ConnectionResetError` giua chung. Van ton trong `_MAX_FRAME_BYTES` - khong bao gio doc
+    qua han."""
+    header = await reader.readexactly(4)
+    length = int.from_bytes(header, "big")
+    if length <= 0 or length > _MAX_FRAME_BYTES:
+        return
+    await reader.readexactly(length)
 
 
 def _lenpfx_join(*fields: str) -> bytes:
@@ -372,18 +407,28 @@ async def _handle_request(req: dict) -> dict:
     }
 
 
-def _check_rate_limit(now_mono: float) -> bool:
-    """T13-03: fixed-window admission budget — True neu request duoc phep tien hanh (va tu ghi
-    nhan luc do vao cua so). Danh cho traffic DA qua peer-UID check (T11-02/T12-01) — chi tinh
-    ngan sach cho peer da xac thuc, khong lien quan gioi han concurrency (`_MAX_CONCURRENT_REQUESTS`,
-    von chi gioi han so request DANG XU LY DONG THOI, khong gioi han TOC DO request tuan tu)."""
+def _check_rate_limit(now_mono: float) -> float | None:
+    """T13-03: fixed-window admission budget.
+
+    Tra ve `None` neu request duoc phep tien hanh (va tu ghi nhan luc do vao cua so). Neu vuot
+    han, tra ve SO GIAY con phai cho toi khi slot cu nhat roi khoi cua so (`retry_after_seconds`,
+    luon > 0) — F-A12-01: gia tri nay duoc gui ve client trong 1 response TUONG MINH thay vi dong
+    ket noi cam nhu truoc, de client backoff XAC DINH thay vi doan mo qua `ConnectionResetError`.
+
+    Danh cho traffic DA qua peer-UID check (T11-02/T12-01) — chi tinh ngan sach cho peer da xac
+    thuc, khong lien quan gioi han concurrency (`_MAX_CONCURRENT_REQUESTS`, von chi gioi han so
+    request DANG XU LY DONG THOI, khong gioi han TOC DO request tuan tu)."""
     global _rate_limit_timestamps
     cutoff = now_mono - _RATE_LIMIT_WINDOW_SECONDS
     _rate_limit_timestamps = [t for t in _rate_limit_timestamps if t > cutoff]
     if len(_rate_limit_timestamps) >= _RATE_LIMIT_MAX_REQUESTS:
-        return False
+        oldest = min(_rate_limit_timestamps)
+        retry_after = (oldest + _RATE_LIMIT_WINDOW_SECONDS) - now_mono
+        # Lam tron len toi thieu 1 phan nghin giay: khong bao gio tra 0/am (client se coi la "thu
+        # lai ngay" va lap tuc bi tu choi tiep).
+        return max(retry_after, 0.001)
     _rate_limit_timestamps.append(now_mono)
-    return True
+    return None
 
 
 def _validate_socket_directory(socket_path: str, *, shared_gid: int | None = None) -> None:
@@ -485,10 +530,30 @@ async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             # cua 1 peer chua xac thuc. Chi log uid (count-worthy), khong log raw content (T11-03).
             _log("m4_signing_peer_rejected", peer_uid=peer_uid)
             return
-        if not _check_rate_limit(time.monotonic()):
-            # T13-03: ngan sach admission vuot han - tu choi NGAY, khong doc frame (cung tinh than
-            # fail-closed-truoc-frame nhu peer-UID check).
-            _log("m4_signing_rate_limited")
+        retry_after = _check_rate_limit(time.monotonic())
+        if retry_after is not None:
+            # T13-03: ngan sach admission vuot han - tu choi NGAY, KHONG XU LY frame (giu nguyen
+            # tinh than fail-closed-truoc-frame nhu peer-UID check: khong canonicalize/ky/ma hoa
+            # bat ky noi dung nao).
+            #
+            # F-A12-01 (dap PHASE1B-M4-AMENDMENT-12-EXECUTION-CLOSURE-VI.md): TRUOC DAY chi
+            # `return` -> dong ket noi cam -> client dang ghi/doc nhan `ConnectionResetError`, mot
+            # loi transport MU khong phan biet duoc voi signer crash. Amendment 12 vi vay gap dung
+            # 5 lan reset (moi 40 request/10s) va chi "song sot" nho retry mu. Gio tra ve 1
+            # response TUONG MINH kem `retry_after_seconds` de client backoff XAC DINH.
+            _log("m4_signing_rate_limited", retry_after_seconds=round(retry_after, 3))
+            await _write_frame(writer, json.dumps({
+                "ok": False,
+                "error": "rate_limited",
+                "retry_after_seconds": round(retry_after, 3),
+            }).encode("utf-8"))
+            # Doc-va-BO frame yeu cau (neu client da/dang gui) de phia client hoan tat duoc lenh
+            # ghi va doc duoc response o tren, thay vi bi reset giua chung. Noi dung KHONG duoc
+            # parse/xu ly - chi doc xong roi bo di, nen khong pha vo nguyen tac fail-closed.
+            try:
+                await asyncio.wait_for(_drain_frame(reader), timeout=_RATE_LIMITED_DRAIN_SECONDS)
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
+                pass
             return
         async with semaphore:  # T11-02: gioi han so request dong thoi (chong flood)
             try:
