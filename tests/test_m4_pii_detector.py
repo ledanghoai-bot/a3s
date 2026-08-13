@@ -90,6 +90,29 @@ class TestNumericSlotPrecedence:
         assert len(spans) == 1
         assert spans[0].confidence == Confidence.HIGH
 
+    @pytest.mark.parametrize("digits", [
+        "71234567890123456",    # 17
+        "712345678901234567",   # 18
+        "7123456789012345678",  # 19
+    ])
+    def test_bank_17_den_19_so_HIEN_TAI_khong_duoc_nhan(self, digits):
+        """GHI NHAN HANH VI HIEN TAI — KHONG phai khang dinh day la dung.
+
+        CA directive yeu cau test bank account 8-19 so. Do thuc te: nhanh bank trong
+        `_detect_numeric_slots` chan cung `6 <= len(cleaned) <= 16`, nen 17/18/19 so KHONG duoc gan
+        slot nao (du `_DIGITRUN_RE` van khop toi 20 ky tu).
+
+        Theo dung chi dao CA ("khong noi/doi policy ngam: bao finding truoc"), Dev KHONG tu mo rong
+        tran 16 -> 19 trong PR nay. Test nay khoa hanh vi hien tai lai de:
+          - lam khoang trong hien ro thay vi an;
+          - bat ky thay doi nao ve sau deu phai sua test mot cach TUONG MINH, co review.
+        Xem PHASE1B-M4-BANK-ACCOUNT-LENGTH-RANGE-FINDING-VI.md — cho CA/PO quyet dinh pham vi.
+        """
+        text = f"chuyen khoan toi STK {digits} nhe"
+        assert _slots(text, SlotType.BANK_ACCOUNT) == []
+        assert _slots(text, SlotType.NATIONAL_ID) == []
+        assert _slots(text, SlotType.PHONE) == []
+
     @pytest.mark.parametrize("text", [
         "chuyen khoan toi STK 710001234567 nhe",
         "stk 710001234567 vietcombank nhe",
