@@ -88,6 +88,30 @@ class TestName:
     def test_khong_bat_nham(self, text):
         assert _slots(text, SlotType.NAME) == []
 
+    # --- F-A12-02: dong am gia sau khi bo dau (CLAUDE.md muc 6) -------------------
+    # "minh"/"anh"/"mai"/"chi" nam trong _NAME_STOPWORDS vi la dai tu/tu noi, nhung SAU KHI fold()
+    # chung trung voi am tiet TEN RIENG rat pho bien -> ten bi cat cut giua chung.
+    @pytest.mark.parametrize("text,expected", [
+        ("tên mình là Hoàng Minh Tuấn", "Hoàng Minh Tuấn"),   # "Minh" vs dai tu "mình"
+        ("tên mình là Vũ Đức Anh", "Vũ Đức Anh"),             # "Anh"  vs dai tu "anh"
+        ("tên mình là Phan Thị Mai", "Phan Thị Mai"),         # "Mai"  vs "ngày mai"
+        ("tên mình là Đặng Quỳnh Anh", "Đặng Quỳnh Anh"),
+        ("em là Hoàng Minh Tuấn ạ", "Hoàng Minh Tuấn"),
+    ])
+    def test_ten_nhieu_am_tiet_khong_bi_cat_boi_stopword_dong_am(self, text, expected):
+        spans = _slots(text, SlotType.NAME)
+        assert len(spans) == 1
+        assert text[spans[0].start:spans[0].end] == expected
+
+    @pytest.mark.parametrize("text", [
+        "mình là khách quen nhé",   # "minh" la dai tu THUONG -> van phai bi chan
+        "anh cần thêm 2 hộp nhé",   # "anh" dai tu THUONG
+        "mai giao giúp mình nhé",   # "mai" = ngay mai, THUONG
+    ])
+    def test_stopword_viet_thuong_van_bi_chan(self, text):
+        # Chi mien stopword khi token VIET HOA va dang giua cum ten - khong noi long cho tu thuong.
+        assert _slots(text, SlotType.NAME) == []
+
 
 class TestAddress:
     def test_day_du_co_dau(self):
@@ -106,6 +130,40 @@ class TestAddress:
         text = ("giao sáng ở số 12 đường Lê Lợi quận 3, chiều chuyển về "
                 "45 ngõ 78 phố Huế Hà Nội giúp mình")
         assert len(_slots(text, SlotType.ADDRESS)) == 2
+
+    # --- F-A12-02: ranh gioi span dia chi ----------------------------------------
+    # Metric gate la `exact_span_match` (start/end khop TUYET DOI), nen lech bien bi tinh CA
+    # false-positive LAN false-negative. 3 nhom duoi day la loi bien that do chan doan
+    # PHASE1B-M4-DETECTOR-DIAGNOSIS-1-VI.md tim ra tren manifest rehearsal.
+    @pytest.mark.parametrize("text,expected", [
+        # (a) duoi: ten rieng sau tu khoa hanh chinh phai duoc nuot
+        ("giao về 78/9 đường Quang Trung, phường 10, quận Gò Vấp nhé shop",
+         "78/9 đường Quang Trung, phường 10, quận Gò Vấp"),
+        ("giao về số 9, thôn Đoài, xã Phú Minh, huyện Sóc Sơn nhé shop",
+         "số 9, thôn Đoài, xã Phú Minh, huyện Sóc Sơn"),
+        # (b) duoi: CHU SO sau tu khoa hanh chinh ("quận 3") - _WORD_RE loai chu so nen truoc day mat
+        ("giao về 9 đường Nguyễn Huệ, phường Bến Nghé, quận 1 nhé shop",
+         "9 đường Nguyễn Huệ, phường Bến Nghé, quận 1"),
+        ("giao về 88 đường Lý Thường Kiệt, phường 7, quận 11 nhé shop",
+         "88 đường Lý Thường Kiệt, phường 7, quận 11"),
+        # (c) dau: SO NHA TRAN truoc tu khoa duong
+        ("giao về 45 đường Nguyễn Trãi, phường 7, quận Thanh Xuân, Hà Nội nhé shop",
+         "45 đường Nguyễn Trãi, phường 7, quận Thanh Xuân, Hà Nội"),
+        # (d) duoi: cum dia danh sau dau phay cuoi ("..., Hai Bà Trưng")
+        ("giao về 34 ngõ 78 phố Huế, phường Ngô Thì Nhậm, Hai Bà Trưng nhé shop",
+         "34 ngõ 78 phố Huế, phường Ngô Thì Nhậm, Hai Bà Trưng"),
+    ])
+    def test_ranh_gioi_span_dung_tuyet_doi(self, text, expected):
+        spans = _slots(text, SlotType.ADDRESS)
+        assert len(spans) == 1
+        assert text[spans[0].start:spans[0].end] == expected
+
+    def test_duoi_cau_viet_thuong_khong_bi_nuot(self):
+        # Tin hieu dung la HOA/THUONG: "nhé shop"/"giúp mình" viet thuong -> phai nam NGOAI span.
+        text = "giao về 12 đường Lê Lợi, quận 1 giúp mình nhé"
+        spans = _slots(text, SlotType.ADDRESS)
+        assert len(spans) == 1
+        assert text[spans[0].start:spans[0].end] == "12 đường Lê Lợi, quận 1"
 
     @pytest.mark.parametrize("text", [
         "ship Cà Mau được không?",  # ten tinh don le = hoi vung giao
