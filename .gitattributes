@@ -1,0 +1,13 @@
+# Ep LF cho dataset manifest (dap CA Review 2 F-A12-02 / Manifest v3 Preparation Directive).
+#
+# Ly do: `core.autocrlf=true` la mac dinh Git for Windows, nen checkout tren Windows doi LF -> CRLF.
+# Voi manifest, dieu do lam SHA-256 khac nhau giua may Dev (Windows) va VPS (Linux) du NOI DUNG
+# GIONG HET — da chung minh byte-level tren v2: bo CR khoi ban Windows thi `cmp` bao identical va
+# hash ra dung `5f0f92db...` cua VPS (chenh lech dung 225 byte = 225 dong x 1 byte CR).
+#
+# CA yeu cau manifest v3 phai co MOT canonical Linux/VPS SHA-256 duy nhat, nen ep LF o day de moi
+# nen tang checkout ra CUNG BYTES -> cung mot hash, khong con chuyen "2 hash cho 1 file".
+*.jsonl text eol=lf
+
+# Script shell chay tren Linux/VPS cung phai giu LF (CRLF lam hong shebang).
+*.sh text eol=lf
