@@ -118,6 +118,7 @@ from app.services.pii.stage0p_prediction import (  # noqa: E402
     run_prediction_writer,
 )
 from app.services.pii.stage0p_sampling import (  # noqa: E402
+    MAX_CONVERSATIONS,
     PURPOSE_CODE,
     RETENTION_DAYS,
     SELECTION_SEED_LABEL,
@@ -199,6 +200,39 @@ def _principal_conflict_problems(*staff_ids: int) -> list[str]:
     if len(set(staff_ids)) != len(staff_ids):
         return [f"F-M4-RH-R1-07/R2-02: staff_id trung nhau giua cac principal - {staff_ids}"]
     return []
+
+
+def _cap_a_problem(manifest: list[dict]) -> str | None:
+    """F-A13-01/F-A13-02 (dap PHASE1B-M4-AMENDMENT-13-EXECUTION-ABORT-REVIEW-1/2-VI.md).
+
+    Cap A ("hard cap 260 hoi thoai") la MOT BIEN PHAP BAO VE QUYEN RIENG TU da duoc duyet
+    (F-M4-0P-03, PHASE1B-M4-STAGE-0P-GOVERNANCE-CORRECTION-1-VI.md), enforce o 2 tang:
+    `MAX_CONVERSATIONS` trong stage0p_sampling.py VA `CHECK (selected_count <= 260)` tren
+    m4_selection_batches.
+
+    VI SAO CAN HAM NAY — runner CO Y KHONG goi `select_sample()` (xem `_run_execute`: lock batch
+    qua allowlist tracked theo fence F-01, khong `select_eligible_conversations`). Nhung
+    `select_sample()` CHINH LA cho ap Cap A o tang Python. Bo qua no => Cap A khong con duoc
+    enforce truoc khi ghi, va DB constraint chi chan tai INSERT m4_selection_batches — tuc la
+    GIUA lifecycle, SAU khi da seed toan bo manifest va da bat capture (chinh xac dieu da xay ra
+    o Amendment 13: seed 315 hang, capture ON, roi moi CheckViolationError).
+
+    Doc TRUC TIEP `MAX_CONVERSATIONS` tu stage0p_sampling — mot nguon su that duy nhat. Neu Cap A
+    doi (chi qua PO decision rieng), ca dry-run lan execute tu dong theo, khong co so 260 nao bi
+    hard-code lai o day de lech nhau.
+
+    Tra ve `None` neu dat, hoac chuoi mo ta van de. Ban KHONG raise nay dung cho dry-run (gom vao
+    `problems`); `_run_execute` raise SystemExit TRUOC MOI write.
+    """
+    n = len(manifest)
+    if n > MAX_CONVERSATIONS:
+        return (f"manifest co {n} conversation, VUOT Cap A (MAX_CONVERSATIONS="
+                f"{MAX_CONVERSATIONS}) - day la bien phap bao ve quyen rieng tu da duoc duyet "
+                f"(F-M4-0P-03), khong phai gioi han ky thuat tuy chinh duoc. Runner chi lock 1 "
+                f"batch/lifecycle nen selected_count = {n} se vi pham CHECK m4_batch_count_valid. "
+                f"Can manifest <= {MAX_CONVERSATIONS}, hoac mot path da duoc CA/PO duyet rieng "
+                f"(multi-batch, hoac quyet dinh thay Cap A).")
+    return None
 
 
 # ===========================================================================
@@ -758,6 +792,16 @@ async def _do_cleanup_and_verify(
 
 async def _run_execute(args, manifest: list[dict]) -> int:
     _assert_distinct_principals(args.operator_staff_id, args.reviewer_staff_id)
+
+    # F-A13-01: Cap A phai fail TRUOC MOI WRITE — dat o day, TRUOC ca `asyncpg.connect`, nen khong
+    # co ket noi/transaction/seed/capture nao duoc mo neu manifest vuot cap. O Amendment 13, cho
+    # duy nhat chan duoc la DB CHECK tai INSERT m4_selection_batches — GIUA lifecycle, sau khi da
+    # ghi 315 hang synthetic va da bat capture. Chan som nhu day khien lan sau khong con ghi 1 hang
+    # nao vao production truoc khi biet manifest khong dung duoc.
+    cap_a_problem = _cap_a_problem(manifest)
+    if cap_a_problem:
+        raise SystemExit(f"CAP A PRECHECK FAIL (F-A13-01): {cap_a_problem}")
+
     operator_pin = _require_env("STAGE0P_REHEARSAL_OPERATOR_PIN")
     reviewer_pin = _require_env("STAGE0P_REHEARSAL_REVIEWER_PIN")
 
@@ -923,6 +967,10 @@ async def _run_dry_run(args, manifest: list[dict]) -> int:
         approval_ok, recorded_by, approval_problems = await _check_approval_active(
             admin_conn, args.approval_ref)
         gate_eligible = sum(1 for r in manifest if r["expect_gate"])
+        # F-A13-02: TRUOC day dry-run CHI kiem san duoi (>=200) va khong he kiem tran tren, nen
+        # manifest 315 van tra `dry_run_ready` — false green da dan thang toi abort giua lifecycle
+        # o Amendment 13. Gio kiem CA HAI dau.
+        cap_a_problem = _cap_a_problem(manifest)
         _log("dry_run_report",
              capture_currently_enabled=capture_now,
              leftover_synthetic_customers=leftover,
@@ -932,6 +980,8 @@ async def _run_dry_run(args, manifest: list[dict]) -> int:
              manifest_conversation_count=len(manifest),
              manifest_gate_eligible_count=gate_eligible,
              manifest_meets_200_floor=gate_eligible >= 200,
+             manifest_cap_a_limit=MAX_CONVERSATIONS,
+             manifest_within_cap_a=cap_a_problem is None,
              operator_staff_id=args.operator_staff_id,
              reviewer_staff_id=args.reviewer_staff_id,
              note="DRY RUN - khong ghi gi, chi bao cao")
@@ -942,6 +992,8 @@ async def _run_dry_run(args, manifest: list[dict]) -> int:
             problems.append(f"con {leftover} customer synthetic sot lai tu lan chay truoc")
         if gate_eligible < 200:
             problems.append(f"manifest chi co {gate_eligible} gate-eligible conversation (<200)")
+        if cap_a_problem:
+            problems.append(cap_a_problem)
         if recorded_by is not None:
             problems.extend(_principal_conflict_problems(
                 recorded_by, args.operator_staff_id, args.reviewer_staff_id))
