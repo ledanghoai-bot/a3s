@@ -470,7 +470,44 @@ level.
 
 ## 9. Evidence commands (no secret leakage)
 
-**REV4 — image-freshness proof (run AFTER §3's build, BEFORE `up -d`; F-IMG-01: resolve the
+### REV6 — MANDATORY: start a machine-captured transcript before the first step
+
+Answers `PHASE1B-M4-AMENDMENT-13-EXECUTION-ABORT-REVIEW-2-VI.md`, "Operational improvement". During
+Amendment 13 no `tee`/`script` was started, so execution evidence had to rely on console output the
+operator pasted back. CA accepted it that once but requires **machine-captured transcripts for every
+later ceremony**. Run this **first**, before the §2 preflight:
+
+```bash
+CEREMONY_REF=<approval_ref>                       # e.g. m4-internal-synthetic-rehearsal-20260814-13
+TRANSCRIPT=/root/m4-ceremony-${CEREMONY_REF}.log  # NOT under /srv/alpha3s (keep it out of git)
+umask 077                                          # root-only, applied before the file is created
+script -q -f -c "bash -l" "$TRANSCRIPT"            # -f: flush immediately, lose nothing on a hang
+# ... run the entire ceremony INSIDE this shell ...
+# when done: type `exit` to close `script`, then:
+ls -l "$TRANSCRIPT" && sha256sum "$TRANSCRIPT"
+```
+
+**Why `script` and not `tee`**: `tee` only captures the stdout of commands you explicitly pipe into
+it — it misses stderr, prompts, and the output of interactive commands. `script` records the whole
+session.
+
+**Protecting secrets inside the transcript** — `script` records **everything shown on screen**, so:
+
+- PINs typed via `read -rsp` are **not** echoed, so they never reach the transcript. Always use that
+  form; never `export PIN=...` or `-e VAR="$VAR"`.
+- The three signing/encryption keys are never printed (the runner only logs `key_version`).
+- **Before submitting**, rescan and record the scan result in the evidence:
+
+```bash
+grep -cniE 'BEGIN [A-Z ]*PRIVATE KEY|password=|pin=|token=[A-Za-z0-9]' "$TRANSCRIPT"
+# Expect 0. If > 0: inspect every line. SQL column-name matches (e.g. `unconsumed_tokens`) are
+# false positives — state them explicitly in the report rather than quietly ignoring them.
+```
+
+- Keep the transcript outside the repo, mode `0600`, **never commit it**. After closure, submit only
+  its **SHA-256** together with the redacted copy.
+
+### REV4 — image-freshness proof (run AFTER §3's build, BEFORE `up -d`; F-IMG-01: resolve the
 identifier via `config --format json`/`jq`, do NOT hard-code a tag, do NOT use `config --images
 <service>` directly since it also lists the dependency's image `redis:7-alpine`):**
 

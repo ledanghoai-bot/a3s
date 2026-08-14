@@ -447,7 +447,43 @@ tiếp — không mở rộng bề mặt tấn công so với mức truy cập �
 
 ## 9. Evidence commands (không lộ secret)
 
-**REV4 — bằng chứng image freshness (chạy SAU §3 build, TRƯỚC `up -d`; F-IMG-01: resolve identifier
+### REV6 — BẮT BUỘC: bật transcript machine-captured NGAY TRƯỚC bước đầu tiên
+
+Đáp `PHASE1B-M4-AMENDMENT-13-EXECUTION-ABORT-REVIEW-2-VI.md` §"Operational improvement". Ở
+Amendment 13 không có `tee`/`script` nào được bật, nên evidence thực thi phải dựa vào console
+output do operator dán lại — CA chấp nhận lần đó nhưng yêu cầu **các ceremony sau phải có transcript
+máy sinh**. Lệnh dưới đây chạy **đầu tiên**, trước cả bước preflight §2:
+
+```bash
+CEREMONY_REF=<approval_ref>                       # vd m4-internal-synthetic-rehearsal-20260814-13
+TRANSCRIPT=/root/m4-ceremony-${CEREMONY_REF}.log  # KHONG dat trong /srv/alpha3s (tranh lot vao git)
+umask 077                                          # file chi root doc duoc, tao truoc khi ghi
+script -q -f -c "bash -l" "$TRANSCRIPT"            # -f: flush ngay, khong mat dong cuoi neu treo
+# ... toan bo ceremony chay BEN TRONG shell nay ...
+# ket thuc: go `exit` de dong `script`, roi:
+ls -l "$TRANSCRIPT" && sha256sum "$TRANSCRIPT"
+```
+
+**Vì sao `script` chứ không phải `tee`**: `tee` chỉ bắt stdout của từng lệnh được nối ống, bỏ sót
+stderr, prompt và output của lệnh chạy tương tác. `script` ghi lại toàn bộ phiên.
+
+**Bảo vệ secret trong transcript** — `script` ghi **mọi thứ hiện trên màn hình**, nên:
+
+- PIN nhập qua `read -rsp` **không** hiện ra màn hình → **không** vào transcript. Luôn dùng dạng
+  này, tuyệt đối không `export PIN=...` hay `-e VAR="$VAR"`.
+- Ba khóa ký/mã hóa không bao giờ được in (runner chỉ log `key_version`) → an toàn.
+- **Trước khi nộp**, quét lại và ghi kết quả quét vào evidence:
+
+```bash
+grep -cniE 'BEGIN [A-Z ]*PRIVATE KEY|password=|pin=|token=[A-Za-z0-9]' "$TRANSCRIPT"
+# Ky vong 0. Neu > 0: KIEM TUNG DONG. Cac match kieu ten cot SQL (vd `unconsumed_tokens`) la
+# false positive - van phai neu ro trong report thay vi im lang bo qua.
+```
+
+- Transcript đặt ngoài repo, mode `0600`, **không commit**. Sau closure, chỉ nộp **SHA-256** kèm
+  bản đã redact.
+
+### REV4 — bằng chứng image freshness (chạy SAU §3 build, TRƯỚC `up -d`; F-IMG-01: resolve identifier
 qua `config --format json`/`jq`, KHÔNG hard-code tag, KHÔNG dùng `config --images <service>` trực
 tiếp vì lệnh đó gộp cả image của dependency như `redis:7-alpine`):**
 
