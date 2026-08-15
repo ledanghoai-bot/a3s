@@ -370,12 +370,27 @@ def _load_manifest(path: Path) -> list[dict]:
             if line:
                 records.append(json.loads(line))
     seen_psid = set()
+    seen_conv_key = set()
     for r in records:
         if not r["psid"].startswith(PSID_PREFIX):
             raise SystemExit(f"manifest psid {r['psid']!r} khong dung tien to {PSID_PREFIX!r}")
         if r["psid"] in seen_psid:
             raise SystemExit(f"manifest psid trung lap: {r['psid']!r}")
         seen_psid.add(r["psid"])
+        # F-V4-01: `conversation_key` PHAI duy nhat — chot nay truoc day thieu, trong khi psid da
+        # co. `_seed_synthetic` luu `state.conversation_key_to_conversation_id[key] = conv_id`
+        # (DICT), nen key trung khien ban SAU ghi de ban TRUOC va lam MAT conversation_id khoi
+        # map; toi `_label_samples`, `conv_key_by_id.get(conv_id)` tra None va runner raise
+        # "FENCE FAIL: ... khong nam trong danh sach synthetic tracked". Fail-closed (khong gan
+        # nhan sai) nhung thong bao DO LOI CHO FENCE, che mat nguyen nhan that la manifest.
+        # Manifest v3 that su co 38 key trung (generator v3 tai dung prefix RB/RC cua v2); loi do
+        # chua kip lo vi Amendment 13 abort o lock_batch, TRUOC buoc labeling.
+        if r["conversation_key"] in seen_conv_key:
+            raise SystemExit(
+                f"manifest conversation_key trung lap: {r['conversation_key']!r} - runner map "
+                "conversation_key -> conversation_id bang dict nen key trung se lam mat "
+                "conversation va abort nham o buoc labeling (F-V4-01)")
+        seen_conv_key.add(r["conversation_key"])
     return records
 
 

@@ -11,3 +11,9 @@
 
 # Script shell chay tren Linux/VPS cung phai giu LF (CRLF lam hong shebang).
 *.sh text eol=lf
+
+# Inventory ground truth cua manifest (v4 tro di) la mot artifact CO HASH duoc nop cho CA va cho
+# staff 5 review — nen no phai co DUNG MOT hash tren moi nen tang, y het manifest. `*.jsonl` o tren
+# khong phu file .md nay, nen tren Windows Git da doi LF -> CRLF va sinh ra hash thu hai cho cung
+# noi dung (dung lop loi da gap voi v2). Chi ep LF trong thu muc dataset, khong dong toi .md khac.
+datasets/pii/*.md text eol=lf
