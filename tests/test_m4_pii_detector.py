@@ -197,11 +197,21 @@ class TestNumericSlotPrecedence:
         got = _slots(text, SlotType.BANK_ACCOUNT)
         assert (len(got) == 1) is expect_bank
 
-    def test_conflict_policy_nid_cue_thang_bank_cue(self):
-        # Co CA HAI cue tren cung 1 day 12 so -> cue giay to thang (policy CA chot).
-        text = "CCCD va STK 079000012361 nhe"
-        assert len(_slots(text, SlotType.NATIONAL_ID)) == 1
-        assert _slots(text, SlotType.BANK_ACCOUNT) == []
+    def test_conflict_policy_nid_vs_bank_theo_PO_decision_B(self):
+        """PO decision B (`...F-NUM-01-VS-F-NUM-03-PO-DECISION-VI.md`): trong CUNG MENH DE, cue GAN
+        NHAT thang — ke ca khi cue kia la giay to tuy than.
+
+        TRUOC DAY test nay ten `test_conflict_policy_nid_cue_thang_bank_cue` va khoa policy F-NUM-01
+        ("cue giay to LUON thang"). Khi implement F-NUM-03, chinh test nay chuyen do va lam lo ra va
+        cham giua hai policy deu co authority. Dev KHONG tu chon ben: giu policy cu + bao finding.
+        PO sau do thu hoi ngoai le F-NUM-01 cho rieng cap national_id/bank_account.
+
+        Day dung la muc dich cua mot test khoa policy: doi hanh vi thi phai doi test tuong minh, va
+        viec doi test buoc phai co mot quyet dinh co ten di kem.
+        """
+        text = "CCCD va STK 079000012361 nhe"          # `STK` gan so hon `CCCD`
+        assert len(_slots(text, SlotType.BANK_ACCOUNT)) == 1
+        assert _slots(text, SlotType.NATIONAL_ID) == []
 
     # --- F-NUM-02: cue loai tru -> KHONG gan national_id ---
     @pytest.mark.parametrize("text", [
@@ -466,27 +476,42 @@ class TestFNum03CueDistanceClause:
         """Rang buoc PO §1.4: cue tham chieu KHONG duoc chan mot bank cue gan hon cung menh de."""
         assert len(_slots("ma tham chieu cho stk 71000123456", SlotType.BANK_ACCOUNT)) == 1
 
-    # --- Tie + giu policy F-NUM-01 (xem finding va cham precedence) ---
-    @pytest.mark.parametrize("text", [
-        "CCCD va STK 079000012361 nhe",
-        "stk cccd 079000012361",
+    # --- PO decision B: collision nid vs bank quyet bang KHOANG CACH trong cung menh de ---
+    @pytest.mark.parametrize("text,expect", [
+        ("CCCD va STK 079000012361 nhe", SlotType.BANK_ACCOUNT),   # `STK` gan hon
+        ("stk cccd 079000012361", SlotType.NATIONAL_ID),           # `cccd` gan hon
     ])
-    def test_giay_to_van_thang_tai_chinh_giu_policy_F_NUM_01(self, text):
-        """F-NUM-01 (CA chot truoc) va F-NUM-03 §1.1 VA CHAM nhau o day.
+    def test_collision_cung_menh_de_cue_gan_nhat_thang(self, text, expect):
+        """PO decision B — thu hoi ngoai le F-NUM-01 cho rieng cap national_id/bank_account.
 
-        Xem `PHASE1B-M4-F-NUM-01-VS-F-NUM-03-PRECEDENCE-COLLISION-FINDING-VI.md`. Directive
-        F-NUM-03 khong noi gi ve viec thay F-NUM-01, nen implementation GIU policy cu: quan he
-        nid > bank quyet bang precedence (pham vi cung menh de), khong bang khoang cach.
-        Dev KHONG tu chon huong nguoc lai — cho CA/PO xac nhan.
+        Hai ca nay DOI XUNG nhau co y: cung mot cap cue, chi doi thu tu, va ket qua phai dao theo.
+        Neu chi test mot chieu thi khong phan biet duoc 'cue gan nhat thang' voi 'mot loai luon
+        thang loai kia'.
         """
-        assert len(_slots(text, SlotType.NATIONAL_ID)) == 1
-        assert _slots(text, SlotType.BANK_ACCOUNT) == []
+        other = (SlotType.NATIONAL_ID if expect is SlotType.BANK_ACCOUNT
+                 else SlotType.BANK_ACCOUNT)
+        assert len(_slots(text, expect)) == 1
+        assert _slots(text, other) == []
 
-    def test_precedence_nid_KHONG_voi_sang_menh_de_khac(self):
-        """Neu precedence nid>bank la tuyet doi thi so thu 2 se bi gan nham national_id."""
+    def test_collision_KHONG_tran_qua_menh_de_khac(self):
+        """Ranh gioi PO nhan manh: cue canh tranh o menh de khac KHONG duoc doi type so local.
+
+        Neu quy tac bi ap xuyen menh de thi so thu 2 se bi keo ve `national_id` (do `cccd` dung
+        dau cau), hoac so thu 1 bi keo ve `bank_account`.
+        """
         text = "cccd 079012345678, stk 71000123456"
-        assert len(_slots(text, SlotType.NATIONAL_ID)) == 1
-        assert len(_slots(text, SlotType.BANK_ACCOUNT)) == 1
+        nid = _slots(text, SlotType.NATIONAL_ID)
+        bank = _slots(text, SlotType.BANK_ACCOUNT)
+        assert len(nid) == 1 and text[nid[0].start:nid[0].end] == "079012345678"
+        assert len(bank) == 1 and text[bank[0].start:bank[0].end] == "71000123456"
+
+    def test_collision_khong_tran_nguoc_tu_menh_de_sau(self):
+        """Chieu con lai: cue o menh de SAU cung khong duoc voi nguoc len so o menh de truoc."""
+        text = "stk 71000123456, cccd 079012345678"
+        bank = _slots(text, SlotType.BANK_ACCOUNT)
+        nid = _slots(text, SlotType.NATIONAL_ID)
+        assert len(bank) == 1 and text[bank[0].start:bank[0].end] == "71000123456"
+        assert len(nid) == 1 and text[nid[0].start:nid[0].end] == "079012345678"
 
     # --- Doi chung: khong duoc pha cac loai khac ---
     @pytest.mark.parametrize("text", [

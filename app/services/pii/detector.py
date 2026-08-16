@@ -298,23 +298,19 @@ def _has_cue(folded: str, pos: int, cues: tuple[str, ...]) -> bool:
         if d is None:
             continue
 
-        # F-NUM-03 x F-NUM-01 — VA CHAM GIUA HAI POLICY DEU DA DUOC DUYET, xu ly tuong minh:
-        #   * F-NUM-01 (CA chot truoc): 1 day so co CA HAI cue giay to va tai chinh -> GIAY TO thang
-        #     ("CCCD va STK 079000012361" = national_id). Co test khoa.
-        #   * F-NUM-03 §1.1 (PO vua duyet): cue GAN NHAT thang -> o cau tren `STK` gan hon nen bank
-        #     se thang, tuc PHA policy cu.
-        # Directive F-NUM-03 KHONG noi gi ve viec thay F-NUM-01, nen o day GIU policy cu: quan he
-        # nid > bank duoc quyet bang PRECEDENCE, khong bang khoang cach. Pham vi han che trong CUNG
-        # MENH DE — nho vay "cccd <so1>, stk <so2>" van ra dung 2 slot khac nhau (cue `cccd` nam o
-        # menh de khac so2 nen khong voi toi).
-        # Moi cap KHAC deu quyet bang khoang cach nhu policy moi. Xem finding
-        # `PHASE1B-M4-F-NUM-01-VS-F-NUM-03-PRECEDENCE-COLLISION-FINDING-VI.md` — CA/PO xac nhan hoac
-        # dao lai, Dev KHONG tu chon.
-        if cues is _NID_CUES and other is _BANK_CUES:
-            continue                        # giay to mien nhiem truoc tai chinh (F-NUM-01)
-        if cues is _BANK_CUES and other is _NID_CUES:
-            return False                    # tai chinh nhuong giay to bat ke khoang cach
-
+        # F-NUM-03 x F-NUM-01 — DA GIAI QUYET: PO chon huong **B** o
+        # `PHASE1B-M4-F-NUM-01-VS-F-NUM-03-PO-DECISION-VI.md`.
+        #
+        # Truoc day F-NUM-01 quy dinh "cue giay to LUON thang cue tai chinh". PO THU HOI ngoai le do
+        # — chi rieng cap national_id vs bank_account, va chi TRONG CUNG MENH DE: gio khoang cach
+        # quyet dinh, nen "CCCD va STK 079000012361" ra `bank_account` (STK gan so hon).
+        #
+        # Ban implement dau tien cua Dev GIU F-NUM-01 (co 2 nhanh ngoai le o day) va bao finding thay
+        # vi tu chon — CA xac nhan cach lam do dung. Sau quyet dinh cua PO, 2 nhanh ngoai le da duoc
+        # go, khong con exception an nao: MOI cap cue deu quyet bang khoang cach trong menh de.
+        #
+        # Ranh gioi PO nhan manh: cue canh tranh KHONG duoc tran qua mệnh de khac de doi type cua so
+        # local — dieu do do vong lap nay bao dam (chi doc `clause`, khong doc `window`).
         if mine is None:                    # cue cua minh o menh de khac, doi thu o ngay day
             return False
         if d < mine or (d == mine and rank < my_rank):
