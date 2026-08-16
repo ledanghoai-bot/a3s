@@ -1,7 +1,7 @@
 """I-B M4 H2-A — test cho `app/services/pii/signing_backend.py`.
 
 Bo test nay phu cac ca NEGATIVE ma CA liet ke trong H2 Design Review 1 o pham vi TANG BACKEND:
-  - export denied
+  - khong co capability export o phia signer + chinh sach provider tu choi export (F-H2A-01)
   - signature/key-version mismatch denied
   - KMS outage -> fail-closed (khong tra ve chu ky nao)
   - transcript truoc rotation con verify duoc
@@ -152,8 +152,9 @@ def test_hoi_public_key_cua_version_khong_ton_tai_bi_tu_choi(localdev: LocalDevB
 # ---------------------------------------------------------------------------
 
 class _FakeKms:
-    """Transport gia lap DUNG CHUAN: ky duoc, tra public key, va TU CHOI export.
+    """Transport gia lap DUNG CHUAN: CHI ky va tra public key.
 
+    Khong co thao tac export nao — dung theo F-H2A-01: khong the goi thu khong ton tai.
     Giu private key trong chinh doi tuong nay de mo phong "khoa nam ben trong KMS" — code ung
     dung khong cham vao no.
     """
@@ -173,9 +174,6 @@ class _FakeKms:
         return self._keys[key_version].public_key().public_bytes(
             encoding=self._ser.Encoding.Raw, format=self._ser.PublicFormat.Raw)
 
-    def export_private_key(self, key_id: str, key_version: str) -> bytes:
-        raise SigningBackendDenied("export bi tu choi boi policy KMS (exportable=false)")
-
 
 class _KmsChet:
     """KMS down — moi thao tac nem loi transport thuong (khong phai SigningBackendError)."""
@@ -185,9 +183,6 @@ class _KmsChet:
 
     def public_key(self, key_id: str, key_version: str) -> bytes:
         raise TimeoutError("timed out")
-
-    def export_private_key(self, key_id: str, key_version: str) -> bytes:
-        raise ConnectionError("connection refused")
 
 
 def _kms(version: str = "v1") -> tuple[KmsSigningBackend, _FakeKms]:
@@ -213,11 +208,71 @@ def test_kms_rotation_verify_duoc_ca_hai_version() -> None:
     assert verify_signature(be_v1.public_key_raw("v2"), _MSG, sig_v1) is False
 
 
-def test_export_private_key_bi_tu_choi() -> None:
-    """CA yeu cau: 'export denied'. Bien tuyen bo thanh phep thu chay duoc."""
-    _, transport = _kms()
+# ---------------------------------------------------------------------------
+# F-H2A-01 — "application khong export duoc private key": chung minh o HAI cho, va KHONG cho
+# signer mot duong export nao.
+#
+# Ban dau Dev dat `export_private_key()` vao `KmsTransport` roi test rang no bi tu choi. CA bac
+# bo dung: lam vay bien export thanh mot CAPABILITY HOP LE cua interface — chi can mot adapter
+# tuong lai hien thuc no "that" la private key co duong vao application, bat ke fake hom nay tu
+# choi the nao. Bay gio phuong thuc do KHONG TON TAI o phia signer nua.
+# ---------------------------------------------------------------------------
+
+class _FakeKmsProviderAdmin:
+    """Mat phang DIEU KHIEN cua provider — TACH khoi API ma signer nhin thay.
+
+    Doi tuong nay KHONG bao gio duoc cam vao `KmsSigningBackend`. No mo phong nguoi quan tri KMS,
+    va ton tai chi de kiem mot dieu: CHINH SACH tren khoa tu choi export ngay ca voi admin.
+    """
+
+    def __init__(self) -> None:
+        self.policy = {"exportable": False, "allow_plaintext_backup": False}
+
+    def doc_policy(self, key_id: str) -> dict:
+        return dict(self.policy)
+
+    def admin_export(self, key_id: str) -> bytes:
+        if not self.policy["exportable"]:
+            raise SigningBackendDenied(
+                f"provider tu choi export {key_id}: khoa tao voi exportable=false")
+        raise AssertionError("khoa nay dang la exportable — cau hinh sai")
+
+
+def test_chinh_sach_provider_tu_choi_export_ngay_ca_voi_admin() -> None:
+    """Bang chung thu nhat: o PHIA PROVIDER, khoa duoc tao khong the export.
+
+    Chay qua fixture admin, KHONG qua duong signer — nen no khong the vo tinh tro thanh mot
+    capability cua application.
+    """
+    admin = _FakeKmsProviderAdmin()
+    assert admin.doc_policy("m4-transcript-ed25519") == {
+        "exportable": False, "allow_plaintext_backup": False}
     with pytest.raises(SigningBackendDenied, match="exportable=false"):
-        transport.export_private_key("m4-transcript-ed25519", "v1")
+        admin.admin_export("m4-transcript-ed25519")
+
+
+def test_khong_mot_doi_tuong_nao_signer_cham_toi_co_capability_export() -> None:
+    """Bang chung thu hai: khong co duong export trong do thi doi tuong ma signer voi toi.
+
+    Kiem ca backend LAN transport, va kiem ca `KmsTransport` protocol — neu ai do them lai mot
+    phuong thuc export (du doi ten), test nay do ngay.
+    """
+    from app.services.pii.signing_backend import KmsTransport
+
+    mau_export = ("export", "private", "secret", "unwrap", "backup", "extract", "reveal")
+
+    def cong_khai(obj) -> set[str]:
+        return {ten for ten in dir(obj) if not ten.startswith("_")}
+
+    backend, transport = _kms()
+    for doi_tuong, nhan in ((backend, "KmsSigningBackend"), (transport, "transport"),
+                            (KmsTransport, "KmsTransport protocol")):
+        pham = {ten for ten in cong_khai(doi_tuong)
+                if any(m in ten.lower() for m in mau_export)}
+        assert pham == set(), f"{nhan} lo capability export: {pham}"
+
+    # Va do thi doi tuong that su chi co dung hai thao tac.
+    assert cong_khai(transport) == {"sign", "public_key", "so_lan_ky"}
 
 
 def test_kms_chet_thi_ky_that_bai_fail_closed() -> None:
@@ -255,9 +310,6 @@ class _KmsTraSaiKichThuoc:
 
     def public_key(self, key_id: str, key_version: str) -> bytes:
         return b"\x00" * 31
-
-    def export_private_key(self, key_id: str, key_version: str) -> bytes:
-        raise SigningBackendDenied("no")
 
 
 def test_kms_tra_chu_ky_sai_kich_thuoc_bi_tu_choi() -> None:
@@ -322,7 +374,7 @@ def test_interface_khong_co_phuong_thuc_nao_tra_private_material(
     nay do ngay. Do la lop bao ve chong hoi quy, khong phai test trang tri.
     """
     cong_khai = {ten for ten in dir(localdev) if not ten.startswith("_")}
-    cam = {"private_key", "export_key", "export_private_key", "secret", "private_bytes",
-           "private_key_raw", "key_material"}
+    cam = {"private_key", "export_key", "export", "secret", "private_bytes",
+           "private_key_raw", "key_material", "backup", "unwrap"}
     assert cong_khai & cam == set(), f"backend lo phuong thuc private material: {cong_khai & cam}"
     assert cong_khai == {"key_id", "key_version", "public_key_raw", "sign", "rotate"}

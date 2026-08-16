@@ -192,17 +192,26 @@ class LocalDevBackend:
 class KmsTransport(Protocol):
     """Ranh gioi I/O toi KMS that. Test bom fake vao day de khong can KMS that.
 
-    `export_private_key` co mat CO Y: no ton tai de test NEGATIVE goi duoc va chung minh backend
-    bi tu choi. Mot transport dung chuan PHAI raise `SigningBackendDenied` — day la cach bien
-    'application khong export duoc private key' thanh mot phep thu chay duoc, thay vi mot cau
-    tuyen bo trong tai lieu.
+    CHI HAI THAO TAC: ky, va doc public key. **Khong co** thao tac export/wrap/backup private
+    material, va do la ket luan cua CA F-H2A-01.
+
+    Ban dau Dev co dat `export_private_key()` o day, voi lap luan "de test NEGATIVE goi duoc va
+    chung minh no bi tu choi". CA bac bo dung: dat no vao interface bien export thanh mot
+    **capability hop le** cho MOI implementation tuong lai — chi can mot adapter viet sai la
+    private key co duong di vao application, bat ke fake transport hom nay tu choi the nao.
+
+    Nguyen tac thay the: *khong the goi thu khong ton tai*. Bang chung "application khong export
+    duoc" gio nam o HAI cho, ca hai deu KHONG cho signer mot duong export:
+      1. Kiem noi suy: signer va transport khong co phuong thuc nao mang nghia export
+         (`test_khong_mot_doi_tuong_nao_signer_cham_toi_co_capability_export`).
+      2. Chinh sach o PHIA PROVIDER: khoa duoc tao voi `exportable=false` /
+         `allow_plaintext_backup=false`, va provider tu choi export ngay ca voi admin. Phep thu do
+         chay qua mot fixture ADMIN cua provider, TACH khoi API ma signer nhin thay.
     """
 
     def sign(self, key_id: str, key_version: str, message: bytes) -> bytes: ...
 
     def public_key(self, key_id: str, key_version: str) -> bytes: ...
-
-    def export_private_key(self, key_id: str, key_version: str) -> bytes: ...
 
 
 class KmsSigningBackend:
