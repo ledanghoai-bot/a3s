@@ -84,6 +84,20 @@ _BANK_CUES = ("stk", "so tai khoan", "tai khoan", "so the")
 # "đơn hàng"/"Đơn Hàng"/"DON HANG" deu quy ve "don hang", khong can liet ke bien the hoa/dau.
 _NID_EXCLUSION_CUES = ("don hang", "ma don", "ma giao dich", "order", "transaction")
 
+# F-NUM-03 (D3), PO policy `PHASE1B-M4-F-NUM-03-PO-POLICY-DECISION-AND-PR-PREPARATION-DIRECTIVE-VI.md`
+# §1.3: bo sung tu vung tham chieu vao DUY NHAT nhanh fallback national-ID. Cac cum nay noi len "day
+# so la MA TRA CUU/VAN DON/HOA DON", khong phai giay to tuy than.
+#
+# Rang buoc PO/CA di kem (§1.4): chung KHONG duoc vo hieu hoa mot bank cue GAN HON trong CUNG MENH
+# DE. Rang buoc do duoc bao dam boi chinh co che "nearest applicable cue wins" o `_has_cue` — neu
+# `stk` dung gan so hon `ma tham chieu` thi bank van thang; nen KHONG can (va khong duoc) chan cung
+# o day.
+_REFERENCE_EXCLUSION_CUES = ("ma tham chieu", "ma van don", "ma tra cuu", "ma hoa don")
+
+# Tap dung cho nhanh fallback 12 so khong cue. Tach 2 hang so ben tren de truy vet duoc cum nao co
+# tu bao gio (F-NUM-02 vs F-NUM-03) thay vi tron thanh mot danh sach phang.
+_FALLBACK_EXCLUSION_CUES = _NID_EXCLUSION_CUES + _REFERENCE_EXCLUSION_CUES
+
 # Thanh phan dia chi (fold). "pho" dong am "phở" (fold ca hai = "pho") — chap nhan
 # vi 1 thanh phan don le KHONG bao gio tao span (can >=2 hoac so nha + duong).
 _STREET_KW_RE = re.compile(
@@ -174,7 +188,16 @@ _WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 # 20 du cho "duong X..., phuong Y" nhung tach duoc 2 dia chi trong cung 1 tin.
 _ADDR_CLUSTER_GAP = 20
 # Cua so nhin lui tim cue cho day so (phone/nid/bank).
-_CUE_WINDOW = 30
+#
+# F-NUM-03 (D2): TRUOC DAY la 30 — mot vach dung khong co co so ngu nghia nao. Cue o ky tu thu 31 la
+# vo hinh, nen "stk 71000123456" bat duoc con "stk cua em o ngan hang ben do la 71000123456" IM LANG
+# BO SOT du ngu nghia y het. PO duyet nang len 80 (§1.2), kem quy tac menh de o `_has_cue` — nang
+# cua so MA KHONG xep hang cue se keo them nhieu vao (da do: phuong an "chi noi cua so" lam hong 3
+# ca conflict).
+_CUE_WINDOW = 80
+
+# Dau ket thuc menh de. Dung de gioi han pham vi cua cue CANH TRANH (xem `_has_cue`).
+_CLAUSE_DELIM_RE = re.compile(r"[,;.!?\n]")
 
 
 @dataclass
@@ -207,9 +230,92 @@ class DetectionResult:
         return sum(1 for s in self.spans if s.slot_type == slot)
 
 
+# F-NUM-03 (D1): cac tap cue CANH TRANH nhau tren cung mot day so. Thu tu trong tuple nay la
+# TIE-BREAK TUONG MINH khi 2 cue khac tap ket thuc o CUNG mot vi tri (hiem, nhung phai xac dinh):
+# giay to tuy than > tai chinh > tham chieu/don hang > lien lac.
+#
+# Truoc day KHONG co khai niem nay: `_has_cue` tra True cho BAT KY cue nao trong cua so, nen thu tu
+# uu tien la he qua phu cua THU TU CAC LENH `if` trong `_detect_numeric_slots` — khong ai tung chon
+# no. Gio no la mot hang so co ten, doc duoc, va co test khoa.
+_COMPETING_CUE_SETS: tuple[tuple[str, ...], ...] = (
+    _NID_CUES,
+    _BANK_CUES,
+    _FALLBACK_EXCLUSION_CUES,
+    _PHONE_CUES,
+)
+
+
+def _clause_slice(window: str) -> str:
+    """Phan window thuoc MENH DE hien tai (sau dau ket thuc menh de cuoi cung)."""
+    last = 0
+    for m in _CLAUSE_DELIM_RE.finditer(window):
+        last = m.end()
+    return window[last:]
+
+
+def _nearest_cue_distance(window: str, cues: tuple[str, ...]) -> int | None:
+    """Khoang cach tu CUOI window (= ngay truoc day so) toi cue gan nhat. None neu khong co."""
+    best: int | None = None
+    for c in cues:
+        for m in re.finditer(r"\b" + re.escape(c) + r"\b", window):
+            d = len(window) - m.end()
+            if best is None or d < best:
+                best = d
+    return best
+
+
 def _has_cue(folded: str, pos: int, cues: tuple[str, ...]) -> bool:
+    """Cue gan nhat co hieu luc thang — dap F-NUM-03, PO policy §1.1/§1.2.
+
+    Hai quy tac, co chu y bat doi xung:
+
+    1. **Cue CUNG loai duoc phep vuot dau phay/xuong dong** (tinh tren ca cua so 80). Nguoi Viet
+       viet "so tai khoan cua minh, 71000123456" rat pho bien; cat hai chieu tai dau phay se lam
+       mat luon cue hop le nay (da do: phuong an cat hai chieu hong 2/7 ca, trong khi ban cu lam
+       DUNG cac ca do).
+    2. **Cue CANH TRANH chi co hieu luc trong MENH DE hien tai.** Nho vay "so tai khoan, ma giao
+       dich <so>" khong bi gan bank (cue tai chinh o menh de truoc, cue tham chieu o menh de nay),
+       con "ma giao dich cho STK <so>" van ra bank (STK gan hon, cung menh de).
+
+    Tie: neu cue gan nhat cua 2 tap ket thuc cung vi tri, tap dung truoc trong `_COMPETING_CUE_SETS`
+    thang. Xac dinh, khong phu thuoc thu tu goi ham.
+    """
     window = folded[max(0, pos - _CUE_WINDOW):pos]
-    return any(re.search(r"\b" + re.escape(c) + r"\b", window) for c in cues)
+    if _nearest_cue_distance(window, cues) is None:
+        return False
+
+    clause = _clause_slice(window)
+    mine = _nearest_cue_distance(clause, cues)
+    try:
+        my_rank = _COMPETING_CUE_SETS.index(cues)
+    except ValueError:                      # tap khong tham gia canh tranh (vd cue ten rieng)
+        my_rank = len(_COMPETING_CUE_SETS)
+
+    for rank, other in enumerate(_COMPETING_CUE_SETS):
+        if other is cues:
+            continue
+        d = _nearest_cue_distance(clause, other)
+        if d is None:
+            continue
+
+        # F-NUM-03 x F-NUM-01 — DA GIAI QUYET: PO chon huong **B** o
+        # `PHASE1B-M4-F-NUM-01-VS-F-NUM-03-PO-DECISION-VI.md`.
+        #
+        # Truoc day F-NUM-01 quy dinh "cue giay to LUON thang cue tai chinh". PO THU HOI ngoai le do
+        # — chi rieng cap national_id vs bank_account, va chi TRONG CUNG MENH DE: gio khoang cach
+        # quyet dinh, nen "CCCD va STK 079000012361" ra `bank_account` (STK gan so hon).
+        #
+        # Ban implement dau tien cua Dev GIU F-NUM-01 (co 2 nhanh ngoai le o day) va bao finding thay
+        # vi tu chon — CA xac nhan cach lam do dung. Sau quyet dinh cua PO, 2 nhanh ngoai le da duoc
+        # go, khong con exception an nao: MOI cap cue deu quyet bang khoang cach trong menh de.
+        #
+        # Ranh gioi PO nhan manh: cue canh tranh KHONG duoc tran qua mệnh de khac de doi type cua so
+        # local — dieu do do vong lap nay bao dam (chi doc `clause`, khong doc `window`).
+        if mine is None:                    # cue cua minh o menh de khac, doi thu o ngay day
+            return False
+        if d < mine or (d == mine and rank < my_rank):
+            return False
+    return True
 
 
 def _overlaps(spans: list[PIISpan], start: int, end: int) -> bool:
@@ -256,7 +362,7 @@ def _detect_numeric_slots(text_nfc: str, folded: str, spans: list[PIISpan]) -> N
                 spans.append(PIISpan(SlotType.BANK_ACCOUNT, start, end,
                                      Confidence.HIGH, ReasonCode.BANK_CUE_DIGITS))
                 continue
-            if _has_cue(folded, start, _NID_EXCLUSION_CUES):
+            if _has_cue(folded, start, _FALLBACK_EXCLUSION_CUES):
                 # Ma don/ma giao dich: KHONG phai PII danh tinh -> khong gan slot, va cung khong
                 # de roi xuong cac nhanh duoi (phone) vi 12 so khong khop dinh dang phone VN.
                 continue
