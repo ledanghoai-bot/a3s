@@ -1,3 +1,6 @@
+# Sandbox tai lap duoc cho F-PR24-01. Dung DUNG khuon healthcheck/depends_on cua
+# docker-compose.prod.yml, thu nho lai con db + migrate + mot "app" gia lap.
+# Chay bang `python scripts/migration_pipeline_ci_check.py` (CI job `migration-pipeline`).
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -5,6 +8,11 @@ services:
       POSTGRES_USER: alpha3s
       POSTGRES_PASSWORD: sandbox
       POSTGRES_DB: alpha3s
+    # NAMED volume (khong phai anonymous). Ban dau khong co dong nay, nen `docker compose down`
+    # xoa ngam du lieu va lam mot kich ban do sai trang thai ma khong ai biet. Co named volume thi
+    # `down` giu du lieu, `down -v` moi xoa — trang thai tro nen XAC DINH duoc.
+    volumes:
+      - mpsb_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U $$POSTGRES_USER -d $$POSTGRES_DB -q"]
       interval: 3s
@@ -29,3 +37,6 @@ services:
       db:
         condition: service_healthy
     restart: "no"
+
+volumes:
+  mpsb_pgdata:

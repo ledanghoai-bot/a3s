@@ -40,8 +40,31 @@ jobs:
       - name: Test (ham logic thuan, khong cham DB)
         run: pytest -v
 
+  # F-MIG-01: bien 5 kich ban migration pipeline thanh mot CI job THAT SU do duoc.
+  # Truoc day chung chi duoc Dev chay TAY tren may minh, nen mot thay doi sau nay vao
+  # compose/deploy/healthcheck co the regression ma CI van xanh — dung lop loi false-green du an da
+  # gap nhieu lan. Job nay chay tren fresh Docker/Compose cua runner va DO neu bat ky kich ban nao
+  # hong (fresh / idempotent / migration-failure / concurrency / schema-public-only).
+  migration-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Phien ban Docker/Compose cua runner
+        run: docker version --format '{{.Server.Version}}' && docker compose version
+      - name: Chay 5 kich ban migration pipeline
+        run: python3 scripts/migration_pipeline_ci_check.py --json-out migration_pipeline_ci_result.json
+      - name: In JSON canonical (de CA doi chieu tu log)
+        if: always()
+        run: cat migration_pipeline_ci_result.json
+      - name: Upload artifact JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-pipeline-ci-result
+          path: migration_pipeline_ci_result.json
+
   deploy:
-    needs: lint-test
+    needs: [lint-test, migration-pipeline]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'  # CR-07: chỉ deploy khi push main, KHÔNG khi PR
     steps:
