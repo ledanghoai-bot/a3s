@@ -20,7 +20,7 @@ services:
       retries: 24
       start_period: 5s
   migrate:
-    image: h2a-migrate:${MIGRATE_TAG:-sandbox}
+    image: ${MIGRATE_IMAGE:-alpha3s-migrate-sandbox}:${MIGRATE_TAG:-sandbox}
     command: ["python", "scripts/migrate.py", "up"]
     environment:
       DATABASE_URL: postgresql://alpha3s:sandbox@db:5432/alpha3s
@@ -29,7 +29,7 @@ services:
         condition: service_healthy
     restart: "no"
   app:
-    image: h2a-migrate:sandbox
+    image: ${MIGRATE_IMAGE:-alpha3s-migrate-sandbox}:sandbox
     command: ["python", "-c", "print('APP DA START — nghia la migration da thanh cong')"]
     depends_on:
       migrate:
