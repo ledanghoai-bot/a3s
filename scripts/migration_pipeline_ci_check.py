@@ -12,6 +12,8 @@ NGUYEN TAC CUA HARNESS
   * Kich ban [3] va [4] la ca NEGATIVE: chung PHAI do duoc mot that bai. Neu chung "thanh cong"
     theo nghia khong co gi hong, do la harness sai chu khong phai he thong tot.
   * Exit != 0 neu bat ky assert nao fail.
+  * Ky vong boolean viet la "true"/"false" chu THUONG: Postgres `::text` cua boolean cho `true`,
+    khong phai `True` kieu Python. CI da bat dung loi nay o lan chay dau.
 
 CHAY:
     python scripts/migration_pipeline_ci_check.py [--json-out duong/dan.json]
@@ -119,10 +121,10 @@ def kb1_fresh() -> KichBan:
     k.check("so_migration_trong_ledger", q("SELECT count(*)::text FROM schema_migrations"),
             str(dem_file_migration()))
     k.check("044_trong_ledger",
-            q("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version LIKE '044%')::text"), "True")
+            q("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version LIKE '044%')::text"), "true")
     k.check("hai_bang_h2a_ton_tai",
             q("SELECT ((to_regclass('m4_stage0p_transcript_public_keys') IS NOT NULL) AND "
-              "(to_regclass('m4_stage0p_transcript_signatures') IS NOT NULL))::text"), "True")
+              "(to_regclass('m4_stage0p_transcript_signatures') IS NOT NULL))::text"), "true")
     return k
 
 
@@ -175,7 +177,7 @@ def kb4_concurrency() -> KichBan:
        "asyncio.run(m())")
     k.check("044_dang_pending_truoc_khi_dua",
             q("SELECT (NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version LIKE '044%'))::text"),
-            "True")
+            "true")
 
     def chay() -> subprocess.CompletedProcess:
         return dc("run", "--rm", "--no-deps", "-T", "migrate", "python", "scripts/migrate.py", "up")
