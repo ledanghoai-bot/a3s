@@ -10,3 +10,7 @@ __pycache__/
 .mypy_cache/
 DBbuild.bat
 .env.bridge
+
+# F-MIG-01: ket qua CI job migration-pipeline sinh ra luc chay, KHONG commit
+migration_pipeline_ci_result.json
+mp_ci.json
