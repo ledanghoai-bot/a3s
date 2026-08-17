@@ -318,6 +318,21 @@ def kb6_audit_actor() -> KichBan:
     k.check("6b_cac_hang_khac_van_la_deploy_pipeline",
             q("SELECT count(*)::text FROM schema_migrations "
               "WHERE version NOT LIKE '044%' AND applied_by <> 'deploy-pipeline'"), "0")
+    # 6d — F-MIG-02-AUTHORITY-01: env cua HOST KHONG duoc ghi de actor cua deploy path.
+    # CA bac bo ban truoc vi compose dung `${MIGRATE_ACTOR:-deploy-pipeline}` — doc tu env host, nen
+    # mot gia tri hop le nhung SAI van vao ledger. Nay compose hard-code. Phep thu: co tinh dat
+    # MIGRATE_ACTOR=rehearsal trong env cua tien trinh goi `docker compose up`, roi doi hoi ledger
+    # VAN ghi 'deploy-pipeline'.
+    dat_lai_044_pending()
+    env_ghi_de = {**os.environ, "MIGRATE_ACTOR": "rehearsal", "MIGRATE_TAG": "sandbox"}
+    r4 = sh(["docker", "compose", "-f", COMPOSE, "-p", PROJECT, "up", "migrate"], env=env_ghi_de)
+    k.check("6d_deploy_path_chay_duoc_du_env_host_bi_dat", exit_code("migrate"), 0)
+    k.check("6d_ledger_VAN_la_deploy_pipeline_khong_phai_rehearsal",
+            q("SELECT applied_by FROM schema_migrations WHERE version LIKE '044%'"), "deploy-pipeline")
+    k.check("6d_khong_hang_nao_bi_dan_nhan_rehearsal",
+            q("SELECT count(*)::text FROM schema_migrations WHERE applied_by = 'rehearsal'"), "0")
+    k.asserts.append({"ten": "6d_ghi_nhan_exit_cua_up", "thuc_te": r4.returncode,
+                      "ky_vong": "du kien", "so_sanh": "ghi_nhan", "dat": True})
     return k
 
 def main() -> int:

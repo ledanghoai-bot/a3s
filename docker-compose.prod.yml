@@ -300,12 +300,17 @@ services:
       # Neu chua dat MIGRATION_DATABASE_URL thi dung DATABASE_URL — giu nguyen hanh vi hien tai,
       # khong bat operator phai cau hinh them ngay trong PR nay.
       DATABASE_URL: ${MIGRATION_DATABASE_URL:-${DATABASE_URL}}
-      # F-MIG-02: actor ghi vao `schema_migrations.applied_by` PHAI tuong minh.
-      # `migrate.py` truoc day mac dinh "rehearsal" (di san tu thoi runner chi goi tay), nen hang
-      # 044 dau tien ap qua pipeline moi da bi ghi sai nhan (xem evidence PR #25 §8 — hang do KHONG
-      # duoc sua hoi to). Nay `migrate.py` KHONG con mac dinh nao: thieu actor thi fail-closed, nen
-      # dong duoi day la noi DUY NHAT quyet dinh nhan cua deploy path.
-      MIGRATE_ACTOR: ${MIGRATE_ACTOR:-deploy-pipeline}
+      # F-MIG-02 / F-MIG-02-AUTHORITY-01: actor ghi vao `schema_migrations.applied_by`.
+      #
+      # HARD-CODE, KHONG interpolation. Ban truoc Dev viet `${MIGRATE_ACTOR:-deploy-pipeline}` va CA
+      # bac bo dung: `${VAR:-default}` doc tu environment cua host/`.env`, nen mot gia tri hop le
+      # nhung SAI (vd `rehearsal`) van qua regex cua migrate.py va vao ledger cho mot deploy thuong.
+      # Nhu vay chi la doi cho cai silent default tu Python sang ranh gioi deploy, khong loai bo no.
+      #
+      # Gia tri co dinh o day la nguon duy nhat cho normal deploy path. Duong chay tay/rehearsal
+      # PHAI truyen actor tuong minh o cap LENH (`docker compose run -e MIGRATE_ACTOR=...`), tuc
+      # nam ngoai dinh nghia service nay — xem docs/MIGRATION-PIPELINE-VI.md §5.
+      MIGRATE_ACTOR: deploy-pipeline
     depends_on:
       db:
         condition: service_healthy

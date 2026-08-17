@@ -25,7 +25,9 @@ services:
     environment:
       DATABASE_URL: postgresql://alpha3s:sandbox@db:5432/alpha3s
       # F-MIG-02: dat giong docker-compose.prod.yml de kich ban CI kiem duoc nhan audit.
-      MIGRATE_ACTOR: ${MIGRATE_ACTOR_SANDBOX:-deploy-pipeline}
+      # Hard-code giong docker-compose.prod.yml (F-MIG-02-AUTHORITY-01): khong interpolation, de
+      # kich ban 6d chung minh duoc env cua host KHONG ghi de duoc.
+      MIGRATE_ACTOR: deploy-pipeline
     depends_on:
       db:
         condition: service_healthy
