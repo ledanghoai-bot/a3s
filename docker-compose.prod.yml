@@ -41,8 +41,14 @@ services:
     volumes:
       - m4_signing_socket:/run/m4-signing
     depends_on:
-      - db
-      - redis
+      # F-PR24-01: api KHONG duoc start neu migration chua chay xong THANH CONG. Truoc PR nay day
+      # la `- db` tran (chi cho "container db da start"), nen app deploy duoc tren schema cu.
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   # I-B M4 Stage 0P (A08-COR-01/F-A08-R1-01): tien trinh signing service THAT, tach biet hoan
@@ -167,8 +173,13 @@ services:
     command: arq app.workers.tasks.WorkerSettings
     env_file: .env
     depends_on:
-      - db
-      - redis
+      # F-PR24-01: chi start SAU khi migration chay xong thanh cong (fail-closed).
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   telegram_bot:
@@ -176,7 +187,11 @@ services:
     command: python -m app.workers.telegram_listener
     env_file: .env
     depends_on:
-      - db
+      # F-PR24-01: chi start SAU khi migration chay xong thanh cong (fail-closed).
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
   telegram_customer_bot:
@@ -184,8 +199,13 @@ services:
     command: python -m app.workers.telegram_customer_listener
     env_file: .env
     depends_on:
-      - db
-      - redis
+      # F-PR24-01: chi start SAU khi migration chay xong thanh cong (fail-closed).
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   dashboard:
@@ -227,8 +247,63 @@ services:
       POSTGRES_DB: alpha3s
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # F-PR24-01 ghi chu: mount nay la duong schema THU HAI. Postgres chi chay
+      # /docker-entrypoint-initdb.d khi data dir CON RONG (lan initdb dau tien) — no KHONG ghi
+      # `schema_migrations`, nen mot DB moi tinh se co DDL ma ledger khong biet. Xem
+      # `docs/MIGRATION-PIPELINE-VI.md` §4 cho phan tich va cach xu ly.
       - ./migrations:/docker-entrypoint-initdb.d
+    # F-PR24-01: healthcheck la DIEU KIEN de service `migrate` doi DB san sang THAT (khong chi
+    # "container da start"). Truoc PR nay db KHONG co healthcheck nao, nen khong the dung
+    # `depends_on: condition: service_healthy` o bat ky dau trong file.
+    #
+    # PHAI kiem qua TCP (`-h 127.0.0.1 -p 5432`), KHONG qua unix socket.
+    # Ly do do duoc bang thuc nghiem, khong phai ly thuyet: ban dau Dev viet
+    # `pg_isready -U ... -d ...` (mac dinh dung unix socket). Tren mot DB MOI TINH, entrypoint cua
+    # Postgres chay `initdb` roi dung mot server TAM chi lang nghe tren unix socket de nap
+    # /docker-entrypoint-initdb.d; luc do `pg_isready` qua socket bao READY. Compose thay "healthy"
+    # -> start `migrate` -> Postgres tat server tam de khoi dong lai that -> migrate an
+    # `ConnectionRefusedError [Errno 111]`. Server tam KHONG lang nghe TCP, nen kiem qua TCP moi
+    # phan biet duoc "dang initdb" voi "da san sang nhan ket noi".
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U $$POSTGRES_USER -d $$POSTGRES_DB -q"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
     restart: unless-stopped
+
+  # =========================================================================
+  # F-PR24-01: migrate — one-shot job dua migration vao NORMAL DEPLOY PATH.
+  #
+  # Boi canh: PR #24 merge + deploy thanh cong nhung migration 044 van PENDING, vi
+  # `scripts/deploy.sh` chi `up -d --build` cac service ung dung va KHONG chay migration nao.
+  # Ledger cho thay 040-043 deu duoc ap THU CONG, khong trung nhip deploy. Nghia la moi PR mang
+  # migration deu co the deploy thanh cong tren schema CU ma khong gi bao lech.
+  #
+  # Thiet ke (theo PHASE1B-M4-F-PR24-01-MIGRATION-PIPELINE-PREPARATION-DIRECTIVE-VI.md):
+  #   * one-shot: `restart: "no"` — chay xong thi thoat, KHONG phai service thuong tru.
+  #   * doi DB healthy THAT (`service_healthy`), khong phai `service_started`.
+  #   * `migrate.py up` da co advisory lock fail-fast + ledger co checksum + post-migration
+  #     validation fail-closed => idempotent va serialized san, khong phat minh lai.
+  #   * api/worker/dashboard/telegram deu `depends_on` service nay voi dieu kien
+  #     `service_completed_successfully` — migrate that bai thi Compose KHONG start ung dung.
+  #     Cung khuon `m4-signer-init` da dung tu Amendment 11.
+  #   * DSN RIENG `MIGRATION_DATABASE_URL` (mac dinh ve DATABASE_URL de khong pha may dang chay).
+  #     Xem `docs/MIGRATION-PIPELINE-VI.md` §3: quyen KHONG the "toi thieu" tuyet doi vi 024/038/039
+  #     co CREATE ROLE; tach DSN la de quyen tro nen TUONG MINH va thu hep duoc ve sau.
+  # =========================================================================
+  migrate:
+    build: .
+    command: ["python", "scripts/migrate.py", "up"]
+    env_file: .env
+    environment:
+      # Neu chua dat MIGRATION_DATABASE_URL thi dung DATABASE_URL — giu nguyen hanh vi hien tai,
+      # khong bat operator phai cau hinh them ngay trong PR nay.
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:-${DATABASE_URL}}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
 
   redis:
     image: redis:7-alpine
