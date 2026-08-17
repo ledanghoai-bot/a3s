@@ -300,6 +300,12 @@ services:
       # Neu chua dat MIGRATION_DATABASE_URL thi dung DATABASE_URL — giu nguyen hanh vi hien tai,
       # khong bat operator phai cau hinh them ngay trong PR nay.
       DATABASE_URL: ${MIGRATION_DATABASE_URL:-${DATABASE_URL}}
+      # F-MIG-02: actor ghi vao `schema_migrations.applied_by` PHAI tuong minh.
+      # `migrate.py` truoc day mac dinh "rehearsal" (di san tu thoi runner chi goi tay), nen hang
+      # 044 dau tien ap qua pipeline moi da bi ghi sai nhan (xem evidence PR #25 §8 — hang do KHONG
+      # duoc sua hoi to). Nay `migrate.py` KHONG con mac dinh nao: thieu actor thi fail-closed, nen
+      # dong duoi day la noi DUY NHAT quyet dinh nhan cua deploy path.
+      MIGRATE_ACTOR: ${MIGRATE_ACTOR:-deploy-pipeline}
     depends_on:
       db:
         condition: service_healthy

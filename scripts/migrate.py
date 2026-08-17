@@ -27,6 +27,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -252,9 +253,44 @@ async def cmd_baseline(conn, migs, manifest, actor) -> None:
           f"KHONG baseline (phai chay): {', '.join(skipped) or '(none)'}")
 
 
+_ACTOR_RE = re.compile(r"^[a-z][a-z0-9-]{2,31}$")
+# Cac lenh GHI vao `schema_migrations` — chi nhung lenh nay moi can actor.
+_LENH_GHI_LEDGER = ("up", "baseline")
+
+
+def _resolve_actor(cmd: str) -> str:
+    """F-MIG-02: KHONG con mac dinh am tham.
+
+    Truoc day dong nay la `os.environ.get("MIGRATE_ACTOR", "rehearsal")`. Mac dinh do la di san tu
+    thoi runner chi duoc goi TAY trong rehearsal. Sau F-PR24-01, runner nam trong deploy path, nen
+    moi migration ap qua deploy bi ghi `applied_by='rehearsal'` — sai ve truy nguyen audit. Hang
+    044 tren production da bi ghi nhu vay (xem evidence PR #25); hang do KHONG duoc sua hoi to.
+
+    Thiet ke moi: **khong co mac dinh nao ca**. Lenh nao ghi ledger thi PHAI co `MIGRATE_ACTOR`
+    tuong minh, va gia tri phai hop dang. `deploy.sh`/compose dat `deploy-pipeline`; nguoi chay tay
+    phai tu khai minh la ai (`rehearsal`, `operator-hoai`, ...). Nhu vay khong con duong nao de mot
+    nhan sai lot vao bang audit ma khong ai chon no.
+
+    Lenh chi doc (`status`/`validate`/`fresh-validate`) khong ghi ledger nen khong doi actor.
+    """
+    raw = os.environ.get("MIGRATE_ACTOR")
+    if cmd not in _LENH_GHI_LEDGER:
+        return raw or ""
+    if not raw:
+        raise SystemExit(
+            "STOP (F-MIG-02): thieu MIGRATE_ACTOR. Lenh nay ghi vao schema_migrations nen PHAI khai "
+            "ro ai ap migration. Deploy path dat 'deploy-pipeline'; chay tay thi dat vd "
+            "MIGRATE_ACTOR=rehearsal hoac MIGRATE_ACTOR=operator-<ten>.")
+    if not _ACTOR_RE.match(raw):
+        raise SystemExit(
+            f"STOP (F-MIG-02): MIGRATE_ACTOR={raw!r} khong hop dang. Yeu cau: chu thuong/so/gach "
+            "ngang, bat dau bang chu, dai 3-32 ky tu.")
+    return raw
+
+
 async def main() -> None:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
-    actor = os.environ.get("MIGRATE_ACTOR", "rehearsal")
+    actor = _resolve_actor(cmd)
     manifest = load_manifest(_arg_manifest()) if cmd in ("up", "baseline", "validate", "fresh-validate") else {}
     conn = await asyncpg.connect(db_url())
     try:

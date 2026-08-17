@@ -265,6 +265,61 @@ def kb5_schema() -> KichBan:
     return k
 
 
+def kb6_audit_actor() -> KichBan:
+    """F-MIG-02: nhan `applied_by` trong ledger phai dung nguon, va khong duoc co mac dinh am tham.
+
+    Ba duong CA yeu cau kiem:
+      6a  deploy path      -> ghi actor moi ('deploy-pipeline')
+      6b  chay tay         -> chi ghi 'rehearsal' khi duoc TRUYEN TUONG MINH
+      6c  thieu/sai actor  -> FAIL-CLOSED, va KHONG ghi gi vao ledger
+    """
+    k = KichBan("6_audit_actor", "F-MIG-02: applied_by dung nguon, khong mac dinh am tham")
+
+    # 6a — DB da migrate boi service `migrate` (dat MIGRATE_ACTOR=deploy-pipeline trong compose)
+    k.check("6a_moi_hang_ledger_deu_la_deploy_pipeline",
+            q("SELECT count(*)::text FROM schema_migrations WHERE applied_by <> 'deploy-pipeline'"), "0")
+    k.check("6a_co_that_su_co_hang_de_kiem",
+            q("SELECT (count(*) > 0)::text FROM schema_migrations WHERE applied_by = 'deploy-pipeline'"),
+            "true")
+
+    def dat_lai_044_pending() -> None:
+        dc("run", "--rm", "--no-deps", "-T", "migrate", "python", "-c",
+           "import asyncio,asyncpg,os\n"
+           "async def m():\n"
+           "    c=await asyncpg.connect(os.environ['DATABASE_URL'])\n"
+           "    await c.execute('DROP TABLE IF EXISTS m4_stage0p_transcript_signatures')\n"
+           "    await c.execute('DROP TABLE IF EXISTS m4_stage0p_transcript_public_keys')\n"
+           "    await c.execute(\"DELETE FROM schema_migrations WHERE version LIKE '044%'\")\n"
+           "asyncio.run(m())")
+
+    # 6c — thieu actor: PHAI fail-closed va KHONG ghi gi
+    dat_lai_044_pending()
+    r = dc("run", "--rm", "--no-deps", "-T", "-e", "MIGRATE_ACTOR=", "migrate",
+           "python", "scripts/migrate.py", "up")
+    k.check("6c_thieu_actor_that_bai", r.returncode != 0, True)
+    k.check("6c_thong_bao_neu_ro_F_MIG_02", r.stdout + r.stderr, "F-MIG-02", "chua")
+    k.check("6c_khong_ghi_gi_khi_thieu_actor",
+            q("SELECT count(*)::text FROM schema_migrations WHERE version LIKE '044%'"), "0")
+
+    # 6c-2 — actor sai dang: cung fail-closed
+    r2 = dc("run", "--rm", "--no-deps", "-T", "-e", "MIGRATE_ACTOR=Deploy Pipeline!", "migrate",
+            "python", "scripts/migrate.py", "up")
+    k.check("6c2_actor_sai_dang_that_bai", r2.returncode != 0, True)
+    k.check("6c2_thong_bao_neu_khong_hop_dang", r2.stdout + r2.stderr, "khong hop dang", "chua")
+    k.check("6c2_van_khong_ghi_gi",
+            q("SELECT count(*)::text FROM schema_migrations WHERE version LIKE '044%'"), "0")
+
+    # 6b — chay tay voi actor tuong minh 'rehearsal': ghi DUNG nhan do
+    r3 = dc("run", "--rm", "--no-deps", "-T", "-e", "MIGRATE_ACTOR=rehearsal", "migrate",
+            "python", "scripts/migrate.py", "up")
+    k.check("6b_chay_tay_thanh_cong", r3.returncode, 0)
+    k.check("6b_044_ghi_nhan_rehearsal",
+            q("SELECT applied_by FROM schema_migrations WHERE version LIKE '044%'"), "rehearsal")
+    k.check("6b_cac_hang_khac_van_la_deploy_pipeline",
+            q("SELECT count(*)::text FROM schema_migrations "
+              "WHERE version NOT LIKE '044%' AND applied_by <> 'deploy-pipeline'"), "0")
+    return k
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json-out", default="migration_pipeline_ci_result.json")
@@ -277,7 +332,8 @@ def main() -> int:
 
     ket_qua = []
     try:
-        for f in (kb1_fresh, kb2_idempotent, kb3_that_bai, kb4_concurrency, kb5_schema):
+        for f in (kb1_fresh, kb2_idempotent, kb3_that_bai, kb4_concurrency, kb5_schema,
+                  kb6_audit_actor):
             k = f()
             ket_qua.append(k)
             print(f"[{'DAT ' if k.dat else 'HONG'}] {k.ma}: {k.mo_ta}")
