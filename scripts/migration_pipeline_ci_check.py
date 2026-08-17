@@ -91,6 +91,8 @@ class KichBan:
             dat = thuc_te != ky_vong
         elif so_sanh == "khac_rong_va_bang":
             dat = bool(thuc_te) and thuc_te == ky_vong
+        elif so_sanh == "ghi_nhan":
+            dat = True
         elif so_sanh == "chua":
             dat = ky_vong in str(thuc_te)
         else:
@@ -158,42 +160,87 @@ def kb3_that_bai() -> KichBan:
 
 
 def kb4_concurrency() -> KichBan:
-    k = KichBan("4_concurrency", "Hai runner dong thoi: KHONG ap cung migration hai lan")
+    """CA yeu cau 'hai runner khong ap cung migration hai lan'.
+
+    Kich ban nay tung KHONG TIEN DINH: tren runner nhanh, container thu nhat chay xong TRUOC khi
+    container thu hai kip start, nen ca hai exit 0 (mot cai ap, mot cai thay 'khong co pending') va
+    advisory lock KHONG he bi thu thach. CI da bat dung dieu do.
+
+    Nay tach thanh hai phan:
+      4a  TIEN DINH: giu advisory lock tu mot ket noi NGOAI, roi chay migrate -> PHAI fail-fast voi
+          dung thong bao lock, va PHAI KHONG ap gi. Day moi la phep thu THAT SU cua co che lock.
+      4b  BAT BIEN: chay hai runner dong thoi; bat ke co chong nhau hay khong, ket qua PHAI la
+          044 duoc ap DUNG MOT LAN, va moi runner chi duoc phep hoac thanh cong hoac that bai VI
+          LOCK (khong duoc that bai vi ly do khac).
+    """
+    k = KichBan("4_concurrency", "Advisory lock: fail-fast tien dinh + bat bien 'ap dung mot lan'")
     dc("up", "-d", "db")
     for _ in range(60):
         if dc("exec", "-T", "db", "pg_isready", "-h", "127.0.0.1", "-U", "alpha3s",
               "-d", "alpha3s", "-q").returncode == 0:
             break
         time.sleep(2)
-    # tao lai dung 1 migration pending
-    dc("run", "--rm", "--no-deps", "-T", "-v", f"{HOST_ROOT.rstrip(chr(47))}/scripts:/q", "migrate",
-       "python", "-c",
-       "import asyncio,asyncpg,os\n"
-       "async def m():\n"
-       "    c=await asyncpg.connect(os.environ['DATABASE_URL'])\n"
-       "    await c.execute('DROP TABLE IF EXISTS m4_stage0p_transcript_signatures')\n"
-       "    await c.execute('DROP TABLE IF EXISTS m4_stage0p_transcript_public_keys')\n"
-       "    await c.execute(\"DELETE FROM schema_migrations WHERE version LIKE '044%'\")\n"
-       "asyncio.run(m())")
-    k.check("044_dang_pending_truoc_khi_dua",
+
+    def dat_lai_044_thanh_pending() -> None:
+        dc("run", "--rm", "--no-deps", "-T", "migrate", "python", "-c",
+           "import asyncio,asyncpg,os\n"
+           "async def m():\n"
+           "    c=await asyncpg.connect(os.environ['DATABASE_URL'])\n"
+           "    await c.execute('DROP TABLE IF EXISTS m4_stage0p_transcript_signatures')\n"
+           "    await c.execute('DROP TABLE IF EXISTS m4_stage0p_transcript_public_keys')\n"
+           "    await c.execute(\"DELETE FROM schema_migrations WHERE version LIKE '044%'\")\n"
+           "asyncio.run(m())")
+
+    # ---- 4a: lock bi giu tu ben ngoai -> migrate PHAI fail-fast ----
+    dat_lai_044_thanh_pending()
+    k.check("4a_044_pending_truoc_khi_thu",
             q("SELECT (NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version LIKE '044%'))::text"),
             "true")
+    giu = dc("run", "-d", "--no-deps", "migrate", "python", "-c",
+             "import asyncio,asyncpg,os\n"
+             "async def m():\n"
+             "    c=await asyncpg.connect(os.environ['DATABASE_URL'])\n"
+             "    await c.fetchval('SELECT pg_advisory_lock(4013001)')\n"
+             "    print('DA GIU LOCK', flush=True)\n"
+             "    await asyncio.sleep(45)\n"
+             "asyncio.run(m())")
+    cid = giu.stdout.strip().splitlines()[-1].strip() if giu.stdout.strip() else ""
+    lock_ok = False
+    for _ in range(30):
+        if "DA GIU LOCK" in sh(["docker", "logs", cid]).stdout:
+            lock_ok = True
+            break
+        time.sleep(1)
+    k.check("4a_ket_noi_ngoai_da_giu_duoc_lock", lock_ok, True)
+    r = dc("run", "--rm", "--no-deps", "-T", "migrate", "python", "scripts/migrate.py", "up")
+    k.check("4a_migrate_that_bai", r.returncode != 0, True)
+    k.check("4a_thong_bao_dung_la_advisory_lock", r.stdout + r.stderr, "advisory lock", "chua")
+    k.check("4a_khong_ap_gi_khi_bi_chan",
+            q("SELECT count(*)::text FROM schema_migrations WHERE version LIKE '044%'"), "0")
+    sh(["docker", "rm", "-f", cid])
 
+    # ---- 4b: hai runner dong thoi -> bat bien 'ap dung mot lan' ----
     def chay() -> subprocess.CompletedProcess:
         return dc("run", "--rm", "--no-deps", "-T", "migrate", "python", "scripts/migrate.py", "up")
 
     with ThreadPoolExecutor(max_workers=2) as ex:
-        r1, r2 = ex.submit(chay), ex.submit(chay)
-        a, b = r1.result(), r2.result()
-    rcs = sorted([a.returncode, b.returncode])
-    outs = (a.stdout + a.stderr + b.stdout + b.stderr)
-    k.check("dung_mot_runner_thanh_cong", rcs.count(0), 1)
-    k.check("runner_con_lai_that_bai", rcs[1] != 0, True)
-    k.check("co_thong_bao_advisory_lock", outs, "advisory lock", "chua")
-    k.check("044_dung_MOT_hang_trong_ledger",
+        f1, f2 = ex.submit(chay), ex.submit(chay)
+        a, b = f1.result(), f2.result()
+    outs = a.stdout + a.stderr + b.stdout + b.stderr
+    that_bai_khong_phai_lock = [
+        rc for rc, o in ((a.returncode, a.stdout + a.stderr), (b.returncode, b.stdout + b.stderr))
+        if rc != 0 and "advisory lock" not in o]
+    k.check("4b_khong_runner_nao_that_bai_vi_ly_do_khac", that_bai_khong_phai_lock, [])
+    k.check("4b_044_dung_MOT_hang_trong_ledger",
             q("SELECT count(*)::text FROM schema_migrations WHERE version LIKE '044%'"), "1")
+    k.check("4b_hai_bang_h2a_ton_tai",
+            q("SELECT ((to_regclass('m4_stage0p_transcript_public_keys') IS NOT NULL) AND "
+              "(to_regclass('m4_stage0p_transcript_signatures') IS NOT NULL))::text"), "true")
+    # Ghi lai co chong nhau hay khong — la DU KIEN, khong phai assert (khong tien dinh duoc).
+    k.asserts.append({"ten": "4b_ghi_nhan_co_tranh_lock_hay_khong",
+                      "thuc_te": "advisory lock" in outs, "ky_vong": "du kien, khong assert",
+                      "so_sanh": "ghi_nhan", "dat": True})
     return k
-
 
 def kb5_schema() -> KichBan:
     k = KichBan("5_schema_044_public_only", "Bang H2-A dung schema, KHONG co private material")
