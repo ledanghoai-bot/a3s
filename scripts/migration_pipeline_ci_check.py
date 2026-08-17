@@ -242,10 +242,19 @@ def main() -> int:
         dc("down", "-v")
         sh(["docker", "rmi", "-f", f"{IMG}:broken"])
 
+    # `git rev-parse HEAD` trong CI cua GitHub Actions tren su kien pull_request tra ve commit
+    # MERGE TAM (refs/pull/N/merge), KHONG phai head cua nhanh. Ghi ca ba de CA doi chieu duoc.
     head = sh(["git", "rev-parse", "HEAD"]).stdout.strip()
+    compose_sha = sh(["git", "hash-object", COMPOSE]).stdout.strip()
+    harness_sha = sh(["git", "hash-object", os.path.abspath(__file__)]).stdout.strip()
     bc = {
         "phien_ban": "migration-pipeline-ci-v1",
-        "git_head": head,
+        "git_head_checkout": head,
+        "github_sha": os.environ.get("GITHUB_SHA", ""),
+        "github_ref": os.environ.get("GITHUB_REF", ""),
+        "github_head_ref": os.environ.get("GITHUB_HEAD_REF", ""),
+        "compose_blob_sha": compose_sha,
+        "harness_blob_sha": harness_sha,
         "so_file_migration": dem_file_migration(),
         "compose_file": os.path.relpath(COMPOSE, ROOT),
         "tat_ca_dat": all(k.dat for k in ket_qua),
@@ -255,7 +264,8 @@ def main() -> int:
     }
     with open(args.json_out, "w", encoding="utf-8") as fh:
         json.dump(bc, fh, ensure_ascii=False, sort_keys=True, indent=2)
-    print(json.dumps({k: bc[k] for k in ("git_head", "tat_ca_dat", "so_kich_ban", "so_assert")},
+    print(json.dumps({k: bc[k] for k in ("git_head_checkout", "github_sha", "compose_blob_sha",
+                                          "harness_blob_sha", "tat_ca_dat", "so_kich_ban", "so_assert")},
                      ensure_ascii=False))
     return 0 if bc["tat_ca_dat"] else 1
 
