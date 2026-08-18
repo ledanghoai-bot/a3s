@@ -40,6 +40,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from app.services.pii.crc32c import crc32c
 from app.services.pii.signing_backend import (
     SigningBackendDenied,
+    SigningBackendError,
     SigningBackendKeyUnusable,
     SigningBackendUnavailable,
     assert_khong_phai_production,
@@ -117,8 +118,14 @@ class GoogleKmsTransport:
     def _goi(self, method: str, duong_dan: str, payload: dict | None = None) -> dict:
         try:
             token = self._token_provider()
+        except SigningBackendError:
+            # F-H2B-07: token provider DA phan loai (unavailable / misconfigured / denied). Bat rong
+            # roi doi het thanh `Denied` nhu ban truoc lam mat thong tin do: mot su co mang tam thoi
+            # bi bao thanh "sai quyen", va nguoi van hanh se di sua IAM thay vi sua mang. Giu nguyen
+            # lop ngoai le, khong boc lai.
+            raise
         except Exception as exc:  # noqa: BLE001 - khong dua chi tiet credential vao thong diep
-            # Federation/credential hong la van de QUYEN, khong phai ha tang: thu lai khong giup.
+            # Chi ngoai le NGOAI hop dong moi bi quy ve Denied, va van duoc lam sach.
             raise SigningBackendDenied(
                 f"khong lay duoc credential: {type(exc).__name__}") from None
         if not token:

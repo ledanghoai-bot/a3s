@@ -170,3 +170,75 @@ def test_loi_khong_ro_loai_van_fail_closed() -> None:
     p = _provider(_CredsGia(loi=RuntimeError("khong ro")))
     with pytest.raises((SigningBackendDenied, SigningBackendUnavailable)):
         p()
+
+
+# ---------------------------------------------------------------------------
+# F-H2B-06 — cau hinh X.509 phai di qua PARSER THAT cua phien ban da pin
+# ---------------------------------------------------------------------------
+def _cau_hinh_x509(thu_muc, **ghi_de) -> str:
+    """Cau hinh external-account X.509 hop le. KHONG chua credential that.
+
+    `cert_path`/`key_path` tro toi file KHONG ton tai — co y: buoc NAP chi duoc parse, moi I/O
+    (doc chung chi, goi STS) phai xay ra o `refresh()`. Neu mot ban google-auth tuong lai doc chung
+    chi ngay luc nap, test nay se do va bao cho ta biet.
+    """
+    import json as _json
+
+    cert_cfg = thu_muc / "certificate_config.json"
+    cert_cfg.write_text(_json.dumps({"cert_configs": {"workload": {
+        "cert_path": str(thu_muc / "client.pem"),
+        "key_path": str(thu_muc / "client.key")}}}), encoding="utf-8")
+
+    thong_tin = {
+        "type": "external_account",
+        "audience": ("//iam.googleapis.com/projects/000000000000/locations/global/"
+                     "workloadIdentityPools/alpha3s-vps/providers/vps-x509"),
+        "subject_token_type": "urn:ietf:params:oauth:token-type:mtls",
+        "token_url": "https://sts.googleapis.com/v1/token",
+        "credential_source": {"certificate": {"certificate_config_location": str(cert_cfg)}},
+    }
+    thong_tin.update(ghi_de)
+    cfg = thu_muc / "wif-credential-config.json"
+    cfg.write_text(_json.dumps(thong_tin), encoding="utf-8")
+    return str(cfg)
+
+
+def test_phien_ban_google_auth_ho_tro_X509(tmp_path) -> None:
+    """F-H2B-06: pin >= 2.39.0 va cau hinh X.509 phai parse duoc bang loader THAT."""
+    ga = pytest.importorskip("google.auth")
+    phien_ban = tuple(int(x) for x in ga.__version__.split(".")[:2])
+    assert phien_ban >= (2, 39), f"google-auth {ga.__version__} khong ho tro X.509 WIF"
+
+    p = GoogleWifTokenProvider(_cau_hinh_x509(tmp_path))
+    creds = p._nap(p._duong_dan)  # noqa: SLF001 - co y goi duong nap that
+    from google.auth import identity_pool  # type: ignore[import-not-found]
+
+    assert isinstance(creds, identity_pool.Credentials)
+
+
+def test_nap_KHONG_cham_mang_va_khong_doc_chung_chi(tmp_path) -> None:
+    """Nap chi duoc PARSE. File chung chi khong ton tai ma van nap duoc = khong co I/O nao."""
+    pytest.importorskip("google.auth")
+    duong_dan = _cau_hinh_x509(tmp_path)
+    assert not (tmp_path / "client.pem").exists()
+    GoogleWifTokenProvider(duong_dan)._nap(duong_dan)  # noqa: SLF001
+
+
+def test_credential_source_khong_phai_X509_bi_tu_choi(tmp_path) -> None:
+    """PO decision chot X.509; mot cau hinh 'file'/'url' van chay duoc nhung sai mo hinh da duyet."""
+    pytest.importorskip("google.auth")
+    duong_dan = _cau_hinh_x509(tmp_path, credential_source={"file": "/tmp/subject-token"})
+    with pytest.raises(SigningBackendMisconfigured, match="certificate"):
+        GoogleWifTokenProvider(duong_dan)._nap(duong_dan)  # noqa: SLF001
+
+
+def test_cau_hinh_sai_loai_hoac_thieu_file_la_loi_CAU_HINH(tmp_path) -> None:
+    pytest.importorskip("google.auth")
+    p = GoogleWifTokenProvider(str(tmp_path / "khong-ton-tai.json"))
+    with pytest.raises(SigningBackendMisconfigured):
+        p()
+
+    sai = tmp_path / "sai.json"
+    sai.write_text('{"type": "service_account"}', encoding="utf-8")
+    with pytest.raises(SigningBackendMisconfigured, match="external_account"):
+        GoogleWifTokenProvider(str(sai))._nap(str(sai))  # noqa: SLF001

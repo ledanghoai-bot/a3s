@@ -23,6 +23,8 @@ invariant").
 from __future__ import annotations
 
 import datetime as _dt
+import json
+import pathlib
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -59,18 +61,44 @@ def _lop_ngoai_le(exc: BaseException):
 
 
 def _nap_mac_dinh(duong_dan: str) -> Any:
-    """Nap external-account credentials that qua google-auth (duong production)."""
+    """Nap external-account credentials (X.509 identity pool) — KHONG cham mang, KHONG doc chung chi.
+
+    VI SAO KHONG DUNG `load_credentials_from_file` (do duoc bang thuc nghiem):
+    ham do goi `get_project_id()` NGAY khi nap, va thao tac do keo theo mot vong refresh that ->
+    doc file chung chi va goi STS. Nhu vay "nap" se cham mang ngoai `_lam_moi()`, pha vo dung thiet
+    ke ma correction truoc vua dung (nap mot lan, refresh duoi lock). Ta khong can `project_id` cho
+    viec gi ca.
+
+    `identity_pool.Credentials.from_info` chi PARSE cau hinh. Moi I/O xay ra o `refresh()`.
+    """
     try:
-        from google.auth import (
-            load_credentials_from_file,  # type: ignore[import-not-found]
-        )
+        from google.auth import identity_pool  # type: ignore[import-not-found]
     except ImportError as exc:
         raise SigningBackendMisconfigured(
             f"thieu thu vien google-auth cho luong external-account: {type(exc).__name__}"
         ) from None
-    creds, _ = load_credentials_from_file(
-        duong_dan, scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    return creds
+
+    try:
+        thong_tin = json.loads(pathlib.Path(duong_dan).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SigningBackendMisconfigured(
+            "khong tim thay file cau hinh credential WIF") from None
+    except (OSError, ValueError):
+        raise SigningBackendMisconfigured(
+            "file cau hinh credential WIF khong doc/parse duoc") from None
+
+    if thong_tin.get("type") != "external_account":
+        raise SigningBackendMisconfigured(
+            f"cau hinh credential phai la external_account, nhan {thong_tin.get('type')!r}")
+    # PO decision (WIF-X509-TRUST-SOURCE): nguon danh tinh la CHUNG CHI X.509. Chan som mot cau hinh
+    # dung loai khac (file/url/aws...) — no se chay duoc nhung khong dung mo hinh da duoc duyet.
+    nguon = thong_tin.get("credential_source") or {}
+    if "certificate" not in nguon:
+        raise SigningBackendMisconfigured(
+            "credential_source phai la 'certificate' (X.509) theo PO decision WIF-X509-TRUST-SOURCE")
+
+    return identity_pool.Credentials.from_info(
+        thong_tin, scopes=["https://www.googleapis.com/auth/cloud-platform"])
 
 
 def _yeu_cau_mac_dinh() -> Any:

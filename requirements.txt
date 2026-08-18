@@ -15,4 +15,11 @@ cryptography>=42  # I-B M4-S1: AES-256-GCM cho Trusted Slot Store (app/services/
 # I-B M4 H2-B: luong external-account (Workload Identity Federation) cho Google Cloud KMS.
 # PIN chinh xac: credential flow la duong xac thuc cua production signer — mot ban va bat ngo
 # o day co the doi hanh vi refresh/expiry ma khong ai nhan ra cho toi luc ceremony that bai.
-google-auth==2.35.0
+# F-H2B-06: X.509 Workload Identity Federation chi duoc ho tro tu google-auth >= 2.39.0.
+# Ban truoc pin 2.35.0 — Dev chon so ma KHONG kiem chung tinh nang can dung co trong do khong.
+google-auth==2.56.3
+# Luong X.509 cua google-auth dung transport dua tren `requests` (mTLS). Do duoc bang thuc
+# nghiem: thieu goi nay thi loader bao 'The requests library is not installed ... to use the
+# requests transport'. Du an dung httpx cho phan con lai; day la ngoai le CUA RIENG duong xac
+# thuc Google, khong thay the httpx o cho nao khac.
+requests==2.34.2

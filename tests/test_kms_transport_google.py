@@ -334,3 +334,41 @@ def test_public_key_phai_khai_dung_phien_ban(monkeypatch, khoa, ten_sai) -> None
     _cam_client(monkeypatch, _PhanHoi(200, body))
     with pytest.raises(SigningBackendDenied, match="CryptoKeyVersion"):
         _transport().public_key(_KEY, _VER)
+
+
+# ---------------------------------------------------------------------------
+# F-H2B-07 — transport phai GIU NGUYEN phan loai loi cua token provider
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(("loi", "ma"), [
+    (SigningBackendUnavailable("mat mang"), "backend_unavailable"),
+    (SigningBackendMisconfigured("thieu cau hinh"), "backend_misconfigured"),
+    (SigningBackendDenied("sai quyen"), "backend_denied"),
+])
+@pytest.mark.parametrize("thao_tac", ["sign", "public_key"])
+def test_giu_nguyen_phan_loai_loi_cua_token_provider(monkeypatch, loi, ma, thao_tac) -> None:
+    """Ban truoc bat rong roi doi HET thanh Denied: su co mang bi bao thanh 'sai quyen', va nguoi
+    van hanh se di sua IAM thay vi sua mang."""
+    da_goi = _cam_client(monkeypatch, _PhanHoi(200, {}))
+
+    def _hong():
+        raise loi
+
+    t = _transport(token_provider=_hong)
+    with pytest.raises(type(loi)) as e:
+        getattr(t, thao_tac)(_KEY, _VER, _TRANSCRIPT) if thao_tac == "sign" \
+            else t.public_key(_KEY, _VER)
+    assert e.value.MA == ma, f"{thao_tac}: mat phan loai, nhan {e.value.MA}"
+    assert da_goi == [], "khong duoc phat sinh HTTP request khi lay token that bai"
+
+
+def test_ngoai_le_ngoai_hop_dong_van_duoc_lam_sach(monkeypatch) -> None:
+    """Loi khong thuoc `SigningBackendError` van quy ve Denied, va khong lo chi tiet."""
+    _cam_client(monkeypatch, _PhanHoi(200, {}))
+
+    def _hong():
+        raise RuntimeError(f"chi tiet noi bo {_MARKER}")
+
+    with pytest.raises(SigningBackendDenied) as e:
+        _transport(token_provider=_hong).sign(_KEY, _VER, _TRANSCRIPT)
+    assert e.value.MA == "backend_denied"
+    assert _MARKER not in str(e.value)
