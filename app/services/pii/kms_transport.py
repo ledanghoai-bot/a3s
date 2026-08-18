@@ -18,7 +18,9 @@ sua signer, khong sua `signing_backend.py`, khong sua DB/verifier.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 
+from app.services.pii.google_credentials import GoogleWifTokenProvider
 from app.services.pii.signing_backend import (
     KmsTransport,
     SigningBackendMisconfigured,
@@ -28,10 +30,33 @@ _ENV_TRANSPORT = "M4_KMS_TRANSPORT"
 _ENV_KEY_ID = "M4_KMS_KEY_ID"
 _ENV_KEY_VERSION = "M4_KMS_KEY_VERSION"
 
+# Google Cloud KMS (provider production, PO decision H2B)
+_ENV_GOOGLE_ENDPOINT = "M4_GOOGLE_KMS_ENDPOINT"
+# Duong dan file CAU HINH credential external-account (WIF). File nay KHONG phai bi mat: no chi
+# TRO toi nguon subject-token. Ban than nguon do (chung chi/OIDC assertion) moi la thu can bao ve.
+_ENV_GOOGLE_CRED_CONFIG = "M4_GOOGLE_CREDENTIAL_CONFIG"
+_GOOGLE_ENDPOINT_MAC_DINH = "https://cloudkms.googleapis.com"
+
 # Vault (sandbox-only, xem docstring kms_transport_vault.py)
 _ENV_VAULT_ADDR = "M4_VAULT_ADDR"
 _ENV_VAULT_TOKEN = "M4_VAULT_TOKEN"
 _ENV_VAULT_NAMESPACE = "M4_VAULT_NAMESPACE"
+
+
+def _token_provider_google() -> Callable[[], str]:
+    """Nguon bearer token cho Google KMS — Workload Identity Federation voi X.509 client cert.
+
+    AUTHORITY: `CA-Docs/PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI.md` (APPROVED
+    2026-08-18T11:10:00Z).
+
+    F-H2B-01: ban dau doc thang `M4_GOOGLE_ACCESS_TOKEN` — do la TIEM TOKEN, khong phai WIF, va da
+    bi go han. Gio duong duy nhat la mot file cau hinh external-account do van hanh mount vao
+    TRONG cua so ceremony; ban than file do khong phai bi mat (no chi TRO toi nguon subject-token),
+    con chung chi/khoa rieng thi song trong tmpfs va bi xoa o buoc cleanup.
+
+    Doi tuong tra ve duoc TAI SU DUNG (nap mot lan, cache token) — xem `GoogleWifTokenProvider`.
+    """
+    return GoogleWifTokenProvider(os.environ.get(_ENV_GOOGLE_CRED_CONFIG, "").strip())
 
 
 def get_kms_transport(app_env: str) -> tuple[KmsTransport, str, str]:
@@ -64,6 +89,22 @@ def get_kms_transport(app_env: str) -> tuple[KmsTransport, str, str]:
                 token=os.environ.get(_ENV_VAULT_TOKEN, ""),
                 app_env=app_env,
                 namespace=os.environ.get(_ENV_VAULT_NAMESPACE) or None,
+            ),
+            key_id,
+            key_version,
+        )
+
+    if ten == "google":
+        # Provider PRODUCTION (PO decision H2B). Nhanh RIENG, tuong minh — khong phai fallback cua
+        # nhanh vault va cung khong nhan duoc dinh huong tu no.
+        from app.services.pii.kms_transport_google import GoogleKmsTransport
+
+        return (
+            GoogleKmsTransport(
+                key_id=key_id,
+                token_provider=_token_provider_google(),
+                app_env=app_env,
+                endpoint=os.environ.get(_ENV_GOOGLE_ENDPOINT) or _GOOGLE_ENDPOINT_MAC_DINH,
             ),
             key_id,
             key_version,
