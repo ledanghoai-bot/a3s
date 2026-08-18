@@ -64,6 +64,16 @@ def main() -> int:
          or "roles/iam.workloadIdentityUser" in hcl,
          "chi subject duoc phep moi impersonate signer SA")
 
+    print("=== Nguon tin cay WIF: X.509 (PO decision 18/8/2026, phuong an A) ===")
+    kiem("x509" in cau_hinh and "trust_anchors" in cau_hinh,
+         "provider dung X.509 va co trust anchor cua CA noi bo")
+    kiem("oidc" not in cau_hinh and "issuer_uri" not in cau_hinh,
+         "KHONG con cau hinh OIDC sot lai (PO da chot X.509)")
+    kiem("assertion.subject" in cau_hinh,
+         "danh tinh lay tu SUBJECT cua chung chi, khong phai claim tu khai")
+    kiem("PRIVATE KEY" not in hcl,
+         "trust anchor la PUBLIC material — khong khoa rieng nao trong cau hinh")
+
     print("=== Quyen toi thieu, dung cap ===")
     kiem("google_kms_crypto_key_iam_member" in hcl,
          "quyen gan o cap CRYPTO KEY (khong phai project)")

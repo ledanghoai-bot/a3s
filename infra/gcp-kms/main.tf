@@ -124,21 +124,34 @@ resource "google_iam_workload_identity_pool" "vps" {
   depends_on                = [google_project_service.sts]
 }
 
+# PO decision 18/8/2026: phuong an A — WIF + X.509. Danh tinh cua signer la mot CHUNG CHI CLIENT
+# do CA noi bo cap; VPS giu khoa rieng cua chung chi do.
+#
+# !! CAN DOI CHIEU KHI CHAY PLAN !!
+# Ten khoi/truong cua provider X.509 (`x509`, `trust_store`, `trust_anchors`, `pem_certificate`)
+# duoc viet theo tai lieu, CHUA doi chieu voi provider Terraform that vi may lam viec khong co
+# terraform/gcloud. Provisioning Gate PHAI chay `terraform validate` + `plan` va sua lai neu lech —
+# xem docs/M4-H2B-GOOGLE-KMS-IAM-VA-PROVISIONING-VI.md muc 1. KHONG duoc coi doan nay la da xac minh.
 resource "google_iam_workload_identity_pool_provider" "vps" {
   workload_identity_pool_id          = google_iam_workload_identity_pool.vps.workload_identity_pool_id
   workload_identity_pool_provider_id = var.wif_provider_id
   project                            = var.project_id
 
+  # Danh tinh lay tu SUBJECT cua chung chi, khong phai tu mot claim tu khai.
   attribute_mapping = {
-    "google.subject" = "assertion.sub"
+    "google.subject" = "assertion.subject.dn.cn"
   }
 
-  # Chi DUNG mot subject duoc phep doi token. Thieu dieu kien nay thi bat ky identity nao cua
-  # issuer cung mao danh duoc signer.
-  attribute_condition = "assertion.sub == \"${var.wif_allowed_subject}\""
+  # Chi DUNG mot subject duoc phep doi token. Thieu dieu kien nay thi BAT KY chung chi nao do cung
+  # CA do cap cung mao danh duoc signer — ke ca chung chi cap cho muc dich khac.
+  attribute_condition = "assertion.subject.dn.cn == \"${var.wif_allowed_subject}\""
 
-  oidc {
-    issuer_uri = var.wif_issuer_uri
+  x509 {
+    trust_store {
+      trust_anchors {
+        pem_certificate = var.wif_ca_trust_anchor_pem
+      }
+    }
   }
 }
 

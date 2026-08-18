@@ -16,6 +16,10 @@ Hai điều Dev **không** kiểm chứng được ở bước chuẩn bị này
    vào đó có `scripts/m4_h2b_kiem_provisioning_plan.py`: kiểm **tĩnh** 24 bất biến an toàn, chạy
    được trong CI không cần cloud, và tiếp tục gác khi ai đó sửa Terraform sau này.
 
+3. **Schema Terraform của WIF provider X.509 chưa đối chiếu.** Tên khối/trường (`x509`,
+   `trust_store`, `trust_anchors`, `pem_certificate`) viết theo tài liệu; `terraform validate` ở
+   Provisioning Gate phải xác nhận và sửa nếu lệch. Đã ghi cảnh báo ngay trong `main.tf`.
+
 Thứ **đã** đo được: chuyển PEM → raw 32 byte và verify chữ ký Ed25519 bằng chính `verify_signature`
 của dự án (test `test_public_key_doi_PEM_sang_raw_32_byte`, `test_ky_gui_raw_bytes_...`).
 
@@ -56,6 +60,41 @@ PO decision cấm service-account JSON key lâu dài. WIF provider có `attribut
 Trong code, `GoogleKmsTransport` nhận `token_provider` — chỗ cắm WIF. Dev **cố ý chưa** hiện thực
 đường WIF: không có credential để chạy thử, và viết một đường xác thực không thể kiểm thử là cách
 chắc chắn nhất để nó sai âm thầm.
+
+## 2b. Nguồn tin cậy: WIF + X.509 (PO chốt 18/8/2026)
+
+PO chọn phương án A. Danh tính của signer là **một chứng chỉ client** do CA nội bộ cấp; VPS giữ khóa
+riêng của chứng chỉ đó. Google WIF provider là loại **X.509** với trust store chứa trust anchor của
+CA nội bộ.
+
+### Ranh giới phải giữ
+
+| | |
+|---|---|
+| Thứ nằm trên VPS | khóa riêng của **chứng chỉ** — credential để mạo danh, **không** phải khóa ký |
+| Khóa ký | ở Google KMS, `exportable` không tồn tại như một khả năng, kể cả admin |
+| Kịch bản xấu nhất | kẻ tấn công ký được **cho tới khi thu hồi** — không phải "mất khóa vĩnh viễn" |
+| Năng lực bắt buộc | **thu hồi ngay** mà không cần chạm khóa ký |
+
+### Ba đường thu hồi, từ nhanh tới chậm
+
+1. **Sửa `attribute_condition`** của WIF provider — chặn ngay một CN cụ thể, hiệu lực tức thì, không
+   cần CA nội bộ tham gia. Đây là đường nhanh nhất và nên là phản xạ đầu tiên.
+2. **Thu hồi chứng chỉ** ở CA nội bộ — đúng quy trình PKI, cần CA vận hành được.
+3. **Gỡ `roles/iam.workloadIdentityUser`** khỏi signer SA — chặn toàn bộ đường federation.
+
+Cả ba đều **không** đụng tới khóa ký, nên chữ ký lịch sử vẫn verify được sau khi thu hồi.
+
+### Còn chờ PO chốt — chặn Provisioning Gate, không chặn code
+
+| Câu hỏi | Ảnh hưởng |
+|---|---|
+| Ai vận hành CA nội bộ | ai cấp/thu hồi chứng chỉ; ai chịu trách nhiệm khi cần thu hồi gấp |
+| Thời hạn chứng chỉ | ngắn ⇒ phải xoay thường xuyên; dài ⇒ cửa sổ mạo danh rộng hơn khi lộ |
+| Credential có nằm trên VPS ngoài cửa sổ ceremony không | nếu **không**: nạp lúc ceremony, gỡ ở bước cleanup — bề mặt tấn công gần như biến mất giữa các đợt, đổi lại thêm một bước thủ công mỗi ceremony |
+
+Dev **không** tự chọn ba giá trị này. Adapter không phụ thuộc chúng (`load_credentials_from_file`
+không cần biết hình dạng credential), nhưng runbook vận hành và Provisioning Gate thì có.
 
 ## 3. Kế hoạch provisioning (deliverable 4) — chưa thực thi
 

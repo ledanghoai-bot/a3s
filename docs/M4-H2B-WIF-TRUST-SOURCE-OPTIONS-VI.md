@@ -45,12 +45,31 @@ duyệt. CA bác đúng.
 Nếu PO chọn A, Dev đề nghị kèm: chứng chỉ **thời hạn ngắn**, quy trình xoay định kỳ, và giữ nguyên
 mô hình ceremony (credential chỉ hiện diện trong cửa sổ ceremony, thu hồi sau khi xong).
 
+## 3b. QUYẾT ĐỊNH CỦA PO (18/8/2026)
+
+**PO chọn phương án A — WIF + X.509.**
+
+Hệ quả trực tiếp, ghi lại để không phải suy diễn về sau:
+
+- danh tính của signer là **một chứng chỉ client**; VPS giữ khóa riêng của chứng chỉ đó;
+- Google WIF provider phải là loại **X.509** (trust store chứa trust anchor của CA nội bộ), không
+  phải OIDC;
+- thứ nằm trên VPS là **credential để mạo danh trong thời hạn ngắn**, không phải khóa ký. Khóa ký
+  vẫn ở Google KMS và không export được — kịch bản xấu nhất là "ký được cho tới khi thu hồi", không
+  phải "mất khóa vĩnh viễn";
+- **thu hồi** là năng lực bắt buộc, không phải tùy chọn: phải làm được ngay mà không cần chạm khóa
+  ký.
+
 ## 4. Việc Dev cần PO trả lời
 
-1. Chọn A, B, C hay D.
-2. Nếu A: ai vận hành CA nội bộ, thời hạn chứng chỉ, quy trình thu hồi.
-3. Credential có được phép nằm trên VPS **ngoài** cửa sổ ceremony không, hay phải nạp lúc ceremony
-   rồi gỡ.
+1. ~~Chọn A, B, C hay D.~~ → **đã chốt: A (WIF + X.509)**, 18/8/2026.
+2. **CÒN MỞ** — ai vận hành CA nội bộ, thời hạn chứng chỉ, quy trình thu hồi.
+3. **CÒN MỞ** — credential có được phép nằm trên VPS **ngoài** cửa sổ ceremony không, hay phải nạp
+   lúc ceremony rồi gỡ.
+
+Hai câu còn mở **không chặn phần code** (adapter chỉ gọi `load_credentials_from_file`, không cần
+biết hình dạng credential), nhưng **chặn runbook vận hành** và **chặn Provisioning Gate** — vì
+chúng quyết định vòng đời chứng chỉ và ai chịu trách nhiệm.
 
 ## 5. Trạng thái code trong lúc chờ
 

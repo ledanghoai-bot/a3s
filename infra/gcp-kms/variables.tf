@@ -33,14 +33,14 @@ variable "wif_provider_id" {
   type = string
 }
 
-variable "wif_issuer_uri" {
+variable "wif_ca_trust_anchor_pem" {
   type        = string
-  description = "OIDC issuer cua danh tinh tren VPS"
+  description = "Chung chi CA noi bo (PEM) lam trust anchor. Day la PUBLIC material — khong phai bi mat."
 }
 
 variable "wif_allowed_subject" {
   type        = string
-  description = "DUY NHAT subject duoc phep doi token sang signer SA"
+  description = "CN trong subject cua chung chi signer — DUY NHAT gia tri duoc phep doi token"
 }
 
 variable "log_sink_name" {
