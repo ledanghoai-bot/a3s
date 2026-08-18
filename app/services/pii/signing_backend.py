@@ -77,19 +77,45 @@ _PRODUCTION_APP_ENVS = frozenset({"production", "prod", "staging"})
 
 
 class SigningBackendError(Exception):
-    """Goc cua moi loi backend. Caller chi can bat class nay de fail-closed."""
+    """Goc cua moi loi backend. Caller chi can bat class nay de fail-closed.
+
+    `MA` la MA LOI AN TOAN — thu DUY NHAT duoc phep di ra khoi tien trinh signer (F-H2-KMS-02).
+    Thong diep chi tiet cua nha cung cap KHONG BAO GIO duoc chuyen tiep: contract nay trung lap
+    nha cung cap, nen khong the lay hanh vi cua MOT provider (vd "Vault khong echo input") lam
+    bao dam cho MOI provider/proxy/cau hinh sai trong tuong lai. Chi tiet chan doan thuoc ve kenh
+    audit cua chinh KMS, khong phai payload cua giao thuc collector.
+    """
+
+    MA = "backend_error"
 
 
 class SigningBackendUnavailable(SigningBackendError):
     """Backend khong tra loi duoc (timeout, mat mang, KMS down). PHAI dan den KHONG ghi sample."""
 
+    MA = "backend_unavailable"
+
 
 class SigningBackendDenied(SigningBackendError):
     """Backend tu choi thao tac (policy/quyen). Vd: co export private key -> phai bi tu choi."""
 
+    MA = "backend_denied"
+
+
+class SigningBackendKeyUnusable(SigningBackendError):
+    """Khoa/phien ban ton tai nhung KHONG dung ky duoc (bi vo hieu, het han, sai muc dich).
+
+    Tach rieng khoi `Denied` vi huong xu ly khac han: `Denied` la van de QUYEN (sua policy/token),
+    con day la van de VONG DOI KHOA (cong bo phien ban moi, doi key_version). Nguoi van hanh doc
+    ma loi phai biet ngay minh can lam gi ma khong can doc text cua provider.
+    """
+
+    MA = "backend_key_disabled"
+
 
 class SigningBackendMisconfigured(SigningBackendError):
     """Cau hinh sai — vd co dung LocalDevBackend o production. Fail o startup, khong fail giua chung."""
+
+    MA = "backend_misconfigured"
 
 
 @runtime_checkable
@@ -136,6 +162,23 @@ def verify_signature(public_key_raw: bytes, message: bytes, signature: bytes) ->
     return True
 
 
+def assert_khong_phai_production(app_env: str, ten_backend: str) -> None:
+    """Guard DUNG CHUNG cho moi backend CHI-DANH-CHO-SANDBOX (F-H2-KMS-01).
+
+    Truoc correction nay, chi `LocalDevBackend` co guard production, con transport Vault thi khong:
+    mot deployment cau hinh TUONG MINH `kms + vault` van chay duoc o production/staging, trai voi
+    PO delivery path (Vault/VPS la sandbox-only). "Khong co mac dinh" khong ngan duoc cau hinh sai
+    tuong minh — nen ranh buoc phai nam trong CODE.
+
+    Dinh nghia "production" nam DUY NHAT o `_PRODUCTION_APP_ENVS`, de them mot backend sandbox moi
+    khong the vo tinh dung mot danh sach khac.
+    """
+    if app_env.strip().lower() in _PRODUCTION_APP_ENVS:
+        raise SigningBackendMisconfigured(
+            f"{ten_backend} bi tu choi: app_env={app_env!r} la moi truong production. "
+            "Backend nay chi duoc dung o sandbox/CI.")
+
+
 def _assert_localdev_allowed(app_env: str) -> None:
     """Guard fail-closed: LocalDevBackend chi song duoc trong sandbox/CI.
 
@@ -146,10 +189,9 @@ def _assert_localdev_allowed(app_env: str) -> None:
         raise SigningBackendMisconfigured(
             f"LocalDevBackend bi tu choi: thieu {_ENV_ALLOW_LOCALDEV}=1 (khoa nam trong RAM, "
             "chi duoc dung o sandbox/CI)")
-    if app_env.strip().lower() in _PRODUCTION_APP_ENVS:
-        raise SigningBackendMisconfigured(
-            f"LocalDevBackend bi tu choi: app_env={app_env!r} la moi truong production. "
-            "PO decision record §2: dev-mode bi cam cho production.")
+    # PO decision record §2: dev-mode bi cam cho production. Dung CHUNG guard voi cac backend
+    # sandbox khac (vd transport Vault) de chi co MOT dinh nghia ve "production".
+    assert_khong_phai_production(app_env, "LocalDevBackend")
 
 
 class LocalDevBackend:

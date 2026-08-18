@@ -202,6 +202,7 @@ import redis.asyncio as aioredis
 from app.config import settings
 from app.services.pii.canonicalize import canonicalize
 from app.services.pii.crypto import SlotCryptoError, _load_key, sign_capture
+from app.services.pii.kms_transport import get_kms_transport
 from app.services.pii.signing_backend import (
     SIGNATURE_ALGORITHM,
     SigningBackend,
@@ -226,7 +227,15 @@ def _signing_backend() -> SigningBackend:
     """
     global _BACKEND
     if _BACKEND is None:
-        _BACKEND = get_signing_backend(app_env=settings.app_env)
+        # H2 (directive KMS-SANDBOX-ADAPTER): che do `kms` can mot `KmsTransport` duoc cam vao.
+        # Transport do duoc chon TUONG MINH qua `M4_KMS_TRANSPORT` — signer khong biet ten nha
+        # cung cap nao, va khong co duong lui sang backend khac neu provider loi.
+        if os.environ.get("M4_SIGNING_BACKEND", "").strip().lower() == "kms":
+            transport, key_id, key_version = get_kms_transport(settings.app_env)
+            _BACKEND = get_signing_backend(app_env=settings.app_env, transport=transport,
+                                           key_id=key_id, key_version=key_version)
+        else:
+            _BACKEND = get_signing_backend(app_env=settings.app_env)
     return _BACKEND
 
 _MAX_FRAME_BYTES = 1_000_000  # 1MB - du cho 1 tin nhan da cat toi da MAX_BYTES + metadata JSON
@@ -433,7 +442,11 @@ async def _handle_request(req: dict) -> dict:
     # do se tao ra sample khong co bang chung quy trach nhiem ma khong ai biet, dung thu H2 sinh ra
     # de loai bo.
     backend = _signing_backend()
-    signature_asym = backend.sign(transcript_bytes)
+    # H2: voi backend KMS, `sign()` la mot loi goi MANG dong bo. Chay thang trong coroutine se CHAN
+    # ca event loop cua signer (moi request khac phai xep hang sau no). Day sang thread giu nguyen
+    # contract dong bo cua `SigningBackend` (CA da duyet o F-H2A-01) ma khong danh doi thong luong.
+    # Voi LocalDevBackend thi day chi la mot lop mong khong dang ke.
+    signature_asym = await asyncio.to_thread(backend.sign, transcript_bytes)
 
     return {
         "ok": True,
@@ -558,8 +571,28 @@ async def _handle_conn_authorized(reader: asyncio.StreamReader, writer: asyncio.
     req = json.loads(raw_req.decode("utf-8"))
     try:
         resp = await _handle_request(req)
-    except (SlotCryptoError, SigningAuthorizationError, KeyError, ValueError, TypeError) as e:
+    except SigningBackendError as e:
+        # F-H2-KMS-02: CHI ma loi da chuan hoa di ra khoi tien trinh nay. Thong diep chi tiet cua
+        # nha cung cap KHONG duoc chuyen tiep — contract trung lap nha cung cap nen khong the lay
+        # hanh vi cua MOT provider ("Vault khong echo input") lam bao dam cho moi provider/proxy/
+        # cau hinh sai sau nay. Nguoi van hanh van phan biet duoc unavailable / denied /
+        # key-disabled qua `e.MA`; chan doan day du thuoc kenh audit cua chinh KMS.
+        _log("m4_signing_request_rejected", error_type=type(e).__name__, ma=e.MA)
+        resp = {"ok": False, "error": e.MA}
+    except (SlotCryptoError, SigningAuthorizationError,
+            KeyError, ValueError, TypeError) as e:
         # T11-03: chi log error_type/thong diep KHONG chua plaintext - khong bao gio raw_content.
+        #
+        # H2: `SigningBackendError` duoc THEM vao day sau khi kich ban KMS E2E lo ra van de: backend
+        # KMS loi (mat ket noi / sai quyen / khoa bi vo hieu) nem ngoai le KHONG nam trong danh sach
+        # nay, nen no thoat len `_handle_conn` va chi lam DONG ket noi. Collector khi do chi thay
+        # `IncompleteReadError: 0 bytes read` — CA BA nguyen nhan khac nhau cho ra CUNG mot thong
+        # diep mu, dung loai "loi transport mu" ma F-A12-01 da phai sua mot lan.
+        #
+        # Voi backend trong-tien-trinh (LocalDev) thi cac loi nay gan nhu khong xay ra; voi KMS THAT
+        # thi chung la su kien VAN HANH BINH THUONG (mang chap chon, token het han, khoa vua xoay).
+        # Nguoi van hanh phai doc duoc LY DO. Fail-closed khong doi: client van nem
+        # `SigningServiceError` va fenced unit van khong commit sample nao.
         _log("m4_signing_request_rejected", error_type=type(e).__name__)
         resp = {"ok": False, "error": str(e)}
     await _write_frame(writer, json.dumps(resp).encode("utf-8"))
