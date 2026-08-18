@@ -144,6 +144,19 @@ services:
       - M4_SAMPLE_KEY_B64_FILE=/run/m4-signing-secrets/sample_key
       - M4_TRANSCRIPT_HMAC_KEY_B64_FILE=/run/m4-signing-secrets/transcript_hmac_key
       - M4_SIGNING_AUTH_VERIFY_KEY_B64_FILE=/run/m4-signing-secrets/signing_auth_key
+      # H2-A-2: backend ky bat doi xung. KHONG co gia tri mac dinh, va `:?` lam `docker compose up`
+      # THAT BAI NGAY neu chua chon — som hon nhieu so voi loi luc ky.
+      #
+      # Vi sao o day dung interpolation trong khi F-MIG-02-AUTHORITY-01 cam no cho MIGRATE_ACTOR:
+      # hai thu khac ban chat. `MIGRATE_ACTOR` co MOT gia tri dung duy nhat cho deploy path
+      # ('deploy-pipeline'), nen hard-code duoc va moi interpolation deu la lo hong. Con backend ky
+      # la mot LUA CHON HA TANG ma PO chua chot (PO decision record §2: uu tien managed/cloud KMS);
+      # khong co gia tri nao de hard-code, va bia ra mot gia tri se te hon nhieu.
+      #
+      # HE QUA VAN HANH, Dev neu ro: cho toi khi PO chot backend va adapter KMS ton tai, ceremony
+      # M4 tren production KHONG chay duoc — canary probe se hong o buoc dau. Do la fail-closed co
+      # y, khong phai su co.
+      - M4_SIGNING_BACKEND=${M4_SIGNING_BACKEND:?H2-A-2 - phai chon backend ky bat doi xung truoc khi start signer (xem docs/MIGRATION-PIPELINE-VI.md va bao cao H2-A-2)}
     volumes:
       - m4_signing_socket:/run/m4-signing
       - /run/m4-signing-secrets:/run/m4-signing-secrets:ro

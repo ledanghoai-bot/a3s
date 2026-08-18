@@ -202,6 +202,31 @@ import redis.asyncio as aioredis
 from app.config import settings
 from app.services.pii.canonicalize import canonicalize
 from app.services.pii.crypto import SlotCryptoError, _load_key, sign_capture
+from app.services.pii.signing_backend import (
+    SIGNATURE_ALGORITHM,
+    SigningBackend,
+    get_signing_backend,
+)
+
+# H2-A-2: backend ky bat doi xung, khoi tao MOT LAN va giu trong tien trinh signer.
+#
+# Vi sao lazy + cache thay vi khoi tao o import: de loi cau hinh xuat hien nhu mot loi cua REQUEST
+# (fail-closed, co the quan sat trong log/canary) thay vi lam module khong import duoc. Nhung mot
+# khi da khoi tao thi giu nguyen — khong doc lai env giua chung, tranh viec doi backend am tham.
+_BACKEND: SigningBackend | None = None
+
+
+def _signing_backend() -> SigningBackend:
+    """Tra backend dang dung; khoi tao lan dau qua factory FAIL-CLOSED.
+
+    `get_signing_backend` khong co gia tri mac dinh: thieu/sai `M4_SIGNING_BACKEND` -> raise. Do la
+    co y — sau H2-A-2, signer KHONG chay duoc neu chua chon backend, va do chinh la rang buoc buoc
+    PO phai chot KMS truoc ceremony ke tiep (xem bao cao H2-A-2 §"He qua van hanh").
+    """
+    global _BACKEND
+    if _BACKEND is None:
+        _BACKEND = get_signing_backend(app_env=settings.app_env)
+    return _BACKEND
 
 _MAX_FRAME_BYTES = 1_000_000  # 1MB - du cho 1 tin nhan da cat toi da MAX_BYTES + metadata JSON
 _SOCKET_FILE_MODE = 0o600
@@ -395,6 +420,20 @@ async def _handle_request(req: dict) -> dict:
         canonical_len=len(canonical_text), truncated=was_truncated,
         txid=req["txid"], purpose_code=req["purpose_code"],
     )
+
+    # H2-A-2: THE THU HAI — chu ky BAT DOI XUNG tren DUNG `transcript_bytes` vua ky bang HMAC.
+    #
+    # Ky tren cung mot chuoi byte la co y: hai the khong the noi ve hai noi dung khac nhau. HMAC
+    # phuc vu cong chan cua DB (`m4_stage0p_record_sample` tu verify); Ed25519 phuc vu QUY TRACH
+    # NHIEM va duoc verify NGOAI DB bang public key.
+    #
+    # FAIL-CLOSED: backend loi (KMS chet, policy tu choi, cau hinh sai) -> nem loi -> request that
+    # bai -> collector KHONG ghi sample nao. KHONG co duong lui "tam thoi chi ghi HMAC": duong lui
+    # do se tao ra sample khong co bang chung quy trach nhiem ma khong ai biet, dung thu H2 sinh ra
+    # de loai bo.
+    backend = _signing_backend()
+    signature_asym = backend.sign(transcript_bytes)
+
     return {
         "ok": True,
         "ciphertext_b64": base64.b64encode(blob).decode("ascii"),
@@ -404,6 +443,10 @@ async def _handle_request(req: dict) -> dict:
         "canonical_len": len(canonical_text),
         "truncated": was_truncated,
         "canonical_digest_hex": canonical_digest_hex,
+        "signature_asym_b64": base64.b64encode(signature_asym).decode("ascii"),
+        "sig_alg": SIGNATURE_ALGORITHM,
+        "sig_key_id": backend.key_id(),
+        "sig_key_ver": backend.key_version(),
     }
 
 

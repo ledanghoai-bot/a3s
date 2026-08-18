@@ -230,6 +230,21 @@ async def _run_fenced_unit(collector_conn, pending_conn, *, batch_id, conversati
             signed.transcript, signed.signature, signed.key_version,
             timeout=DB_STATEMENT_TIMEOUT_SECONDS,
         )
+        # H2-A-2: LUU the bat doi xung, trong CUNG fenced unit voi `record_sample`.
+        #
+        # Truoc H2-A, transcript/chu ky bi VUT sau khi `record_sample` verify xong — nghia la
+        # khong ai re-verify duoc mot mau nao sau khi capture. Doan nay la cho bang chung bat dau
+        # duoc GIU LAI (bang `m4_stage0p_record_transcript_signature`, migration 044).
+        #
+        # Neu loi o day thi ngoai le thoat ra khoi fenced unit -> unit that bai -> candidate KHONG
+        # chuyen sang 'committed'. Do la fail-closed dung huong: tha khong co sample con hon co
+        # sample ma khong co bang chung quy trach nhiem.
+        await collector_conn.execute(
+            "SELECT m4_stage0p_record_transcript_signature($1,$2,$3,$4,$5,$6)",
+            sample_id, signed.transcript, signed.signature_asym,
+            signed.sig_alg, signed.sig_key_id, signed.sig_key_ver,
+            timeout=DB_STATEMENT_TIMEOUT_SECONDS,
+        )
         return {"status": "ok", "truncated": signed.truncated}
 
 
