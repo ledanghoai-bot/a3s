@@ -85,16 +85,54 @@ CA nội bộ.
 
 Cả ba đều **không** đụng tới khóa ký, nên chữ ký lịch sử vẫn verify được sau khi thu hồi.
 
-### Còn chờ PO chốt — chặn Provisioning Gate, không chặn code
+### PO đã chốt (18/8/2026)
 
-| Câu hỏi | Ảnh hưởng |
+| Câu hỏi | Quyết định |
 |---|---|
-| Ai vận hành CA nội bộ | ai cấp/thu hồi chứng chỉ; ai chịu trách nhiệm khi cần thu hồi gấp |
-| Thời hạn chứng chỉ | ngắn ⇒ phải xoay thường xuyên; dài ⇒ cửa sổ mạo danh rộng hơn khi lộ |
-| Credential có nằm trên VPS ngoài cửa sổ ceremony không | nếu **không**: nạp lúc ceremony, gỡ ở bước cleanup — bề mặt tấn công gần như biến mất giữa các đợt, đổi lại thêm một bước thủ công mỗi ceremony |
+| Ai vận hành CA nội bộ | **CA offline tự dựng, đặt trên máy PO.** Khóa riêng của CA **không bao giờ** lên VPS, không lên cloud |
+| Credential trên VPS ngoài cửa sổ ceremony | **KHÔNG.** Nạp lúc ceremony, **gỡ ở bước cleanup** |
+| Thời hạn chứng chỉ | Dev đề xuất **24 giờ** (xem lập luận dưới) — PO/CA bác được ở Provisioning Gate |
 
-Dev **không** tự chọn ba giá trị này. Adapter không phụ thuộc chúng (`load_credentials_from_file`
-không cần biết hình dạng credential), nhưng runbook vận hành và Provisioning Gate thì có.
+Hai quyết định này ăn khớp nhau và làm phương án A mạnh hơn hẳn bản mặc định: giữa các đợt ceremony,
+**trên VPS không có credential nào cả**. Kẻ chiếm được VPS ngoài cửa sổ ceremony không tìm thấy thứ
+gì để mạo danh — tương tự cách "Vault sealed ngoài ceremony" từng được cân nhắc ở giai đoạn sandbox,
+nhưng lần này không cần thêm hạ tầng nào.
+
+**Vì sao đề xuất 24 giờ**: credential đã bị gỡ sau mỗi ceremony nên thời hạn chứng chỉ chỉ còn là
+lớp phòng vệ *thứ hai* (phòng khi bước gỡ thất bại hoặc bản sao bị bỏ quên). 24 giờ đủ rộng cho một
+ceremony có sự cố phải chạy lại, và đủ hẹp để một bản sao bị bỏ quên tự hết hiệu lực trước lần
+ceremony sau. Ngắn hơn (vd 1 giờ) sẽ làm ceremony bị gián đoạn khi phải chờ điều tra giữa chừng.
+
+### Quy trình vận hành chứng chỉ
+
+**Dựng CA — một lần, trên máy PO, offline:**
+
+1. sinh khóa CA + self-signed cert, **có mật khẩu bảo vệ khóa**;
+2. giữ khóa CA trên máy PO + một bản offline; **không** sao lên VPS, không lên cloud, không vào repo;
+3. chỉ **chứng chỉ CA** (public, PEM) được dùng làm trust anchor trong Terraform.
+
+**Mỗi ceremony:**
+
+| Bước | Việc | Ai |
+|---|---|---|
+| 1 | cấp chứng chỉ signer, CN = đúng giá trị `wif_allowed_subject`, hạn 24h | PO (máy offline) |
+| 2 | chuyển chứng chỉ + khóa riêng lên VPS qua kênh an toàn, quyền `0600`, đúng UID signer | PO |
+| 3 | chạy ceremony | theo runbook M4 |
+| 4 | **gỡ** chứng chỉ + khóa riêng khỏi VPS | bước **bắt buộc** của cleanup |
+| 5 | xác nhận đã gỡ (kiểm read-only) | Dev/PO |
+
+**Bước 4 phải nằm trong cùng checklist cleanup** với `capture_enabled=false` và thu hồi token —
+nếu tách ra, sớm muộn nó bị quên, và bài học `signing.sock` sót lại từ Amendment 16 đã cho thấy điều
+đó xảy ra thật.
+
+**Bất biến dormant mới, kiểm được read-only:** giữa các ceremony, trên VPS **không tồn tại** file
+credential nào của WIF. Đề nghị đưa phép kiểm này vào cùng bộ với "signer/init absent" và
+"signing-secret mount absent" đang dùng.
+
+### Thu hồi
+
+Ba đường ở trên vẫn nguyên. Với mô hình nạp-rồi-gỡ, còn thêm một đường thứ tư, nhanh nhất và không
+cần ai cấp quyền: **không nạp credential** cho ceremony kế tiếp.
 
 ## 3. Kế hoạch provisioning (deliverable 4) — chưa thực thi
 

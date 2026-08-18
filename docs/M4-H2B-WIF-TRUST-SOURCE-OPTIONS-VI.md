@@ -63,9 +63,11 @@ Hệ quả trực tiếp, ghi lại để không phải suy diễn về sau:
 ## 4. Việc Dev cần PO trả lời
 
 1. ~~Chọn A, B, C hay D.~~ → **đã chốt: A (WIF + X.509)**, 18/8/2026.
-2. **CÒN MỞ** — ai vận hành CA nội bộ, thời hạn chứng chỉ, quy trình thu hồi.
-3. **CÒN MỞ** — credential có được phép nằm trên VPS **ngoài** cửa sổ ceremony không, hay phải nạp
-   lúc ceremony rồi gỡ.
+2. ~~ai vận hành CA nội bộ~~ → **CA offline tự dựng trên máy PO**, 18/8/2026.
+3. ~~credential nằm trên VPS ngoài ceremony?~~ → **KHÔNG** — nạp lúc ceremony, gỡ ở cleanup.
+
+Thời hạn chứng chỉ: Dev đề xuất **24 giờ**, lập luận ở
+`M4-H2B-GOOGLE-KMS-IAM-VA-PROVISIONING-VI.md` §2b. PO/CA bác được ở Provisioning Gate.
 
 Hai câu còn mở **không chặn phần code** (adapter chỉ gọi `load_credentials_from_file`, không cần
 biết hình dạng credential), nhưng **chặn runbook vận hành** và **chặn Provisioning Gate** — vì
