@@ -70,6 +70,41 @@ Capture của M4 là hoạt động **theo đợt**, không thường trực. Kh
 Đưa "backend đã seal/không truy cập được" vào **cùng checklist dormant** với `capture_enabled=false`
 — nếu không, trạng thái mở sẽ trôi qua nhiều tuần mà không ai để ý.
 
+## 5b. Hai ràng buộc code do CA yêu cầu (F-H2-KMS-01 / F-H2-KMS-02)
+
+### Backend sandbox không thể sống ở production
+
+`assert_khong_phai_production()` trong `signing_backend.py` là **định nghĩa duy nhất** về
+"production" (`production`, `prod`, `staging`), dùng chung cho `LocalDevBackend` và
+`VaultTransitTransport`. Guard nằm trong **hàm khởi tạo** của transport — điểm không thể bỏ qua —
+nên ngay cả khi ai đó cấu hình **tường minh** `M4_KMS_TRANSPORT=vault` trên production thì signer
+vẫn ném `SigningBackendMisconfigured` **trước bất kỳ request HTTP nào**.
+
+"Không có mặc định" chỉ chặn được sự lười; nó không chặn được cấu hình sai tường minh. Đây là ràng
+buộc thứ hai, độc lập.
+
+Provider của giai đoạn 2 sẽ có **nhánh explicit riêng** trong factory. Guard này **không** được
+biến thành fallback: không có đường "production thì tự chuyển sang provider khác".
+
+### Chi tiết chẩn đoán của provider không đi qua giao thức collector
+
+Thứ duy nhất rời khỏi tiến trình signer là một **mã lỗi an toàn**:
+
+| Mã | Nghĩa | Người vận hành cần làm gì |
+|---|---|---|
+| `backend_unavailable` | không gọi được backend (mạng, timeout, 5xx) | kiểm hạ tầng/kết nối |
+| `backend_denied` | bị từ chối quyền, credential sai, khóa không tồn tại | kiểm policy/token |
+| `backend_key_disabled` | khóa/phiên bản tồn tại nhưng không ký được | kiểm vòng đời khóa, công bố phiên bản mới |
+| `backend_misconfigured` | cấu hình sai (vd backend sandbox ở production) | sửa cấu hình triển khai |
+
+Việc **phân loại** là kiến thức riêng của từng adapter và nằm trọn trong file adapter đó; text của
+provider không bao giờ được chuyển tiếp, kể cả vào log. Lý do: contract này trung lập nhà cung cấp,
+nên không thể lấy hành vi của *một* provider ("Vault không echo input") làm bảo đảm cho mọi
+provider, proxy hay cấu hình sai trong tương lai — đó cũng là nguyên tắc T11-03.
+
+**Chẩn đoán đầy đủ** (nguyên văn lỗi provider) chỉ tồn tại ở **audit/kênh vận hành của chính KMS**,
+và cách truy cập kênh đó thuộc quyết định của PO ở giai đoạn managed KMS.
+
 ## 6. Timeout và retry
 
 - Transport dùng timeout ngắn (mặc định 5s). Backend treo phải thành "không ký được" **nhanh**, vì

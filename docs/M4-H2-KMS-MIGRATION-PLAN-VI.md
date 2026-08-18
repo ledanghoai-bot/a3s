@@ -78,6 +78,18 @@ Cả hai lớp đều là `SigningBackendError` ⇒ fenced unit thất bại ⇒
 để người vận hành đọc log biết nên sửa hạ tầng hay sửa cấu hình — nên adapter mới **phải** đính kèm
 thông điệp gốc của provider (đã cắt ngắn, không chứa nội dung được ký).
 
+## 5b. Hai ràng buộc adapter mới BẮT BUỘC giữ
+
+1. **Guard môi trường.** Nếu provider mới cũng là sandbox-only, hàm khởi tạo của nó phải gọi
+   `assert_khong_phai_production(app_env, "<tên>")`. Nếu là provider production thì **không** thêm
+   guard đó, nhưng cũng **không** được sửa/nới guard của backend sandbox — mỗi provider là một
+   nhánh explicit riêng trong factory, không bao giờ là fallback của nhau.
+2. **Chỉ phát mã lỗi an toàn.** Adapter tự phân loại lỗi provider thành
+   `backend_unavailable` / `backend_denied` / `backend_key_disabled` / `backend_misconfigured`
+   (bảng ở `M4-H2-KMS-THREAT-MODEL-VA-RUNBOOK-VI.md` §5b) và **không** đưa text của provider vào
+   thông điệp ngoại lệ hay log. Kịch bản E2E khẳng định trên mã, nên adapter nào ánh xạ đúng thì
+   chạy được ngay mà không phải sửa kịch bản.
+
 ## 6. Chuyển khóa: không migrate khóa, chỉ rotate
 
 Khóa sandbox **không bao giờ** được mang sang production (PO decision, mục Ràng buộc). Đường đi

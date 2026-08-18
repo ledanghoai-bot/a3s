@@ -231,7 +231,7 @@ def _signing_backend() -> SigningBackend:
         # Transport do duoc chon TUONG MINH qua `M4_KMS_TRANSPORT` — signer khong biet ten nha
         # cung cap nao, va khong co duong lui sang backend khac neu provider loi.
         if os.environ.get("M4_SIGNING_BACKEND", "").strip().lower() == "kms":
-            transport, key_id, key_version = get_kms_transport()
+            transport, key_id, key_version = get_kms_transport(settings.app_env)
             _BACKEND = get_signing_backend(app_env=settings.app_env, transport=transport,
                                            key_id=key_id, key_version=key_version)
         else:
@@ -571,7 +571,15 @@ async def _handle_conn_authorized(reader: asyncio.StreamReader, writer: asyncio.
     req = json.loads(raw_req.decode("utf-8"))
     try:
         resp = await _handle_request(req)
-    except (SlotCryptoError, SigningAuthorizationError, SigningBackendError,
+    except SigningBackendError as e:
+        # F-H2-KMS-02: CHI ma loi da chuan hoa di ra khoi tien trinh nay. Thong diep chi tiet cua
+        # nha cung cap KHONG duoc chuyen tiep — contract trung lap nha cung cap nen khong the lay
+        # hanh vi cua MOT provider ("Vault khong echo input") lam bao dam cho moi provider/proxy/
+        # cau hinh sai sau nay. Nguoi van hanh van phan biet duoc unavailable / denied /
+        # key-disabled qua `e.MA`; chan doan day du thuoc kenh audit cua chinh KMS.
+        _log("m4_signing_request_rejected", error_type=type(e).__name__, ma=e.MA)
+        resp = {"ok": False, "error": e.MA}
+    except (SlotCryptoError, SigningAuthorizationError,
             KeyError, ValueError, TypeError) as e:
         # T11-03: chi log error_type/thong diep KHONG chua plaintext - khong bao gio raw_content.
         #
@@ -586,7 +594,7 @@ async def _handle_conn_authorized(reader: asyncio.StreamReader, writer: asyncio.
         # Nguoi van hanh phai doc duoc LY DO. Fail-closed khong doi: client van nem
         # `SigningServiceError` va fenced unit van khong commit sample nao.
         _log("m4_signing_request_rejected", error_type=type(e).__name__)
-        resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        resp = {"ok": False, "error": str(e)}
     await _write_frame(writer, json.dumps(resp).encode("utf-8"))
 
 

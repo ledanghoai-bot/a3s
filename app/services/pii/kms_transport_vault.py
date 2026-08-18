@@ -33,7 +33,9 @@ import httpx
 
 from app.services.pii.signing_backend import (
     SigningBackendDenied,
+    SigningBackendKeyUnusable,
     SigningBackendUnavailable,
+    assert_khong_phai_production,
 )
 
 # Vault tra chu ky dang "vault:v<n>:<base64>" — tien to nay la mot phan giao thuc, khong phai rac.
@@ -41,25 +43,38 @@ _SIG_PREFIX = "vault"
 _DEFAULT_TIMEOUT_SECONDS = 5.0
 
 
-def _thong_diep_loi(resp) -> str:
-    """Trich thong diep loi cua Vault, mot dong, cat ngan.
+# Dau hieu RIENG CUA VAULT dung de PHAN LOAI trong noi bo adapter. Chung KHONG BAO GIO roi khoi
+# file nay: thu duy nhat di ra ngoai la mot lop ngoai le mang MA LOI AN TOAN.
+#
+# Vi sao phai doc text: Vault tra HTTP 500 cho ca truong hop CAU HINH (ky bang phien ban khoa da bi
+# vo hieu) lan truong hop ha tang. Neu khong phan loai, nguoi van hanh se di sua HA TANG trong khi
+# nguyen nhan nam o VONG DOI KHOA. Viec doc text la kien thuc RIENG cua adapter — dung cho mot
+# adapter phai lam — va no duoc gioi han trong dung mot ham.
+_DAU_HIEU_KHOA_KHONG_DUNG_DUOC = (
+    "minimum encryption key version",
+    "key version disabled",
+    "is disabled",
+)
 
-    VI SAO CAN: Vault tra HTTP 500 cho ca truong hop CAU HINH sai — vd ky bang mot phien ban khoa
-    da bi vo hieu (`min_encryption_version`). Neu chi bao "HTTP 500" thi nguoi van hanh se di sua
-    HA TANG trong khi nguyen nhan that nam o CAU HINH KHOA. Do duoc bang thuc nghiem: body tra ve
-    "requested version for signing is less than the minimum encryption key version".
 
-    AN TOAN: Vault khong bao gio echo `input` (noi dung duoc ky) trong thong diep loi — da kiem
-    tra truc tiep. Van cat ngan de mot backend viet sai khong the bien log thanh kenh ro ri.
+def _phan_loai_loi(resp) -> type[SigningBackendUnavailable] | type[SigningBackendDenied] | type[SigningBackendKeyUnusable]:
+    """Chon LOP ngoai le tu phan hoi loi cua Vault. KHONG tra ve text nao.
+
+    Quy tac:
+      * 403/404 -> `Denied` (quyen/khong ton tai);
+      * 400 -> `Denied`, tru khi noi dung cho thay khoa khong dung duoc;
+      * 5xx -> `Unavailable`, tru khi noi dung cho thay khoa khong dung duoc -> `KeyUnusable`.
     """
     try:
         loi = (resp.json() or {}).get("errors") or []
-    except Exception:  # noqa: BLE001 - body khong phai JSON thi khong co goi y nao
-        return ""
-    if not loi:
-        return ""
-    gon = " ".join(str(loi[0]).split())
-    return f": {gon[:160]}" if gon else ""
+        gop = " ".join(str(x) for x in loi).lower()
+    except Exception:  # noqa: BLE001 - body khong phai JSON thi khong phan loai sau duoc
+        gop = ""
+    if any(d in gop for d in _DAU_HIEU_KHOA_KHONG_DUNG_DUOC):
+        return SigningBackendKeyUnusable
+    if resp.status_code in (400, 403, 404):
+        return SigningBackendDenied
+    return SigningBackendUnavailable
 
 
 class VaultTransitTransport:
@@ -70,13 +85,17 @@ class VaultTransitTransport:
     qua tot hon, chi giu lock DB lau hon.
     """
 
-    def __init__(self, *, base_url: str, token: str,
+    def __init__(self, *, base_url: str, token: str, app_env: str,
                  timeout: float = _DEFAULT_TIMEOUT_SECONDS,
                  verify: bool | str = True, namespace: str | None = None) -> None:
         if not base_url:
             raise SigningBackendDenied("thieu dia chi Vault")
         if not token:
             raise SigningBackendDenied("thieu token Vault")
+        # F-H2-KMS-01: Vault la SANDBOX-ONLY theo PO delivery path. Guard dat trong ham khoi tao —
+        # diem khong the bo qua — nen khong the co duong nao tao ra transport nay o production, ke
+        # ca khi ai do cau hinh tuong minh `M4_KMS_TRANSPORT=vault`. Nem TRUOC moi request HTTP.
+        assert_khong_phai_production(app_env, "VaultTransitTransport")
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._verify = verify
@@ -101,11 +120,10 @@ class VaultTransitTransport:
         except Exception as exc:  # noqa: BLE001 - khong dua URL/token vao thong diep
             raise SigningBackendUnavailable(
                 f"khong goi duoc Vault: {type(exc).__name__}") from None
-        goi_y = _thong_diep_loi(resp)
-        if resp.status_code in (400, 403, 404):
-            raise SigningBackendDenied(f"Vault tu choi (HTTP {resp.status_code}){goi_y}")
         if resp.status_code >= 400:
-            raise SigningBackendUnavailable(f"Vault loi (HTTP {resp.status_code}){goi_y}")
+            lop = _phan_loai_loi(resp)
+            # Thong diep TINH, do chinh ta viet: khong co manh nao cua phan hoi provider di kem.
+            raise lop(f"backend tu choi hoac khong dung duoc (HTTP {resp.status_code})")
         try:
             return resp.json()
         except Exception:  # noqa: BLE001

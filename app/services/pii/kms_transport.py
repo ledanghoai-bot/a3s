@@ -34,7 +34,7 @@ _ENV_VAULT_TOKEN = "M4_VAULT_TOKEN"
 _ENV_VAULT_NAMESPACE = "M4_VAULT_NAMESPACE"
 
 
-def get_kms_transport() -> tuple[KmsTransport, str, str]:
+def get_kms_transport(app_env: str) -> tuple[KmsTransport, str, str]:
     """Tra (transport, key_id, key_version) theo cau hinh moi truong. Fail-closed moi nhanh.
 
     `key_id`/`key_version` la BAT BUOC va TUONG MINH: chung di thang vao hang chu ky
@@ -42,6 +42,9 @@ def get_kms_transport() -> tuple[KmsTransport, str, str]:
     De backend tu chon "phien ban moi nhat" se tao ra chu ky ma khong ai cong bo public key tuong
     ung — sai lech chi lo ra o tan buoc verify.
     """
+    # F-H2-KMS-01: `app_env` la THAM SO BAT BUOC, khong doc tu moi truong o day. Caller (signer)
+    # phai truyen `settings.app_env` — cung nguon su that ma phan con lai cua ung dung dung — nen
+    # khong the co tinh huong "guard doc mot bien khac voi bien ung dung dang chay".
     ten = os.environ.get(_ENV_TRANSPORT, "").strip().lower()
     key_id = os.environ.get(_ENV_KEY_ID, "").strip()
     key_version = os.environ.get(_ENV_KEY_VERSION, "").strip()
@@ -54,9 +57,12 @@ def get_kms_transport() -> tuple[KmsTransport, str, str]:
         from app.services.pii.kms_transport_vault import VaultTransitTransport
 
         return (
+            # Guard production nam trong chinh ham khoi tao cua transport (diem khong the bo qua),
+            # va nem TRUOC khi co bat ky request HTTP nao.
             VaultTransitTransport(
                 base_url=os.environ.get(_ENV_VAULT_ADDR, ""),
                 token=os.environ.get(_ENV_VAULT_TOKEN, ""),
+                app_env=app_env,
                 namespace=os.environ.get(_ENV_VAULT_NAMESPACE) or None,
             ),
             key_id,

@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 import asyncpg  # noqa: E402
 
+from app.config import settings  # noqa: E402
 from app.services.pii.kms_transport import get_kms_transport  # noqa: E402
 from app.services.pii.signing_backend import (  # noqa: E402
     SIGNATURE_ALGORITHM,
@@ -52,7 +53,7 @@ async def _chay(chi_kiem_tra: bool) -> int:
         print("thieu DATABASE_URL", file=sys.stderr)
         return 2
     try:
-        transport, key_id, key_version = get_kms_transport()
+        transport, key_id, key_version = get_kms_transport(settings.app_env)
         pub = transport.public_key(key_id, key_version)
     except SigningBackendError as exc:
         print(f"khong lay duoc public key: {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -155,10 +155,15 @@ async def _kiem_fail_closed(admin, ten: str, batch, kq, loi, truoc: tuple[int, i
     if loi is not None:
         print(f"         loi that: {thong_diep[:170]}")
     if dau_hieu:
-        check(dau_hieu.lower() in thong_diep.lower(),
-              f"{ten}: loi do DUNG nguyen nhan (tim thay dau hieu {dau_hieu!r})")
+        check(dau_hieu in thong_diep,
+              f"{ten}: signer tra dung MA AN TOAN {dau_hieu!r}")
         check("incompleteread" not in thong_diep.lower(),
               f"{ten}: KHONG phai loi transport mu (signer tra ly do tuong minh)")
+        # F-H2-KMS-02: khong manh nao cua chan doan provider duoc di theo duong nay.
+        for cam in ("vault", "HTTP 4", "HTTP 5", "permission denied", "minimum encryption",
+                    "errors"):
+            check(cam.lower() not in thong_diep.lower(),
+                  f"{ten}: khong ro ri chi tiet provider ({cam!r} khong xuat hien)")
     trong_batch = await admin.fetchval(
         "SELECT count(*) FROM m4_shadow_review_samples WHERE selection_batch=$1", batch)
     check(trong_batch == 0, f"{ten}: 0 sample duoc commit trong batch nay")
@@ -200,9 +205,13 @@ async def _chay_tat_ca() -> int:
                 "  JOIN m4_stage0p_transcript_signatures g ON g.sample_id = r.sample_id "
                 " WHERE r.selection_batch=$1", batch)
             check(len(hang) == 2, "[S1] moi sample deu co hang chu ky asym")
-            check(all(h["sig_key_id"] == KEY_ID and h["sig_key_ver"] == "1" for h in hang),
+            # `hang and all(...)`: danh sach RONG lam `all()` tra True — mot phep kiem "PASS rong".
+            # Da gap that o lan chay truoc: S1 hong tu buoc cong bo khoa nhung hai dong nay van
+            # xanh. Bat buoc phai co du lieu THAT roi moi noi den chuyen dung/sai.
+            check(bool(hang) and all(h["sig_key_id"] == KEY_ID and h["sig_key_ver"] == "1"
+                                     for h in hang),
                   f"[S1] chu ky khai dung khoa Vault {KEY_ID}@1")
-            check(all(h["n"] == 64 and h["sig_alg"] == "Ed25519" for h in hang),
+            check(bool(hang) and all(h["n"] == 64 and h["sig_alg"] == "Ed25519" for h in hang),
                   "[S1] Ed25519, 64 byte")
             rc, bc = await _chay_verifier(batch)
             check(rc == 0 and bc["hong"] == 0 and bc["tong_chu_ky"] == 2,
@@ -223,7 +232,7 @@ async def _chay_tat_ca() -> int:
         try:
             batch, kq, loi = await _chay_mot_batch(admin, "kms-s2", "H2KMS-S2")
             await _kiem_fail_closed(admin, "[S2]", batch, kq, loi, truoc,
-                                    dau_hieu="SigningBackendUnavailable")
+                                    dau_hieu="backend_unavailable")
         finally:
             await stop_signing_service(proc, socket_path)
 
@@ -235,7 +244,7 @@ async def _chay_tat_ca() -> int:
         try:
             batch, kq, loi = await _chay_mot_batch(admin, "kms-s3", "H2KMS-S3")
             await _kiem_fail_closed(admin, "[S3]", batch, kq, loi, truoc,
-                                    dau_hieu="HTTP 403")
+                                    dau_hieu="backend_denied")
         finally:
             await stop_signing_service(proc, socket_path)
 
@@ -250,7 +259,7 @@ async def _chay_tat_ca() -> int:
         try:
             batch, kq, loi = await _chay_mot_batch(admin, "kms-s4", "H2KMS-S4")
             await _kiem_fail_closed(admin, "[S4]", batch, kq, loi, truoc,
-                                    dau_hieu="minimum encryption key version")
+                                    dau_hieu="backend_key_disabled")
         finally:
             await stop_signing_service(proc, socket_path)
 
