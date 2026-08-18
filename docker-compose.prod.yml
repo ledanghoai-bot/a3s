@@ -144,6 +144,22 @@ services:
       - M4_SAMPLE_KEY_B64_FILE=/run/m4-signing-secrets/sample_key
       - M4_TRANSCRIPT_HMAC_KEY_B64_FILE=/run/m4-signing-secrets/transcript_hmac_key
       - M4_SIGNING_AUTH_VERIFY_KEY_B64_FILE=/run/m4-signing-secrets/signing_auth_key
+      # H2-A-2 (sua theo F-H2A2-01): backend ky bat doi xung, TRUYEN QUA nhung KHONG bat buoc o
+      # parse-time.
+      #
+      # Ban dau Dev viet `${M4_SIGNING_BACKEND:?...}` voi y "hong som". CA bac bo dung: Compose noi
+      # suy TOAN FILE truoc khi chon profile, nen khi production dang dormant (khong co signer,
+      # chua chot KMS) thi `docker compose config`/deploy thuong se HONG — do la rui ro outage toan
+      # he thong, khong phai fail-closed rieng cho signer.
+      #
+      # Fail-closed dung cho o `signing_backend.get_signing_backend()`: thieu/sai gia tri thi SIGNER
+      # khong khoi dong/khong ky duoc, va capture khong commit duoc sample thieu bang chung. Base
+      # application o trang thai dormant van parse/deploy/health-check duoc ma khong can quyet dinh
+      # KMS nao.
+      #
+      # `:-` (khong phai `:?`) de biến trong ma van truyen qua duoc khi da chon backend. KHONG dat
+      # mot backend gia lam mac dinh — chuoi rong se bi factory tu choi.
+      - M4_SIGNING_BACKEND=${M4_SIGNING_BACKEND:-}
     volumes:
       - m4_signing_socket:/run/m4-signing
       - /run/m4-signing-secrets:/run/m4-signing-secrets:ro

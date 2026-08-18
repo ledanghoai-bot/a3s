@@ -150,6 +150,21 @@ async def _submit(socket_path: str, blob: dict) -> dict:
         "canonical_len": result.canonical_len,
         "canonical_digest_matches":
             result.canonical_digest == bytes.fromhex(blob["canonical_digest_hex"]),
+        # H2-A-2: canary la cong DAU TIEN cua ceremony, nen no phai bat duoc mot backend ky bat doi
+        # xung hong NGAY — truoc khi bat ky sample nao duoc ghi.
+        #
+        # Probe chay duoi vai `m4-collector` va KHONG duoc cham backend/khoa, nen no khong the tu
+        # verify chu ky bang public key. Nhung no kiem duoc ba dieu co y nghia va do duoc:
+        #   * thuat toan dung la Ed25519 (khong phai mot the khac lot vao),
+        #   * chu ky dung 64 byte (backend tra rac se lo ra ngay),
+        #   * key_id/key_version duoc cong bo de nguoi van hanh doi chieu voi registry.
+        # Verify mat ma DAY DU la viec cua verifier ngoai DB (`m4_stage0p_verify_transcripts.py`),
+        # noi co public key — do la dung phan cong: nguoi verify khong can bi mat nao.
+        "sig_alg": result.sig_alg,
+        "sig_alg_dung_ed25519": result.sig_alg == "Ed25519",
+        "sig_key_id": result.sig_key_id,
+        "sig_key_ver": result.sig_key_ver,
+        "signature_asym_dung_64_byte": len(result.signature_asym) == 64,
     }
 
 
