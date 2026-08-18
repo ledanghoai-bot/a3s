@@ -232,3 +232,75 @@ def test_signer_tu_choi_khoi_dong_khi_backend_rong_hoac_la(
         monkeypatch.setenv("M4_SIGNING_BACKEND", gia_tri)
         with pytest.raises(SigningBackendMisconfigured):
             svc._signing_backend()
+
+
+# ---------------------------------------------------------------------------
+# F-H2A2-02: seed sandbox cua LocalDevBackend (chi ton tai de harness E2E biet truoc
+# public key ma provision registry — xem scripts/m4_h2a2_e2e_capture_path.py)
+# ---------------------------------------------------------------------------
+def test_seed_sandbox_cho_khoa_xac_dinh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cung seed -> cung public key: dieu kien de harness cong bo dung khoa cua signer."""
+    import base64 as _b64
+
+    monkeypatch.setenv("M4_ALLOW_LOCALDEV_SIGNING", "1")
+    monkeypatch.setenv("M4_LOCALDEV_SIGNING_SEED_B64", _b64.b64encode(b"s" * 32).decode())
+    a, b = LocalDevBackend(app_env="test"), LocalDevBackend(app_env="test")
+    assert a.public_key_raw() == b.public_key_raw()
+    # Chu ky cua ban nay verify duoc bang public key cua ban kia -> dung la MOT khoa.
+    assert verify_signature(b.public_key_raw(), b"noi dung", a.sign(b"noi dung")) is True
+    # Rotation van la khoa DOC LAP, khong phai cung mot khoa doi ten.
+    cu = a.public_key_raw()
+    a.rotate()
+    assert a.public_key_raw() != cu
+
+
+def test_khong_co_seed_thi_van_ngau_nhien(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mac dinh khong doi: khong seed -> moi ban la mot khoa moi trong RAM."""
+    monkeypatch.setenv("M4_ALLOW_LOCALDEV_SIGNING", "1")
+    monkeypatch.delenv("M4_LOCALDEV_SIGNING_SEED_B64", raising=False)
+    assert (LocalDevBackend(app_env="test").public_key_raw()
+            != LocalDevBackend(app_env="test").public_key_raw())
+
+
+@pytest.mark.parametrize("seed_sai", ["khong-phai-base64!!", "c2hvcnQ="])
+def test_seed_sai_dinh_dang_bi_tu_choi(monkeypatch: pytest.MonkeyPatch, seed_sai: str) -> None:
+    """Seed sai KHONG duoc am tham quay ve ngau nhien.
+
+    Neu quay ve ngau nhien, harness van tin la minh biet public key, provision nham khoa, va that
+    bai chi lo ra o tan buoc verify — xa noi gay loi. Fail ngay tai cho cau hinh sai.
+    """
+    from app.services.pii.signing_backend import SigningBackendMisconfigured
+
+    monkeypatch.setenv("M4_ALLOW_LOCALDEV_SIGNING", "1")
+    monkeypatch.setenv("M4_LOCALDEV_SIGNING_SEED_B64", seed_sai)
+    with pytest.raises(SigningBackendMisconfigured, match="M4_LOCALDEV_SIGNING_SEED_B64"):
+        LocalDevBackend(app_env="test")
+
+
+def test_seed_khong_qua_mat_duoc_guard_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Seed doc SAU guard: no khong tao ra duong nao de LocalDevBackend song o production."""
+    import base64 as _b64
+
+    from app.services.pii.signing_backend import SigningBackendMisconfigured
+
+    monkeypatch.setenv("M4_ALLOW_LOCALDEV_SIGNING", "1")
+    monkeypatch.setenv("M4_LOCALDEV_SIGNING_SEED_B64", _b64.b64encode(b"s" * 32).decode())
+    with pytest.raises(SigningBackendMisconfigured, match="production"):
+        LocalDevBackend(app_env="production")
+
+
+def test_signer_kiem_backend_ngay_o_main_truoc_khi_bind_socket() -> None:
+    """F-H2A2-01 bang chung #2: signer phai tu choi KHOI DONG, khong phai rot tung ket noi.
+
+    Kiem o day la kiem CAU TRUC (main goi _signing_backend truoc run_signing_service). Bang chung
+    HANH VI that — tien trinh signer that thoat voi exit=2 va thong diep noi ro bien nao sai — nam
+    o kich ban [S3] cua scripts/m4_h2a2_e2e_capture_path.py, vi no can spawn tien trinh that.
+    """
+    import inspect
+
+    from app.services.pii import stage0p_signing_service as svc
+
+    src = inspect.getsource(svc.main)
+    assert "_signing_backend()" in src
+    assert src.index("_signing_backend()") < src.index("run_signing_service"), \
+        "phai kiem backend TRUOC khi bind socket"

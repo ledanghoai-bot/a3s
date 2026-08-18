@@ -40,6 +40,8 @@ expose ra ngoai qua bat ky phuong thuc public nao).
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 from typing import Protocol, runtime_checkable
 
@@ -58,6 +60,18 @@ _ED25519_SIGNATURE_BYTES = 64
 # hai: mot cai chon backend, mot cai la xac nhan tuong minh "toi biet day la khoa trong RAM".
 _ENV_BACKEND = "M4_SIGNING_BACKEND"
 _ENV_ALLOW_LOCALDEV = "M4_ALLOW_LOCALDEV_SIGNING"
+# H2-A-2 (F-H2A2-02): seed 32 byte (base64) de `LocalDevBackend` sinh khoa XAC DINH thay vi ngau
+# nhien. CHI co nghia trong sandbox/CI: no chi duoc doc SAU khi `_assert_localdev_allowed` cho qua,
+# nen o production ca LocalDevBackend lan seed deu bi chan boi CUNG mot guard.
+#
+# Vi sao can: kich ban E2E chay signer nhu MOT TIEN TRINH RIENG that. Khoa cua `LocalDevBackend`
+# sinh trong RAM cua tien trinh do, nen ben ngoai KHONG biet duoc public key — trong khi
+# `m4_stage0p_record_transcript_signature` (migration 044) doi hang registry public key phai co SAN
+# TRUOC khi ghi chu ky. Voi KMS that, buoc do la "doc public key tu API cua KMS roi cong bo vao
+# registry"; sandbox khong co KMS nen seed dong dung vai tro ay — de harness BIET TRUOC public key
+# ma provision registry, KHONG phai de ky thay signer (moi chu ky trong E2E deu do tien trinh
+# signer that tao ra).
+_ENV_LOCALDEV_SEED = "M4_LOCALDEV_SIGNING_SEED_B64"
 # Gia tri `app_env` bi coi la production — LocalDevBackend bi tu choi ke ca khi 2 bien tren dung.
 _PRODUCTION_APP_ENVS = frozenset({"production", "prod", "staging"})
 
@@ -144,6 +158,10 @@ class LocalDevBackend:
     Ho tro `rotate()` de test duoc dieu CA yeu cau: 'transcript truoc rotation con verify duoc'.
     Public key cua MOI phien ban deu duoc giu lai; private key cua phien ban cu bi bo di ngay khi
     xoay (khong con ky duoc bang khoa cu — dung ngu nghia thu hoi).
+
+    Neu `M4_LOCALDEV_SIGNING_SEED_B64` duoc dat (chi kha thi trong sandbox — xem hang so do), khoa
+    duoc DAN XUAT xac dinh tu seed thay vi sinh ngau nhien, de tien trinh khac biet truoc public
+    key ma provision registry. Khong dat -> hanh vi cu, khong doi.
     """
 
     def __init__(self, *, key_id: str = "m4-transcript-ed25519-localdev",
@@ -156,13 +174,45 @@ class LocalDevBackend:
         self._public_history: dict[str, bytes] = {}
         self._private: Ed25519PrivateKey | None = None
         self._key_version = ""
+        # Doc SAU guard o tren — xem `_ENV_LOCALDEV_SEED`. `None` = giu nguyen hanh vi cu
+        # (sinh ngau nhien trong RAM), la mac dinh cua moi caller hien co.
+        self._seed = self._doc_seed_sandbox()
         self.rotate()
+
+    @staticmethod
+    def _doc_seed_sandbox() -> bytes | None:
+        """Doc seed sandbox tuy chon. Thieu -> None (ngau nhien nhu cu); co ma SAI -> raise.
+
+        Sai dinh dang bi coi la CAU HINH SAI chu khong am tham quay ve ngau nhien: mot harness
+        tuong seed cua minh dang duoc dung, trong khi thuc te signer sinh khoa khac, se lam
+        registry provision nham public key va sinh ra that bai KHO HIEU o tan buoc verify.
+        """
+        raw = os.environ.get(_ENV_LOCALDEV_SEED)
+        if not raw:
+            return None
+        try:
+            seed = base64.b64decode(raw, validate=True)
+        except Exception:  # noqa: BLE001 — khong dua gia tri seed vao thong diep loi
+            raise SigningBackendMisconfigured(
+                f"{_ENV_LOCALDEV_SEED} khong phai base64 hop le") from None
+        if len(seed) != 32:
+            raise SigningBackendMisconfigured(
+                f"{_ENV_LOCALDEV_SEED} phai la 32 byte sau khi giai base64, dang la {len(seed)}")
+        return seed
 
     def rotate(self) -> str:
         """Sinh phien ban khoa moi, tra ve `key_version` moi. Public key cu VAN tra cuu duoc."""
         self._version_counter += 1
         self._key_version = f"localdev:v{self._version_counter}"
-        self._private = Ed25519PrivateKey.generate()
+        if self._seed is None:
+            self._private = Ed25519PrivateKey.generate()
+        else:
+            # Dan xuat theo TUNG phien ban: hai phien ban khac nhau van la hai khoa doc lap, nen
+            # kich ban rotation/thu hoi trong sandbox giu nguyen y nghia. Domain tag de seed nay
+            # khong the trung voi bat ky dan xuat nao khac dung cung nguon.
+            material = hashlib.sha256(
+                self._seed + b"|m4-h2a2-localdev|" + self._key_version.encode("ascii")).digest()
+            self._private = Ed25519PrivateKey.from_private_bytes(material)
         self._public_history[self._key_version] = self._private.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw)

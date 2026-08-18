@@ -205,6 +205,7 @@ from app.services.pii.crypto import SlotCryptoError, _load_key, sign_capture
 from app.services.pii.signing_backend import (
     SIGNATURE_ALGORITHM,
     SigningBackend,
+    SigningBackendError,
     get_signing_backend,
 )
 
@@ -747,11 +748,23 @@ def main() -> int:
         settings.m4_transcript_hmac_key_b64 = hmac_key_b64
         settings.m4_signing_auth_verify_key_b64 = auth_verify_key_b64
         allowed_uid = _allowed_uid()
+        # H2-A-2 (F-H2A2-01/F-H2A2-02): khoi tao backend ky NGAY O STARTUP, TRUOC khi bind socket.
+        #
+        # `_signing_backend()` van lazy+cache cho duong request, nhung goi no o day bien cau hinh
+        # sai thanh "signer KHONG KHOI DONG" thay vi "signer khoi dong roi rot tung ket noi".
+        # Khac biet do la thuc chat, do bang thuc nghiem trong kich ban [S3] cua
+        # scripts/m4_h2a2_e2e_capture_path.py: truoc thay doi nay, backend unset lam signer nhan
+        # ket noi roi dong cam, va collector chi thay `IncompleteReadError: 0 bytes read` — dung
+        # loai "loi transport MU" ma F-A12-01 da mot lan phai sua (xem ghi chu rate-limit o tren).
+        # Fail-closed van dung ca hai duong (khong sample nao duoc ghi), nhung nguoi van hanh phai
+        # doc duoc LY DO ngay o dong khoi dong, khong phai doan qua mot loi socket.
+        _signing_backend()
         asyncio.run(run_signing_service(socket_path, allowed_uid=allowed_uid, shared_gid=shared_gid))
-    except RuntimeError as e:
+    except (RuntimeError, SigningBackendError) as e:
         # T11-02/T12-01: startup fail neu socket directory/path khong an toan
         # (_validate_socket_directory) hoac STAGE0P_SIGNING_ALLOWED_UID chua cau hinh (_allowed_uid);
-        # F-A08-R2-01: hoac secret file khong an toan/thieu (_read_secret_env_or_file).
+        # F-A08-R2-01: hoac secret file khong an toan/thieu (_read_secret_env_or_file);
+        # H2-A-2: hoac M4_SIGNING_BACKEND thieu/khong hop le (_signing_backend).
         print(f"signing service tu choi khoi dong: {e}", file=sys.stderr)
         return 2
     return 0
