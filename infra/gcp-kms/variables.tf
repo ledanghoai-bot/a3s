@@ -51,3 +51,18 @@ variable "log_sink_bucket" {
   type        = string
   description = "Bucket luu Cloud Audit Logs cua KMS"
 }
+
+variable "log_bucket_location" {
+  type        = string
+  description = "Location cua bucket luu audit log"
+}
+
+variable "log_retention_days" {
+  type        = number
+  description = "So ngay giu audit log (retention policy cua bucket)"
+}
+
+variable "audit_reader_member" {
+  type        = string
+  description = "Principal duoc DOC audit log; phai KHAC signer va KHAC nguoi ghi"
+}

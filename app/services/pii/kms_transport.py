@@ -18,9 +18,11 @@ sua signer, khong sua `signing_backend.py`, khong sua DB/verifier.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 
 from app.services.pii.signing_backend import (
     KmsTransport,
+    SigningBackendDenied,
     SigningBackendMisconfigured,
 )
 
@@ -30,7 +32,9 @@ _ENV_KEY_VERSION = "M4_KMS_KEY_VERSION"
 
 # Google Cloud KMS (provider production, PO decision H2B)
 _ENV_GOOGLE_ENDPOINT = "M4_GOOGLE_KMS_ENDPOINT"
-_ENV_GOOGLE_TOKEN = "M4_GOOGLE_ACCESS_TOKEN"
+# Duong dan file CAU HINH credential external-account (WIF). File nay KHONG phai bi mat: no chi
+# TRO toi nguon subject-token. Ban than nguon do (chung chi/OIDC assertion) moi la thu can bao ve.
+_ENV_GOOGLE_CRED_CONFIG = "M4_GOOGLE_CREDENTIAL_CONFIG"
 _GOOGLE_ENDPOINT_MAC_DINH = "https://cloudkms.googleapis.com"
 
 # Vault (sandbox-only, xem docstring kms_transport_vault.py)
@@ -39,24 +43,52 @@ _ENV_VAULT_TOKEN = "M4_VAULT_TOKEN"
 _ENV_VAULT_NAMESPACE = "M4_VAULT_NAMESPACE"
 
 
-def _token_provider_google():
-    """Tra ve ham lay bearer token cho Google KMS.
+def _token_provider_google() -> Callable[[], str]:
+    """Nguon bearer token cho Google KMS — BAT BUOC di qua Workload Identity Federation.
 
-    Directive H2-B CAM tao credential/service-account key, va PO decision chot dung Workload
-    Identity Federation. Nen o buoc CHUAN BI nay chua the hien thuc duong WIF that: khong co
-    credential de kiem thu, va viet mot duong xac thuc khong the chay thu la cach chac chan nhat de
-    no sai am tham.
+    F-H2B-01: ban truoc doc thang `M4_GOOGLE_ACCESS_TOKEN`. CA bac dung: do la TIEM TOKEN, khong
+    phai WIF, va no tao ra mot duong van hanh production ma PO chua duyet. Bien do da bi bo han.
 
-    Hien tai ho tro mot nguon token TUONG MINH (`M4_GOOGLE_ACCESS_TOKEN`) danh cho contract test va
-    cho buoc preflight sau nay. Khi PO mo Provisioning Gate, cam adapter WIF vao DUNG cho nay —
-    phan con lai cua tang ky khong phai sua mot dong.
+    WIF KHONG tu tao danh tinh cho VPS. No doi mot credential co san tu mot external IdP (OIDC/
+    SAML/X.509/AWS/Azure...) roi doi qua STS lay short-lived Google token. VPS cua du an la mot VM
+    thuong, KHONG co ambient credential nao — nen nguon tin cay do phai duoc CHON truoc, bang mot
+    PO decision. Bang so sanh phuong an: docs/M4-H2B-WIF-TRUST-SOURCE-OPTIONS-VI.md.
+
+    Vi chua co quyet dinh do, ham nay CHUA the hien thuc duoc, va no fail-closed thay vi doan:
+    thieu cau hinh credential -> `SigningBackendMisconfigured`. Viet mot duong xac thuc khong the
+    kiem thu la cach chac chan nhat de no sai am tham.
     """
+    duong_dan = os.environ.get(_ENV_GOOGLE_CRED_CONFIG, "").strip()
+    if not duong_dan:
+        raise SigningBackendMisconfigured(
+            f"chua cau hinh nguon credential WIF cho Google KMS ({_ENV_GOOGLE_CRED_CONFIG} trong). "
+            "Nguon tin cay (OIDC hay X.509) can PO chot — xem "
+            "docs/M4-H2B-WIF-TRUST-SOURCE-OPTIONS-VI.md.")
+
     def _lay() -> str:
-        token = os.environ.get(_ENV_GOOGLE_TOKEN, "").strip()
-        if not token:
+        # Import MUON: `google-auth` chi can khi that su dung Google KMS, va viec them dependency
+        # nay thuoc buoc provisioning (CA F-H2B-01 muc 3).
+        try:
+            from google.auth import (
+                load_credentials_from_file,  # type: ignore[import-not-found]
+            )
+            from google.auth.transport.requests import (
+                Request,  # type: ignore[import-not-found]
+            )
+        except ImportError as exc:
             raise SigningBackendMisconfigured(
-                f"chua co nguon credential cho Google KMS ({_ENV_GOOGLE_TOKEN} trong). "
-                "Duong Workload Identity Federation duoc cam vao o buoc provisioning.")
+                f"thieu thu vien google-auth cho luong external-account: {type(exc).__name__}"
+            ) from None
+        try:
+            creds, _ = load_credentials_from_file(
+                duong_dan, scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            creds.refresh(Request())
+        except Exception as exc:  # noqa: BLE001 - khong dua chi tiet credential vao thong diep
+            raise SigningBackendDenied(
+                f"khong doi duoc credential WIF sang token: {type(exc).__name__}") from None
+        token = getattr(creds, "token", None)
+        if not token:
+            raise SigningBackendDenied("luong WIF khong tra ve access token")
         return token
 
     return _lay
@@ -106,6 +138,7 @@ def get_kms_transport(app_env: str) -> tuple[KmsTransport, str, str]:
             GoogleKmsTransport(
                 key_id=key_id,
                 token_provider=_token_provider_google(),
+                app_env=app_env,
                 endpoint=os.environ.get(_ENV_GOOGLE_ENDPOINT) or _GOOGLE_ENDPOINT_MAC_DINH,
             ),
             key_id,

@@ -7,6 +7,25 @@
 # BIEN, vi PO decision H2B ghi ro chung "chua duoc quyet dinh". Gia tri de xuat nam o
 # docs/M4-H2B-GOOGLE-KMS-IAM-VA-PROVISIONING-VI.md va can PO chot truoc khi plan.
 
+# ---------------------------------------------------------------------------
+# HOP DONG BOOTSTRAP (F-H2B-05) — DOC TRUOC KHI PLAN
+#
+# Module nay KHONG tao project va KHONG gan billing. Do la thao tac o cap to chuc, thuoc quyen chu
+# billing account, va co he qua tai chinh — khong nen nam chung voi module bao mat nay.
+#
+# Dieu kien tien quyet (nguoi thuc hien: PO/chu billing account, TRUOC khi chay `terraform plan`):
+#   1. project `var.project_id` da ton tai, tao rieng cho production signing (khong dung chung);
+#   2. billing account da gan vao project do;
+#   3. nguoi/SA chay Terraform co quyen tren project: `roles/cloudkms.admin`,
+#      `roles/iam.serviceAccountAdmin`, `roles/iam.workloadIdentityPoolAdmin`,
+#      `roles/logging.configWriter`, `roles/storage.admin`;
+#   4. thu tu tao: project + billing -> (module nay) API -> key ring -> khoa -> SA -> IAM -> WIF ->
+#      audit + bucket + sink.
+#
+# Module nay TU tao: API, key ring, khoa, signer SA, IAM cap khoa, WIF pool/provider, audit config,
+# bucket audit va sink. Khong thu nao trong so do gia dinh la "da co san".
+# ---------------------------------------------------------------------------
+
 terraform {
   required_version = ">= 1.5"
   required_providers {
@@ -140,11 +159,51 @@ resource "google_project_iam_audit_config" "kms" {
   audit_log_config { log_type = "DATA_WRITE" }
 }
 
+# F-H2B-05: bucket dich phai duoc TAO O DAY (khong gia dinh no da ton tai), va phai co retention
+# + chan truy cap rong. Mot sink tro toi bucket khong ton tai/khong co quyen se tao THANH CONG
+# nhung khong luu duoc log — audit trong rong ma khong ai biet.
+resource "google_storage_bucket" "kms_audit" {
+  name     = var.log_sink_bucket
+  project  = var.project_id
+  location = var.log_bucket_location
+
+  # Khong cho ACL cu/truy cap theo object -> quyen chi den tu IAM, de kiem soat va kiem tra.
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  retention_policy {
+    retention_period = var.log_retention_days * 24 * 60 * 60
+  }
+
+  versioning {
+    enabled = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "google_logging_project_sink" "kms_audit" {
   name        = var.log_sink_name
   project     = var.project_id
-  destination = "storage.googleapis.com/${var.log_sink_bucket}"
+  destination = "storage.googleapis.com/${google_storage_bucket.kms_audit.name}"
   filter      = "protoPayload.serviceName=\"cloudkms.googleapis.com\""
 
   unique_writer_identity = true
+}
+
+# F-H2B-05: khong cap quyen cho writer identity thi sink chay nhung KHONG ghi duoc.
+# Quyen toi thieu: chi tao object, khong doc, khong xoa.
+resource "google_storage_bucket_iam_member" "sink_writer" {
+  bucket = google_storage_bucket.kms_audit.name
+  role   = "roles/storage.objectCreator"
+  member = google_logging_project_sink.kms_audit.writer_identity
+}
+
+# Nguoi DOC audit log tach khoi nguoi ghi va khoi signer.
+resource "google_storage_bucket_iam_member" "audit_reader" {
+  bucket = google_storage_bucket.kms_audit.name
+  role   = "roles/storage.objectViewer"
+  member = var.audit_reader_member
 }

@@ -37,10 +37,12 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from app.services.pii.crc32c import crc32c
 from app.services.pii.signing_backend import (
     SigningBackendDenied,
     SigningBackendKeyUnusable,
     SigningBackendUnavailable,
+    assert_khong_phai_production,
 )
 
 _ENDPOINT_MAC_DINH = "https://cloudkms.googleapis.com"
@@ -84,9 +86,18 @@ class GoogleKmsTransport:
     con quyen truy cap he thong) phai doan. Path day du lam bang chung tu dung vung.
     """
 
-    def __init__(self, *, key_id: str, token_provider: Callable[[], str],
+    def __init__(self, *, key_id: str, token_provider: Callable[[], str], app_env: str,
                  endpoint: str = _ENDPOINT_MAC_DINH,
                  timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> None:
+        # F-H2B-03: endpoint tuy y la mot duong RO RI. Neu tro toi host khac, adapter se gui CA
+        # bearer token LAN raw transcript (base64) toi host do. O production chi cho phep endpoint
+        # chinh thuc; endpoint tu chon chi song duoc o sandbox — cung khuon guard voi transport
+        # Vault. Kiem TRUOC khi lay token va truoc moi request.
+        if endpoint.rstrip("/") != _ENDPOINT_MAC_DINH:
+            assert_khong_phai_production(app_env, "GoogleKmsTransport voi endpoint tu chon")
+            if not endpoint.startswith("https://") and not endpoint.startswith("http://127.0.0.1"):
+                raise SigningBackendDenied(
+                    "endpoint tu chon phai la https (hoac loopback trong test)")
         if not key_id or key_id.count("/") != 7 or not key_id.startswith("projects/"):
             raise SigningBackendDenied(
                 "key_id phai la resource path day du cua CryptoKey "
@@ -142,30 +153,60 @@ class GoogleKmsTransport:
         ten = self._ten_phien_ban(key_version)
         # Ed25519 la PureEdDSA: gui `data` (raw transcript bytes). TUYET DOI khong dung `digest` —
         # lam vay se ky tren mot noi dung khac voi thu duoc luu va verifier se bao sai.
-        body = self._goi("POST", f"{ten}:asymmetricSign",
-                         {"data": base64.b64encode(message).decode("ascii")})
+        #
+        # F-H2B-02: gui kem `dataCrc32c` de Google phat hien hong tren duong DI, va doi
+        # `verifiedDataCrc32c=true` de biet no DA kiem. Thieu buoc nay thi mot chu ky 64 byte hop le
+        # van co the la chu ky cua BYTES BI HONG — va no se lam verifier ngoai DB bao sai o tan
+        # cuoi duong, xa noi gay loi.
+        body = self._goi("POST", f"{ten}:asymmetricSign", {
+            "data": base64.b64encode(message).decode("ascii"),
+            "dataCrc32c": str(crc32c(message)),
+        })
 
-        # Doi chieu phien ban TRA VE voi phien ban DA YEU CAU: chan truong hop backend/proxy tra ve
-        # ket qua cua mot phien ban khac (vd cau hinh "latest" o dau do trong duong goi).
-        ten_tra_ve = body.get("name")
-        if ten_tra_ve and ten_tra_ve != ten:
+        # F-H2B-04: `name` la BAT BUOC va phai khop CHINH XAC. Truoc day chi kiem khi truong nay co
+        # mat, nen mot phan hoi thieu `name` van duoc chap nhan — tuc rang buoc "dung phien ban"
+        # phu thuoc vao thien chi cua phan hoi.
+        if body.get("name") != ten:
             raise SigningBackendDenied(
-                "Google KMS ky bang phien ban khac voi phien ban da yeu cau")
+                "phan hoi khong khai dung CryptoKeyVersion da yeu cau")
+
+        if body.get("verifiedDataCrc32c") is not True:
+            raise SigningBackendUnavailable(
+                "Google KMS khong xac nhan da kiem checksum cua du lieu gui di")
 
         chu_ky_b64 = body.get("signature")
         if not isinstance(chu_ky_b64, str):
             raise SigningBackendUnavailable("Google KMS khong tra ve truong signature")
         try:
-            return base64.b64decode(chu_ky_b64, validate=True)
+            chu_ky = base64.b64decode(chu_ky_b64, validate=True)
         except Exception:  # noqa: BLE001
             raise SigningBackendUnavailable(
                 "chu ky cua Google KMS khong phai base64 hop le") from None
+
+        # F-H2B-02: kiem hong tren duong VE.
+        khai_bao = body.get("signatureCrc32c")
+        if khai_bao is None:
+            raise SigningBackendUnavailable("Google KMS khong tra ve signatureCrc32c")
+        try:
+            khop = int(khai_bao) == crc32c(chu_ky)
+        except (TypeError, ValueError):
+            raise SigningBackendUnavailable("signatureCrc32c khong phai so") from None
+        if not khop:
+            raise SigningBackendUnavailable(
+                "checksum cua chu ky khong khop — nghi ngo hong tren duong truyen")
+        return chu_ky
 
     def public_key(self, key_id: str, key_version: str) -> bytes:
         if key_id != self._key_id:
             raise SigningBackendDenied("key_id khong khop khoa da cau hinh cho transport nay")
         ten = self._ten_phien_ban(key_version)
         body = self._goi("GET", f"{ten}/publicKey")
+
+        # F-H2B-04: public key cung phai khai dung CryptoKeyVersion — neu khong, ta co the cong bo
+        # public key cua MOT PHIEN BAN KHAC vao registry, va moi chu ky sau do se verify sai.
+        if body.get("name") != ten:
+            raise SigningBackendDenied(
+                "phan hoi public key khong khai dung CryptoKeyVersion da yeu cau")
 
         # Chan nham thuat toan/muc dich: mot khoa RSA/ECDSA van tra ve PEM hop le, nhung chu ky se
         # khong phai Ed25519 va migration 044 se tu choi ghi. Bat o day de hong SOM va ro rang.

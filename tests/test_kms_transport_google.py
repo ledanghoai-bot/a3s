@@ -16,10 +16,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from app.services.pii.crc32c import crc32c
 from app.services.pii.kms_transport_google import GoogleKmsTransport
 from app.services.pii.signing_backend import (
     SigningBackendDenied,
     SigningBackendKeyUnusable,
+    SigningBackendMisconfigured,
     SigningBackendUnavailable,
     verify_signature,
 )
@@ -79,7 +81,21 @@ def _cam_client(monkeypatch, phan_hoi) -> list[dict]:
 def _transport(**kw) -> GoogleKmsTransport:
     kw.setdefault("key_id", _KEY)
     kw.setdefault("token_provider", lambda: _TOKEN)
+    kw.setdefault("app_env", "sandbox")
     return GoogleKmsTransport(**kw)
+
+
+def _than_hoi_ky(khoa: Ed25519PrivateKey, thong_diep: bytes = _TRANSCRIPT, **ghi_de) -> dict:
+    """Phan hoi asymmetricSign DUNG CHUAN. Test muon thu ca hong thi ghi de dung mot truong."""
+    sig = khoa.sign(thong_diep)
+    body = {
+        "name": _TEN_PHIEN_BAN,
+        "signature": base64.b64encode(sig).decode(),
+        "verifiedDataCrc32c": True,
+        "signatureCrc32c": str(crc32c(sig)),
+    }
+    body.update(ghi_de)
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +104,7 @@ def _transport(**kw) -> GoogleKmsTransport:
 def test_ky_gui_raw_bytes_qua_truong_data_khong_phai_digest(monkeypatch, khoa) -> None:
     """Ed25519 la PureEdDSA. Gui nham sang `digest` se ky tren noi dung KHAC voi thu duoc luu."""
     def tra_loi(req):
-        sig = khoa.sign(base64.b64decode(req["json"]["data"]))
-        return _PhanHoi(200, {"name": _TEN_PHIEN_BAN,
-                              "signature": base64.b64encode(sig).decode()})
+        return _PhanHoi(200, _than_hoi_ky(khoa, base64.b64decode(req["json"]["data"])))
 
     da_goi = _cam_client(monkeypatch, tra_loi)
     sig = _transport().sign(_KEY, _VER, _TRANSCRIPT)
@@ -104,9 +118,7 @@ def test_ky_gui_raw_bytes_qua_truong_data_khong_phai_digest(monkeypatch, khoa) -
 
 
 def test_ky_dung_CryptoKeyVersion_tuong_minh_khong_dung_latest(monkeypatch, khoa) -> None:
-    da_goi = _cam_client(monkeypatch, _PhanHoi(200, {
-        "name": _TEN_PHIEN_BAN,
-        "signature": base64.b64encode(khoa.sign(_TRANSCRIPT)).decode()}))
+    da_goi = _cam_client(monkeypatch, _PhanHoi(200, _than_hoi_ky(khoa)))
     _transport().sign(_KEY, _VER, _TRANSCRIPT)
     url = da_goi[0]["url"]
     assert url.endswith(f"cryptoKeyVersions/{_VER}:asymmetricSign")
@@ -156,16 +168,15 @@ def test_khoa_sai_thuat_toan_bi_tu_choi(monkeypatch, khoa) -> None:
 
 
 def test_backend_tra_ve_phien_ban_khac_bi_tu_choi(monkeypatch, khoa) -> None:
-    _cam_client(monkeypatch, _PhanHoi(200, {
-        "name": f"{_KEY}/cryptoKeyVersions/9",
-        "signature": base64.b64encode(khoa.sign(_TRANSCRIPT)).decode()}))
-    with pytest.raises(SigningBackendDenied, match="phien ban"):
+    _cam_client(monkeypatch, _PhanHoi(200, _than_hoi_ky(
+        khoa, name=f"{_KEY}/cryptoKeyVersions/9")))
+    with pytest.raises(SigningBackendDenied, match="CryptoKeyVersion"):
         _transport().sign(_KEY, _VER, _TRANSCRIPT)
 
 
 @pytest.mark.parametrize("body", [
-    {"name": _TEN_PHIEN_BAN},
-    {"name": _TEN_PHIEN_BAN, "signature": "!!!"},
+    {"name": _TEN_PHIEN_BAN, "verifiedDataCrc32c": True},
+    {"name": _TEN_PHIEN_BAN, "verifiedDataCrc32c": True, "signature": "!!!"},
     None,
 ])
 def test_phan_hoi_di_dang_fail_closed(monkeypatch, body) -> None:
@@ -225,3 +236,101 @@ def test_key_version_khong_phai_so_bi_tu_choi() -> None:
 def test_key_id_khac_khoa_da_cau_hinh_bi_tu_choi() -> None:
     with pytest.raises(SigningBackendDenied, match="khong khop"):
         _transport().sign(_KEY.replace("a3s-m4-signing", "project-khac"), _VER, _TRANSCRIPT)
+
+
+# ---------------------------------------------------------------------------
+# F-H2B-02 — CRC32C end-to-end
+# ---------------------------------------------------------------------------
+def test_gui_kem_dataCrc32c_dung(monkeypatch, khoa) -> None:
+    da_goi = _cam_client(monkeypatch, _PhanHoi(200, _than_hoi_ky(khoa)))
+    _transport().sign(_KEY, _VER, _TRANSCRIPT)
+    assert da_goi[0]["json"]["dataCrc32c"] == str(crc32c(_TRANSCRIPT))
+
+
+def test_backend_khong_xac_nhan_da_kiem_checksum_thi_tu_choi(monkeypatch, khoa) -> None:
+    """Thieu `verifiedDataCrc32c=true` nghia la khong biet du lieu gui di co nguyen ven khong."""
+    for gia_tri in (False, None, "true"):
+        body = _than_hoi_ky(khoa)
+        if gia_tri is None:
+            body.pop("verifiedDataCrc32c")
+        else:
+            body["verifiedDataCrc32c"] = gia_tri
+        _cam_client(monkeypatch, _PhanHoi(200, body))
+        with pytest.raises(SigningBackendUnavailable, match="checksum"):
+            _transport().sign(_KEY, _VER, _TRANSCRIPT)
+
+
+def test_chu_ky_hong_tren_duong_ve_bi_bat(monkeypatch, khoa) -> None:
+    """Chu ky VAN 64 byte hop le nhung la cua bytes bi hong — chi checksum moi phat hien."""
+    sig_hong = bytearray(khoa.sign(_TRANSCRIPT))
+    sig_hong[0] ^= 0x01
+    body = _than_hoi_ky(khoa)
+    body["signature"] = base64.b64encode(bytes(sig_hong)).decode()  # signatureCrc32c giu nguyen
+    _cam_client(monkeypatch, _PhanHoi(200, body))
+    with pytest.raises(SigningBackendUnavailable, match="checksum"):
+        _transport().sign(_KEY, _VER, _TRANSCRIPT)
+
+
+@pytest.mark.parametrize("khai_bao", [None, "khong-phai-so"])
+def test_signatureCrc32c_thieu_hoac_di_dang_bi_tu_choi(monkeypatch, khoa, khai_bao) -> None:
+    body = _than_hoi_ky(khoa)
+    if khai_bao is None:
+        body.pop("signatureCrc32c")
+    else:
+        body["signatureCrc32c"] = khai_bao
+    _cam_client(monkeypatch, _PhanHoi(200, body))
+    with pytest.raises(SigningBackendUnavailable):
+        _transport().sign(_KEY, _VER, _TRANSCRIPT)
+
+
+# ---------------------------------------------------------------------------
+# F-H2B-03 — endpoint tu chon khong duoc song o production
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("app_env", ["production", "prod", "staging"])
+def test_endpoint_tu_chon_bi_chan_o_production(monkeypatch, app_env: str) -> None:
+    """Endpoint la thu se nhan CA token LAN transcript — phai chan truoc token va truoc mang."""
+    da_goi = _cam_client(monkeypatch, _PhanHoi(200, {}))
+    goi_token: list[int] = []
+
+    with pytest.raises(SigningBackendMisconfigured, match="production"):
+        _transport(app_env=app_env, endpoint="https://ke-tan-cong.example",
+                   token_provider=lambda: goi_token.append(1) or _TOKEN)
+    assert da_goi == [] and goi_token == [], "khong duoc lay token hay goi mang truoc khi chan"
+
+
+def test_endpoint_chinh_thuc_van_dung_duoc_o_production(monkeypatch, khoa) -> None:
+    _cam_client(monkeypatch, _PhanHoi(200, _than_hoi_ky(khoa)))
+    t = _transport(app_env="production", endpoint="https://cloudkms.googleapis.com")
+    assert len(t.sign(_KEY, _VER, _TRANSCRIPT)) == 64
+
+
+def test_endpoint_khong_phai_https_bi_tu_choi_o_sandbox() -> None:
+    with pytest.raises(SigningBackendDenied, match="https"):
+        _transport(app_env="sandbox", endpoint="http://ke-tan-cong.example")
+
+
+# ---------------------------------------------------------------------------
+# F-H2B-04 — `name` la bat buoc cho CA HAI thao tac
+# ---------------------------------------------------------------------------
+def test_ky_thieu_name_bi_tu_choi(monkeypatch, khoa) -> None:
+    body = _than_hoi_ky(khoa)
+    body.pop("name")
+    _cam_client(monkeypatch, _PhanHoi(200, body))
+    with pytest.raises(SigningBackendDenied, match="CryptoKeyVersion"):
+        _transport().sign(_KEY, _VER, _TRANSCRIPT)
+
+
+@pytest.mark.parametrize("ten_sai", [
+    None,
+    "projects/KHAC/locations/asia-southeast1/keyRings/m4-transcript/cryptoKeys/"
+    "transcript-ed25519/cryptoKeyVersions/3",
+    _KEY + "/cryptoKeyVersions/4",
+])
+def test_public_key_phai_khai_dung_phien_ban(monkeypatch, khoa, ten_sai) -> None:
+    """Cong bo nham public key cua phien ban khac vao registry se lam moi chu ky verify sai."""
+    body = {"pem": _pem(khoa), "algorithm": "EC_SIGN_ED25519"}
+    if ten_sai is not None:
+        body["name"] = ten_sai
+    _cam_client(monkeypatch, _PhanHoi(200, body))
+    with pytest.raises(SigningBackendDenied, match="CryptoKeyVersion"):
+        _transport().public_key(_KEY, _VER)

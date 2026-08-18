@@ -88,6 +88,19 @@ def main() -> int:
     kiem('log_type = "DATA_READ"' in hcl, "ghi log thao tac doc public key (DATA_READ)")
     kiem("google_logging_project_sink" in hcl, "co log sink de giu lai audit log")
 
+    print("=== Bootstrap va audit destination (F-H2B-05) ===")
+    kiem("HOP DONG BOOTSTRAP" in hcl and "billing" in hcl.lower(),
+         "co hop dong bootstrap project/billing (ai lam, thu tu, dieu kien tien quyet)")
+    kiem("google_storage_bucket" in cau_hinh and "google_storage_bucket_iam_member" in cau_hinh,
+         "bucket audit duoc TAO o day, khong gia dinh da ton tai")
+    kiem("writer_identity" in cau_hinh and "roles/storage.objectCreator" in cau_hinh,
+         "writer identity cua sink duoc cap quyen ghi (thieu -> sink chay nhung khong luu duoc log)")
+    kiem("retention_policy" in cau_hinh, "bucket audit co retention policy")
+    kiem("public_access_prevention" in cau_hinh and "uniform_bucket_level_access" in cau_hinh,
+         "bucket audit chan truy cap cong khai va dung IAM thay ACL")
+    kiem("audit_reader_member" in cau_hinh,
+         "nguoi DOC audit log duoc khai bao tuong minh (tach khoi signer va nguoi ghi)")
+
     print("=== Khong co dinh danh that bi hard-code ===")
     kiem("variable " + chr(34) + "project_id" + chr(34) in hcl,
          "dinh danh la BIEN (PO chua chot gia tri) chu khong hard-code")
