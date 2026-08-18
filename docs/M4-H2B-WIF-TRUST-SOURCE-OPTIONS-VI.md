@@ -45,9 +45,13 @@ duyệt. CA bác đúng.
 Nếu PO chọn A, Dev đề nghị kèm: chứng chỉ **thời hạn ngắn**, quy trình xoay định kỳ, và giữ nguyên
 mô hình ceremony (credential chỉ hiện diện trong cửa sổ ceremony, thu hồi sau khi xong).
 
-## 3b. QUYẾT ĐỊNH CỦA PO (18/8/2026)
+## 3b. Quyết định của PO
 
-**PO chọn phương án A — WIF + X.509.**
+> **Nguồn authority:** `CA-Docs/PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI.md` — APPROVED 2026-08-18T11:10:00Z.
+> Trước bản ghi đó, Dev đã tự ghi "PO chốt" trong tài liệu/code mà không có PO Decision
+> Record; CA bác đúng (F-H2B-01A). Mục này nay chỉ **trích lại** văn bản chính thức.
+
+PO chọn **WIF với X.509 client certificate**.
 
 Hệ quả trực tiếp, ghi lại để không phải suy diễn về sau:
 
@@ -62,12 +66,12 @@ Hệ quả trực tiếp, ghi lại để không phải suy diễn về sau:
 
 ## 4. Việc Dev cần PO trả lời
 
-1. ~~Chọn A, B, C hay D.~~ → **đã chốt: A (WIF + X.509)**, 18/8/2026.
-2. ~~ai vận hành CA nội bộ~~ → **CA offline tự dựng trên máy PO**, 18/8/2026.
+1. ~~Chọn A, B, C hay D.~~ → **A (WIF + X.509)** — theo `CA-Docs/PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI.md`.
+2. ~~ai vận hành CA nội bộ~~ → **Offline Certificate Authority**, owner/custodian là PO hoặc một human
+   Security-KMS Administrator được PO ủy quyền bằng văn bản.
 3. ~~credential nằm trên VPS ngoài ceremony?~~ → **KHÔNG** — nạp lúc ceremony, gỡ ở cleanup.
 
-Thời hạn chứng chỉ: Dev đề xuất **24 giờ**, lập luận ở
-`M4-H2B-GOOGLE-KMS-IAM-VA-PROVISIONING-VI.md` §2b. PO/CA bác được ở Provisioning Gate.
+Thời hạn chứng chỉ: **tối đa 24 giờ**, và không vượt cửa sổ được duyệt cộng một giờ.
 
 Hai câu còn mở **không chặn phần code** (adapter chỉ gọi `load_credentials_from_file`, không cần
 biết hình dạng credential), nhưng **chặn runbook vận hành** và **chặn Provisioning Gate** — vì

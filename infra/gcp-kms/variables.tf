@@ -1,4 +1,4 @@
-# Moi gia tri o day CHUA duoc PO chot (xem PO decision H2B, muc "Chua duoc quyet dinh").
+# Moi gia tri o day CHUA duoc quyet dinh (CA-Docs/PHASE1B-M4-H2B-GOOGLE-CLOUD-KMS-PO-DECISION-VI.md, muc "Chua duoc quyet dinh").
 # Khong dat gia tri mac dinh cho cac dinh danh that: mot mac dinh am tham o day co the tao resource
 # nham project — dung lop loi ma H2 da phai sua nhieu lan o cho khac.
 
@@ -35,7 +35,7 @@ variable "wif_provider_id" {
 
 variable "wif_ca_trust_anchor_pem" {
   type        = string
-  description = "Chung chi CA noi bo (PEM) lam trust anchor. Day la PUBLIC material — khong phai bi mat."
+  description = "Chung chi cua Offline Certificate Authority (PEM) lam trust anchor. Day la PUBLIC material — khong phai bi mat."
 }
 
 variable "wif_allowed_subject" {

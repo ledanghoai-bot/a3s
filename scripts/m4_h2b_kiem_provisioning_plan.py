@@ -64,7 +64,15 @@ def main() -> int:
          or "roles/iam.workloadIdentityUser" in hcl,
          "chi subject duoc phep moi impersonate signer SA")
 
-    print("=== Nguon tin cay WIF: X.509 (PO decision 18/8/2026, phuong an A) ===")
+    print("=== Authority (F-H2B-01A) ===")
+    kiem("PHASE1B-M4-H2B-GOOGLE-CLOUD-KMS-PO-DECISION-VI" in hcl,
+         "cau hinh khoa dan nguon PO Decision Record cua Google KMS")
+    kiem("PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI" in hcl,
+         "cau hinh WIF dan nguon PO Decision Record cua X.509 trust source")
+    kiem("Offline Certificate Authority" in hcl,
+         "goi day du 'Offline Certificate Authority' (khong nham voi CA reviewer/governance)")
+
+    print("=== Nguon tin cay WIF: X.509 (authority: PO Decision Record WIF-X509-TRUST-SOURCE) ===")
     kiem("x509" in cau_hinh and "trust_anchors" in cau_hinh,
          "provider dung X.509 va co trust anchor cua CA noi bo")
     kiem("oidc" not in cau_hinh and "issuer_uri" not in cau_hinh,

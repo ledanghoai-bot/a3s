@@ -4,8 +4,9 @@
 # `terraform plan` SAU KHI PO mo Provisioning Gate. Khong chay `apply` o buoc chuan bi nay.
 #
 # Moi gia tri dinh danh (project, region, ten key ring/key, service account, WIF pool) deu la
-# BIEN, vi PO decision H2B ghi ro chung "chua duoc quyet dinh". Gia tri de xuat nam o
-# docs/M4-H2B-GOOGLE-KMS-IAM-VA-PROVISIONING-VI.md va can PO chot truoc khi plan.
+# BIEN, vi PO Decision Record `CA-Docs/PHASE1B-M4-H2B-GOOGLE-CLOUD-KMS-PO-DECISION-VI.md` ghi ro chung "chua duoc quyet
+# dinh". Gia tri de xuat nam o docs/M4-H2B-GOOGLE-KMS-IAM-VA-PROVISIONING-VI.md va can
+# mot PO decision rieng truoc khi plan.
 
 # ---------------------------------------------------------------------------
 # HOP DONG BOOTSTRAP (F-H2B-05) — DOC TRUOC KHI PLAN
@@ -78,7 +79,8 @@ resource "google_kms_crypto_key" "transcript" {
   name     = var.key_name
   key_ring = google_kms_key_ring.m4.id
 
-  # PO decision H2B: ASYMMETRIC_SIGN + EC_SIGN_ED25519 + SOFTWARE.
+  # Authority: CA-Docs/PHASE1B-M4-H2B-GOOGLE-CLOUD-KMS-PO-DECISION-VI.md
+  # (ASYMMETRIC_SIGN + EC_SIGN_ED25519 + protection level SOFTWARE).
   purpose = "ASYMMETRIC_SIGN"
 
   version_template {
@@ -124,8 +126,12 @@ resource "google_iam_workload_identity_pool" "vps" {
   depends_on                = [google_project_service.sts]
 }
 
-# PO decision 18/8/2026: phuong an A — WIF + X.509. Danh tinh cua signer la mot CHUNG CHI CLIENT
-# do CA noi bo cap; VPS giu khoa rieng cua chung chi do.
+# Authority: CA-Docs/PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI.md — WIF voi X.509 client certificate.
+# Danh tinh cua signer la mot CHUNG CHI CLIENT do OFFLINE CERTIFICATE AUTHORITY cap.
+# (Luu y thuat ngu: "CA" trong du an nay la vai REVIEWER/GOVERNANCE; ben cap chung chi
+#  luon phai goi day du la Offline Certificate Authority.)
+# Khoa rieng client SINH TRONG TMPFS TREN VPS va khong roi VPS; chi CSR di ra, chi
+# certificate/chain di vao. Chi PUBLIC trust anchor xuat hien o day.
 #
 # !! CAN DOI CHIEU KHI CHAY PLAN !!
 # Ten khoi/truong cua provider X.509 (`x509`, `trust_store`, `trust_anchors`, `pem_certificate`)
@@ -149,7 +155,7 @@ resource "google_iam_workload_identity_pool_provider" "vps" {
   x509 {
     trust_store {
       trust_anchors {
-        pem_certificate = var.wif_ca_trust_anchor_pem
+        pem_certificate = var.wif_ca_trust_anchor_pem  # PUBLIC material
       }
     }
   }

@@ -20,9 +20,9 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 
+from app.services.pii.google_credentials import GoogleWifTokenProvider
 from app.services.pii.signing_backend import (
     KmsTransport,
-    SigningBackendDenied,
     SigningBackendMisconfigured,
 )
 
@@ -44,54 +44,19 @@ _ENV_VAULT_NAMESPACE = "M4_VAULT_NAMESPACE"
 
 
 def _token_provider_google() -> Callable[[], str]:
-    """Nguon bearer token cho Google KMS — BAT BUOC di qua Workload Identity Federation.
+    """Nguon bearer token cho Google KMS — Workload Identity Federation voi X.509 client cert.
 
-    F-H2B-01: ban truoc doc thang `M4_GOOGLE_ACCESS_TOKEN`. CA bac dung: do la TIEM TOKEN, khong
-    phai WIF, va no tao ra mot duong van hanh production ma PO chua duyet. Bien do da bi bo han.
+    AUTHORITY: `CA-Docs/PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI.md` (APPROVED
+    2026-08-18T11:10:00Z).
 
-    WIF KHONG tu tao danh tinh cho VPS. No doi mot credential co san tu mot external IdP (OIDC/
-    SAML/X.509/AWS/Azure...) roi doi qua STS lay short-lived Google token. VPS cua du an la mot VM
-    thuong, KHONG co ambient credential nao — nen nguon tin cay do phai duoc CHON truoc, bang mot
-    PO decision. Bang so sanh phuong an: docs/M4-H2B-WIF-TRUST-SOURCE-OPTIONS-VI.md.
+    F-H2B-01: ban dau doc thang `M4_GOOGLE_ACCESS_TOKEN` — do la TIEM TOKEN, khong phai WIF, va da
+    bi go han. Gio duong duy nhat la mot file cau hinh external-account do van hanh mount vao
+    TRONG cua so ceremony; ban than file do khong phai bi mat (no chi TRO toi nguon subject-token),
+    con chung chi/khoa rieng thi song trong tmpfs va bi xoa o buoc cleanup.
 
-    Vi chua co quyet dinh do, ham nay CHUA the hien thuc duoc, va no fail-closed thay vi doan:
-    thieu cau hinh credential -> `SigningBackendMisconfigured`. Viet mot duong xac thuc khong the
-    kiem thu la cach chac chan nhat de no sai am tham.
+    Doi tuong tra ve duoc TAI SU DUNG (nap mot lan, cache token) — xem `GoogleWifTokenProvider`.
     """
-    duong_dan = os.environ.get(_ENV_GOOGLE_CRED_CONFIG, "").strip()
-    if not duong_dan:
-        raise SigningBackendMisconfigured(
-            f"chua cau hinh nguon credential WIF cho Google KMS ({_ENV_GOOGLE_CRED_CONFIG} trong). "
-            "Nguon tin cay (OIDC hay X.509) can PO chot — xem "
-            "docs/M4-H2B-WIF-TRUST-SOURCE-OPTIONS-VI.md.")
-
-    def _lay() -> str:
-        # Import MUON: `google-auth` chi can khi that su dung Google KMS, va viec them dependency
-        # nay thuoc buoc provisioning (CA F-H2B-01 muc 3).
-        try:
-            from google.auth import (
-                load_credentials_from_file,  # type: ignore[import-not-found]
-            )
-            from google.auth.transport.requests import (
-                Request,  # type: ignore[import-not-found]
-            )
-        except ImportError as exc:
-            raise SigningBackendMisconfigured(
-                f"thieu thu vien google-auth cho luong external-account: {type(exc).__name__}"
-            ) from None
-        try:
-            creds, _ = load_credentials_from_file(
-                duong_dan, scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            creds.refresh(Request())
-        except Exception as exc:  # noqa: BLE001 - khong dua chi tiet credential vao thong diep
-            raise SigningBackendDenied(
-                f"khong doi duoc credential WIF sang token: {type(exc).__name__}") from None
-        token = getattr(creds, "token", None)
-        if not token:
-            raise SigningBackendDenied("luong WIF khong tra ve access token")
-        return token
-
-    return _lay
+    return GoogleWifTokenProvider(os.environ.get(_ENV_GOOGLE_CRED_CONFIG, "").strip())
 
 
 def get_kms_transport(app_env: str) -> tuple[KmsTransport, str, str]:

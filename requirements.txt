@@ -12,3 +12,7 @@ numpy>=1.26
 openai>=1.40
 pyyaml>=6.0
 cryptography>=42  # I-B M4-S1: AES-256-GCM cho Trusted Slot Store (app/services/pii/crypto.py)
+# I-B M4 H2-B: luong external-account (Workload Identity Federation) cho Google Cloud KMS.
+# PIN chinh xac: credential flow la duong xac thuc cua production signer — mot ban va bat ngo
+# o day co the doi hanh vi refresh/expiry ma khong ai nhan ra cho toi luc ceremony that bai.
+google-auth==2.35.0

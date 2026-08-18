@@ -61,7 +61,9 @@ Trong code, `GoogleKmsTransport` nhận `token_provider` — chỗ cắm WIF. De
 đường WIF: không có credential để chạy thử, và viết một đường xác thực không thể kiểm thử là cách
 chắc chắn nhất để nó sai âm thầm.
 
-## 2b. Nguồn tin cậy: WIF + X.509 (PO chốt 18/8/2026)
+## 2b. Nguồn tin cậy: WIF + X.509
+
+> Authority: `CA-Docs/PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI.md`
 
 PO chọn phương án A. Danh tính của signer là **một chứng chỉ client** do CA nội bộ cấp; VPS giữ khóa
 riêng của chứng chỉ đó. Google WIF provider là loại **X.509** với trust store chứa trust anchor của
@@ -85,54 +87,67 @@ CA nội bộ.
 
 Cả ba đều **không** đụng tới khóa ký, nên chữ ký lịch sử vẫn verify được sau khi thu hồi.
 
-### PO đã chốt (18/8/2026)
+### Quyết định của PO
 
-| Câu hỏi | Quyết định |
+> **Nguồn authority:** `CA-Docs/PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI.md` — APPROVED 2026-08-18T11:10:00Z.
+
+| Hạng mục | Quyết định |
 |---|---|
-| Ai vận hành CA nội bộ | **CA offline tự dựng, đặt trên máy PO.** Khóa riêng của CA **không bao giờ** lên VPS, không lên cloud |
-| Credential trên VPS ngoài cửa sổ ceremony | **KHÔNG.** Nạp lúc ceremony, **gỡ ở bước cleanup** |
-| Thời hạn chứng chỉ | Dev đề xuất **24 giờ** (xem lập luận dưới) — PO/CA bác được ở Provisioning Gate |
+| Nguồn tin cậy | WIF với **X.509 client certificate** |
+| Offline Certificate Authority | owner/custodian là **PO** hoặc human Security-KMS Administrator được PO ủy quyền bằng văn bản. **Dev không giữ** khóa riêng của Offline CA |
+| Khóa riêng Offline CA | không lên VPS, Google Cloud, repository, CI hay máy Dev. Chỉ **public trust anchor** đi vào Terraform/WIF |
+| TTL chứng chỉ client | **tối đa 24 giờ**, và không vượt cửa sổ được duyệt cộng một giờ |
+| Mỗi ceremony | serial mới + **khóa riêng client mới** |
+| Khóa riêng client | **sinh trong tmpfs hạn chế TRÊN VPS, không rời VPS** |
+| Ra/vào | VPS chỉ gửi **CSR**; custodian chỉ trả **certificate/chain** |
 
-Hai quyết định này ăn khớp nhau và làm phương án A mạnh hơn hẳn bản mặc định: giữa các đợt ceremony,
-**trên VPS không có credential nào cả**. Kẻ chiếm được VPS ngoài cửa sổ ceremony không tìm thấy thứ
-gì để mạo danh — tương tự cách "Vault sealed ngoài ceremony" từng được cân nhắc ở giai đoạn sandbox,
-nhưng lần này không cần thêm hạ tầng nào.
+**Lưu ý thuật ngữ:** trong dự án này "CA" là vai **reviewer/governance**. Bên cấp chứng chỉ phải
+luôn gọi đầy đủ là **Offline Certificate Authority**, và nó **không phải** CA reviewer.
 
-**Vì sao đề xuất 24 giờ**: credential đã bị gỡ sau mỗi ceremony nên thời hạn chứng chỉ chỉ còn là
-lớp phòng vệ *thứ hai* (phòng khi bước gỡ thất bại hoặc bản sao bị bỏ quên). 24 giờ đủ rộng cho một
-ceremony có sự cố phải chạy lại, và đủ hẹp để một bản sao bị bỏ quên tự hết hiệu lực trước lần
-ceremony sau. Ngắn hơn (vd 1 giờ) sẽ làm ceremony bị gián đoạn khi phải chờ điều tra giữa chừng.
-
-### Quy trình vận hành chứng chỉ
-
-**Dựng CA — một lần, trên máy PO, offline:**
-
-1. sinh khóa CA + self-signed cert, **có mật khẩu bảo vệ khóa**;
-2. giữ khóa CA trên máy PO + một bản offline; **không** sao lên VPS, không lên cloud, không vào repo;
-3. chỉ **chứng chỉ CA** (public, PEM) được dùng làm trust anchor trong Terraform.
-
-**Mỗi ceremony:**
+### Quy trình chứng chỉ theo ceremony
 
 | Bước | Việc | Ai |
 |---|---|---|
-| 1 | cấp chứng chỉ signer, CN = đúng giá trị `wif_allowed_subject`, hạn 24h | PO (máy offline) |
-| 2 | chuyển chứng chỉ + khóa riêng lên VPS qua kênh an toàn, quyền `0600`, đúng UID signer | PO |
-| 3 | chạy ceremony | theo runbook M4 |
-| 4 | **gỡ** chứng chỉ + khóa riêng khỏi VPS | bước **bắt buộc** của cleanup |
-| 5 | xác nhận đã gỡ (kiểm read-only) | Dev/PO |
+| 1 | tạo tmpfs hạn chế trên VPS (chỉ UID signer đọc được), **sinh khóa riêng client tại đó** | vận hành |
+| 2 | tạo **CSR** với CN = đúng giá trị `wif_allowed_subject`; **chỉ CSR** rời VPS | vận hành |
+| 3 | ký CSR trên máy offline, TTL ≤ 24h và ≤ cửa sổ duyệt + 1h; trả về certificate/chain | custodian Offline CA |
+| 4 | mount certificate/chain + external-account config cho signer **trong** ceremony | vận hành |
+| 5 | chạy ceremony | runbook M4 |
+| 6 | **cleanup**: xóa certificate, khóa riêng client, subject-token artifact và credential config khỏi tmpfs/mount; stop signer; xóa socket; revoke runtime approval | **bắt buộc** |
+| 7 | xác nhận dormant bằng kiểm read-only (danh sách dưới) | Dev/vận hành |
 
-**Bước 4 phải nằm trong cùng checklist cleanup** với `capture_enabled=false` và thu hồi token —
-nếu tách ra, sớm muộn nó bị quên, và bài học `signing.sock` sót lại từ Amendment 16 đã cho thấy điều
-đó xảy ra thật.
+Khóa riêng **không bao giờ đi qua đường truyền nào** — đây là điểm bản chính thức chặt hơn đề xuất
+ban đầu của Dev (vốn định sinh khóa trên máy PO rồi chuyển lên VPS).
 
-**Bất biến dormant mới, kiểm được read-only:** giữa các ceremony, trên VPS **không tồn tại** file
-credential nào của WIF. Đề nghị đưa phép kiểm này vào cùng bộ với "signer/init absent" và
-"signing-secret mount absent" đang dùng.
+**Bước 6 nằm trong CÙNG checklist cleanup** với `capture_enabled=false` và thu hồi approval. Tách ra
+là sớm muộn bị quên — `signing.sock` sót lại từ Amendment 16 đã cho thấy điều đó xảy ra thật.
 
-### Thu hồi
+### Bất biến dormant, kiểm được read-only
 
-Ba đường ở trên vẫn nguyên. Với mô hình nạp-rồi-gỡ, còn thêm một đường thứ tư, nhanh nhất và không
-cần ai cấp quyền: **không nạp credential** cho ceremony kế tiếp.
+Giữa các ceremony phải chứng minh được:
+
+- không có khóa riêng client / certificate / chain;
+- không có WIF credential configuration nào được mount;
+- không có subject-token artifact, và không có `M4_GOOGLE_ACCESS_TOKEN`;
+- không có signer/init process hay socket;
+- capture OFF và không approval còn hiệu lực.
+
+**Public trust anchor không phải secret** và được phép tồn tại.
+
+### Thu hồi — nhiều lớp
+
+| Lớp | Việc | Tốc độ |
+|---|---|---|
+| 1 | stop signer + xóa runtime credential khỏi tmpfs/mount | tức thì, không cần ai cấp quyền |
+| 2 | disable/gỡ WIF provider hoặc impersonation binding | nhanh, không cần Offline CA |
+| 3 | gỡ signer role khi cần | nhanh |
+| 4 | chứng chỉ hết hạn ngắn (≤ 24h) | tự động |
+
+**Không** dựa vào CRL/OCSP cho tới khi có bằng chứng Google WIF thực thi cơ chế đó — Dev chưa kiểm
+chứng được điều này và không được giả định.
+
+**Không** destroy Google KMS signing key/version chỉ để thu hồi workload identity: hủy khóa làm mọi
+chữ ký lịch sử mất khả năng verify, trong khi vấn đề nằm ở danh tính chứ không ở khóa.
 
 ## 3. Kế hoạch provisioning (deliverable 4) — chưa thực thi
 
