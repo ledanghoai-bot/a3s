@@ -28,10 +28,38 @@ _ENV_TRANSPORT = "M4_KMS_TRANSPORT"
 _ENV_KEY_ID = "M4_KMS_KEY_ID"
 _ENV_KEY_VERSION = "M4_KMS_KEY_VERSION"
 
+# Google Cloud KMS (provider production, PO decision H2B)
+_ENV_GOOGLE_ENDPOINT = "M4_GOOGLE_KMS_ENDPOINT"
+_ENV_GOOGLE_TOKEN = "M4_GOOGLE_ACCESS_TOKEN"
+_GOOGLE_ENDPOINT_MAC_DINH = "https://cloudkms.googleapis.com"
+
 # Vault (sandbox-only, xem docstring kms_transport_vault.py)
 _ENV_VAULT_ADDR = "M4_VAULT_ADDR"
 _ENV_VAULT_TOKEN = "M4_VAULT_TOKEN"
 _ENV_VAULT_NAMESPACE = "M4_VAULT_NAMESPACE"
+
+
+def _token_provider_google():
+    """Tra ve ham lay bearer token cho Google KMS.
+
+    Directive H2-B CAM tao credential/service-account key, va PO decision chot dung Workload
+    Identity Federation. Nen o buoc CHUAN BI nay chua the hien thuc duong WIF that: khong co
+    credential de kiem thu, va viet mot duong xac thuc khong the chay thu la cach chac chan nhat de
+    no sai am tham.
+
+    Hien tai ho tro mot nguon token TUONG MINH (`M4_GOOGLE_ACCESS_TOKEN`) danh cho contract test va
+    cho buoc preflight sau nay. Khi PO mo Provisioning Gate, cam adapter WIF vao DUNG cho nay —
+    phan con lai cua tang ky khong phai sua mot dong.
+    """
+    def _lay() -> str:
+        token = os.environ.get(_ENV_GOOGLE_TOKEN, "").strip()
+        if not token:
+            raise SigningBackendMisconfigured(
+                f"chua co nguon credential cho Google KMS ({_ENV_GOOGLE_TOKEN} trong). "
+                "Duong Workload Identity Federation duoc cam vao o buoc provisioning.")
+        return token
+
+    return _lay
 
 
 def get_kms_transport(app_env: str) -> tuple[KmsTransport, str, str]:
@@ -64,6 +92,21 @@ def get_kms_transport(app_env: str) -> tuple[KmsTransport, str, str]:
                 token=os.environ.get(_ENV_VAULT_TOKEN, ""),
                 app_env=app_env,
                 namespace=os.environ.get(_ENV_VAULT_NAMESPACE) or None,
+            ),
+            key_id,
+            key_version,
+        )
+
+    if ten == "google":
+        # Provider PRODUCTION (PO decision H2B). Nhanh RIENG, tuong minh — khong phai fallback cua
+        # nhanh vault va cung khong nhan duoc dinh huong tu no.
+        from app.services.pii.kms_transport_google import GoogleKmsTransport
+
+        return (
+            GoogleKmsTransport(
+                key_id=key_id,
+                token_provider=_token_provider_google(),
+                endpoint=os.environ.get(_ENV_GOOGLE_ENDPOINT) or _GOOGLE_ENDPOINT_MAC_DINH,
             ),
             key_id,
             key_version,
