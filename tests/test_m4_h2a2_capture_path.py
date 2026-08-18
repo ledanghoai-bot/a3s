@@ -203,3 +203,32 @@ def test_collector_luu_chu_ky_bang_ham_migration_044() -> None:
     src = inspect.getsource(sp)
     assert "m4_stage0p_record_transcript_signature" in src
     assert "signed.signature_asym" in src
+
+
+# ---------------------------------------------------------------------------
+# F-H2A2-01: fail-closed nam o SIGNER, khong o parse-time cua Compose
+# ---------------------------------------------------------------------------
+
+def test_signer_tu_choi_khoi_dong_khi_backend_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deploy dormant phai parse duoc khi `M4_SIGNING_BACKEND` unset (xem evidence Compose), nhung
+    SIGNER thi khong duoc chay. Test nay khoa nua sau cua doi do."""
+    from app.services.pii import stage0p_signing_service as svc
+    from app.services.pii.signing_backend import SigningBackendMisconfigured
+
+    monkeypatch.setattr(svc, "_BACKEND", None)
+    monkeypatch.delenv("M4_SIGNING_BACKEND", raising=False)
+    with pytest.raises(SigningBackendMisconfigured, match="M4_SIGNING_BACKEND"):
+        svc._signing_backend()
+
+
+def test_signer_tu_choi_khoi_dong_khi_backend_rong_hoac_la(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chuoi rong (dung gia tri Compose truyen qua khi chua chon) va gia tri la deu bi tu choi."""
+    from app.services.pii import stage0p_signing_service as svc
+    from app.services.pii.signing_backend import SigningBackendMisconfigured
+
+    for gia_tri in ("", "hmac", "localdev-that"):
+        monkeypatch.setattr(svc, "_BACKEND", None)
+        monkeypatch.setenv("M4_SIGNING_BACKEND", gia_tri)
+        with pytest.raises(SigningBackendMisconfigured):
+            svc._signing_backend()
