@@ -28,6 +28,29 @@ cd /srv/alpha3s
 # Day la fail-closed o CA HAI lop: Compose (khong start service) va CI (stage do).
 SERVICES="db redis migrate api worker dashboard telegram_customer_bot telegram_bot"
 
+# F-PR27-E01: tap con cua SERVICES duoc BUILD TU Dockerfile trong repo nay -- chi nhung image do
+# moi mang duoc nhan commit. `db` (pgvector) va `redis` la image thuong nguon ngoai, khong co va
+# KHONG NEN co nhan cua ta; dua chung vao buoc kiem se tao bao dong gia roi som muon bi lam ngo.
+SERVICES_CO_NHAN="migrate api worker dashboard telegram_customer_bot telegram_bot"
+
+# F-PR27-E01 (CA PHASE1B-M4-PR27-MERGE-DEPLOY-DORMANT-EVIDENCE-REVIEW-1-VI): commit dang deploy
+# phai di VAO image, khong phai chi nam trong checkout.
+#
+# Truoc correction nay deploy.sh khong set GIT_COMMIT, nen Dockerfile roi ve mac dinh `unknown`
+# va MOI image production deu mang nhan vo nghia. Evidence cua gate PR #27 vi vay khong chung
+# minh duoc image DANG CHAY sinh ra tu commit nao -- mot image cu van co the ton tai trong cung
+# checkout voi timestamp gan luc deploy.
+#
+# CI da `git reset --hard origin/main` truoc khi goi file nay, nen HEAD o day CHINH LA commit
+# dang duoc deploy.
+GIT_COMMIT="$(git rev-parse HEAD)"
+export GIT_COMMIT
+if ! printf '%s' "$GIT_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+  echo "LOI (F-PR27-E01): khong lay duoc commit hop le tu git rev-parse HEAD (nhan: '$GIT_COMMIT')" >&2
+  exit 1
+fi
+echo "=== deploy commit: $GIT_COMMIT ==="
+
 docker compose -f docker-compose.prod.yml up -d --build $SERVICES
 
 # In ket qua migration ra log deploy de operator/CI thay duoc, khong phai doan.
@@ -43,6 +66,11 @@ fi
 
 # Don image cu sau khi build de khong day disk (60GB)
 docker image prune -f >/dev/null
+
+# F-PR27-E01: DAT nhan thoi thi chua du -- phai KIEM lai tren container dang chay. Neu mot
+# service nao do van chay image cu (cache/build that bai am tham), buoc nay lam deploy DO thay
+# vi bao thanh cong roi de operator tu phat hien sau.
+bash scripts/verify_image_provenance.sh "$GIT_COMMIT" $SERVICES_CO_NHAN
 
 echo "=== deploy xong — trang thai container ==="
 docker compose -f docker-compose.prod.yml ps --format '{{.Name}}: {{.Status}}'

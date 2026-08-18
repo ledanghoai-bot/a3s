@@ -30,7 +30,30 @@ COPY . .
 # (tuc MOI ceremony) se build lai tu dau -- tai lai ~800MB torch + toan bo pip, va sinh them ~2GB
 # layer moi moi lan tren VPS 60GB. Dat cuoi file: doi GIT_COMMIT chi rebuild layer metadata LABEL
 # (tuc thi), con cac layer pip van CACHED khi requirements.txt khong doi.
-ARG GIT_COMMIT=unknown
+#
+# F-PR27-E01 (CA PHASE1B-M4-PR27-MERGE-DEPLOY-DORMANT-EVIDENCE-REVIEW-1-VI): TRUOC correction nay
+# dong duoi la `ARG GIT_COMMIT=unknown`, tuc mot FALLBACK IM LANG. Hau qua do duoc tren production:
+# `deploy.sh` khong set GIT_COMMIT, `api`/`worker`/2 bot lai dung `build: .` tran (khong truyen arg
+# nao), nen MOI image production deu mang nhan `git_commit=unknown`. Nhan ton tai nhung khong noi
+# len dieu gi -- khong the chung minh image DANG CHAY sinh ra tu commit nao.
+#
+# Gio KHONG con mac dinh: thieu/sai GIT_COMMIT thi BUILD HONG (fail-closed), khong the tao ra mot
+# image production khong truy nguon duoc. Kiem tai day (build) chu khong o Compose interpolation la
+# co y -- bai hoc F-H2A2-01: `${VAR:?}` trong Compose noi suy TOAN FILE truoc khi chon profile, nen
+# no lam hong ca `docker compose config` cua deploy dormant. Rang buoc phai nam o noi thuc su tao
+# ra image.
+ARG GIT_COMMIT
+RUN set -eu; \
+    if ! printf '%s' "${GIT_COMMIT:-}" | grep -Eq '^[0-9a-f]{40}$'; then \
+      echo "STOP (F-PR27-E01): build-arg GIT_COMMIT thieu hoac khong phai commit SHA 40 hex." >&2; \
+      echo "  nhan duoc: '${GIT_COMMIT:-<khong dat>}'" >&2; \
+      echo "  deploy path phai truyen DUNG commit dang duoc deploy, vd:" >&2; \
+      echo "    GIT_COMMIT=\$(git rev-parse HEAD) docker compose -f docker-compose.prod.yml up -d --build" >&2; \
+      exit 1; \
+    fi
+
+# Nhan chuan OCI (CA yeu cau) + giu `git_commit` cu de runbook/lenh kiem da co khong vo.
+LABEL org.opencontainers.image.revision=$GIT_COMMIT
 LABEL git_commit=$GIT_COMMIT
 
 EXPOSE 8000

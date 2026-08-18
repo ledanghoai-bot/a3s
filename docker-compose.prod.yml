@@ -33,7 +33,13 @@
 
 services:
   api:
-    build: .
+    build:
+      context: .
+      args:
+        # F-PR27-E01: `:-` (RONG) chu KHONG `:?`. `:?` se noi suy o parse-time va lam
+        # `docker compose config` cua deploy dormant hong (bai hoc F-H2A2-01). Gia tri rong
+        # bi Dockerfile TU CHOI luc build, nen fail-closed van nguyen ven.
+        GIT_COMMIT: ${GIT_COMMIT:-}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --no-access-log
     env_file: .env
     ports:
@@ -100,7 +106,7 @@ services:
     build:
       context: .
       args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-}
     profiles: ["m4-signing"]
     user: "0:0"
     command:
@@ -132,7 +138,7 @@ services:
     build:
       context: .
       args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-}
     profiles: ["m4-signing"]
     command: python -m app.services.pii.stage0p_signing_service
     user: "5001:5000"
@@ -185,7 +191,13 @@ services:
       start_period: 5s
 
   worker:
-    build: .
+    build:
+      context: .
+      args:
+        # F-PR27-E01: `:-` (RONG) chu KHONG `:?`. `:?` se noi suy o parse-time va lam
+        # `docker compose config` cua deploy dormant hong (bai hoc F-H2A2-01). Gia tri rong
+        # bi Dockerfile TU CHOI luc build, nen fail-closed van nguyen ven.
+        GIT_COMMIT: ${GIT_COMMIT:-}
     command: arq app.workers.tasks.WorkerSettings
     env_file: .env
     depends_on:
@@ -199,7 +211,13 @@ services:
     restart: unless-stopped
 
   telegram_bot:
-    build: .
+    build:
+      context: .
+      args:
+        # F-PR27-E01: `:-` (RONG) chu KHONG `:?`. `:?` se noi suy o parse-time va lam
+        # `docker compose config` cua deploy dormant hong (bai hoc F-H2A2-01). Gia tri rong
+        # bi Dockerfile TU CHOI luc build, nen fail-closed van nguyen ven.
+        GIT_COMMIT: ${GIT_COMMIT:-}
     command: python -m app.workers.telegram_listener
     env_file: .env
     depends_on:
@@ -211,7 +229,13 @@ services:
     restart: unless-stopped
 
   telegram_customer_bot:
-    build: .
+    build:
+      context: .
+      args:
+        # F-PR27-E01: `:-` (RONG) chu KHONG `:?`. `:?` se noi suy o parse-time va lam
+        # `docker compose config` cua deploy dormant hong (bai hoc F-H2A2-01). Gia tri rong
+        # bi Dockerfile TU CHOI luc build, nen fail-closed van nguyen ven.
+        GIT_COMMIT: ${GIT_COMMIT:-}
     command: python -m app.workers.telegram_customer_listener
     env_file: .env
     depends_on:
@@ -225,7 +249,10 @@ services:
     restart: unless-stopped
 
   dashboard:
-    build: ./dashboard
+    build:
+      context: ./dashboard
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
     command: sh -c "npm ci && npm run build && npm start -- -p 3000 -H 0.0.0.0"
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
@@ -309,7 +336,13 @@ services:
   #     co CREATE ROLE; tach DSN la de quyen tro nen TUONG MINH va thu hep duoc ve sau.
   # =========================================================================
   migrate:
-    build: .
+    build:
+      context: .
+      args:
+        # F-PR27-E01: `:-` (RONG) chu KHONG `:?`. `:?` se noi suy o parse-time va lam
+        # `docker compose config` cua deploy dormant hong (bai hoc F-H2A2-01). Gia tri rong
+        # bi Dockerfile TU CHOI luc build, nen fail-closed van nguyen ven.
+        GIT_COMMIT: ${GIT_COMMIT:-}
     command: ["python", "scripts/migrate.py", "up"]
     env_file: .env
     environment:
