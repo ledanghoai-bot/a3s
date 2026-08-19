@@ -15,8 +15,10 @@
 # billing account, va co he qua tai chinh — khong nen nam chung voi module bao mat nay.
 #
 # Dieu kien tien quyet (nguoi thuc hien: PO/chu billing account, TRUOC khi chay `terraform plan`):
-#   1. project `var.project_id` da ton tai, tao rieng cho production signing (khong dung chung);
-#   2. billing account da gan vao project do;
+#   1. project `var.project_id` da ton tai — PO bao cao da tao `alpha3s-production-signing`
+#      (project number 452818585523, parent NONE / No organization);
+#   2. billing account da gan vao project do (tham chieu governance: A3S-GCP-BILLING-01;
+#      KHONG ghi full Billing Account ID vao repo/evidence);
 #   3. nguoi/SA chay Terraform co quyen tren project: `roles/cloudkms.admin`,
 #      `roles/iam.serviceAccountAdmin`, `roles/iam.workloadIdentityPoolAdmin`,
 #      `roles/logging.configWriter`, `roles/storage.admin`;
@@ -31,8 +33,11 @@ terraform {
   required_version = ">= 1.5"
   required_providers {
     google = {
-      source  = "hashicorp/google"
-      version = "~> 5.0"
+      source = "hashicorp/google"
+      # DO DUOC (khong phai doan): provider 5.x KHONG co block `x509` —
+      # `terraform validate` bao "Blocks of type x509 are not expected here".
+      # v6.50.0 validate PASS. Vi vay ~> 6.0 la BAT BUOC cho WIF X.509.
+      version = "~> 6.0"
     }
   }
 }
@@ -95,6 +100,9 @@ resource "google_kms_crypto_key" "transcript" {
   # Huy khoa lam moi chu ky lich su khong con verify duoc -> chan o ca hai lop.
   lifecycle {
     prevent_destroy = true
+
+    # Thuat toan de LITERAL chu khong qua bien: mot bien co the bi ghi de tu tfvars/CLI, con literal
+    # thi khong. Doi thuat toan = thay khoa = moi chu ky lich su mat kha nang verify.
   }
 }
 
@@ -155,7 +163,7 @@ resource "google_iam_workload_identity_pool_provider" "vps" {
   x509 {
     trust_store {
       trust_anchors {
-        pem_certificate = var.wif_ca_trust_anchor_pem  # PUBLIC material
+        pem_certificate = var.wif_ca_trust_anchor_pem # PUBLIC material
       }
     }
   }
@@ -194,12 +202,21 @@ resource "google_storage_bucket" "kms_audit" {
     retention_period = var.log_retention_days * 24 * 60 * 60
   }
 
+  # CA acceptance §5.6: retention toi thieu 400 ngay. Precondition lam rang buoc nay hong o PLAN,
+  # truoc khi ai do kip apply mot gia tri thap hon.
   versioning {
     enabled = true
   }
 
   lifecycle {
     prevent_destroy = true
+
+    # CA acceptance §5.6: retention toi thieu 400 ngay. Precondition lam rang buoc nay hong ngay o
+    # PLAN, truoc khi ai do kip apply mot gia tri thap hon.
+    precondition {
+      condition     = var.log_retention_days >= 400
+      error_message = "Audit retention phai >= 400 ngay (CA acceptance criteria)."
+    }
   }
 }
 
@@ -225,4 +242,30 @@ resource "google_storage_bucket_iam_member" "audit_reader" {
   bucket = google_storage_bucket.kms_audit.name
   role   = "roles/storage.objectViewer"
   member = var.audit_reader_member
+}
+
+
+# --- Bang chung co the LOC THEO WORKLOAD (CA acceptance muc 6) -----------------
+# Audit log tho thi kho doi chieu. Metric nay dem rieng cac lan KY bang DUNG khoa cua M4, de:
+#   * doi chieu cheo voi so hang chu ky sinh ra trong DB cung cua so thoi gian — lech la dau hieu
+#     phai dieu tra;
+#   * lam co so cho alert "co thao tac ky NGOAI cua so ceremony".
+#
+# Alert policy CHUA duoc khai bao o day: no can mot notification channel, ma kenh nhan canh bao la
+# quyet dinh cua PO (email/SMS/webhook nao). Da ghi thanh open question trong plan package.
+resource "google_logging_metric" "m4_sign_operations" {
+  name    = "m4-transcript-sign-operations"
+  project = var.project_id
+
+  filter = join(" AND ", [
+    "protoPayload.serviceName=\"cloudkms.googleapis.com\"",
+    "protoPayload.methodName=\"AsymmetricSign\"",
+    "protoPayload.resourceName:\"${google_kms_crypto_key.transcript.id}\"",
+  ])
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
 }

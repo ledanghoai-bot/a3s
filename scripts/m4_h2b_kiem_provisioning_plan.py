@@ -133,8 +133,10 @@ def main() -> int:
         for x in _loi:
             print("  - " + x)
         return 1
-    print(f"TAT CA {len(_dat)} BAT BIEN DAT. (Luu y: day la kiem TINH — chua chay terraform "
-          "validate/plan vi may nay khong co terraform/gcloud.)")
+    print(f"TAT CA {len(_dat)} BAT BIEN DAT.")
+    print("Luu y pham vi: day la kiem TINH tren van ban cau hinh. `terraform validate` DA duoc chay")
+    print("rieng va PASS (google provider ~> 6.0). `terraform plan` VAN CHUA chay duoc vi can")
+    print("credential Google — xem blocker trong plan package.")
     return 0
 
 
