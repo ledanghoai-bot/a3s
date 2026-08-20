@@ -66,3 +66,11 @@ variable "audit_reader_member" {
   type        = string
   description = "Principal duoc DOC audit log; phai KHAC signer va KHAC nguoi ghi"
 }
+
+# Hop thu nhan canh bao Cloud Monitoring. PO tra loi 20/8/2026 (Dev ghi lai o
+# Dev/PHASE1B-M4-H2B-PROVISIONING-F-PROV-06-PO-ANSWERS-VI.md): canh bao phai di duong KHONG phu
+# thuoc VPS. Duong Telegram lam ngoai Google Cloud bang forward tu hop thu nay.
+variable "alert_email" {
+  type        = string
+  description = "Dia chi email nhan canh bao KMS (khong dat mac dinh: khong doan hop thu that)"
+}

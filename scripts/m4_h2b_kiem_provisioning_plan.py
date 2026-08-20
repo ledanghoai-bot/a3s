@@ -96,7 +96,7 @@ def main() -> int:
 
     print("=== Chong mat bang chung lich su ===")
     kiem(hcl.count("prevent_destroy = true") >= 2,
-         "key ring va crypto key deu prevent_destroy (huy khoa = chu ky cu khong verify duoc nua)")
+         "key ring va crypto key deu prevent_destroy (huy khoa = mat mat xich doi chieu public key trong registry voi nguon KMS; chu ky cu VAN verify duoc)")
     kiem("rotation_period" not in cau_hinh,
          "KHONG rotation tu dong (phai cong bo public key moi vao registry TRUOC khi doi phien ban)")
 
@@ -118,6 +118,19 @@ def main() -> int:
          "bucket audit chan truy cap cong khai va dung IAM thay ACL")
     kiem("audit_reader_member" in cau_hinh,
          "nguoi DOC audit log duoc khai bao tuong minh (tach khoi signer va nguoi ghi)")
+
+    print("=== Canh bao (F-PROV-06, PO tra loi 20/8/2026) ===")
+    so_alert = cau_hinh.count('resource "google_monitoring_alert_policy"')
+    so_wire = cau_hinh.count("notification_channels = [google_monitoring_notification_channel")
+    kiem(so_alert >= 3, f"co du 3 alert policy (ky / doi IAM / doi trang thai khoa) — thuc te {so_alert}")
+    kiem(so_alert > 0 and so_wire == so_alert,
+         f"MOI alert policy deu noi vao notification channel ({so_wire}/{so_alert}) — alert khong co kenh la alert cam")
+    kiem("var.alert_email" in cau_hinh and not re.search(r'email_address\s*=\s*"[^"]*@', cau_hinh),
+         "hop thu nhan canh bao la BIEN, khong hard-code dia chi that trong .tf")
+    kiem(not re.search(r'type\s*=\s*"webhook_', cau_hinh),
+         "khong dung webhook channel (webhook Telegram se phai giu bot token trong cau hinh)")
+    kiem("notification_rate_limit" in cau_hinh,
+         "alert ky co notification_rate_limit (mot ceremony ~ mot email, khong phai 260)")
 
     print("=== Khong co dinh danh that bi hard-code ===")
     kiem("variable " + chr(34) + "project_id" + chr(34) in hcl,

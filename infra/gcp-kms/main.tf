@@ -269,3 +269,177 @@ resource "google_logging_metric" "m4_sign_operations" {
     unit        = "1"
   }
 }
+
+# --- Canh bao (F-PROV-06, PO tra loi 20/8/2026) ------------------------------
+# Nguon: CA-Docs khong co van ban rieng cho 4 cau hoi F-PROV-06; PO tra loi truc tiep trong phien
+# lam viec 20/8/2026, Dev ghi lai nguyen van o
+# `Dev/PHASE1B-M4-H2B-PROVISIONING-F-PROV-06-PO-ANSWERS-VI.md` (muc 1). Neu CA doi mot PO Decision
+# Record chinh thuc thi phai bo sung van ban do TRUOC khi apply — day la yeu cau da biet, khong am
+# tham bo qua.
+#
+# PO chot: canh bao di CA email VA Telegram. Chi phan EMAIL nam trong Terraform. Telegram KHONG
+# duoc lam bang webhook channel o day vi hai ly do ky thuat, ca hai deu la ly do an toan:
+#   1. Cloud Monitoring khong co kenh Telegram; webhook channel POST mot payload rieng cua Google
+#      ma Bot API khong hieu, nen phai co mot bo chuyen doi o giua (Cloud Function/Run) — them
+#      resource, them IAM, them chi phi trong dung project toi thieu nay;
+#   2. bo chuyen doi do phai giu BOT TOKEN. Dat token vao cau hinh module nay pha bat bien "khong
+#      token/khoa trong cau hinh" ma static checker dang gac.
+# Duong Telegram vi vay duoc lam NGOAI Google Cloud (forward tu hop thu nhan alert) va khong tao
+# phu thuoc VPS o duong bao dong. Xem muc 2 cua van ban PO answers.
+resource "google_project_service" "monitoring" {
+  project            = var.project_id
+  service            = "monitoring.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_monitoring_notification_channel" "alert_email" {
+  project      = var.project_id
+  display_name = "M4 transcript signing alerts"
+  type         = "email"
+
+  labels = {
+    email_address = var.alert_email
+  }
+
+  depends_on = [google_project_service.monitoring]
+}
+
+# Metric 2/3: THAY DOI IAM tren key ring hoac khoa. Doi quyen la buoc bat buoc cua bat ky duong
+# lam dung nao — no phai phat ra tieng, ke ca khi nguoi doi la chinh chu.
+resource "google_logging_metric" "m4_key_iam_changes" {
+  name    = "m4-transcript-key-iam-changes"
+  project = var.project_id
+
+  filter = join(" AND ", [
+    "protoPayload.serviceName=\"cloudkms.googleapis.com\"",
+    "protoPayload.methodName:\"SetIamPolicy\"",
+    "(protoPayload.resourceName:\"${google_kms_key_ring.m4.id}\" OR protoPayload.resourceName:\"${google_kms_crypto_key.transcript.id}\")",
+  ])
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+# Metric 3/3: doi TRANG THAI khoa/phien ban (tao, disable, destroy, restore, doi primary).
+# Lien quan truc tiep toi mat xich doi chieu registry <-> KMS: mot phien ban bi destroy lam mat
+# kha nang chung minh public key trong registry dung la cua khoa Google da ky (chu ky cu VAN verify
+# duoc — verifier doc public key tu DB). Vi vay day la su kien phai bao, khong phai su kien im lang.
+resource "google_logging_metric" "m4_key_state_changes" {
+  name    = "m4-transcript-key-state-changes"
+  project = var.project_id
+
+  filter = join(" AND ", [
+    "protoPayload.serviceName=\"cloudkms.googleapis.com\"",
+    "(protoPayload.methodName:\"CryptoKeyVersion\" OR protoPayload.methodName:\"UpdateCryptoKey\")",
+    "protoPayload.resourceName:\"${google_kms_crypto_key.transcript.id}\"",
+  ])
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+# Alert 1/3 — CO THAO TAC KY.
+# Production o trang thai dormant: ngoai cua so ceremony thi so lan ky dung phai la 0. Nguong > 0
+# tren cua so 300s + notification_rate_limit 300s cho ra "mot ceremony ~ mot email", khong phai 260
+# email. Doi lai: mot ceremony hop le cung sinh email — dung y do, vi email do la doi chung cua
+# nguoi van hanh voi so hang chu ky trong DB.
+resource "google_monitoring_alert_policy" "sign_activity" {
+  project      = var.project_id
+  display_name = "M4: co thao tac ky transcript"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "AsymmetricSign tren khoa M4 > 0"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_sign_operations.name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  alert_strategy {
+    notification_rate_limit {
+      period = "300s"
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.alert_email.id]
+  depends_on            = [google_project_service.monitoring]
+}
+
+# Alert 2/3 — DOI IAM tren key ring/khoa.
+resource "google_monitoring_alert_policy" "key_iam_changes" {
+  project      = var.project_id
+  display_name = "M4: IAM tren key ring/khoa bi thay doi"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "SetIamPolicy tren key ring hoac khoa M4"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_iam_changes.name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.alert_email.id]
+  depends_on            = [google_project_service.monitoring]
+}
+
+# Alert 3/3 — doi trang thai khoa/phien ban.
+resource "google_monitoring_alert_policy" "key_state_changes" {
+  project      = var.project_id
+  display_name = "M4: trang thai khoa/phien ban thay doi"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Tao/disable/destroy/restore phien ban khoa M4"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_state_changes.name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.alert_email.id]
+  depends_on            = [google_project_service.monitoring]
+}

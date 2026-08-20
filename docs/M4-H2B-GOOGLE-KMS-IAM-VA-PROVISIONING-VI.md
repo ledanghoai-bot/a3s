@@ -153,9 +153,10 @@ registry ngược về nguồn KMS (xem §2, mục `prevent_destroy`).
 ## 3. Kế hoạch provisioning (deliverable 4) — chưa thực thi
 
 `infra/gcp-kms/` (Terraform): bật API, key ring, khóa `ASYMMETRIC_SIGN`/`EC_SIGN_ED25519`/`SOFTWARE`,
-signer SA, hai IAM binding cấp khóa, WIF pool + provider có điều kiện, audit config, log sink.
+signer SA, hai IAM binding cấp khóa, WIF pool + provider có điều kiện, audit config, log sink, ba
+log-based metric + ba alert policy nối vào một notification channel email (§4).
 
-### Bất biến được kiểm tự động (24 mục)
+### Bất biến được kiểm tự động (42 mục)
 
 | Nhóm | Ví dụ |
 |---|---|
@@ -164,6 +165,7 @@ signer SA, hai IAM binding cấp khóa, WIF pool + provider có điều kiện, 
 | Quyền tối thiểu | binding ở cấp CryptoKey; **không** `google_project_iam_member`; chỉ 2 role; không admin/owner/editor |
 | Chống mất bằng chứng | `prevent_destroy` trên key ring + khóa; **không** `rotation_period` tự động |
 | Audit | `DATA_READ` + `DATA_WRITE` + log sink |
+| Cảnh báo | đủ 3 alert policy; **mọi** policy đều nối vào notification channel; hộp thư là biến; không webhook channel (tránh giữ bot token) |
 | Vệ sinh | không hard-code project id, không token/khóa trong cấu hình |
 
 Hai bất biến đáng giải thích:
@@ -196,8 +198,25 @@ không khóa tay người vận hành.
 
 **Audit.** `DATA_WRITE` ghi mọi lần ký, `DATA_READ` ghi mọi lần đọc public key, sink giữ lại log.
 Đối chiếu chéo được: số lần `asymmetricSign` trong một cửa sổ phải khớp số hàng chữ ký sinh ra ở DB.
-Lệch là dấu hiệu phải điều tra. Cảnh báo đề xuất: ký ngoài cửa sổ ceremony, đổi IAM trên key ring,
-thay đổi trạng thái khóa, tỉ lệ `PERMISSION_DENIED` tăng đột biến.
+Lệch là dấu hiệu phải điều tra.
+
+**Cảnh báo — PO chốt 20/8/2026** (Dev ghi lại ở `Dev/PHASE1B-M4-H2B-PROVISIONING-F-PROV-06-PO-ANSWERS-VI.md`;
+chờ PO Decision Record chính thức nếu CA đòi). Ba alert policy đã nằm trong Terraform, tất cả
+nối vào **một notification channel email**:
+
+| Alert | Nguồn | Vì sao |
+|---|---|---|
+| Có thao tác ký | metric `m4-transcript-sign-operations` | production dormant ⇒ ngoài ceremony thì số lần ký đúng phải là 0; gom theo cửa sổ 300s + `notification_rate_limit` ⇒ **một ceremony ≈ một email**, không phải 260 |
+| Đổi IAM trên key ring/khóa | metric `m4-transcript-key-iam-changes` | đổi quyền là bước bắt buộc của mọi đường lạm dụng — phải phát ra tiếng kể cả khi người đổi là chính chủ |
+| Đổi trạng thái khóa/phiên bản | metric `m4-transcript-key-state-changes` | destroy phiên bản làm mất mắt xích đối chiếu registry ↔ nguồn KMS (xem §2 `prevent_destroy`) |
+
+**Email, không phải Telegram, là đường chính** — Telegram webhook đi qua VPS nên sẽ chết đúng lúc
+cần nhất. PO muốn nhận **cả hai**; phần Telegram làm **ngoài** Google Cloud (forward từ hộp thư
+nhận alert), vì Cloud Monitoring không có kênh Telegram và làm bằng webhook thì phải giữ bot token
+trong cấu hình — phá bất biến "không token/khóa trong cấu hình".
+
+**Chưa làm, khai rõ:** alert "tỉ lệ `PERMISSION_DENIED` tăng đột biến" (đề xuất ban đầu) chưa có
+metric riêng. Nó chỉ có ý nghĩa khi đã có nền lưu lượng thật, mà production đang dormant.
 
 **Trình tự rotation — thứ tự bắt buộc:**
 
