@@ -15,6 +15,7 @@ Exit: 0 dat | 1 co vi pham | 2 loi van hanh
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -51,6 +52,30 @@ def main() -> int:
          "thuat toan EC_SIGN_ED25519 (khop CHECK cua migration 044)")
     kiem('protection_level = "SOFTWARE"' in hcl, "protection level SOFTWARE")
     kiem("ENCRYPT_DECRYPT" not in cau_hinh, "khong dung khoa nay cho muc dich ma hoa")
+
+    # F-PR31-03: danh sach API duoc duyet phai TRUNG KHIT giua cau hinh va checker. Ban sao o day
+    # co chu dich: them mot API vao Terraform ma khong sua checker se FAIL, buoc nguoi sua phai
+    # di qua review thay vi lang le mo rong be mat.
+    print("=== Inventory API (F-PR31-03) ===")
+    API_DUOC_DUYET = {
+        "cloudkms.googleapis.com",
+        "iam.googleapis.com",
+        "iamcredentials.googleapis.com",
+        "sts.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "logging.googleapis.com",
+        "monitoring.googleapis.com",
+        "storage.googleapis.com",
+    }
+    trong_ch = set(re.findall(r'"([a-z][a-z0-9.-]*\.googleapis\.com)"\s*=', cau_hinh))
+    kiem(trong_ch == API_DUOC_DUYET,
+         f"inventory API khop danh sach duyet (thua: {sorted(trong_ch - API_DUOC_DUYET)}, "
+         f"thieu: {sorted(API_DUOC_DUYET - trong_ch)})")
+    so_khoi_api = len(re.findall(r'resource\s+"google_project_service"', cau_hinh))
+    kiem(so_khoi_api == 1,
+         f"chi MOT khoi google_project_service (for_each tren inventory) — thuc te {so_khoi_api}")
+    kiem("SAFETY-STOP (F-PR31-03)" in hcl,
+         "cau hinh ghi ro quy tac safety-stop khi can API ngoai danh sach")
 
     print("=== Khong co credential lau dai ===")
     kiem("google_service_account_key" not in cau_hinh,
@@ -148,7 +173,9 @@ def main() -> int:
     print("=== Canh bao (F-PROV-06, PO tra loi 20/8/2026) ===")
     so_alert = cau_hinh.count('resource "google_monitoring_alert_policy"')
     so_wire = cau_hinh.count("notification_channels = [google_monitoring_notification_channel")
-    kiem(so_alert >= 3, f"co du 3 alert policy (ky / doi IAM / doi trang thai khoa) — thuc te {so_alert}")
+    kiem(so_alert >= 6,
+         "co du 6 alert policy (ky / IAM khoa / trang thai khoa / danh tinh / that bai xac thuc / "
+         f"noi chua bang chung) — thuc te {so_alert}")
     kiem(so_alert > 0 and so_wire == so_alert,
          f"MOI alert policy deu noi vao notification channel ({so_wire}/{so_alert}) — alert khong co kenh la alert cam")
     kiem("var.alert_email" in cau_hinh and not re.search(r'email_address\s*=\s*"[^"]*@', cau_hinh),
@@ -157,6 +184,31 @@ def main() -> int:
          "khong dung webhook channel (webhook Telegram se phai giu bot token trong cau hinh)")
     kiem("notification_rate_limit" in cau_hinh,
          "alert ky co notification_rate_limit (mot ceremony ~ mot email, khong phai 260)")
+
+    # F-PR31-04: filter phai nam trong audit_filters.json de test fixture chay dung cai duoc deploy.
+    # Neu ai do viet lai filter thang vao HCL, test se khong con gac cai filter that nua.
+    print("=== Pham vi audit (F-PR31-04) ===")
+    tep_filter = THU_MUC / "audit_filters.json"
+    kiem(tep_filter.is_file(), "co audit_filters.json (mot nguon su that cho filter)")
+    if tep_filter.is_file():
+        bo_loc = json.loads(tep_filter.read_text(encoding="utf-8"))
+        can_co = {
+            "sink_all_audit", "sign_operations", "key_iam_changes", "key_state_changes",
+            "identity_config_changes", "auth_failures", "audit_destination_changes",
+        }
+        co = {k for k in bo_loc if not k.startswith("_")}
+        kiem(co == can_co, f"du 7 filter (thieu: {sorted(can_co - co)}, thua: {sorted(co - can_co)})")
+        kiem(all('methodName="' not in v for k, v in bo_loc.items() if not k.startswith("_")),
+             "khong filter nao dung methodName= (bang tuyet doi voi ten RPC rut gon = khong bao gio khop)")
+        sink = bo_loc.get("sink_all_audit", "")
+        for loai in ("activity", "data_access", "system_event", "policy"):
+            kiem(loai in sink, f"sink giu ca loai audit log {loai!r}")
+    kiem(cau_hinh.count("local.audit_filters.") >= 7,
+         "sink va metric deu lay filter tu JSON (khong viet chuoi filter thang trong HCL)")
+    kiem('service = "allServices"' in cau_hinh,
+         "audit config phu allServices (khong liet ke tay roi sot service)")
+    kiem(cau_hinh.count('resource "google_logging_metric"') >= 6,
+         "co du 6 log-based metric (KMS x3 + danh tinh + xac thuc + noi chua bang chung)")
 
     print("=== Khong co dinh danh that bi hard-code ===")
     kiem("variable " + chr(34) + "project_id" + chr(34) in hcl,

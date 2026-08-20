@@ -47,22 +47,62 @@ provider "google" {
   region  = var.location
 }
 
-# --- API bat buoc -----------------------------------------------------------
-resource "google_project_service" "kms" {
-  project            = var.project_id
-  service            = "cloudkms.googleapis.com"
-  disable_on_destroy = false
+# --- API bat buoc (F-PR31-03: INVENTORY tuong minh, khong doan) --------------
+#
+# CA Review 1 bac ban truoc vi module chi khai 4 API trong khi luong WIF X.509 + service-account
+# impersonation con phu thuoc IAM, Resource Manager va Service Account Credentials. Danh sach
+# duoi day la INVENTORY DUY NHAT: moi API duoc enable deu phai co ten o day kem LY DO.
+#
+# SAFETY-STOP (F-PR31-03): neu `terraform plan` doi enable mot API KHONG co trong danh sach nay,
+# hoac discovery cho thay resource nao do can them API khac, thi DUNG va xin gate rieng — KHONG
+# tu them vao day o Plan Gate. `scripts/m4_h2b_kiem_provisioning_plan.py` gac bang cach doi chieu
+# danh sach nay voi ban sao trong checker; them API ma quen sua checker se FAIL.
+#
+# CHUA XAC MINH BANG DISCOVERY THAT: chua co credential nen chua goi duoc `gcloud services list`.
+# Danh sach nay suy tu tai lieu + tu chinh cac resource trong module, va phai doi chieu lai o
+# buoc discovery read-only cua PO.
+locals {
+  required_services = {
+    "cloudkms.googleapis.com"             = "key ring, crypto key, AsymmetricSign, GetPublicKey"
+    "iam.googleapis.com"                  = "service account cua signer + Workload Identity Pool/Provider"
+    "iamcredentials.googleapis.com"       = "impersonate signer SA sau khi doi token (generateAccessToken)"
+    "sts.googleapis.com"                  = "doi X.509 client certificate lay token STS — buoc dau cua WIF"
+    "cloudresourcemanager.googleapis.com" = "doc/ghi IAM policy cap project va audit config"
+    "logging.googleapis.com"              = "log sink + log-based metric"
+    "monitoring.googleapis.com"           = "notification channel + alert policy"
+    "storage.googleapis.com"              = "bucket dich cua audit sink"
+  }
 }
 
-resource "google_project_service" "iamcredentials" {
-  project            = var.project_id
-  service            = "iamcredentials.googleapis.com"
-  disable_on_destroy = false
+# --- Filter audit: MOT nguon su that (F-PR31-04) -----------------------------
+# CA Review 1 doi "chung minh filters bang fixture hoac provider-supported validation". Filter vi
+# vay khong viet rai rac trong HCL nua ma nam trong `audit_filters.json`; Terraform va
+# `tests/test_m4_h2b_audit_filters.py` doc CUNG mot file, nen test chay dung cai se duoc deploy.
+#
+# Fixture da bat mot loi that o ban truoc: filter cu dung `methodName="AsymmetricSign"` (bang
+# tuyet doi), trong khi audit log ghi ten RPC day du
+# `google.cloud.kms.v1.KeyManagementService.AsymmetricSign` — filter do se KHONG BAO GIO khop, tuc
+# metric luon bang 0 va alert "co thao tac ky" im lang vinh vien. Nay doi sang toan tu chua `:`.
+locals {
+  _audit_filters_raw = jsondecode(file("${path.module}/audit_filters.json"))
+
+  audit_filters = {
+    for ten, mau in local._audit_filters_raw :
+    ten => replace(
+      replace(mau, "__CRYPTO_KEY_ID__", google_kms_crypto_key.transcript.id),
+      "__KEY_RING_ID__", google_kms_key_ring.m4.id
+    )
+    if !startswith(ten, "_")
+  }
 }
 
-resource "google_project_service" "sts" {
-  project            = var.project_id
-  service            = "sts.googleapis.com"
+resource "google_project_service" "required" {
+  for_each = local.required_services
+
+  project = var.project_id
+  service = each.key
+
+  # Khong disable khi destroy: tat API o day co the lam hong workload KHAC trong cung project.
   disable_on_destroy = false
 }
 
@@ -72,7 +112,7 @@ resource "google_kms_key_ring" "m4" {
   location = var.location
   project  = var.project_id
 
-  depends_on = [google_project_service.kms]
+  depends_on = [google_project_service.required["cloudkms.googleapis.com"]]
 
   # Key ring khong xoa duoc o Google Cloud; prevent_destroy chan luon ca y dinh xoa khoi state.
   lifecycle {
@@ -137,7 +177,10 @@ resource "google_iam_workload_identity_pool" "vps" {
   workload_identity_pool_id = var.wif_pool_id
   display_name              = "Alpha3S VPS"
   project                   = var.project_id
-  depends_on                = [google_project_service.sts]
+  depends_on = [
+    google_project_service.required["sts.googleapis.com"],
+    google_project_service.required["iam.googleapis.com"],
+  ]
 }
 
 # Authority: CA-Docs/PHASE1B-M4-H2B-WIF-X509-TRUST-SOURCE-PO-DECISION-VI.md — WIF voi X.509 client certificate.
@@ -192,6 +235,19 @@ resource "google_project_iam_audit_config" "kms" {
   audit_log_config { log_type = "DATA_WRITE" }
 }
 
+# F-PR31-04: audit config rieng cho KMS o tren la de noi RO Y DINH. Nhung neu chi co no thi moi
+# service khac (IAM, STS, IAM Credentials, Storage, Logging) chi con Admin Activity mac dinh, va
+# khong co gi bat duoc thao tac DOC. Project nay chi chua signing platform nen luu luong rat thap;
+# bat allServices la cach duy nhat chung minh KHONG SOT service, thay vi liet ke tay roi quen.
+resource "google_project_iam_audit_config" "all_services" {
+  project = var.project_id
+  service = "allServices"
+
+  audit_log_config { log_type = "ADMIN_READ" }
+  audit_log_config { log_type = "DATA_READ" }
+  audit_log_config { log_type = "DATA_WRITE" }
+}
+
 # F-H2B-05: bucket dich phai duoc TAO O DAY (khong gia dinh no da ton tai), va phai co retention
 # + chan truy cap rong. Mot sink tro toi bucket khong ton tai/khong co quyen se tao THANH CONG
 # nhung khong luu duoc log — audit trong rong ma khong ai biet.
@@ -199,6 +255,8 @@ resource "google_storage_bucket" "kms_audit" {
   name     = var.log_sink_bucket
   project  = var.project_id
   location = var.log_bucket_location
+
+  depends_on = [google_project_service.required["storage.googleapis.com"]]
 
   # Khong cho ACL cu/truy cap theo object -> quyen chi den tu IAM, de kiem soat va kiem tra.
   uniform_bucket_level_access = true
@@ -230,9 +288,18 @@ resource "google_logging_project_sink" "kms_audit" {
   name        = var.log_sink_name
   project     = var.project_id
   destination = "storage.googleapis.com/${google_storage_bucket.kms_audit.name}"
-  filter      = "protoPayload.serviceName=\"cloudkms.googleapis.com\""
+  # F-PR31-04: sink cu CHI giu log cua Cloud KMS, tuc moi thay doi IAM/WIF/provider/service
+  # account, moi su kien xac thuc STS/IAM Credentials va moi thay doi CHINH CAI SINK/BUCKET nay
+  # deu roi ra ngoai. Bang chung ma khong giu duoc thao tac SUA BANG CHUNG thi khong con la bang
+  # chung. Nay giu toan bo bon loai Cloud Audit Log cua project.
+  #
+  # Doi lai la dung luong: project nay chi chua signing platform, luu luong audit rat thap, nen
+  # chon PHU RONG thay vi loc hep roi phat hien thieu sau su co.
+  filter = local.audit_filters.sink_all_audit
 
   unique_writer_identity = true
+
+  depends_on = [google_project_service.required["logging.googleapis.com"]]
 }
 
 # F-H2B-05: khong cap quyen cho writer identity thi sink chay nhung KHONG ghi duoc.
@@ -257,17 +324,13 @@ resource "google_storage_bucket_iam_member" "audit_reader" {
 #     phai dieu tra;
 #   * lam co so cho alert "co thao tac ky NGOAI cua so ceremony".
 #
-# Alert policy CHUA duoc khai bao o day: no can mot notification channel, ma kenh nhan canh bao la
-# quyet dinh cua PO (email/SMS/webhook nao). Da ghi thanh open question trong plan package.
+# Alert policy tuong ung: `google_monitoring_alert_policy.sign_activity` o duoi (PO da chot kenh
+# email tai CA-Docs/PHASE1B-M4-H2B-F-PROV-06-PO-DECISION-RECORD-VI.md).
 resource "google_logging_metric" "m4_sign_operations" {
   name    = "m4-transcript-sign-operations"
   project = var.project_id
 
-  filter = join(" AND ", [
-    "protoPayload.serviceName=\"cloudkms.googleapis.com\"",
-    "protoPayload.methodName=\"AsymmetricSign\"",
-    "protoPayload.resourceName:\"${google_kms_crypto_key.transcript.id}\"",
-  ])
+  filter = local.audit_filters.sign_operations
 
   metric_descriptor {
     metric_kind = "DELTA"
@@ -292,12 +355,6 @@ resource "google_logging_metric" "m4_sign_operations" {
 #      token/khoa trong cau hinh" ma static checker dang gac.
 # Duong Telegram vi vay duoc lam NGOAI Google Cloud (forward tu hop thu nhan alert) va khong tao
 # phu thuoc VPS o duong bao dong. Xem muc 2 cua van ban PO answers.
-resource "google_project_service" "monitoring" {
-  project            = var.project_id
-  service            = "monitoring.googleapis.com"
-  disable_on_destroy = false
-}
-
 resource "google_monitoring_notification_channel" "alert_email" {
   project      = var.project_id
   display_name = "M4 transcript signing alerts"
@@ -307,7 +364,7 @@ resource "google_monitoring_notification_channel" "alert_email" {
     email_address = var.alert_email
   }
 
-  depends_on = [google_project_service.monitoring]
+  depends_on = [google_project_service.required["monitoring.googleapis.com"]]
 }
 
 # Metric 2/3: THAY DOI IAM tren key ring hoac khoa. Doi quyen la buoc bat buoc cua bat ky duong
@@ -316,11 +373,7 @@ resource "google_logging_metric" "m4_key_iam_changes" {
   name    = "m4-transcript-key-iam-changes"
   project = var.project_id
 
-  filter = join(" AND ", [
-    "protoPayload.serviceName=\"cloudkms.googleapis.com\"",
-    "protoPayload.methodName:\"SetIamPolicy\"",
-    "(protoPayload.resourceName:\"${google_kms_key_ring.m4.id}\" OR protoPayload.resourceName:\"${google_kms_crypto_key.transcript.id}\")",
-  ])
+  filter = local.audit_filters.key_iam_changes
 
   metric_descriptor {
     metric_kind = "DELTA"
@@ -337,11 +390,7 @@ resource "google_logging_metric" "m4_key_state_changes" {
   name    = "m4-transcript-key-state-changes"
   project = var.project_id
 
-  filter = join(" AND ", [
-    "protoPayload.serviceName=\"cloudkms.googleapis.com\"",
-    "(protoPayload.methodName:\"CryptoKeyVersion\" OR protoPayload.methodName:\"UpdateCryptoKey\")",
-    "protoPayload.resourceName:\"${google_kms_crypto_key.transcript.id}\"",
-  ])
+  filter = local.audit_filters.key_state_changes
 
   metric_descriptor {
     metric_kind = "DELTA"
@@ -387,7 +436,7 @@ resource "google_monitoring_alert_policy" "sign_activity" {
   }
 
   notification_channels = [google_monitoring_notification_channel.alert_email.id]
-  depends_on            = [google_project_service.monitoring]
+  depends_on            = [google_project_service.required["monitoring.googleapis.com"]]
 }
 
 # Alert 2/3 — DOI IAM tren key ring/khoa.
@@ -417,7 +466,7 @@ resource "google_monitoring_alert_policy" "key_iam_changes" {
   }
 
   notification_channels = [google_monitoring_notification_channel.alert_email.id]
-  depends_on            = [google_project_service.monitoring]
+  depends_on            = [google_project_service.required["monitoring.googleapis.com"]]
 }
 
 # Alert 3/3 — doi trang thai khoa/phien ban.
@@ -447,5 +496,145 @@ resource "google_monitoring_alert_policy" "key_state_changes" {
   }
 
   notification_channels = [google_monitoring_notification_channel.alert_email.id]
-  depends_on            = [google_project_service.monitoring]
+  depends_on            = [google_project_service.required["monitoring.googleapis.com"]]
+}
+
+
+# --- F-PR31-04: ba duong con lai ma ban truoc bo sot ------------------------
+#
+# CA Review 1: sink + alert cu chi phu Cloud KMS. Ba metric duoi day phu not ba mat con lai ma mot
+# ke tan cong PHAI di qua, hoac mot su co PHAI de lai dau vet:
+#   1. doi danh tinh/quyen  — them binding, sua WIF provider, tao service account khac;
+#   2. that bai xac thuc     — chung chi sai/het han, subject khong khop, token bi tu choi;
+#   3. doi noi chua bang chung — sua/xoa sink, sua bucket audit hoac retention cua no.
+# Rieng (3) la duong ma ke muon xoa dau vet buoc phai di, nen no phai bao dong RIENG.
+
+resource "google_logging_metric" "m4_identity_config_changes" {
+  name    = "m4-identity-config-changes"
+  project = var.project_id
+  filter  = local.audit_filters.identity_config_changes
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_logging_metric" "m4_auth_failures" {
+  name    = "m4-auth-failures"
+  project = var.project_id
+  filter  = local.audit_filters.auth_failures
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_logging_metric" "m4_audit_destination_changes" {
+  name    = "m4-audit-destination-changes"
+  project = var.project_id
+  filter  = local.audit_filters.audit_destination_changes
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+# Alert 4/6 — doi danh tinh/quyen (WIF pool/provider, service account, IAM binding cap project).
+resource "google_monitoring_alert_policy" "identity_config_changes" {
+  project      = var.project_id
+  display_name = "M4: cau hinh danh tinh/quyen bi thay doi"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Thay doi IAM/WIF/service account trong project"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_identity_config_changes.name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.alert_email.id]
+  depends_on            = [google_project_service.required["monitoring.googleapis.com"]]
+}
+
+# Alert 5/6 — THAT BAI xac thuc o STS/IAM Credentials.
+# Production dormant: khong ai duoc phep doi token. Mot chuoi that bai la dau hieu chung chi bi
+# dung sai cho, het han, hoac co ke dang thu.
+resource "google_monitoring_alert_policy" "auth_failures" {
+  project      = var.project_id
+  display_name = "M4: that bai xac thuc STS/IAM Credentials"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Loi xac thuc > 0"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_auth_failures.name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.alert_email.id]
+  depends_on            = [google_project_service.required["monitoring.googleapis.com"]]
+}
+
+# Alert 6/6 — doi NOI CHUA BANG CHUNG (sink, bucket audit, retention, quyen tren bucket).
+# Retention policy hien KHONG lock (PO chot 20/8/2026), nghia la no VAN SUA DUOC boi nguoi co
+# quyen. Alert nay la lop bu cho khoang chua lock: sua duoc, nhung khong sua len duoc.
+resource "google_monitoring_alert_policy" "audit_destination_changes" {
+  project      = var.project_id
+  display_name = "M4: noi chua audit log bi thay doi"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Thay doi sink hoac bucket audit"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_audit_destination_changes.name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.alert_email.id]
+  depends_on            = [google_project_service.required["monitoring.googleapis.com"]]
 }
