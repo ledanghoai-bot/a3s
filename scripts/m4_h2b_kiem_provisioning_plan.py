@@ -119,6 +119,32 @@ def main() -> int:
     kiem("audit_reader_member" in cau_hinh,
          "nguoi DOC audit log duoc khai bao tuong minh (tach khoi signer va nguoi ghi)")
 
+    # F-PR31-05: CA yeu cau static checker FAIL neu khang dinh sai ve destroy quay lai. Phep kiem
+    # nay chay tren CA VAN BAN ke ca COMMENT (khac cac phep kiem khac chay tren `cau_hinh` da bo
+    # comment) — vi lan truoc chinh comment la cho sai, va comment la thu nguoi sau doc de hieu.
+    print("=== Chan hoi quy khang dinh sai ve destroy (F-PR31-05 / Erratum 01) ===")
+    MAU_SAI = (
+        r"chu ky[^\n]{0,60}khong con verify duoc",
+        r"mat kha nang verify",
+        r"khong verify duoc nua",
+        r"mất khả năng verify",
+        r"không verify được nữa",
+        r"không còn verify được",
+    )
+    for mau in MAU_SAI:
+        vi_pham = re.search(mau, hcl, re.IGNORECASE)
+        kiem(vi_pham is None,
+             f"khong co khang dinh sai kieu {mau!r}"
+             + (f" — TIM THAY: {vi_pham.group(0)!r}" if vi_pham else ""))
+    kiem("m4_stage0p_transcript_public_keys" in hcl,
+         "cau hinh noi ro NGUON verify la registry DB (khong phai GetPublicKey cua KMS)")
+
+    doc = ROOT / "docs" / "M4-H2B-GOOGLE-KMS-IAM-VA-PROVISIONING-VI.md"
+    if doc.is_file():
+        van_ban = doc.read_text(encoding="utf-8")
+        xau = [m for m in MAU_SAI if re.search(m, van_ban, re.IGNORECASE)]
+        kiem(not xau, f"tai lieu thiet ke khong chua khang dinh sai (thuc te: {xau})")
+
     print("=== Canh bao (F-PROV-06, PO tra loi 20/8/2026) ===")
     so_alert = cau_hinh.count('resource "google_monitoring_alert_policy"')
     so_wire = cau_hinh.count("notification_channels = [google_monitoring_notification_channel")

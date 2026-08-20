@@ -97,12 +97,18 @@ resource "google_kms_crypto_key" "transcript" {
   # public key moi vao registry (migration 044) TRUOC khi signer doi phien ban. Rotation tu dong se
   # tao ra phien ban ma registry chua biet, va moi chu ky sau do bi tu choi ghi.
   #
-  # Huy khoa lam moi chu ky lich su khong con verify duoc -> chan o ca hai lop.
+  # F-PR31-05 (Erratum 01): huy phien ban khoa KHONG lam chu ky lich su het verify duoc — verifier
+  # doc public key tu registry DB (m4_stage0p_transcript_public_keys), khong goi Google. Cai that su
+  # mat la (a) kha nang KY TIEP va (b) mat xich doi chieu public key trong registry nguoc ve nguon
+  # KMS. Theo PO Decision Record F-PROV-06 muc 4, phien ban da DISABLE cung khong duoc gia dinh la
+  # con goi duoc GetPublicKey. Vi vay chan o ca hai lop: khong rotation tu dong + prevent_destroy.
   lifecycle {
     prevent_destroy = true
 
     # Thuat toan de LITERAL chu khong qua bien: mot bien co the bi ghi de tu tfvars/CLI, con literal
-    # thi khong. Doi thuat toan = thay khoa = moi chu ky lich su mat kha nang verify.
+    # thi khong. Doi thuat toan = thay khoa: chu ky cu VAN verify duoc bang public key da luu o
+    # registry, nhung tu do tro di la mot khoa KHAC — phai cong bo public key moi vao registry TRUOC
+    # khi signer doi phien ban, neu khong moi capture se bi tu choi ghi.
   }
 }
 
