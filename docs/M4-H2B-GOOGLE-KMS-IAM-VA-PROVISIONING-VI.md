@@ -146,8 +146,9 @@ Giữa các ceremony phải chứng minh được:
 **Không** dựa vào CRL/OCSP cho tới khi có bằng chứng Google WIF thực thi cơ chế đó — Dev chưa kiểm
 chứng được điều này và không được giả định.
 
-**Không** destroy Google KMS signing key/version chỉ để thu hồi workload identity: hủy khóa làm mọi
-chữ ký lịch sử mất khả năng verify, trong khi vấn đề nằm ở danh tính chứ không ở khóa.
+**Không** destroy Google KMS signing key/version chỉ để thu hồi workload identity: vấn đề nằm ở
+danh tính chứ không ở khóa, và destroy còn cắt mất mắt xích đối chiếu public key trong
+registry ngược về nguồn KMS (xem §2, mục `prevent_destroy`).
 
 ## 3. Kế hoạch provisioning (deliverable 4) — chưa thực thi
 
@@ -170,8 +171,14 @@ Hai bất biến đáng giải thích:
 - **Không rotation tự động.** Rotation của M4 phải kèm bước **công bố public key mới vào registry
   trước** khi signer đổi phiên bản. Rotation tự động sẽ tạo phiên bản mà registry chưa biết, và
   migration 044 sẽ từ chối ghi ⇒ fenced unit thất bại. An toàn, nhưng là gãy vận hành không cần có.
-- **`prevent_destroy`.** Hủy phiên bản khóa làm **mọi chữ ký lịch sử không verify được nữa**. Chỉ
-  được hủy khi retention/nghĩa vụ pháp lý đã hết — cần quyết định riêng, không nằm trong Terraform.
+- **`prevent_destroy`.** Cần nói chính xác cái gì mất khi hủy phiên bản khóa. Verifier
+  (`scripts/m4_stage0p_verify_transcripts.py`) đọc public key từ registry DB
+  (`m4_stage0p_transcript_public_keys`), **không** gọi Google, nên chữ ký lịch sử **vẫn verify
+  được** sau khi phiên bản khóa bị hủy ở Google. Cái thật sự mất là (a) khả năng **ký tiếp** bằng
+  phiên bản đó và (b) **mắt xích đối chiếu** public key trong registry ngược về nguồn KMS — không
+  còn cách chứng minh độc lập rằng public key đang nằm trong DB đúng là của khóa Google đã ký.
+  `prevent_destroy` giữ mắt xích đó lại; hủy hay vô hiệu là quyết định riêng của PO, không nằm
+  trong Terraform.
 
 ### Rollback / break-glass
 
@@ -198,7 +205,8 @@ thay đổi trạng thái khóa, tỉ lệ `PERMISSION_DENIED` tăng đột bi�
 2. **công bố public key mới vào registry** (`scripts/m4_publish_transcript_public_key.py`);
 3. preflight: `--kiem-tra` xác nhận registry đã có, ký thử trên sandbox;
 4. đổi `M4_KMS_KEY_VERSION` của signer;
-5. **giữ** public key/phiên bản cũ. Không destroy khi còn nghĩa vụ verify.
+5. **giữ** public key cũ trong registry (verify dựa vào đây) **và** giữ phiên bản khóa cũ ở KMS
+   để còn đối chiếu được registry với nguồn.
 
 Đảo bước 1–2 sẽ làm mọi capture thất bại cho tới khi registry được cập nhật.
 
