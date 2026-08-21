@@ -1,5 +1,5 @@
 import subprocess
-import re
+
 
 def push_issues_to_gitlab(filename):
     with open(filename, 'r', encoding='utf-8') as file:
@@ -32,7 +32,7 @@ def push_issues_to_gitlab(filename):
         result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', shell=True)
         
         if result.returncode == 0:
-            print(f"✅ Thành công!")
+            print("✅ Thành công!")
         else:
             print(f"❌ Thất bại: {result.stderr}")
 

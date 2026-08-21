@@ -161,7 +161,7 @@ async def main() -> None:
             json.dumps(rejected, ensure_ascii=False, default=str),
         )
 
-        print(f"\n=== XONG ===")
+        print("\n=== XONG ===")
         print(f"Chap nhan: {len(accepted)} asset | Tu choi: {len(rejected)} asset")
         print(f"index_version vua ghi: {index_version}")
         print("\nDay CHUA phai index dang active cho retrieval. Kiem tra ky ket qua o tren,")

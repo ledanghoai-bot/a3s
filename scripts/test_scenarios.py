@@ -135,6 +135,7 @@ async def cleanup_redis(results: list[dict]) -> None:
     """Xoa lich su chat test khoi Redis va reset bot_paused=FALSE, de lan chay
     sau khong bi dinh trang thai cua kich ban cu."""
     import redis.asyncio as aioredis
+
     from app.config import settings
 
     redis = await aioredis.from_url(settings.redis_url, decode_responses=True)

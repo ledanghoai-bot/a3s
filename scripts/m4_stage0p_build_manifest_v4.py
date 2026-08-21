@@ -231,7 +231,7 @@ def write_inventory(v4: list[dict]) -> None:
     lines = [
         "# Manifest v4 — Inventory cho staff 5 (reviewer/evaluator) review",
         "",
-        f"Sinh boi `scripts/m4_stage0p_build_manifest_v4.py` tu v3 (v3 KHONG bi sua).",
+        "Sinh boi `scripts/m4_stage0p_build_manifest_v4.py` tu v3 (v3 KHONG bi sua).",
         f"Tong: **{len(v4)} conversation** (Cap A = {CAP_A}).",
         "",
         "Cot `span_text` la ket qua cat `canonical_text[start:end]` THAT SU — neu offset sai,",
@@ -294,13 +294,13 @@ def main() -> int:
     print(f"  {'nhom':<26}{'v3':>6}{'v4':>6}")
     for k, v in audit.items():
         print(f"  {k:<26}{v['v3']:>6}{v['v4']:>6}")
-    print(f"\n== F-V4-01: doi conversation_key trung (text/nhan/psid GIU NGUYEN) ==")
+    print("\n== F-V4-01: doi conversation_key trung (text/nhan/psid GIU NGUYEN) ==")
     print(f"  so record duoc doi key: {len(remapped)}")
     for old, new in remapped[:5]:
         print(f"    {old} -> {new}")
     if len(remapped) > 5:
         print(f"    ... con {len(remapped) - 5} record nua")
-    print(f"\n== v4 ==")
+    print("\n== v4 ==")
     print(f"  conversation_count : {len(v4)}  (Cap A = {CAP_A})")
     lf, cr = raw.count(b"\n"), raw.count(b"\r")
     print(f"  bytes / LF / CR    : {len(raw)} / {lf} / {cr}")
@@ -309,7 +309,7 @@ def main() -> int:
     for t in PII_TYPES:
         print(f"  {t:<19}: {per[t]}  (san >= {MIN_POSITIVE_PER_TYPE})")
     print(f"\n  sha256             : {hashlib.sha256(raw).hexdigest()}")
-    print(f"  v2/v3 bat bien     : OK (hash khop)")
+    print("  v2/v3 bat bien     : OK (hash khop)")
 
     if args.inventory:
         write_inventory(v4)

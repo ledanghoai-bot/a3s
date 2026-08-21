@@ -104,11 +104,11 @@ def main() -> None:
 
     both_peak = results["both"]["steps"]["end"].get("VmHWM", 0)
     base_peak = results["baseline"]["steps"]["end"].get("VmHWM", 0)
-    print(f"\nKET LUAN SO BO (ghi vao bao cao A3 / ISSUES-VI.md):")
+    print("\nKET LUAN SO BO (ghi vao bao cao A3 / ISSUES-VI.md):")
     print(f"  Peak 2 model cung process : {both_peak} MB (baseline interpreter: {base_peak} MB)")
-    print(f"  Budget tham chieu (VPS 4GB, AGW-ROADMAP-001 §5): API+worker+PG(~256MB")
-    print(f"  shared_buffers)+Redis+dashboard+OS phai cung vua 4GB + swap 2-4GB.")
-    print(f"  Neu peak 2 model > ~1.5GB -> can nhac model nho/quantized hoac hosted API (REV2-03).")
+    print("  Budget tham chieu (VPS 4GB, AGW-ROADMAP-001 §5): API+worker+PG(~256MB")
+    print("  shared_buffers)+Redis+dashboard+OS phai cung vua 4GB + swap 2-4GB.")
+    print("  Neu peak 2 model > ~1.5GB -> can nhac model nho/quantized hoac hosted API (REV2-03).")
 
 
 if __name__ == "__main__":
