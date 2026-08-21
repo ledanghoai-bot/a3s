@@ -63,6 +63,7 @@ provider "google" {
 # buoc discovery read-only cua PO.
 locals {
   required_services = {
+    "serviceusage.googleapis.com"         = "chinh API dung de enable 7 API con lai — module tu liet ke minh, khong gia dinh no da bat"
     "cloudkms.googleapis.com"             = "key ring, crypto key, AsymmetricSign, GetPublicKey"
     "iam.googleapis.com"                  = "service account cua signer + Workload Identity Pool/Provider"
     "iamcredentials.googleapis.com"       = "impersonate signer SA sau khi doi token (generateAccessToken)"
@@ -262,8 +263,20 @@ resource "google_storage_bucket" "kms_audit" {
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
 
+  # F-PR31-08A. Authority: CA-Docs/PHASE1B-M4-H2B-AUDIT-BUCKET-RETENTION-PO-DECISION-VI.md
+  # (APPROVED 20/8/2026): retention DUNG 400 ngay, bootstrap lock state = UNLOCKED.
+  #
+  # `is_locked` de TUONG MINH bang false chu khong bo trong: Bucket Lock la thao tac MOT CHIEU,
+  # khoa roi thi khong go, khong rut ngan, khong xoa bucket truoc han — vinh vien. De trong o day
+  # se khien nguoi doc phai doan y dinh; ghi ro false thi moi thay do la LUA CHON co van ban.
+  #
+  # Doi lai cua trang thai unlocked: nguoi co quyen VAN sua/go duoc retention. Bu lai bang
+  # `google_monitoring_alert_policy.audit_destination_changes` (bao ngay khi sink/bucket bi doi) +
+  # postcondition o apply evidence. Lock chi duoc xem xet o mot gate RIENG sau khi Infrastructure
+  # Apply va Synthetic KMS Integration deu duoc CA dong (Decision Record muc 3).
   retention_policy {
     retention_period = var.log_retention_days * 24 * 60 * 60
+    is_locked        = false
   }
 
   # CA acceptance §5.6: retention toi thieu 400 ngay. Precondition lam rang buoc nay hong o PLAN,
@@ -339,22 +352,27 @@ resource "google_logging_metric" "m4_sign_operations" {
   }
 }
 
-# --- Canh bao (F-PROV-06, PO tra loi 20/8/2026) ------------------------------
-# Nguon: CA-Docs khong co van ban rieng cho 4 cau hoi F-PROV-06; PO tra loi truc tiep trong phien
-# lam viec 20/8/2026, Dev ghi lai nguyen van o
-# `Dev/PHASE1B-M4-H2B-PROVISIONING-F-PROV-06-PO-ANSWERS-VI.md` (muc 1). Neu CA doi mot PO Decision
-# Record chinh thuc thi phai bo sung van ban do TRUOC khi apply — day la yeu cau da biet, khong am
-# tham bo qua.
+# --- Canh bao (F-PROV-06) ----------------------------------------------------
+# Authority: CA-Docs/PHASE1B-M4-H2B-F-PROV-06-PO-DECISION-RECORD-VI.md (APPROVED 20/8/2026).
+# Record do THAY THE tu cach authority cua ban Dev ghi lai
+# (Dev/PHASE1B-M4-H2B-PROVISIONING-F-PROV-06-PO-ANSWERS-VI.md) — ban Dev chi con gia tri lich su.
 #
-# PO chot: canh bao di CA email VA Telegram. Chi phan EMAIL nam trong Terraform. Telegram KHONG
-# duoc lam bang webhook channel o day vi hai ly do ky thuat, ca hai deu la ly do an toan:
+# Theo Decision Record muc 2:
+#   * `3scoffee.cs@gmail.com` la AUTHORITATIVE Cloud Monitoring channel;
+#   * Telegram la BEST-EFFORT SECONDARY, nam NGOAI GCP, KHONG phai acceptance criterion va KHONG
+#     chan Infrastructure Apply Gate;
+#   * cam dat Telegram bot token trong Terraform, repository, evidence hoac VPS signer.
+# Vi vay Terraform/GCP scope chi gom email notification channel + cac alert policy duoc review.
+#
+# Hai ly do ky thuat khien Telegram khong the lam bang webhook channel o day:
 #   1. Cloud Monitoring khong co kenh Telegram; webhook channel POST mot payload rieng cua Google
 #      ma Bot API khong hieu, nen phai co mot bo chuyen doi o giua (Cloud Function/Run) — them
 #      resource, them IAM, them chi phi trong dung project toi thieu nay;
 #   2. bo chuyen doi do phai giu BOT TOKEN. Dat token vao cau hinh module nay pha bat bien "khong
 #      token/khoa trong cau hinh" ma static checker dang gac.
-# Duong Telegram vi vay duoc lam NGOAI Google Cloud (forward tu hop thu nhan alert) va khong tao
-# phu thuoc VPS o duong bao dong. Xem muc 2 cua van ban PO answers.
+# Duong Telegram vi vay lam NGOAI Google Cloud (forward tu hop thu nhan alert), khong tao phu thuoc
+# VPS o duong bao dong, va can runbook + secret custody RIENG ngoai module nay (Decision Record
+# muc 2). Khong duoc suy dien authority cho viec do tu cau hinh nay.
 resource "google_monitoring_notification_channel" "alert_email" {
   project      = var.project_id
   display_name = "M4 transcript signing alerts"
@@ -608,7 +626,7 @@ resource "google_monitoring_alert_policy" "auth_failures" {
 }
 
 # Alert 6/6 — doi NOI CHUA BANG CHUNG (sink, bucket audit, retention, quyen tren bucket).
-# Retention policy hien KHONG lock (PO chot 20/8/2026), nghia la no VAN SUA DUOC boi nguoi co
+# Retention policy hien KHONG lock (PO Decision Record AUDIT-BUCKET-RETENTION), nghia la no VAN SUA DUOC boi nguoi co
 # quyen. Alert nay la lop bu cho khoang chua lock: sua duoc, nhung khong sua len duoc.
 resource "google_monitoring_alert_policy" "audit_destination_changes" {
   project      = var.project_id

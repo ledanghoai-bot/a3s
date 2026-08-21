@@ -67,9 +67,10 @@ variable "audit_reader_member" {
   description = "Principal duoc DOC audit log; phai KHAC signer va KHAC nguoi ghi"
 }
 
-# Hop thu nhan canh bao Cloud Monitoring. PO tra loi 20/8/2026 (Dev ghi lai o
-# Dev/PHASE1B-M4-H2B-PROVISIONING-F-PROV-06-PO-ANSWERS-VI.md): canh bao phai di duong KHONG phu
-# thuoc VPS. Duong Telegram lam ngoai Google Cloud bang forward tu hop thu nay.
+# Hop thu nhan canh bao Cloud Monitoring.
+# Authority: CA-Docs/PHASE1B-M4-H2B-F-PROV-06-PO-DECISION-RECORD-VI.md muc 2 — day la
+# AUTHORITATIVE channel cua Cloud Monitoring. Telegram la best-effort secondary, nam ngoai GCP,
+# co runbook/secret custody rieng, va KHONG phai acceptance criterion cua Apply Gate.
 variable "alert_email" {
   type        = string
   description = "Dia chi email nhan canh bao KMS (khong dat mac dinh: khong doan hop thu that)"

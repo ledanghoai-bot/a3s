@@ -32,5 +32,6 @@ audit_reader_member = "user:3scoffee.cs@gmail.com"
 # Chua ton tai — Offline CA chi duoc tao o mot gate sau. De trong o day la CO Y.
 wif_ca_trust_anchor_pem = "<CHUA CO — dien khi Offline Certificate Authority da duoc tao>"
 
-# Hop thu nhan 3 canh bao KMS (PO tra loi 20/8/2026).
+# Hop thu AUTHORITATIVE nhan canh bao KMS.
+# Authority: CA-Docs/PHASE1B-M4-H2B-F-PROV-06-PO-DECISION-RECORD-VI.md muc 2.
 alert_email = "3scoffee.cs@gmail.com"

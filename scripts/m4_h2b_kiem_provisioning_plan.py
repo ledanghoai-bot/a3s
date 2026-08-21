@@ -58,6 +58,7 @@ def main() -> int:
     # di qua review thay vi lang le mo rong be mat.
     print("=== Inventory API (F-PR31-03) ===")
     API_DUOC_DUYET = {
+        "serviceusage.googleapis.com",
         "cloudkms.googleapis.com",
         "iam.googleapis.com",
         "iamcredentials.googleapis.com",
@@ -209,6 +210,24 @@ def main() -> int:
          "audit config phu allServices (khong liet ke tay roi sot service)")
     kiem(cau_hinh.count('resource "google_logging_metric"') >= 6,
          "co du 6 log-based metric (KMS x3 + danh tinh + xac thuc + noi chua bang chung)")
+
+    # F-PR31-07A/08A: quyet dinh cua PO phai dan nguon VAN BAN, khong duoc ghi "PO chot ngay X" roi
+    # coi do la authority. Day la lan thu HAI Dev vap cho nay (lan dau la F-H2B-01A), nen dong lai
+    # bang phep kiem thay vi bang lo`i hua.
+    print("=== Authority cua quyet dinh PO (F-PR31-07A / 08A) ===")
+    kiem("PHASE1B-M4-H2B-F-PROV-06-PO-DECISION-RECORD-VI" in hcl,
+         "cau hinh alert dan PO Decision Record chinh thuc cua F-PROV-06")
+    kiem("PHASE1B-M4-H2B-AUDIT-BUCKET-RETENTION-PO-DECISION-VI" in hcl,
+         "cau hinh retention dan PO Decision Record chinh thuc cua audit bucket")
+    tu_phong = re.findall(r"PO (?:chot|tra loi) \d{1,2}/\d{1,2}/\d{4}", hcl)
+    kiem(not tu_phong,
+         f"khong co khang dinh authority kieu 'PO chot <ngay>' ma thieu van ban (thuc te: {tu_phong})")
+    kiem("Telegram" not in cau_hinh or "best-effort" in hcl.lower() or "BEST-EFFORT" in hcl,
+         "neu nhac Telegram thi phai ghi ro no la best-effort secondary, khong phai acceptance criterion")
+    kiem(re.search(r"is_locked\s*=\s*(true|false)", cau_hinh) is not None,
+         "retention_policy khai is_locked TUONG MINH (Bucket Lock la thao tac mot chieu)")
+    kiem(re.search(r"is_locked\s*=\s*true", cau_hinh) is None,
+         "bootstrap KHONG lock retention (PO Decision: unlocked; lock can gate rieng)")
 
     print("=== Khong co dinh danh that bi hard-code ===")
     kiem("variable " + chr(34) + "project_id" + chr(34) in hcl,
