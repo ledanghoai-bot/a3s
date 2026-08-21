@@ -14,3 +14,14 @@ DBbuild.bat
 # F-MIG-01: ket qua CI job migration-pipeline sinh ra luc chay, KHONG commit
 migration_pipeline_ci_result.json
 mp_ci.json
+
+# Terraform (H2-B provisioning) — chi commit .tf, .tfvars.example va lock file.
+# State/plan/tfvars that co the chua ten resource, gia tri nhay cam hoac bi mat.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+terraform.tfvars
+*.auto.tfvars
+tfplan
+*.tfplan

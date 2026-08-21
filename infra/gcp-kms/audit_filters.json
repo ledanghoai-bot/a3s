@@ -1,0 +1,26 @@
+{
+  "_doc": [
+    "F-PR31-04: MOT NGUON SU THAT cho toan bo filter cua sink va log-based metric.",
+    "Terraform doc file nay bang jsondecode(file(...)); test tests/test_m4_h2b_audit_filters.py doc",
+    "CUNG file nay va chay no tren cac ban ghi audit log mau. Nho vay filter duoc chung minh bang",
+    "fixture chu khong phai bang niem tin — dung yeu cau cua CA Review 1.",
+    "Placeholder __KEY_RING_ID__ / __CRYPTO_KEY_ID__ duoc Terraform thay bang id that luc plan;",
+    "test thay bang gia tri mau co cung hinh dang.",
+    "GIOI HAN da khai: chua doi chieu voi audit log THAT tu Google (chua co credential). Fixture",
+    "duoc dung theo hinh dang tai lieu; buoc Infra Apply phai kiem lai bang su kien that."
+  ],
+
+  "sink_all_audit": "log_id(\"cloudaudit.googleapis.com/activity\") OR log_id(\"cloudaudit.googleapis.com/data_access\") OR log_id(\"cloudaudit.googleapis.com/system_event\") OR log_id(\"cloudaudit.googleapis.com/policy\")",
+
+  "sign_operations": "protoPayload.serviceName=\"cloudkms.googleapis.com\" AND protoPayload.methodName:\"AsymmetricSign\" AND protoPayload.resourceName:\"__CRYPTO_KEY_ID__\"",
+
+  "key_iam_changes": "protoPayload.serviceName=\"cloudkms.googleapis.com\" AND protoPayload.methodName:\"SetIamPolicy\" AND (protoPayload.resourceName:\"__KEY_RING_ID__\" OR protoPayload.resourceName:\"__CRYPTO_KEY_ID__\")",
+
+  "key_state_changes": "protoPayload.serviceName=\"cloudkms.googleapis.com\" AND (protoPayload.methodName:\"CryptoKeyVersion\" OR protoPayload.methodName:\"UpdateCryptoKey\") AND protoPayload.resourceName:\"__CRYPTO_KEY_ID__\"",
+
+  "identity_config_changes": "(protoPayload.serviceName=\"iam.googleapis.com\" OR protoPayload.serviceName=\"cloudresourcemanager.googleapis.com\") AND (protoPayload.methodName:\"SetIamPolicy\" OR protoPayload.methodName:\"WorkloadIdentityPool\" OR protoPayload.methodName:\"ServiceAccount\")",
+
+  "auth_failures": "(protoPayload.serviceName=\"sts.googleapis.com\" OR protoPayload.serviceName=\"iamcredentials.googleapis.com\") AND protoPayload.status.code!=0",
+
+  "audit_destination_changes": "(protoPayload.serviceName=\"logging.googleapis.com\" OR protoPayload.serviceName=\"storage.googleapis.com\") AND (protoPayload.methodName:\"sinks.update\" OR protoPayload.methodName:\"sinks.delete\" OR protoPayload.methodName:\"storage.buckets.update\" OR protoPayload.methodName:\"storage.buckets.delete\" OR protoPayload.methodName:\"storage.setIamPermissions\")"
+}

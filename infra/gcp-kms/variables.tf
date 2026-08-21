@@ -66,3 +66,12 @@ variable "audit_reader_member" {
   type        = string
   description = "Principal duoc DOC audit log; phai KHAC signer va KHAC nguoi ghi"
 }
+
+# Hop thu nhan canh bao Cloud Monitoring.
+# Authority: CA-Docs/PHASE1B-M4-H2B-F-PROV-06-PO-DECISION-RECORD-VI.md muc 2 — day la
+# AUTHORITATIVE channel cua Cloud Monitoring. Telegram la best-effort secondary, nam ngoai GCP,
+# co runbook/secret custody rieng, va KHONG phai acceptance criterion cua Apply Gate.
+variable "alert_email" {
+  type        = string
+  description = "Dia chi email nhan canh bao KMS (khong dat mac dinh: khong doan hop thu that)"
+}

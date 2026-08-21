@@ -146,15 +146,17 @@ Giữa các ceremony phải chứng minh được:
 **Không** dựa vào CRL/OCSP cho tới khi có bằng chứng Google WIF thực thi cơ chế đó — Dev chưa kiểm
 chứng được điều này và không được giả định.
 
-**Không** destroy Google KMS signing key/version chỉ để thu hồi workload identity: hủy khóa làm mọi
-chữ ký lịch sử mất khả năng verify, trong khi vấn đề nằm ở danh tính chứ không ở khóa.
+**Không** destroy Google KMS signing key/version chỉ để thu hồi workload identity: vấn đề nằm ở
+danh tính chứ không ở khóa, và destroy còn cắt mất mắt xích đối chiếu public key trong
+registry ngược về nguồn KMS (xem §2, mục `prevent_destroy`).
 
 ## 3. Kế hoạch provisioning (deliverable 4) — chưa thực thi
 
 `infra/gcp-kms/` (Terraform): bật API, key ring, khóa `ASYMMETRIC_SIGN`/`EC_SIGN_ED25519`/`SOFTWARE`,
-signer SA, hai IAM binding cấp khóa, WIF pool + provider có điều kiện, audit config, log sink.
+signer SA, hai IAM binding cấp khóa, WIF pool + provider có điều kiện, audit config, log sink, ba
+log-based metric + ba alert policy nối vào một notification channel email (§4).
 
-### Bất biến được kiểm tự động (24 mục)
+### Bất biến được kiểm tự động (42 mục)
 
 | Nhóm | Ví dụ |
 |---|---|
@@ -163,6 +165,7 @@ signer SA, hai IAM binding cấp khóa, WIF pool + provider có điều kiện, 
 | Quyền tối thiểu | binding ở cấp CryptoKey; **không** `google_project_iam_member`; chỉ 2 role; không admin/owner/editor |
 | Chống mất bằng chứng | `prevent_destroy` trên key ring + khóa; **không** `rotation_period` tự động |
 | Audit | `DATA_READ` + `DATA_WRITE` + log sink |
+| Cảnh báo | đủ 3 alert policy; **mọi** policy đều nối vào notification channel; hộp thư là biến; không webhook channel (tránh giữ bot token) |
 | Vệ sinh | không hard-code project id, không token/khóa trong cấu hình |
 
 Hai bất biến đáng giải thích:
@@ -170,8 +173,14 @@ Hai bất biến đáng giải thích:
 - **Không rotation tự động.** Rotation của M4 phải kèm bước **công bố public key mới vào registry
   trước** khi signer đổi phiên bản. Rotation tự động sẽ tạo phiên bản mà registry chưa biết, và
   migration 044 sẽ từ chối ghi ⇒ fenced unit thất bại. An toàn, nhưng là gãy vận hành không cần có.
-- **`prevent_destroy`.** Hủy phiên bản khóa làm **mọi chữ ký lịch sử không verify được nữa**. Chỉ
-  được hủy khi retention/nghĩa vụ pháp lý đã hết — cần quyết định riêng, không nằm trong Terraform.
+- **`prevent_destroy`.** Cần nói chính xác cái gì mất khi hủy phiên bản khóa. Verifier
+  (`scripts/m4_stage0p_verify_transcripts.py`) đọc public key từ registry DB
+  (`m4_stage0p_transcript_public_keys`), **không** gọi Google, nên chữ ký lịch sử **vẫn verify
+  được** sau khi phiên bản khóa bị hủy ở Google. Cái thật sự mất là (a) khả năng **ký tiếp** bằng
+  phiên bản đó và (b) **mắt xích đối chiếu** public key trong registry ngược về nguồn KMS — không
+  còn cách chứng minh độc lập rằng public key đang nằm trong DB đúng là của khóa Google đã ký.
+  `prevent_destroy` giữ mắt xích đó lại; hủy hay vô hiệu là quyết định riêng của PO, không nằm
+  trong Terraform.
 
 ### Rollback / break-glass
 
@@ -189,8 +198,25 @@ không khóa tay người vận hành.
 
 **Audit.** `DATA_WRITE` ghi mọi lần ký, `DATA_READ` ghi mọi lần đọc public key, sink giữ lại log.
 Đối chiếu chéo được: số lần `asymmetricSign` trong một cửa sổ phải khớp số hàng chữ ký sinh ra ở DB.
-Lệch là dấu hiệu phải điều tra. Cảnh báo đề xuất: ký ngoài cửa sổ ceremony, đổi IAM trên key ring,
-thay đổi trạng thái khóa, tỉ lệ `PERMISSION_DENIED` tăng đột biến.
+Lệch là dấu hiệu phải điều tra.
+
+**Cảnh báo — PO chốt 20/8/2026** (Dev ghi lại ở `Dev/PHASE1B-M4-H2B-PROVISIONING-F-PROV-06-PO-ANSWERS-VI.md`;
+chờ PO Decision Record chính thức nếu CA đòi). Ba alert policy đã nằm trong Terraform, tất cả
+nối vào **một notification channel email**:
+
+| Alert | Nguồn | Vì sao |
+|---|---|---|
+| Có thao tác ký | metric `m4-transcript-sign-operations` | production dormant ⇒ ngoài ceremony thì số lần ký đúng phải là 0; gom theo cửa sổ 300s + `notification_rate_limit` ⇒ **một ceremony ≈ một email**, không phải 260 |
+| Đổi IAM trên key ring/khóa | metric `m4-transcript-key-iam-changes` | đổi quyền là bước bắt buộc của mọi đường lạm dụng — phải phát ra tiếng kể cả khi người đổi là chính chủ |
+| Đổi trạng thái khóa/phiên bản | metric `m4-transcript-key-state-changes` | destroy phiên bản làm mất mắt xích đối chiếu registry ↔ nguồn KMS (xem §2 `prevent_destroy`) |
+
+**Email, không phải Telegram, là đường chính** — Telegram webhook đi qua VPS nên sẽ chết đúng lúc
+cần nhất. PO muốn nhận **cả hai**; phần Telegram làm **ngoài** Google Cloud (forward từ hộp thư
+nhận alert), vì Cloud Monitoring không có kênh Telegram và làm bằng webhook thì phải giữ bot token
+trong cấu hình — phá bất biến "không token/khóa trong cấu hình".
+
+**Chưa làm, khai rõ:** alert "tỉ lệ `PERMISSION_DENIED` tăng đột biến" (đề xuất ban đầu) chưa có
+metric riêng. Nó chỉ có ý nghĩa khi đã có nền lưu lượng thật, mà production đang dormant.
 
 **Trình tự rotation — thứ tự bắt buộc:**
 
@@ -198,7 +224,8 @@ thay đổi trạng thái khóa, tỉ lệ `PERMISSION_DENIED` tăng đột bi�
 2. **công bố public key mới vào registry** (`scripts/m4_publish_transcript_public_key.py`);
 3. preflight: `--kiem-tra` xác nhận registry đã có, ký thử trên sandbox;
 4. đổi `M4_KMS_KEY_VERSION` của signer;
-5. **giữ** public key/phiên bản cũ. Không destroy khi còn nghĩa vụ verify.
+5. **giữ** public key cũ trong registry (verify dựa vào đây) **và** giữ phiên bản khóa cũ ở KMS
+   để còn đối chiếu được registry với nguồn.
 
 Đảo bước 1–2 sẽ làm mọi capture thất bại cho tới khi registry được cập nhật.
 
