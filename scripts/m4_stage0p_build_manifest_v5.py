@@ -456,7 +456,7 @@ def main() -> int:
     by_group = collections.Counter(r.get("fnum03_group") for r in v5 if r.get("fnum03_group"))
     for gname, _ in GROUPS:
         print(f"  {gname:<40}{by_group[gname]:>4}  (toi thieu 8)")
-    print(f"\n== v5 ==")
+    print("\n== v5 ==")
     print(f"  conversation_count : {len(v5)}  (Cap A = {CAP_A})")
     lf, cr = raw.count(b"\n"), raw.count(b"\r")
     print(f"  bytes / LF / CR    : {len(raw)} / {lf} / {cr}")
@@ -465,7 +465,7 @@ def main() -> int:
     for t in PII_TYPES:
         print(f"  {t:<19}: {per[t]}  (san >= {MIN_POSITIVE_PER_TYPE})")
     print(f"\n  sha256             : {hashlib.sha256(raw).hexdigest()}")
-    print(f"  v2/v3/v4 bat bien  : OK")
+    print("  v2/v3/v4 bat bien  : OK")
 
     if args.inventory:
         write_inventory(v5)

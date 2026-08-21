@@ -173,7 +173,7 @@ def test_dung_8_ca_moi_nhom(new40, group_prefix):
 def test_ca_moi_khong_lay_tu_v4(new40):
     """psid của ca mới phải nằm ngoài dải v4 — chống trùng khi rehearsal seed."""
     with open(V4, encoding="utf-8") as fh:
-        v4_psids = {json.loads(l)["psid"] for l in fh if l.strip()}
+        v4_psids = {json.loads(dong)["psid"] for dong in fh if dong.strip()}
     for rec in new40:
         assert rec["psid"] not in v4_psids, rec["psid"]
 
@@ -329,7 +329,9 @@ def test_generator_deterministic_va_khop_file_da_commit():
     """
     a, _ = gen.build()
     b, _ = gen.build()
-    ser = lambda recs: "\n".join(json.dumps(r, ensure_ascii=False) for r in recs)
+    def ser(recs):
+        return "\n".join(json.dumps(r, ensure_ascii=False) for r in recs)
+
     assert ser(a) == ser(b), "generator KHÔNG deterministic"
 
     on_disk = open(V5, encoding="utf-8").read()

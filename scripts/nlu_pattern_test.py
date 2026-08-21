@@ -19,7 +19,10 @@ from app.services.nlu.loader import (  # noqa: E402
     load_test_cases,
     load_utterances,
 )
-from app.services.nlu.pattern_router import build_pattern_index, route_pattern  # noqa: E402
+from app.services.nlu.pattern_router import (  # noqa: E402
+    build_pattern_index,
+    route_pattern,
+)
 
 NLU_ROOT = Path(__file__).resolve().parent.parent / "datasets" / "nlu"
 TESTS_ROOT = Path(__file__).resolve().parent.parent / "datasets" / "tests"
@@ -59,7 +62,7 @@ def main() -> None:
         print(f"\nKET QUA tren {len(tests)} test held-out:")
         print(f"  Co match: {matched} | Dung: {correct} | Sai: {wrong}")
         print(f"  Pattern Router (Bat B) tu phu duoc: {correct}/{len(tests)} = {correct/len(tests)*100:.1f}%")
-        print(f"  (Phan con lai se can Semantic Router - Bat C, chua lam)")
+        print("  (Phan con lai se can Semantic Router - Bat C, chua lam)")
         return
 
     query = " ".join(sys.argv[1:])
