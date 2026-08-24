@@ -158,6 +158,11 @@ resource "google_service_account" "signer" {
   account_id   = var.signer_sa_id
   display_name = "M4 transcript signer (chi duoc ky, khong quan tri)"
   project      = var.project_id
+
+  # F-APPLY-03A: apply 24/8 chung minh Terraform tao SA song song voi viec bat IAM API — SA fail
+  # 403 SERVICE_DISABLED o giay 0 trong khi API bat xong o giay 23. Rang buoc nay bat buoc de
+  # khong dua vao may man thu tu.
+  depends_on = [google_project_service.required["iam.googleapis.com"]]
 }
 
 # Quyen TOI THIEU, gan o cap CRYPTO KEY chu khong phai cap project.
@@ -213,7 +218,10 @@ resource "google_iam_workload_identity_pool_provider" "vps" {
   x509 {
     trust_store {
       trust_anchors {
-        pem_certificate = var.wif_ca_trust_anchor_pem # PUBLIC material
+        # F-APPLY-03B: validator cua endpoint tu choi gia tri co newline cuoi du PEM chuan
+        # (bang chung: provider v6.50.0 passthrough + byte matrix + thread HashiCorp 76743).
+        # trimspace chi bo whitespace DAU/CUOI toan chuoi — 13 newline noi bo giu nguyen.
+        pem_certificate = trimspace(var.wif_ca_trust_anchor_pem) # PUBLIC material
       }
     }
   }
@@ -234,6 +242,10 @@ resource "google_project_iam_audit_config" "kms" {
   audit_log_config { log_type = "ADMIN_READ" }
   audit_log_config { log_type = "DATA_READ" }
   audit_log_config { log_type = "DATA_WRITE" }
+
+  # F-APPLY-03A: setIamPolicy cho audit config di qua Cloud Resource Manager API — apply 24/8
+  # fail 403 vi API nay chua bat xong khi lenh chay.
+  depends_on = [google_project_service.required["cloudresourcemanager.googleapis.com"]]
 }
 
 # F-PR31-04: audit config rieng cho KMS o tren la de noi RO Y DINH. Nhung neu chi co no thi moi
@@ -247,6 +259,9 @@ resource "google_project_iam_audit_config" "all_services" {
   audit_log_config { log_type = "ADMIN_READ" }
   audit_log_config { log_type = "DATA_READ" }
   audit_log_config { log_type = "DATA_WRITE" }
+
+  # F-APPLY-03A: cung ly do voi audit config KMS o tren.
+  depends_on = [google_project_service.required["cloudresourcemanager.googleapis.com"]]
 }
 
 # F-H2B-05: bucket dich phai duoc TAO O DAY (khong gia dinh no da ton tai), va phai co retention
@@ -431,7 +446,7 @@ resource "google_monitoring_alert_policy" "sign_activity" {
     display_name = "AsymmetricSign tren khoa M4 > 0"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_sign_operations.name}\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_sign_operations.name}\" AND resource.type=\"cloudkms_cryptokey\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -464,10 +479,30 @@ resource "google_monitoring_alert_policy" "key_iam_changes" {
   combiner     = "OR"
 
   conditions {
-    display_name = "SetIamPolicy tren key ring hoac khoa M4"
+    display_name = "SetIamPolicy tren key ring hoac khoa M4 [cloudkms_cryptokey]"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_iam_changes.name}\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_iam_changes.name}\" AND resource.type=\"cloudkms_cryptokey\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  conditions {
+    display_name = "SetIamPolicy tren key ring hoac khoa M4 [cloudkms_keyring]"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_iam_changes.name}\" AND resource.type=\"cloudkms_keyring\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -497,7 +532,7 @@ resource "google_monitoring_alert_policy" "key_state_changes" {
     display_name = "Tao/disable/destroy/restore phien ban khoa M4"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_state_changes.name}\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_state_changes.name}\" AND resource.type=\"cloudkms_cryptokey\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -570,10 +605,30 @@ resource "google_monitoring_alert_policy" "identity_config_changes" {
   combiner     = "OR"
 
   conditions {
-    display_name = "Thay doi IAM/WIF/service account trong project"
+    display_name = "Thay doi IAM/WIF/service account trong project [project]"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_identity_config_changes.name}\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_identity_config_changes.name}\" AND resource.type=\"project\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  conditions {
+    display_name = "Thay doi IAM/WIF/service account trong project [audited_resource]"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_identity_config_changes.name}\" AND resource.type=\"audited_resource\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -605,7 +660,7 @@ resource "google_monitoring_alert_policy" "auth_failures" {
     display_name = "Loi xac thuc > 0"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_auth_failures.name}\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_auth_failures.name}\" AND resource.type=\"audited_resource\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -634,10 +689,30 @@ resource "google_monitoring_alert_policy" "audit_destination_changes" {
   combiner     = "OR"
 
   conditions {
-    display_name = "Thay doi sink hoac bucket audit"
+    display_name = "Thay doi sink hoac bucket audit [gcs_bucket]"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_audit_destination_changes.name}\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_audit_destination_changes.name}\" AND resource.type=\"gcs_bucket\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  conditions {
+    display_name = "Thay doi sink hoac bucket audit [project]"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_audit_destination_changes.name}\" AND resource.type=\"project\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"

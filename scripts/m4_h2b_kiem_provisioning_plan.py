@@ -237,6 +237,47 @@ def main() -> int:
     kiem(not re.search(r'\bya29\.|BEGIN PRIVATE KEY|"AIza[0-9A-Za-z_-]{20,}"', hcl),
          "khong co token/khoa/API key nao trong cau hinh")
 
+    # F-APPLY-03A: apply 24/8/2026 fail 403 vi SA va audit config chay TRUOC khi API tuong ung bat
+    # xong (race — Terraform khong tu biet phu thuoc nay). Moi resource dung API vua-bat phai khai
+    # depends_on ve google_project_service.required[...] tuong ung. Kiem bang cach doc than block.
+    print("=== depends_on chong race bat API (F-APPLY-03A) ===")
+
+    # Doc than block tu CAU_HINH (da bo comment) — Review 19: neu doc tu van ban goc thi mot
+    # dong comment chua dung chuoi mong doi se lam phep kiem pass GIA.
+    def _khoi(ten_resource: str) -> str:
+        m = re.search(
+            r'resource\s+"' + ten_resource.split(".")[0] + r'"\s+"' + ten_resource.split(".")[1]
+            + r'"\s*\{.*?\n\}', cau_hinh, re.DOTALL)
+        return m.group(0) if m else ""
+
+    RANG_BUOC_API = {
+        "google_service_account.signer": "iam.googleapis.com",
+        "google_project_iam_audit_config.kms": "cloudresourcemanager.googleapis.com",
+        "google_project_iam_audit_config.all_services": "cloudresourcemanager.googleapis.com",
+        "google_storage_bucket.kms_audit": "storage.googleapis.com",
+    }
+    for ten, api in RANG_BUOC_API.items():
+        khoi = _khoi(ten)
+        kiem(khoi != "" and "depends_on" in khoi
+             and f'google_project_service.required["{api}"]' in khoi,
+             f"{ten} khai depends_on ve google_project_service.required[\"{api}\"]")
+
+    # F-APPLY-03B/03C (Review 20): trimspace bat buoc quanh PEM (apply 24/8 bi tu choi vi newline
+    # cuoi); moi alert filter phai co resource.type; one_of bi CAM (sai cu phap cho resource.type).
+    # Mapping chi tiet 6 metric -> type kiem o tests/test_m4_h2b_alert_conditions.py.
+    print("=== Sua loi partial apply 24/8 (F-APPLY-03B/03C) ===")
+    kiem("pem_certificate = trimspace(var.wif_ca_trust_anchor_pem)" in cau_hinh,
+         "pem_certificate boc trimspace() — plan input khong trailing LF")
+    kiem(re.search(r"pem_certificate\s*=\s*var\.wif_ca_trust_anchor_pem\b", cau_hinh) is None,
+         "khong con dang pem_certificate tran (khong trimspace)")
+    # filter chua escaped quote (\") nen khong dung [^"]* — lay het dong roi kiem tung dong
+    dong_filter_alert = re.findall(r'filter\s*=\s*"metric\.type=[^\n]*', cau_hinh)
+    so_filter_alert = len(dong_filter_alert)
+    so_co_type = sum(1 for d in dong_filter_alert if "resource.type=" in d)
+    kiem(so_filter_alert > 0 and so_filter_alert == so_co_type,
+         f"moi alert filter co resource.type ({so_co_type}/{so_filter_alert})")
+    kiem("one_of" not in cau_hinh, "khong dung one_of (grammar khong cho voi resource.type)")
+
     print()
     if _loi:
         print(f"KHONG DAT ({len(_loi)}):")
