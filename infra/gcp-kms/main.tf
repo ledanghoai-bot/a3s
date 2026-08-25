@@ -433,10 +433,13 @@ resource "google_logging_metric" "m4_key_state_changes" {
 }
 
 # Alert 1/3 — CO THAO TAC KY.
-# Production o trang thai dormant: ngoai cua so ceremony thi so lan ky dung phai la 0. Nguong > 0
-# tren cua so 300s + notification_rate_limit 300s cho ra "mot ceremony ~ mot email", khong phai 260
-# email. Doi lai: mot ceremony hop le cung sinh email — dung y do, vi email do la doi chung cua
-# nguoi van hanh voi so hang chu ky trong DB.
+# Production o trang thai dormant: ngoai cua so ceremony thi so lan ky dung phai la 0.
+# Cau hinh: nguong > 0, duration 0s, alignment 300s (ALIGN_SUM).
+# KHONG co notification_rate_limit: metric-threshold policy khong ho tro cau hinh do (server 400,
+# F-APPLY-04A — apply 25/8). Tan suat email vi vay KHONG duoc throttle o tang policy; muc do gop
+# thong bao phu thuoc mo hinh incident cua Monitoring, chua co config nao dam bao dinh luong
+# "mot ceremony ~ mot email". Email khi ky van la doi chung cua nguoi van hanh voi so hang chu ky
+# trong DB — dung y do.
 resource "google_monitoring_alert_policy" "sign_activity" {
   project      = var.project_id
   display_name = "M4: co thao tac ky transcript"

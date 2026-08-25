@@ -1,7 +1,10 @@
-"""F-APPLY-03B/03C — kiem tra sua loi partial apply 24/8/2026 (Review 20 + Commit Directive).
+"""F-APPLY-03B/03C/04A/04B — kiem tra sua loi partial apply 24-25/8/2026.
+
+Authority mapping hien hanh: CA Review 28 muc 4 (thay Review 20 sau khi server bac
+cloudkms_*/project — khong phai Monitoring descriptor; timeSeries thuc do ra global).
 
 Kiem TINH tren van ban main.tf:
-- 03C: 6 alert policy co dung so condition, dung exact resource.type theo mapping Review 20 muc 2,
+- 04B: 6 alert policy co dung so condition, dung exact resource.type theo mapping Review 28 muc 4,
   moi condition van tro dung metric, combiner OR, va CAM one_of (sai cu phap cho resource.type
   theo grammar https://docs.cloud.google.com/monitoring/api/v3/filters).
 - 03B: pem_certificate phai boc trimspace; va trimspace-semantics (mo phong Go strings.TrimSpace)
