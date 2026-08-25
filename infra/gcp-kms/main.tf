@@ -446,7 +446,7 @@ resource "google_monitoring_alert_policy" "sign_activity" {
     display_name = "AsymmetricSign tren khoa M4 > 0"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_sign_operations.name}\" AND resource.type=\"cloudkms_cryptokey\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_sign_operations.name}\" AND resource.type=\"global\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -459,12 +459,6 @@ resource "google_monitoring_alert_policy" "sign_activity" {
       trigger {
         count = 1
       }
-    }
-  }
-
-  alert_strategy {
-    notification_rate_limit {
-      period = "300s"
     }
   }
 
@@ -479,30 +473,10 @@ resource "google_monitoring_alert_policy" "key_iam_changes" {
   combiner     = "OR"
 
   conditions {
-    display_name = "SetIamPolicy tren key ring hoac khoa M4 [cloudkms_cryptokey]"
+    display_name = "SetIamPolicy tren key ring hoac khoa M4"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_iam_changes.name}\" AND resource.type=\"cloudkms_cryptokey\""
-      comparison      = "COMPARISON_GT"
-      threshold_value = 0
-      duration        = "0s"
-
-      aggregations {
-        alignment_period   = "300s"
-        per_series_aligner = "ALIGN_SUM"
-      }
-
-      trigger {
-        count = 1
-      }
-    }
-  }
-
-  conditions {
-    display_name = "SetIamPolicy tren key ring hoac khoa M4 [cloudkms_keyring]"
-
-    condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_iam_changes.name}\" AND resource.type=\"cloudkms_keyring\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_iam_changes.name}\" AND resource.type=\"global\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -532,7 +506,7 @@ resource "google_monitoring_alert_policy" "key_state_changes" {
     display_name = "Tao/disable/destroy/restore phien ban khoa M4"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_state_changes.name}\" AND resource.type=\"cloudkms_cryptokey\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_key_state_changes.name}\" AND resource.type=\"global\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -605,10 +579,10 @@ resource "google_monitoring_alert_policy" "identity_config_changes" {
   combiner     = "OR"
 
   conditions {
-    display_name = "Thay doi IAM/WIF/service account trong project [project]"
+    display_name = "Thay doi IAM/WIF/service account trong project [global]"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_identity_config_changes.name}\" AND resource.type=\"project\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_identity_config_changes.name}\" AND resource.type=\"global\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -709,10 +683,10 @@ resource "google_monitoring_alert_policy" "audit_destination_changes" {
   }
 
   conditions {
-    display_name = "Thay doi sink hoac bucket audit [project]"
+    display_name = "Thay doi sink hoac bucket audit [global]"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_audit_destination_changes.name}\" AND resource.type=\"project\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.m4_audit_destination_changes.name}\" AND resource.type=\"global\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"

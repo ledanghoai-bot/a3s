@@ -14,14 +14,15 @@ from pathlib import Path
 MAIN_TF = (Path(__file__).resolve().parents[1] / "infra" / "gcp-kms" / "main.tf").read_text(
     encoding="utf-8")
 
-# Mapping EXACT theo CA Review 20 muc 2 (F-APPLY-03C) — doi mapping phai qua review.
+# Mapping EXACT theo CA Review 28 muc 4 (F-APPLY-04B — sua tu Review 20 sau khi server bac
+# cloudkms_*/project: khong phai Monitoring descriptor; timeSeries thuc do ra global) — doi mapping phai qua review.
 MAPPING = {
-    "m4_sign_operations": ["cloudkms_cryptokey"],
-    "m4_key_state_changes": ["cloudkms_cryptokey"],
+    "m4_sign_operations": ["global"],
+    "m4_key_state_changes": ["global"],
     "m4_auth_failures": ["audited_resource"],
-    "m4_key_iam_changes": ["cloudkms_cryptokey", "cloudkms_keyring"],
-    "m4_identity_config_changes": ["project", "audited_resource"],
-    "m4_audit_destination_changes": ["gcs_bucket", "project"],
+    "m4_key_iam_changes": ["global"],
+    "m4_identity_config_changes": ["global", "audited_resource"],
+    "m4_audit_destination_changes": ["gcs_bucket", "global"],
 }
 
 POLICY_CUA_METRIC = {
@@ -96,3 +97,9 @@ def test_trimspace_semantics_giu_newline_noi_bo():
     assert not cat.endswith("\n"), "plan input khong duoc co trailing LF"
     assert cat.startswith("-----BEGIN CERTIFICATE-----")
     assert cat.endswith("-----END CERTIFICATE-----")
+
+
+def test_khong_co_alert_strategy_trong_metric_threshold_policy():
+    # F-APPLY-04A: notification_rate_limit chi hop le cho log-based policy; moi policy o day la
+    # metric-threshold nen alert_strategy bi cam hoan toan (server 400 neu co).
+    assert "alert_strategy" not in MAIN_TF, "alert_strategy bi cam trong metric-threshold policy"

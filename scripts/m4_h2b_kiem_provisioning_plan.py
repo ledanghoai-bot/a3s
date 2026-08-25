@@ -183,8 +183,11 @@ def main() -> int:
          "hop thu nhan canh bao la BIEN, khong hard-code dia chi that trong .tf")
     kiem(not re.search(r'type\s*=\s*"webhook_', cau_hinh),
          "khong dung webhook channel (webhook Telegram se phai giu bot token trong cau hinh)")
-    kiem("notification_rate_limit" in cau_hinh,
-         "alert ky co notification_rate_limit (mot ceremony ~ mot email, khong phai 260)")
+    # (Bat bien cu "alert ky co notification_rate_limit" bi GO theo F-APPLY-04A: server 400 —
+    # notification_rate_limit chi danh cho log-based policy, khong phai metric-threshold. Lo ngai
+    # "260 email/ceremony" duoc giam nhe tu nhien boi mo hinh incident cua Monitoring: alert mo
+    # MOT incident cho ca dot (ALIGN_SUM 300s), khong gui email theo tung data point. Bat bien
+    # nguoc lai — CAM alert_strategy — nam o cum F-APPLY-04A/04B phia duoi.)
 
     # F-PR31-04: filter phai nam trong audit_filters.json de test fixture chay dung cai duoc deploy.
     # Neu ai do viet lai filter thang vao HCL, test se khong con gac cai filter that nua.
@@ -277,6 +280,17 @@ def main() -> int:
     kiem(so_filter_alert > 0 and so_filter_alert == so_co_type,
          f"moi alert filter co resource.type ({so_co_type}/{so_filter_alert})")
     kiem("one_of" not in cau_hinh, "khong dung one_of (grammar khong cho voi resource.type)")
+    # F-APPLY-04A (apply 25/8): notification_rate_limit chi danh cho log-based alert policy;
+    # moi policy o module nay la metric-threshold nen alert_strategy bi cam.
+    kiem("alert_strategy" not in cau_hinh,
+         "khong co alert_strategy trong metric-threshold policy (F-APPLY-04A)")
+    # F-APPLY-04B: resource.type trong alert filter phai thuoc danh muc MONITORING descriptor
+    # (do thuc te: project/cloudkms_* bi 404). Danh sach hop le do discovery R3 chot.
+    TYPE_HOP_LE = {"global", "audited_resource", "gcs_bucket"}
+    sai_type = [d for d in dong_filter_alert
+                for m in [re.search(r'resource\.type=\\"([a-z_]+)\\"', d)]
+                if m and m.group(1) not in TYPE_HOP_LE]
+    kiem(not sai_type, "moi resource.type thuoc danh muc Monitoring descriptor da kiem (F-APPLY-04B)")
 
     print()
     if _loi:
