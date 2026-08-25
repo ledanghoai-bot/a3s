@@ -22,17 +22,22 @@ Mỗi mục dưới đây phải có: **lệnh đã chạy**, **output thô**, *
 | # | Phải chứng minh | Cách lấy bằng chứng |
 |---|---|---|
 | 1.1 | Channel tồn tại đúng địa chỉ authoritative | `gcloud alpha monitoring channels list --format=json` — kiểm `type=email`, `labels.email_address` |
-| 1.2 | **Verification status = verified** | cùng output trên, trường `verificationStatus`. Google gửi thư xác minh — **phải bấm link trong thư**; chưa bấm thì channel tồn tại mà không nhận được gì |
+| 1.2 | **Verification status không phải `UNVERIFIED`** | cùng output trên, trường `verificationStatus`. Sửa theo CA Review 37/39 và Monitoring API reference: channel **email** không có workflow xác minh — trường thường **vắng mặt** (= `VERIFICATION_STATUS_UNSPECIFIED`) và channel vẫn gửi thư bình thường. Chỉ giá trị `UNVERIFIED` mới là non-functioning và chặn gate. Acceptance cuối cùng là **email test nhận được thật** (§1.3), không phải giá trị trường này |
 | 1.3 | **Controlled test alert được nhận thật** | xem §1.4 |
 | 1.4 | Ảnh chụp/redact của email alert nhận được | ghi giờ UTC nhận, tiêu đề alert, policy name; **che** nội dung nhạy cảm |
 
 **Kịch bản test có kiểm soát** (chạy trong cửa sổ apply, ghi rõ vào evidence là test):
 
 1. ghi giờ UTC bắt đầu test;
-2. tạo **một** sự kiện thuộc phạm vi một metric đã khai — cách rẻ nhất và ít tác dụng phụ nhất là
-   một thao tác **đọc** sinh audit log thuộc `m4-identity-config-changes` hoặc một lần
-   `GetPublicKey`; **không** dùng thao tác ký thật để test;
-3. chờ trong cửa sổ align 300s + rate limit 300s;
+2. tạo **một** sự kiện thuộc phạm vi một metric đã khai — test chuẩn (đã chạy thật và PASS
+   25/8/2026, CA Review 39): đúng **một** lệnh describe read-only WIF provider `vps-x509` trong
+   pool `alpha3s-prod-vps` — audit event `GetWorkloadIdentityPoolProvider` match filter
+   `m4-identity-config-changes`. **KHÔNG dùng `GetPublicKey`** (CA Review 36: filter
+   `sign_operations` chỉ bắt `AsymmetricSign` nên GetPublicKey không match metric nào — test sẽ
+   câm); **không** dùng thao tác ký thật để test;
+3. chờ alignment/evaluation/notification latency (align 300s; độ trễ đo thật 25/8: ~3m41s;
+   trần chờ hợp lý 15 phút). **Không có notification rate-limit**: metric-threshold policy không
+   hỗ trợ cấu hình đó (F-APPLY-04A) — không được mô tả hay trông đợi throttle ở tầng policy;
 4. xác nhận email đến hộp `3scoffee.cs@gmail.com`;
 5. ghi giờ UTC nhận, độ trễ, và **đóng** incident.
 
@@ -94,7 +99,7 @@ Vì retention đang unlocked, phải có đường phát hiện nếu ai đó gi
 ## 6. Điều kiện đóng gate
 
 Gate Infrastructure Apply **chỉ** được đề nghị đóng khi cả §1–§5 đều có bằng chứng thô kèm giờ UTC.
-Riêng §1.2 và §1.3 (email verified + nhận được alert thật) là **điều kiện cứng** — CA nêu đích danh,
+Riêng §1.2 và §1.3 (channel không `UNVERIFIED` + nhận được alert thật) là **điều kiện cứng** — CA nêu đích danh,
 và nó là thứ duy nhất chứng minh đường báo động không phải đường câm.
 
 Sau khi CA đóng gate này **và** Synthetic KMS Integration, mới xét tới
