@@ -1,0 +1,37 @@
+# Gia tri EXACT do PO duyet — PHASE1B-M4-H2B-PROVISIONING-DESIGN-INPUTS-PO-APPROVAL-VI
+# va Bootstrap Directive PHASE1B-M4-H2B-BOOTSTRAP-TERRAFORM-PLAN-DIRECTIVE-VI.
+#
+# File .example nay CO trong repo. File `terraform.tfvars` that thi KHONG duoc commit.
+# TUYET DOI khong dua full Billing Account ID vao day — governance chi dung tham chieu
+# `A3S-GCP-BILLING-01`. Terraform trong module nay khong gan/doi billing, nen no khong can ID do.
+
+project_id = "alpha3s-production-signing" # project number 452818585523, parent NONE
+location   = "asia-southeast1"
+
+# Platform-wide (dung chung cho cac workload ky sau nay)
+key_ring_name   = "production-signing"
+wif_pool_id     = "alpha3s-prod-vps"
+wif_provider_id = "vps-x509"
+log_sink_name   = "kms-audit-sink"
+log_sink_bucket = "a3s-prod-kms-audit"
+
+log_bucket_location = "asia-southeast1"
+log_retention_days  = 400 # CA acceptance §5.6: toi thieu 400 ngay
+
+# Workload-specific: M4 transcript signing
+key_name     = "m4-transcript-ed25519"
+signer_sa_id = "m4-transcript-signer"
+
+# CN cua chung chi client do Offline Certificate Authority cap. Chi DUNG subject nay duoc doi token.
+wif_allowed_subject = "alpha3s-m4-transcript-signer"
+
+# Nguoi/nhom duoc DOC audit log — phai khac signer va khac writer identity cua sink.
+audit_reader_member = "user:3scoffee.cs@gmail.com"
+
+# Trust anchor: noi dung PEM cua chung chi Offline Certificate Authority (PUBLIC material).
+# Chua ton tai — Offline CA chi duoc tao o mot gate sau. De trong o day la CO Y.
+wif_ca_trust_anchor_pem = "<CHUA CO — dien khi Offline Certificate Authority da duoc tao>"
+
+# Hop thu AUTHORITATIVE nhan canh bao KMS.
+# Authority: CA-Docs/PHASE1B-M4-H2B-F-PROV-06-PO-DECISION-RECORD-VI.md muc 2.
+alert_email = "3scoffee.cs@gmail.com"

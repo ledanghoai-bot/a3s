@@ -15,6 +15,7 @@ Exit: 0 dat | 1 co vi pham | 2 loi van hanh
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -51,6 +52,31 @@ def main() -> int:
          "thuat toan EC_SIGN_ED25519 (khop CHECK cua migration 044)")
     kiem('protection_level = "SOFTWARE"' in hcl, "protection level SOFTWARE")
     kiem("ENCRYPT_DECRYPT" not in cau_hinh, "khong dung khoa nay cho muc dich ma hoa")
+
+    # F-PR31-03: danh sach API duoc duyet phai TRUNG KHIT giua cau hinh va checker. Ban sao o day
+    # co chu dich: them mot API vao Terraform ma khong sua checker se FAIL, buoc nguoi sua phai
+    # di qua review thay vi lang le mo rong be mat.
+    print("=== Inventory API (F-PR31-03) ===")
+    API_DUOC_DUYET = {
+        "serviceusage.googleapis.com",
+        "cloudkms.googleapis.com",
+        "iam.googleapis.com",
+        "iamcredentials.googleapis.com",
+        "sts.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "logging.googleapis.com",
+        "monitoring.googleapis.com",
+        "storage.googleapis.com",
+    }
+    trong_ch = set(re.findall(r'"([a-z][a-z0-9.-]*\.googleapis\.com)"\s*=', cau_hinh))
+    kiem(trong_ch == API_DUOC_DUYET,
+         f"inventory API khop danh sach duyet (thua: {sorted(trong_ch - API_DUOC_DUYET)}, "
+         f"thieu: {sorted(API_DUOC_DUYET - trong_ch)})")
+    so_khoi_api = len(re.findall(r'resource\s+"google_project_service"', cau_hinh))
+    kiem(so_khoi_api == 1,
+         f"chi MOT khoi google_project_service (for_each tren inventory) — thuc te {so_khoi_api}")
+    kiem("SAFETY-STOP (F-PR31-03)" in hcl,
+         "cau hinh ghi ro quy tac safety-stop khi can API ngoai danh sach")
 
     print("=== Khong co credential lau dai ===")
     kiem("google_service_account_key" not in cau_hinh,
@@ -96,7 +122,7 @@ def main() -> int:
 
     print("=== Chong mat bang chung lich su ===")
     kiem(hcl.count("prevent_destroy = true") >= 2,
-         "key ring va crypto key deu prevent_destroy (huy khoa = chu ky cu khong verify duoc nua)")
+         "key ring va crypto key deu prevent_destroy (huy khoa = mat mat xich doi chieu public key trong registry voi nguon KMS; chu ky cu VAN verify duoc)")
     kiem("rotation_period" not in cau_hinh,
          "KHONG rotation tu dong (phai cong bo public key moi vao registry TRUOC khi doi phien ban)")
 
@@ -119,6 +145,93 @@ def main() -> int:
     kiem("audit_reader_member" in cau_hinh,
          "nguoi DOC audit log duoc khai bao tuong minh (tach khoi signer va nguoi ghi)")
 
+    # F-PR31-05: CA yeu cau static checker FAIL neu khang dinh sai ve destroy quay lai. Phep kiem
+    # nay chay tren CA VAN BAN ke ca COMMENT (khac cac phep kiem khac chay tren `cau_hinh` da bo
+    # comment) — vi lan truoc chinh comment la cho sai, va comment la thu nguoi sau doc de hieu.
+    print("=== Chan hoi quy khang dinh sai ve destroy (F-PR31-05 / Erratum 01) ===")
+    MAU_SAI = (
+        r"chu ky[^\n]{0,60}khong con verify duoc",
+        r"mat kha nang verify",
+        r"khong verify duoc nua",
+        r"mất khả năng verify",
+        r"không verify được nữa",
+        r"không còn verify được",
+    )
+    for mau in MAU_SAI:
+        vi_pham = re.search(mau, hcl, re.IGNORECASE)
+        kiem(vi_pham is None,
+             f"khong co khang dinh sai kieu {mau!r}"
+             + (f" — TIM THAY: {vi_pham.group(0)!r}" if vi_pham else ""))
+    kiem("m4_stage0p_transcript_public_keys" in hcl,
+         "cau hinh noi ro NGUON verify la registry DB (khong phai GetPublicKey cua KMS)")
+
+    doc = ROOT / "docs" / "M4-H2B-GOOGLE-KMS-IAM-VA-PROVISIONING-VI.md"
+    if doc.is_file():
+        van_ban = doc.read_text(encoding="utf-8")
+        xau = [m for m in MAU_SAI if re.search(m, van_ban, re.IGNORECASE)]
+        kiem(not xau, f"tai lieu thiet ke khong chua khang dinh sai (thuc te: {xau})")
+
+    print("=== Canh bao (F-PROV-06, PO tra loi 20/8/2026) ===")
+    so_alert = cau_hinh.count('resource "google_monitoring_alert_policy"')
+    so_wire = cau_hinh.count("notification_channels = [google_monitoring_notification_channel")
+    kiem(so_alert >= 6,
+         "co du 6 alert policy (ky / IAM khoa / trang thai khoa / danh tinh / that bai xac thuc / "
+         f"noi chua bang chung) — thuc te {so_alert}")
+    kiem(so_alert > 0 and so_wire == so_alert,
+         f"MOI alert policy deu noi vao notification channel ({so_wire}/{so_alert}) — alert khong co kenh la alert cam")
+    kiem("var.alert_email" in cau_hinh and not re.search(r'email_address\s*=\s*"[^"]*@', cau_hinh),
+         "hop thu nhan canh bao la BIEN, khong hard-code dia chi that trong .tf")
+    kiem(not re.search(r'type\s*=\s*"webhook_', cau_hinh),
+         "khong dung webhook channel (webhook Telegram se phai giu bot token trong cau hinh)")
+    # (Bat bien cu "alert ky co notification_rate_limit" bi GO theo F-APPLY-04A: server 400 —
+    # notification_rate_limit chi danh cho log-based policy, khong phai metric-threshold. Lo ngai
+    # "260 email/ceremony" duoc giam nhe tu nhien boi mo hinh incident cua Monitoring: alert mo
+    # MOT incident cho ca dot (ALIGN_SUM 300s), khong gui email theo tung data point. Bat bien
+    # nguoc lai — CAM alert_strategy — nam o cum F-APPLY-04A/04B phia duoi.)
+
+    # F-PR31-04: filter phai nam trong audit_filters.json de test fixture chay dung cai duoc deploy.
+    # Neu ai do viet lai filter thang vao HCL, test se khong con gac cai filter that nua.
+    print("=== Pham vi audit (F-PR31-04) ===")
+    tep_filter = THU_MUC / "audit_filters.json"
+    kiem(tep_filter.is_file(), "co audit_filters.json (mot nguon su that cho filter)")
+    if tep_filter.is_file():
+        bo_loc = json.loads(tep_filter.read_text(encoding="utf-8"))
+        can_co = {
+            "sink_all_audit", "sign_operations", "key_iam_changes", "key_state_changes",
+            "identity_config_changes", "auth_failures", "audit_destination_changes",
+        }
+        co = {k for k in bo_loc if not k.startswith("_")}
+        kiem(co == can_co, f"du 7 filter (thieu: {sorted(can_co - co)}, thua: {sorted(co - can_co)})")
+        kiem(all('methodName="' not in v for k, v in bo_loc.items() if not k.startswith("_")),
+             "khong filter nao dung methodName= (bang tuyet doi voi ten RPC rut gon = khong bao gio khop)")
+        sink = bo_loc.get("sink_all_audit", "")
+        for loai in ("activity", "data_access", "system_event", "policy"):
+            kiem(loai in sink, f"sink giu ca loai audit log {loai!r}")
+    kiem(cau_hinh.count("local.audit_filters.") >= 7,
+         "sink va metric deu lay filter tu JSON (khong viet chuoi filter thang trong HCL)")
+    kiem('service = "allServices"' in cau_hinh,
+         "audit config phu allServices (khong liet ke tay roi sot service)")
+    kiem(cau_hinh.count('resource "google_logging_metric"') >= 6,
+         "co du 6 log-based metric (KMS x3 + danh tinh + xac thuc + noi chua bang chung)")
+
+    # F-PR31-07A/08A: quyet dinh cua PO phai dan nguon VAN BAN, khong duoc ghi "PO chot ngay X" roi
+    # coi do la authority. Day la lan thu HAI Dev vap cho nay (lan dau la F-H2B-01A), nen dong lai
+    # bang phep kiem thay vi bang lo`i hua.
+    print("=== Authority cua quyet dinh PO (F-PR31-07A / 08A) ===")
+    kiem("PHASE1B-M4-H2B-F-PROV-06-PO-DECISION-RECORD-VI" in hcl,
+         "cau hinh alert dan PO Decision Record chinh thuc cua F-PROV-06")
+    kiem("PHASE1B-M4-H2B-AUDIT-BUCKET-RETENTION-PO-DECISION-VI" in hcl,
+         "cau hinh retention dan PO Decision Record chinh thuc cua audit bucket")
+    tu_phong = re.findall(r"PO (?:chot|tra loi) \d{1,2}/\d{1,2}/\d{4}", hcl)
+    kiem(not tu_phong,
+         f"khong co khang dinh authority kieu 'PO chot <ngay>' ma thieu van ban (thuc te: {tu_phong})")
+    kiem("Telegram" not in cau_hinh or "best-effort" in hcl.lower() or "BEST-EFFORT" in hcl,
+         "neu nhac Telegram thi phai ghi ro no la best-effort secondary, khong phai acceptance criterion")
+    kiem(re.search(r"is_locked\s*=\s*(true|false)", cau_hinh) is not None,
+         "retention_policy khai is_locked TUONG MINH (Bucket Lock la thao tac mot chieu)")
+    kiem(re.search(r"is_locked\s*=\s*true", cau_hinh) is None,
+         "bootstrap KHONG lock retention (PO Decision: unlocked; lock can gate rieng)")
+
     print("=== Khong co dinh danh that bi hard-code ===")
     kiem("variable " + chr(34) + "project_id" + chr(34) in hcl,
          "dinh danh la BIEN (PO chua chot gia tri) chu khong hard-code")
@@ -127,14 +240,68 @@ def main() -> int:
     kiem(not re.search(r'\bya29\.|BEGIN PRIVATE KEY|"AIza[0-9A-Za-z_-]{20,}"', hcl),
          "khong co token/khoa/API key nao trong cau hinh")
 
+    # F-APPLY-03A: apply 24/8/2026 fail 403 vi SA va audit config chay TRUOC khi API tuong ung bat
+    # xong (race — Terraform khong tu biet phu thuoc nay). Moi resource dung API vua-bat phai khai
+    # depends_on ve google_project_service.required[...] tuong ung. Kiem bang cach doc than block.
+    print("=== depends_on chong race bat API (F-APPLY-03A) ===")
+
+    # Doc than block tu CAU_HINH (da bo comment) — Review 19: neu doc tu van ban goc thi mot
+    # dong comment chua dung chuoi mong doi se lam phep kiem pass GIA.
+    def _khoi(ten_resource: str) -> str:
+        m = re.search(
+            r'resource\s+"' + ten_resource.split(".")[0] + r'"\s+"' + ten_resource.split(".")[1]
+            + r'"\s*\{.*?\n\}', cau_hinh, re.DOTALL)
+        return m.group(0) if m else ""
+
+    RANG_BUOC_API = {
+        "google_service_account.signer": "iam.googleapis.com",
+        "google_project_iam_audit_config.kms": "cloudresourcemanager.googleapis.com",
+        "google_project_iam_audit_config.all_services": "cloudresourcemanager.googleapis.com",
+        "google_storage_bucket.kms_audit": "storage.googleapis.com",
+    }
+    for ten, api in RANG_BUOC_API.items():
+        khoi = _khoi(ten)
+        kiem(khoi != "" and "depends_on" in khoi
+             and f'google_project_service.required["{api}"]' in khoi,
+             f"{ten} khai depends_on ve google_project_service.required[\"{api}\"]")
+
+    # F-APPLY-03B/03C (Review 20): trimspace bat buoc quanh PEM (apply 24/8 bi tu choi vi newline
+    # cuoi); moi alert filter phai co resource.type; one_of bi CAM (sai cu phap cho resource.type).
+    # Mapping chi tiet 6 metric -> type kiem o tests/test_m4_h2b_alert_conditions.py.
+    print("=== Sua loi partial apply 24/8 (F-APPLY-03B/03C) ===")
+    kiem("pem_certificate = trimspace(var.wif_ca_trust_anchor_pem)" in cau_hinh,
+         "pem_certificate boc trimspace() — plan input khong trailing LF")
+    kiem(re.search(r"pem_certificate\s*=\s*var\.wif_ca_trust_anchor_pem\b", cau_hinh) is None,
+         "khong con dang pem_certificate tran (khong trimspace)")
+    # filter chua escaped quote (\") nen khong dung [^"]* — lay het dong roi kiem tung dong
+    dong_filter_alert = re.findall(r'filter\s*=\s*"metric\.type=[^\n]*', cau_hinh)
+    so_filter_alert = len(dong_filter_alert)
+    so_co_type = sum(1 for d in dong_filter_alert if "resource.type=" in d)
+    kiem(so_filter_alert > 0 and so_filter_alert == so_co_type,
+         f"moi alert filter co resource.type ({so_co_type}/{so_filter_alert})")
+    kiem("one_of" not in cau_hinh, "khong dung one_of (grammar khong cho voi resource.type)")
+    # F-APPLY-04A (apply 25/8): notification_rate_limit chi danh cho log-based alert policy;
+    # moi policy o module nay la metric-threshold nen alert_strategy bi cam.
+    kiem("alert_strategy" not in cau_hinh,
+         "khong co alert_strategy trong metric-threshold policy (F-APPLY-04A)")
+    # F-APPLY-04B: resource.type trong alert filter phai thuoc danh muc MONITORING descriptor
+    # (do thuc te: project/cloudkms_* bi 404). Danh sach hop le do discovery R3 chot.
+    TYPE_HOP_LE = {"global", "audited_resource", "gcs_bucket"}
+    sai_type = [d for d in dong_filter_alert
+                for m in [re.search(r'resource\.type=\\"([a-z_]+)\\"', d)]
+                if m and m.group(1) not in TYPE_HOP_LE]
+    kiem(not sai_type, "moi resource.type thuoc danh muc Monitoring descriptor da kiem (F-APPLY-04B)")
+
     print()
     if _loi:
         print(f"KHONG DAT ({len(_loi)}):")
         for x in _loi:
             print("  - " + x)
         return 1
-    print(f"TAT CA {len(_dat)} BAT BIEN DAT. (Luu y: day la kiem TINH — chua chay terraform "
-          "validate/plan vi may nay khong co terraform/gcloud.)")
+    print(f"TAT CA {len(_dat)} BAT BIEN DAT.")
+    print("Luu y pham vi: day la kiem TINH tren van ban cau hinh. `terraform validate` DA duoc chay")
+    print("rieng va PASS (google provider ~> 6.0). `terraform plan` VAN CHUA chay duoc vi can")
+    print("credential Google — xem blocker trong plan package.")
     return 0
 
 
