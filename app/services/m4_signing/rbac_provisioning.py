@@ -163,10 +163,13 @@ async def reset_admin(
         return plan
     async with conn.transaction():
         if existing is None:
-            cols = "username,password_hash,password_salt,name"; vals = "$1,$2,$3,$4"
+            cols = "username,password_hash,password_salt,name"
+            vals = "$1,$2,$3,$4"
             params = [username, password_hash, salt, name]
             if has_role:
-                cols += ",role_key"; vals += ",$5"; params.append("admin")
+                cols += ",role_key"
+                vals += ",$5"
+                params.append("admin")
             staff_id = await conn.fetchval(
                 f"INSERT INTO staff_users ({cols},is_active) VALUES ({vals},true) RETURNING id",
                 *params)
