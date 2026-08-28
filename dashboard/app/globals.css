@@ -81,6 +81,18 @@ th {
 .badge-done { background: #bbf7d0; color: #14532d; }
 .badge-cancelled { background: #fecaca; color: #7f1d1d; }
 
+/* M4-9 signing run states */
+.badge-CREATED { background: #dbeafe; color: #1e3a8a; }
+.badge-CONFIRMED { background: #e0e7ff; color: #3730a3; }
+.badge-PREFLIGHT_PASSED { background: #cffafe; color: #155e75; }
+.badge-CEREMONY_RECORDED { background: #ddd6fe; color: #5b21b6; }
+.badge-CANARY_PENDING { background: #fde68a; color: #7c5a05; }
+.badge-CANARY_APPROVED { background: #a7f3d0; color: #065f46; }
+.badge-EXECUTING { background: #fed7aa; color: #9a3412; }
+.badge-CLOSED { background: #bbf7d0; color: #14532d; }
+.badge-ABORTED { background: #e5e7eb; color: #374151; }
+.badge-FAILED { background: #fecaca; color: #7f1d1d; }
+
 button {
   cursor: pointer;
   font-size: 14px;
