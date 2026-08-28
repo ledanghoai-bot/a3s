@@ -43,8 +43,29 @@ Dashboard-triggered Signing Run (tiered) theo:
 - **Auto-escalate fail-closed:** ☑ chấp nhận (cap batch 260, quota routine 5).
 - **pin_secret↔JWT (T9-03):** owner = **PO (anh Hoài)**, gate riêng sau. ☑ đồng ý.
 
+### 4a. Chữ ký PO / Service Owner (phê duyệt mô hình + disposition)
+
 ```
-Tôi, PO/Service Owner dự án alpha3s (danh tính: HOAI), xác nhận Operations tự vận hành được M4-9
-tiered (Tier A single-operator; Tier B giữ ceremony/SoD), chấp nhận các disposition trên.
+Tôi, PO/Service Owner dự án alpha3s (danh tính: HOAI), phê duyệt mô hình M4-9 tiered
+(Tier A single-operator; Tier B giữ ceremony/SoD) và các disposition trên.
 Ký — ngày 28/08/2026: PO - HOAI
 ```
+
+### 4b. Chữ ký OPERATIONS (nhận trách nhiệm vận hành — BÊN KHÁC PO)
+
+> CA yêu cầu: đây là **bên vận hành hằng ngày** (Operator/SRE + Incident Owner) tự ký nhận rằng
+> họ tự chạy được runbook trong policy. **Không thay thế bằng chữ ký PO.** Điền tên thật.
+
+```
+Operator / SRE — Tôi, ______________________, nhận trách nhiệm vận hành M4-9 Tier A (self-serve
+theo runbook §1), và Tier B khi có ceremony. Xác nhận đã tự chạy được Tier A.
+Ký — ngày __/__/2026: ______________________
+
+Incident Owner — Tôi, HOAI, nhận trách nhiệm xử lý alert `CLEANUP_FAILED` /
+health degradation + escalation path.
+Ký — ngày 28/08/2026: PO - HOAI
+```
+
+**Trạng thái Operations acceptance:** Incident Owner (HOAI) ĐÃ ký. **Operator/SRE ("Staff 1" trong
+RACI) CHƯA ký** — cần chính người đó ký nhận (không thay bằng chữ ký PO). Handover M4-9 chỉ đóng
+khi khối §4b đủ chữ ký Operations.
