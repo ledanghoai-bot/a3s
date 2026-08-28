@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 
 from app.db_pool import get_pool
 from app.services import audit_service
+from app.services.m4_signing import preflight_checks
 
 ACTIVATE_CAP = "m4.signing.activate.production"
 PREFLIGHT_FRESH_SECONDS = 15 * 60
@@ -98,8 +100,54 @@ async def get(activation_id: str) -> dict | None:
     return _hydrate(row) if row else None
 
 
+def _preflight_deps():
+    """Wire dependency THAT tu settings/env cho preflight_checks. KHONG goi backend/token o day
+    (chi dung factory/closure) — moi loi thuc thi do check tu bat va fail-closed. KHONG nhan secret."""
+    from app.config import settings
+    from app.services.pii.kms_transport import get_kms_transport
+    from app.services.pii.signing_backend import get_signing_backend
+
+    app_env = settings.app_env
+    env_backend = os.environ.get("M4_SIGNING_BACKEND", "").strip().lower()
+    allow_localdev = os.environ.get("M4_ALLOW_LOCALDEV_SIGNING", "").strip() == "1"
+    localdev_ok = (allow_localdev and env_backend == "localdev"
+                   and app_env.strip().lower() not in ("production", "prod", "staging"))
+
+    def backend_factory():
+        if env_backend == "kms":
+            transport, key_id, key_version = get_kms_transport(app_env)
+            return get_signing_backend(app_env=app_env, transport=transport,
+                                       key_id=key_id, key_version=key_version)
+        return get_signing_backend(app_env=app_env)
+
+    token_provider = None
+    cfg = os.environ.get("M4_GOOGLE_CREDENTIAL_CONFIG")
+    if cfg:
+        from app.services.pii.google_credentials import GoogleWifTokenProvider
+        try:
+            token_provider = GoogleWifTokenProvider(cfg)
+        except Exception as exc:  # noqa: BLE001 — construct loi -> cert_chain fail-closed
+            _err = exc
+
+            def token_provider():  # type: ignore[misc]
+                raise _err
+
+    async def redis_ping():
+        import redis.asyncio as aioredis
+        r = await aioredis.from_url(settings.redis_url, socket_timeout=3, socket_connect_timeout=3)
+        try:
+            return bool(await r.ping())
+        finally:
+            await r.aclose()
+
+    return backend_factory, token_provider, redis_ping, localdev_ok
+
+
 async def run_preflight(activation_id: str, *, actor: str) -> dict:
-    """Read-only checks (fail-closed). Rehearsal: cau truc; hook cho infra KMS/WIF that sau."""
+    """Preflight THAT (read-only, fail-closed). 3 check re noi bo + 4 check ha tang qua
+    preflight_checks (kms_wif_health / cert_chain / clock_nonce_replay / no_conflicting_incident).
+    Truoc khi KMS/WIF provision (Buoc 2/3) cac check ngoai fail-closed -> preflight khong pass (dung
+    thiet ke dormant). Preflight fail -> REVOKED (phai request lai)."""
     act = await get(activation_id)
     if act is None:
         raise ActivationError("activation khong ton tai")
@@ -113,16 +161,16 @@ async def run_preflight(activation_id: str, *, actor: str) -> dict:
     add("digest_locked", bool(act["artifact_digest"]), "artifact_digest da khoa")
     add("scope_bounded", bool(act["scope"]), "scope khai bao")
     add("policy_version", True, POLICY_VERSION)
-    # Cac check infra that (cert/chain, key custody, KMS/WIF/token health, clock/nonce, incident)
-    # se noi vao day khi co infra; rehearsal khong cham dat -> pass-through co ghi chu.
-    add("cert_chain", True, "stub (rehearsal — khong cham KMS/WIF)")
-    add("kms_wif_health", True, "stub (rehearsal)")
-    add("clock_nonce_replay", True, "stub (rehearsal)")
-    add("no_conflicting_incident", True, "stub (rehearsal)")
-    ok = all(c["passed"] for c in checks)
+
+    backend_factory, token_provider, redis_ping, localdev_ok = _preflight_deps()
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+        real = await preflight_checks.run_all(
+            conn, activation_id=activation_id, backend_factory=backend_factory,
+            token_provider=token_provider, redis_ping=redis_ping, localdev_ok=localdev_ok)
+        checks.extend(real)
+        ok = all(c["passed"] for c in checks)
         async with conn.transaction():
             to = "PREFLIGHT_PASSED" if ok else "REVOKED"
             await conn.execute(
@@ -132,7 +180,8 @@ async def run_preflight(activation_id: str, *, actor: str) -> dict:
                 "WHERE activation_id=$1", activation_id, to)
             await _audit(conn, "preflight", activation_id, actor, None, {"state": act["state"]},
                          {"state": to, "ok": ok,
-                          "checks": [{"name": c["name"], "passed": c["passed"]} for c in checks]},
+                          "checks": [{"name": c["name"], "passed": c["passed"],
+                                      "detail": c["detail"]} for c in checks]},
                          None)
     return {"ok": ok, "checks": checks, "state": to}
 
