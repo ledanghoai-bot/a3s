@@ -1,22 +1,17 @@
-"""Provision role + staff CHUYEN BIET de van hanh Tier A ky transcript (M4-9).
+"""Provision / revoke role operator ky Tier A (M4-9, hardened — Directive 70 + 70A).
 
-Tao/dam bao role `m4_signing_operator` ("Van hanh ky transcript") CHI co 5 quyen m4.signing.run.*
-(view/start/operate/approve/abort) — KHONG kem quyen nghiep vu khac, TACH khoi admin va staff hang
-ngay. Roi tao/gan MOT staff chuyen biet vao role do (mat khau nhap AN tu terminal).
+Role `m4_signing_operator` (5 quyen m4.signing.run.*) do MIGRATION 048 dinh nghia (version-controlled);
+script nay CHI GAN role co dinh do cho mot staff chuyen biet (khong tao/grant quyen -> khong
+escalation). Moi lan provision/revoke ghi AUDIT bat bien (audit_log). Bat buoc --actor/--reason/
+--ticket (fail-closed). Ho tro --dry-run (plan truoc), --revoke (thu hoi ve dormant), --yes (xac nhan).
 
-Vi sao can script (khong lam qua /staff UI): endpoint /staff co "subset check" — admin chi gan
-duoc role ma admin CUNG co quyen. Admin mac dinh chi co m4.signing.run.view, nen KHONG gan duoc
-role nay qua UI. Script ghi DB truc tiep (break-glass, boundary = SSH key custody).
-
-BAO MAT: mat khau nhap AN tu terminal (getpass, 2 lan xac nhan) — khong qua lenh/env/history.
-(Fallback bien NEW_OPERATOR_PASSWORD khi khong co TTY, cho automation.)
-
-Cach dung (container api tren VPS, KHONG dung -T de co TTY):
-    docker compose -f docker-compose.prod.yml exec api \
-        python scripts/provision_m4_signing_operator.py <username_moi> ["Ten hien thi"]
-
-Vi du: python scripts/provision_m4_signing_operator.py signer1 "Nhan vien ky transcript"
+BAO MAT: mat khau nhap AN tu terminal (getpass, 2 lan) — khong qua lenh/env/history.
+Chay trong container api (KHONG -T de co TTY):
+    docker compose -f docker-compose.prod.yml exec api python scripts/provision_m4_signing_operator.py \
+        <username> --actor "hoai" --ticket "M4-9-OPS-001" --reason "cap operator Tier A" --dry-run
+Bo --dry-run + them --yes de thuc thi. Thu hoi: them --revoke (khong can mat khau).
 """
+import argparse
 import asyncio
 import getpass
 import os
@@ -29,13 +24,7 @@ import asyncpg  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.services import auth_service  # noqa: E402
-
-ROLE_KEY = "m4_signing_operator"
-ROLE_NAME = "Van hanh ky transcript (Tier A)"
-PERMS = [
-    "m4.signing.run.view", "m4.signing.run.start", "m4.signing.run.operate",
-    "m4.signing.run.approve", "m4.signing.run.abort",
-]
+from app.services.m4_signing import rbac_provisioning as rp  # noqa: E402
 
 
 def _db_url() -> str:
@@ -45,91 +34,88 @@ def _db_url() -> str:
 def _read_password() -> str | None:
     if sys.stdin.isatty():
         pw = getpass.getpass("Mat khau operator moi (go, khong hien): ")
-        c = getpass.getpass("Nhap lai de xac nhan: ")
-        if pw != c:
-            print("Loi: hai lan nhap khong khop.")
-            return None
+        if pw != getpass.getpass("Nhap lai de xac nhan: "):
+            print("Loi: hai lan nhap khong khop."); return None
         return pw
     pw = os.environ.get("NEW_OPERATOR_PASSWORD", "")
     if not pw:
-        print("Loi: khong co TTY. Chay KHONG kem `-T` de nhap mat khau, hoac dat "
-              "NEW_OPERATOR_PASSWORD cho automation.")
+        print("Loi: khong co TTY. Chay KHONG kem -T, hoac dat NEW_OPERATOR_PASSWORD (automation).")
     return pw or None
 
 
+def _print_plan(plan: dict) -> None:
+    print("--- PLAN ---")
+    for k in ("action", "username", "role", "grants", "will_create", "delegated_by", "ticket",
+              "existing", "dry_run", "applied", "result", "staff_id"):
+        if k in plan:
+            print(f"  {k}: {plan[k]}")
+
+
 async def main() -> int:
-    if len(sys.argv) < 2:
-        print("Dung: python scripts/provision_m4_signing_operator.py <username> [\"Ten\"]")
-        return 2
-    username = sys.argv[1]
-    name = sys.argv[2] if len(sys.argv) > 2 else username
-
-    password = _read_password()
-    if password is None:
-        return 2
-    if len(password) < 8:
-        print("Loi: mat khau can toi thieu 8 ky tu.")
-        return 2
-
-    password_hash, salt = auth_service._hash_password(password)  # noqa: SLF001
+    p = argparse.ArgumentParser(description="Provision/revoke operator ky Tier A")
+    p.add_argument("username")
+    p.add_argument("name", nargs="?", default=None)
+    p.add_argument("--actor", required=True, help="nguoi thuc hien (dinh danh khong bi mat)")
+    p.add_argument("--ticket", required=True, help="change ticket / authorization reference")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--delegated-by", default=None, help="neu operator lam thay PO uy quyen")
+    p.add_argument("--revoke", action="store_true", help="thu hoi role ve dormant (khong mat khau)")
+    p.add_argument("--dry-run", action="store_true", help="chi in plan, khong mutation")
+    p.add_argument("--yes", action="store_true", help="xac nhan apply (bat buoc khi khong dry-run)")
+    args = p.parse_args()
+    name = args.name or args.username
 
     conn = await asyncpg.connect(_db_url())
     try:
-        if not await auth_service._has_column(conn, "staff_users", "role_key"):  # noqa: SLF001
-            print("Loi: DB chua co RBAC (staff_users.role_key) — chay migration 016/018 truoc.")
-            return 2
-        has_mcp = await auth_service._has_column(conn, "staff_users", "must_change_password")  # noqa: SLF001
+        if args.revoke:
+            try:
+                plan = await rp.revoke_operator(
+                    conn, username=args.username, actor=args.actor, reason=args.reason,
+                    ticket=args.ticket, apply=(not args.dry_run and args.yes))
+            except rp.ProvisioningError as e:
+                print(f"Loi: {e}"); return 2
+            _print_plan(plan)
+            if not args.dry_run and not args.yes:
+                print("Chua apply: them --yes de xac nhan thu hoi."); return 3
+            return 0
 
-        async with conn.transaction():
-            # 1. role chuyen biet
-            await conn.execute(
-                "INSERT INTO roles (key, name, is_system, is_active) VALUES ($1,$2,false,true) "
-                "ON CONFLICT (key) DO UPDATE SET name=EXCLUDED.name, is_active=true",
-                ROLE_KEY, ROLE_NAME)
-            # 2. grant dung 5 quyen m4.signing.run.* (idempotent)
-            granted = 0
-            for p in PERMS:
-                r = await conn.execute(
-                    "INSERT INTO role_permissions (role_key, permission_key) "
-                    "SELECT $1,$2 WHERE EXISTS (SELECT 1 FROM permissions WHERE key=$2) "
-                    "ON CONFLICT DO NOTHING", ROLE_KEY, p)
-                if r.endswith("1"):
-                    granted += 1
-            nperm = await conn.fetchval(
-                "SELECT count(*) FROM role_permissions WHERE role_key=$1 "
-                "AND permission_key LIKE 'm4.signing.%'", ROLE_KEY)
-
-            # 3. tao/gan staff chuyen biet vao role
-            row = await conn.fetchrow("SELECT id, role_key FROM staff_users WHERE username=$1",
-                                      username)
-            if row is None:
-                staff_id = await conn.fetchval(
-                    "INSERT INTO staff_users (username,password_hash,password_salt,name,role_key,"
-                    "is_active) VALUES ($1,$2,$3,$4,$5,true) RETURNING id",
-                    username, password_hash, salt, name, ROLE_KEY)
-                action = "TAO MOI staff"
-            else:
-                if row["role_key"] not in (None, ROLE_KEY):
-                    print(f"Canh bao: '{username}' dang co role '{row['role_key']}' — se DOI sang "
-                          f"'{ROLE_KEY}' (mat cac quyen role cu). Dung username MOI cho staff "
-                          f"chuyen biet neu khong muon vay.")
-                staff_id = row["id"]
-                sets = ["password_hash=$2", "password_salt=$3", "name=$4",
-                        "role_key=$5", "is_active=true"]
-                if has_mcp:
-                    sets.append("must_change_password=false")
-                await conn.execute(f"UPDATE staff_users SET {', '.join(sets)} WHERE id=$1",
-                                   staff_id, password_hash, salt, name, ROLE_KEY)
-                await conn.execute("DELETE FROM staff_sessions WHERE staff_id=$1", staff_id)
-                action = "GAN LAI staff (revoke session cu)"
+        # provision: can mat khau (tru dry-run)
+        password_hash = salt = None
+        if not args.dry_run:
+            if not args.yes:
+                # plan truoc, khong doi mat khau
+                try:
+                    plan = await rp.provision_operator(
+                        conn, username=args.username, name=name, password_hash="x", salt="x",
+                        actor=args.actor, delegated_by=args.delegated_by, reason=args.reason,
+                        ticket=args.ticket, apply=False)
+                except rp.ProvisioningError as e:
+                    print(f"Loi: {e}"); return 2
+                _print_plan(plan)
+                print("Chua apply: them --yes de xac nhan (se hoi mat khau).")
+                return 3
+            pw = _read_password()
+            if pw is None:
+                return 2
+            if len(pw) < 8:
+                print("Loi: mat khau can toi thieu 8 ky tu."); return 2
+            password_hash, salt = auth_service._hash_password(pw)  # noqa: SLF001
+        try:
+            plan = await rp.provision_operator(
+                conn, username=args.username, name=name,
+                password_hash=password_hash or "x", salt=salt or "x",
+                actor=args.actor, delegated_by=args.delegated_by, reason=args.reason,
+                ticket=args.ticket, apply=(not args.dry_run and args.yes))
+        except rp.ProvisioningError as e:
+            print(f"Loi: {e}"); return 2
+        _print_plan(plan)
+        if plan.get("applied"):
+            print(f"OK: role {rp.OPERATOR_ROLE} gan cho '{args.username}' ({plan['result']}). "
+                  "Audit da ghi. Dang nhap /login -> 'Ky transcript' (Tier A).")
+            print("Luu y: assignment != activation — Execute/signing van cho Activation Gate rieng.")
+        return 0
     finally:
         await conn.close()
-
-    print(f"OK: role '{ROLE_KEY}' co {nperm}/5 quyen m4.signing.run.*; {action} "
-          f"username='{username}' id={staff_id} role={ROLE_KEY}.")
-    print("Dang nhap /login voi tai khoan nay -> vao 'Ky transcript' chay Tier A.")
-    print("Luu y: admin KHAC van chi co quyen 'view' (giam sat), khong van hanh.")
-    return 0
 
 
 if __name__ == "__main__":
