@@ -32,7 +32,7 @@ execution đi qua worker→CLI→Postgres RBAC.
 | T2 | **Tampering** attempt counter (reset để vượt quota) | ledger `m4_signing_run_attempt` **append-only** (trigger chặn UPDATE/DELETE); quota đếm theo số row; UI refresh không đổi count. |
 | T3 | **Repudiation** hành động PO | mọi transition + human action ghi `m4_signing_run_event` bất biến (actor + reason + timestamp). |
 | T4 | **Info disclosure** secret vào log/evidence | `redact()` ở adapter; CHECK `no_secret` trên mọi cột JSON (scope/metadata/attempt/event); `_assert_no_secret` ở service; `_worker_env` từ chối secret-key từ caller. |
-| T5 | **Elevation** — operator tự duyệt canary | SoD `approve≠operate` ép ở service (`SoDViolation`) + DB CHECK `m4_signing_run_sod`; phản chiếu SoD Postgres stage0p. |
+| T5 | **Elevation** — operator tự duyệt canary | **Tiered (Review 64):** SoD `approve≠operate` ép cho **`run_kind='production'`** (service `SoDViolation` + DB CHECK `m4_signing_run_sod` state-aware); Tier A (`evidence_batch`/synthetic) là single-operator hợp lệ (blast-radius thấp, no non-repudiation). Auto-escalate Tier A→production fail-closed nếu non-repudiation/PII-ngoài-scope/batch>260/quota>5. |
 | T6 | **Bypass preflight** (chạy ngoài window/khi drift) | preflight fail-closed; ceremony/execute yêu cầu **preflight còn tươi (≤15')**; state machine allowlist chặn nhảy bước. |
 | T7 | **Race** 2 run song song | partial unique index `single_active`; runner có advisory lock single-writer. |
 | T8 | **Confused deputy** — dashboard bị lừa gọi signing | dashboard không có đường gọi signer trực tiếp; chỉ enqueue job; worker + Postgres RBAC là nơi thực thi. |

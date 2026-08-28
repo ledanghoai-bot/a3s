@@ -123,9 +123,11 @@ async def _run_http(ids: dict) -> None:
                                json={"scope": {"batch": "x"}})
         _check(rr.status_code == 403, "neg: staff khong quyen -> 403 tao run")
 
-        # 1. create (operator)
+        # 1. create (operator). run_kind='production' de SoD ap dung (Tier B) — negative SoD ben duoi.
         rr = await client.post("/dashboard/signing/runs", headers=H("op"),
-                               json={"scope": {"batch": "synth-rehearsal-v1"},
+                               json={"run_kind": "production",
+                                     "scope": {"batch": "synth-rehearsal-v1"},
+                                     "data_boundary": {"scope": "internal-synthetic"},
                                      "window_start": win_start, "window_end": win_end,
                                      "quota_sts": 3, "quota_sign": 3})
         _check(rr.status_code == 200, "1 create 200")

@@ -48,6 +48,7 @@ export default function SigningPage() {
   const [busy, setBusy] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [perms, setPerms] = useState(null); // null = chua biet -> khong an (backend van chan)
+  const [pfChecks, setPfChecks] = useState(null); // preflight checklist gan nhat (xanh/do)
 
   const can = (p) => perms === null || perms.includes(p);
 
@@ -74,6 +75,7 @@ export default function SigningPage() {
 
   async function openDetail(runId) {
     setError(null);
+    setPfChecks(null);
     try {
       setDetail(await apiFetch(`/dashboard/signing/runs/${runId}`));
     } catch (err) {
@@ -86,9 +88,10 @@ export default function SigningPage() {
     setError(null);
     try {
       const body = {
-        run_kind: "synthetic_rehearsal",
+        run_kind: form.run_kind || "evidence_batch",
         change_ticket: form.change_ticket || null,
         scope: form.scope ? JSON.parse(form.scope) : {},
+        data_boundary: form.data_boundary ? JSON.parse(form.data_boundary) : {},
         window_start: form.window_start || null,
         window_end: form.window_end || null,
         quota_sts: Number(form.quota_sts || 3),
@@ -125,10 +128,8 @@ export default function SigningPage() {
         });
       } else if (action === "preflight") {
         const r = await apiFetch(`/dashboard/signing/runs/${runId}/preflight`, { method: "POST" });
-        const failed = (r.preflight?.checks || []).filter((c) => !c.passed);
-        if (failed.length) {
-          alert("Preflight FAIL:\n" + failed.map((c) => `- ${c.name}: ${c.detail}`).join("\n"));
-        }
+        // Hien checklist xanh/do ngay tren man hinh — operator ĐỌC, khong phai NHỚ tien dieu kien.
+        setPfChecks(r.preflight?.checks || []);
       } else if (action === "ceremony") {
         const fp = window.prompt("Fingerprint/serial cert (metadata CÔNG KHAI — KHÔNG nhập PIN/khóa):");
         if (fp == null) { setBusy(false); return; }
@@ -212,23 +213,38 @@ export default function SigningPage() {
         </tbody>
       </table>
 
-      {detail && <DetailPanel detail={detail} busy={busy} onAction={doAction} can={can} onClose={() => setDetail(null)} />}
+      {detail && <DetailPanel detail={detail} busy={busy} onAction={doAction} can={can} pfChecks={pfChecks} onClose={() => setDetail(null)} />}
     </main>
   );
 }
 
 function CreateForm({ onSubmit, busy, onCancel }) {
   const [form, setForm] = useState({
-    change_ticket: "", scope: '{"batch":"synthetic-rehearsal-v1"}',
+    run_kind: "evidence_batch", change_ticket: "", scope: '{"batch_size":100}',
+    data_boundary: '{"scope":"internal-eval"}',
     window_start: "", window_end: "", quota_sts: 3, quota_sign: 3,
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const tierA = form.run_kind === "evidence_batch";
   return (
     <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 16, marginTop: 12, background: "#fff" }}>
-      <h3>Tạo Signing Run (synthetic)</h3>
+      <h3>Tạo Signing Run</h3>
       <div style={{ display: "grid", gap: 8, maxWidth: 640 }}>
+        <label>Loại run{" "}
+          <select value={form.run_kind} onChange={set("run_kind")}>
+            <option value="evidence_batch">Tier A — Routine evidence batch (1 người)</option>
+            <option value="production">Tier B — Production KMS (SoD + ceremony)</option>
+            <option value="synthetic_rehearsal">Synthetic rehearsal (test)</option>
+          </select>
+        </label>
+        <div style={{ fontSize: 12, color: tierA ? "#065f46" : "#9a3412" }}>
+          {tierA
+            ? "Tier A: 1 operator, không SoD/USB. Tự nâng Tier B nếu non-repudiation / PII ngoài scope / batch>260 / quota>5."
+            : "Tier B: bắt buộc SoD (approve≠operate) + ceremony + Ed25519-KMS."}
+        </div>
         <label>Change ticket <input value={form.change_ticket} onChange={set("change_ticket")} /></label>
         <label>Scope (JSON) <input value={form.scope} onChange={set("scope")} /></label>
+        <label>Data boundary (JSON) <input value={form.data_boundary} onChange={set("data_boundary")} /></label>
         <label>Window start (ISO UTC) <input value={form.window_start} onChange={set("window_start")} placeholder="2026-08-28T01:15:00Z" /></label>
         <label>Window end (ISO UTC) <input value={form.window_end} onChange={set("window_end")} placeholder="2026-08-28T03:15:00Z" /></label>
         <div style={{ display: "flex", gap: 8 }}>
@@ -244,7 +260,7 @@ function CreateForm({ onSubmit, busy, onCancel }) {
   );
 }
 
-function DetailPanel({ detail, busy, onAction, can, onClose }) {
+function DetailPanel({ detail, busy, onAction, can, pfChecks, onClose }) {
   const run = detail.run;
   // Loc action theo quyen (backend van enforce 403). can=undefined -> hien het.
   const actions = (ACTIONS[run.state] || []).filter(
@@ -258,10 +274,25 @@ function DetailPanel({ detail, busy, onAction, can, onClose }) {
         <button onClick={onClose}>Đóng</button>
       </div>
       <div style={{ fontSize: 13, color: "#374151" }}>
-        <div>Ticket: {run.change_ticket || "—"} · operator: {run.operator_staff_id || "—"} · approver: {run.approver_staff_id || "—"}</div>
+        <div>Loại: <b>{run.run_kind}</b>{run.escalation_flags?.length ? ` (đã nâng cấp: ${run.escalation_flags.join(", ")})` : ""} · Ticket: {run.change_ticket || "—"}</div>
+        <div>operator: {run.operator_staff_id || "—"} · approver: {run.approver_staff_id || "—"}</div>
         <div>Quota: STS {detail.attempt_counts?.sts || 0}/{run.quota_sts} · sign {detail.attempt_counts?.sign || 0}/{run.quota_sign}</div>
         <div>Preflight tươi: {fresh.ok ? "✓" : "✗"} ({fresh.detail})</div>
       </div>
+
+      {/* Preflight checklist — operator ĐỌC xanh/đỏ, không phải NHỚ tiền điều kiện */}
+      {pfChecks && (
+        <div style={{ margin: "12px 0", padding: 10, background: "#f9fafb", borderRadius: 6 }}>
+          <b style={{ fontSize: 13 }}>Preflight checklist:</b>
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 13 }}>
+            {pfChecks.map((c) => (
+              <li key={c.name} style={{ color: c.passed ? "#14532d" : "#7f1d1d" }}>
+                {c.passed ? "✓" : "✗"} <b>{c.name}</b> — {c.detail}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div style={{ margin: "12px 0" }}>
         {actions.length === 0 && <span className="empty-state">Trạng thái kết thúc — không còn hành động</span>}

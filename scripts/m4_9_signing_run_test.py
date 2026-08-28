@@ -85,14 +85,17 @@ async def main() -> int:
     win_start = (now - _dt.timedelta(minutes=5)).isoformat()
     win_end = (now + _dt.timedelta(hours=2)).isoformat()
 
-    # [1] create + single-active
-    run = await run_store.create_run(created_by=op_id, scope={"batch": "synth-v1"},
+    # [1] create + single-active. Dung run_kind='production' de test SoD (Tier B ep SoD).
+    run = await run_store.create_run(created_by=op_id, run_kind="production",
+                                     scope={"batch": "synth-v1"},
+                                     data_boundary={"scope": "internal-synthetic"},
                                      window_start=win_start, window_end=win_end,
                                      quota_sts=3, quota_sign=1)
     rid = str(run["run_id"])
-    _check(run["state"] == "CREATED", "1a create -> CREATED")
+    _check(run["state"] == "CREATED" and run["run_kind"] == "production",
+           "1a create production -> CREATED")
     try:
-        await run_store.create_run(created_by=op_id, scope={"batch": "b2"})
+        await run_store.create_run(created_by=op_id, run_kind="production", scope={"batch": "b2"})
         _check(False, "1b single-active phai chan")
     except ActiveRunExists:
         _check(True, "1b single-active chan run thu 2")
@@ -125,12 +128,12 @@ async def main() -> int:
                                public_metadata={"cert_fingerprint": "7D:67:ED"})
     await run_store.transition(rid, "canary_request", actor_staff_id=op_id)
 
-    # [4] SoD: approver == operator -> chan
+    # [4] SoD (production): approver == operator -> chan
     try:
         await run_store.transition(rid, "canary_approve", actor_staff_id=op_id, set_approver=True)
-        _check(False, "4 SoD phai chan approver==operator")
+        _check(False, "4 SoD production phai chan approver==operator")
     except SoDViolation:
-        _check(True, "4 SoD chan approver==operator")
+        _check(True, "4 SoD production chan approver==operator")
 
     # approve bang nguoi KHAC
     await run_store.transition(rid, "canary_approve", actor_staff_id=approver_id, set_approver=True)
@@ -191,6 +194,36 @@ async def main() -> int:
     ab = await run_store.transition(str(run_late["run_id"]), "abort", actor_staff_id=op_id,
                                     reason="test abort")
     _check(ab["state"] == "ABORTED", "9 abort -> ABORTED")
+
+    # [10] TIER A (evidence_batch): operator TU APPROVE canary (single-operator) — PHAI OK
+    ta = await run_store.create_run(created_by=op_id, run_kind="evidence_batch",
+                                    scope={"batch": "eval", "batch_size": 100},
+                                    window_start=win_start, window_end=win_end)
+    tid = str(ta["run_id"])
+    _check(ta["run_kind"] == "evidence_batch", "10a tao evidence_batch (Tier A)")
+    await run_store.transition(tid, "confirm", actor_staff_id=op_id)
+    await policy.run_preflight(tid)
+    await run_store.transition(tid, "preflight_pass", actor_staff_id=op_id, detail={"ok": True})
+    await run_store.transition(tid, "ceremony_record", actor_staff_id=op_id, set_operator=True,
+                               public_metadata={"note": "tier-a"})
+    await run_store.transition(tid, "canary_request", actor_staff_id=op_id)
+    # operator TU approve — Tier A cho phep (khong SoD)
+    await run_store.transition(tid, "canary_approve", actor_staff_id=op_id, set_approver=True)
+    ta_exec = await run_store.transition(tid, "execute_start", actor_staff_id=op_id)
+    _check(ta_exec["state"] == "EXECUTING", "10b Tier A single-operator toi EXECUTING (khong SoD)")
+    await run_store.transition(tid, "execute_success", actor_staff_id=None, reason="tier-a done")
+
+    # [11] ESCALATION: evidence_batch khai non_repudiation -> BUOC production (fail-closed)
+    esc = await run_store.create_run(created_by=op_id, run_kind="evidence_batch",
+                                     scope={"batch": "x"}, data_boundary={"non_repudiation": True})
+    _check(esc["run_kind"] == "production", "11a escalation non_repudiation -> production")
+    await run_store.transition(str(esc["run_id"]), "abort", actor_staff_id=op_id, reason="cleanup")
+
+    # [12] ESCALATION: batch_size > 260 -> production
+    esc2 = await run_store.create_run(created_by=op_id, run_kind="evidence_batch",
+                                      scope={"batch": "big", "batch_size": 500})
+    _check(esc2["run_kind"] == "production", "12 escalation batch>260 -> production")
+    await run_store.transition(str(esc2["run_id"]), "abort", actor_staff_id=op_id, reason="cleanup")
 
     await close_pool()
     print("M4_9_ALL_PASS")

@@ -49,6 +49,45 @@ TRANSITIONS: dict[str, dict[str, str]] = {
 }
 TERMINAL_STATES = frozenset({"CLOSED", "ABORTED", "FAILED"})
 
+# Tiered model (Review 64). Tier A = evidence_batch/synthetic (single-operator, HMAC eval).
+# Tier B = production (Ed25519-KMS + SoD + ceremony). Cap routine do CA chot.
+ROUTINE_BATCH_CAP = 260   # bang cap eval hien tai; vuot -> escalate Tier B
+ROUTINE_QUOTA_CAP = 5     # STS/sign moi loai; vuot -> escalate Tier B
+TIER_A_KINDS = frozenset({"synthetic_rehearsal", "evidence_batch"})
+VALID_KINDS = frozenset({"synthetic_rehearsal", "production", "evidence_batch"})
+
+
+def _evaluate_escalation(run_kind: str, *, scope: dict, data_boundary: dict,
+                         quota_sts: int, quota_sign: int) -> tuple[str, list[str]]:
+    """Auto-escalate Tier A -> production (fail-closed) neu bat ky trigger §4 policy.
+
+    Tra (final_run_kind, flags). Chi escalate Tier A; production giu nguyen. "Khong khai/khong
+    chac" khong tu ha xuong Tier A: caller phai KHAI TUONG MINH evidence_batch moi vao Tier A.
+    """
+    if run_kind not in TIER_A_KINDS:
+        return run_kind, []
+    flags: list[str] = []
+    db = data_boundary or {}
+    if db.get("non_repudiation") or db.get("external_delivery") or db.get("legal"):
+        flags.append("non_repudiation_or_external")
+    if db.get("unmasked_pii") or db.get("pii_outside_eval"):
+        flags.append("pii_outside_scope")
+    if db.get("cross_tenant"):
+        flags.append("cross_tenant")
+    if db.get("retention_beyond_run"):
+        flags.append("retention_beyond_run")
+    try:
+        batch_size = int(scope.get("batch_size", 0) or 0)
+    except (TypeError, ValueError):
+        batch_size = 0
+    if batch_size > ROUTINE_BATCH_CAP:
+        flags.append(f"batch_over_cap({batch_size}>{ROUTINE_BATCH_CAP})")
+    if quota_sts > ROUTINE_QUOTA_CAP or quota_sign > ROUTINE_QUOTA_CAP:
+        flags.append(f"quota_over_routine(sts={quota_sts},sign={quota_sign})")
+    if flags:
+        return "production", flags
+    return run_kind, flags
+
 # Cac pattern secret hien nhien — chan o service layer TRUOC khi cham DB (defense-in-depth).
 _SECRET_RE = re.compile(
     r"(pin_secret|private[_ ]?key|\btoken\b|password|-----BEGIN|ya29\.)", re.IGNORECASE
@@ -123,14 +162,23 @@ async def create_run(
     quota_sts: int = 3,
     quota_sign: int = 3,
     data_boundary: dict | None = None,
+    purpose: str | None = None,
 ) -> dict:
-    """Tao run moi o state CREATED. Fail neu con run active cung run_kind."""
+    """Tao run moi o state CREATED. Fail neu con run active cung run_kind.
+
+    Tiered (Review 64): Tier A (evidence_batch/synthetic) single-operator; production ep SoD.
+    Auto-escalate: Tier A co trigger §4 -> buoc production (fail-closed), ghi escalation_flags.
+    """
     scope = scope or {}
     data_boundary = data_boundary or {}
     _assert_no_secret(scope, "scope")
     _assert_no_secret(data_boundary, "data_boundary")
-    if run_kind not in ("synthetic_rehearsal", "production"):
+    if run_kind not in VALID_KINDS:
         raise RunStoreError("run_kind khong hop le")
+    # Auto-escalate Tier A -> production neu co trigger.
+    run_kind, esc_flags = _evaluate_escalation(
+        run_kind, scope=scope, data_boundary=data_boundary,
+        quota_sts=quota_sts, quota_sign=quota_sign)
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -145,17 +193,21 @@ async def create_run(
                 """
                 INSERT INTO m4_signing_run
                   (run_kind, change_ticket, scope, window_start, window_end,
-                   quota_sts, quota_sign, data_boundary, created_by, state)
-                VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7,$8::jsonb,$9,'CREATED')
+                   quota_sts, quota_sign, data_boundary, created_by, state,
+                   purpose, escalation_flags)
+                VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7,$8::jsonb,$9,'CREATED',$10,$11::jsonb)
                 RETURNING run_id, state, run_kind, created_at
                 """,
                 run_kind, change_ticket, json.dumps(scope),
                 _parse_ts(window_start), _parse_ts(window_end),
                 quota_sts, quota_sign, json.dumps(data_boundary), created_by,
+                purpose, json.dumps(esc_flags),
             )
             await _write_event(
                 conn, row["run_id"], "created", None, "CREATED",
-                actor_staff_id=created_by, reason=change_ticket, detail={"run_kind": run_kind},
+                actor_staff_id=created_by, reason=change_ticket,
+                detail={"run_kind": run_kind, "escalated": bool(esc_flags),
+                        "escalation_flags": esc_flags},
             )
     return dict(row)
 
@@ -264,9 +316,18 @@ async def transition(
                 operator = actor_staff_id
             if set_approver:
                 approver = actor_staff_id
-            # SoD: approver != operator (khi ca hai da xac dinh)
-            if operator is not None and approver is not None and operator == approver:
-                raise SoDViolation("SoD: nguoi approve canary phai khac operator")
+            # SoD CHI ap cho production (Tier B). Tier A (evidence_batch/synthetic) single-operator:
+            # operator duoc tu approve canary (Review 64). Voi production:
+            is_production = row["run_kind"] == "production"
+            if is_production:
+                # (a) chong same-person khi ca hai da set
+                if operator is not None and approver is not None and operator == approver:
+                    raise SoDViolation("SoD production: approver phai khac operator")
+                # (b) execute yeu cau ca hai non-NULL + khac (defense-in-depth cung DB CHECK)
+                if event == "execute_start" and (operator is None or approver is None
+                                                 or operator == approver):
+                    raise SoDViolation(
+                        "SoD production: execute yeu cau ca operator lan approver (khac nhau)")
 
             new_meta = None
             if public_metadata is not None:

@@ -113,6 +113,51 @@ def test_redact_hides_secrets():
     assert "[REDACTED]" in s
 
 
+# --- Tiered model: _evaluate_escalation (Review 64) --------------------------
+def test_escalation_tier_a_clean_stays():
+    kind, flags = run_store._evaluate_escalation(
+        "evidence_batch", scope={"batch_size": 100}, data_boundary={}, quota_sts=3, quota_sign=3)
+    assert kind == "evidence_batch" and flags == []
+
+
+def test_escalation_non_repudiation_forces_production():
+    kind, flags = run_store._evaluate_escalation(
+        "evidence_batch", scope={}, data_boundary={"non_repudiation": True},
+        quota_sts=3, quota_sign=3)
+    assert kind == "production" and "non_repudiation_or_external" in flags
+
+
+def test_escalation_unmasked_pii_forces_production():
+    kind, flags = run_store._evaluate_escalation(
+        "evidence_batch", scope={}, data_boundary={"unmasked_pii": True},
+        quota_sts=3, quota_sign=3)
+    assert kind == "production" and "pii_outside_scope" in flags
+
+
+def test_escalation_batch_over_cap():
+    kind, flags = run_store._evaluate_escalation(
+        "evidence_batch", scope={"batch_size": 261}, data_boundary={}, quota_sts=3, quota_sign=3)
+    assert kind == "production" and any("batch_over_cap" in f for f in flags)
+
+
+def test_escalation_quota_over_routine():
+    kind, flags = run_store._evaluate_escalation(
+        "evidence_batch", scope={}, data_boundary={}, quota_sts=6, quota_sign=3)
+    assert kind == "production" and any("quota_over_routine" in f for f in flags)
+
+
+def test_escalation_production_never_downgraded():
+    kind, flags = run_store._evaluate_escalation(
+        "production", scope={"batch_size": 10}, data_boundary={}, quota_sts=3, quota_sign=3)
+    assert kind == "production" and flags == []
+
+
+def test_batch_cap_and_quota_cap_values():
+    # Cap CA chot (Review 64): batch 260, quota routine 5.
+    assert run_store.ROUTINE_BATCH_CAP == 260
+    assert run_store.ROUTINE_QUOTA_CAP == 5
+
+
 def test_worker_env_rejects_secret_keys():
     with pytest.raises(ValueError):
         cli_adapter._worker_env({"STAGE0P_REHEARSAL_OPERATOR_PIN": "x"})

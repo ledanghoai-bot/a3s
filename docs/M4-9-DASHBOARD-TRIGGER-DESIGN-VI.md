@@ -107,5 +107,15 @@ approval checkpoint → bounded canary → audit/metric/alert → cleanup → do
 **không có đường bypass** dashboard/policy và mọi human action của PO được audit. Evidence đóng
 theo schema 10 phần Addendum 61 §4.
 
+## 10. Tiered operating model (Review 64)
+
+Ba `run_kind`: **Tier A** (`evidence_batch`, `synthetic_rehearsal`) = single-operator, HMAC/eval,
+không SoD/USB; **Tier B** (`production`) = Ed25519-KMS + SoD (approve≠operate) + ceremony USB.
+SoD/ceremony **chỉ** áp production (service gate + DB CHECK `m4_signing_run_sod` state-aware). Tier A
+**tự nâng** production (fail-closed, cột `escalation_flags`) nếu: non-repudiation/external, PII ngoài
+eval scope, cross-tenant, retention>run, `batch_size`>260, hoặc quota>5. Cap: batch 260, routine
+quota 5 (Review 64). Migration 047. Vận hành: `docs/M4-9-OPERATOR-RUNBOOK-VI.md`.
+
 ## 9. Change log
 - v1 (28/8): baseline freeze ban đầu.
+- v2 (28/8): tiered model (Review 64) — evidence_batch, SoD conditional, auto-escalate.

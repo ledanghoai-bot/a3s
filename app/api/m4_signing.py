@@ -88,6 +88,7 @@ async def create_run(
             quota_sts=int(body.get("quota_sts", 3)),
             quota_sign=int(body.get("quota_sign", 3)),
             data_boundary=body.get("data_boundary") or {},
+            purpose=body.get("purpose"),
         )
     except Exception as exc:
         raise _err(exc) from None
