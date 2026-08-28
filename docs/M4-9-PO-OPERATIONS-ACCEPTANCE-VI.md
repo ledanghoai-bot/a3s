@@ -57,15 +57,28 @@ Ký — ngày 28/08/2026: PO - HOAI
 > họ tự chạy được runbook trong policy. **Không thay thế bằng chữ ký PO.** Điền tên thật.
 
 ```
-Operator / SRE — Tôi, ______________________, nhận trách nhiệm vận hành M4-9 Tier A (self-serve
-theo runbook §1), và Tier B khi có ceremony. Xác nhận đã tự chạy được Tier A.
-Ký — ngày __/__/2026: ______________________
+Operator / SRE — Tôi, HOAI (PO kiêm trong giai đoạn xây dựng — xem §5), nhận trách nhiệm vận hành
+M4-9 Tier A (self-serve theo runbook §1). Xác nhận đã tự chạy được Tier A.
+Ký — ngày 28/08/2026: PO - HOAI
 
 Incident Owner — Tôi, HOAI, nhận trách nhiệm xử lý alert `CLEANUP_FAILED` /
 health degradation + escalation path.
 Ký — ngày 28/08/2026: PO - HOAI
 ```
 
-**Trạng thái Operations acceptance:** Incident Owner (HOAI) ĐÃ ký. **Operator/SRE ("Staff 1" trong
-RACI) CHƯA ký** — cần chính người đó ký nhận (không thay bằng chữ ký PO). Handover M4-9 chỉ đóng
-khi khối §4b đủ chữ ký Operations.
+**Operations acceptance: ĐỦ chữ ký** (PO kiêm mọi vai vận hành trong giai đoạn xây dựng — §5).
+
+## 5. Ghi chú phân vai — GIAI ĐOẠN XÂY DỰNG (chuẩn cho cả dự án A3s)
+
+> **Chỉ thị PO (bản chuẩn, áp dụng từ đây về sau cho toàn dự án A3s):** Trong giai đoạn **xây dựng
+> hệ thống**, PO (HOAI) là người **thực tế in-charge duy nhất** và **kiêm mọi vai** (Operator/SRE,
+> Approver, Incident Owner, Custodian…). Các tên "Staff 1/2/…" trong RACI là **chỗ dành sẵn** cho
+> nhân viên PO sẽ **chỉ định sau khi hệ thống vận hành chính thức**. Do đó mọi chữ ký "Operations"
+> trong giai đoạn này do PO thực hiện là **hợp lệ và đầy đủ** — CA không cần hỏi thêm về tách vai
+> trong các gate của giai đoạn xây dựng.
+>
+> **Ngoại lệ do MÁY ép, không đổi:** SoD kỹ thuật (Tier B production: approve≠operate) vẫn được
+> backend/DB **enforce cứng** — một người không thể vừa operate vừa approve một Tier B run. Nghĩa là
+> Tier B production signing **chưa vận hành được bằng một người** cho tới khi PO chỉ định người thứ
+> hai; điều này **nhất quán** với việc production đang dormant và Activation Gate là gate riêng ở
+> tương lai. Tier A (single-operator) vận hành đầy đủ bằng PO ngay bây giờ.
