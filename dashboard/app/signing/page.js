@@ -27,6 +27,18 @@ const ACTIONS = {
   FAILED: [],
 };
 
+// Quyen tuong ung tung action (khop RBAC backend). Backend van enforce 403 (defense in depth);
+// UI an nut chi la UX (M4-9 tracked action #3).
+const ACTION_PERM = {
+  confirm: "m4.signing.run.start",
+  preflight: "m4.signing.run.operate",
+  ceremony: "m4.signing.run.operate",
+  "canary-request": "m4.signing.run.operate",
+  "canary-approve": "m4.signing.run.approve",
+  execute: "m4.signing.run.operate",
+  abort: "m4.signing.run.abort",
+};
+
 export default function SigningPage() {
   const ready = useAuthGuard();
   const [runs, setRuns] = useState([]);
@@ -35,9 +47,16 @@ export default function SigningPage() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [perms, setPerms] = useState(null); // null = chua biet -> khong an (backend van chan)
+
+  const can = (p) => perms === null || perms.includes(p);
 
   useEffect(() => {
-    if (ready) loadRuns();
+    if (!ready) return;
+    loadRuns();
+    apiFetch("/dashboard/auth/me")
+      .then((me) => setPerms(me.rbac_provisioned ? (me.permissions || []) : null))
+      .catch(() => setPerms(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
 
@@ -153,9 +172,11 @@ export default function SigningPage() {
         <h1>Ký transcript — Signing Run</h1>
         <div>
           <button onClick={loadRuns} disabled={loading}>Tải lại</button>{" "}
-          <button className="primary" onClick={() => setShowCreate(!showCreate)}>
-            + Start Production Signing Run
-          </button>
+          {can("m4.signing.run.start") && (
+            <button className="primary" onClick={() => setShowCreate(!showCreate)}>
+              + Start Production Signing Run
+            </button>
+          )}
         </div>
       </div>
 
@@ -191,7 +212,7 @@ export default function SigningPage() {
         </tbody>
       </table>
 
-      {detail && <DetailPanel detail={detail} busy={busy} onAction={doAction} onClose={() => setDetail(null)} />}
+      {detail && <DetailPanel detail={detail} busy={busy} onAction={doAction} can={can} onClose={() => setDetail(null)} />}
     </main>
   );
 }
@@ -223,9 +244,12 @@ function CreateForm({ onSubmit, busy, onCancel }) {
   );
 }
 
-function DetailPanel({ detail, busy, onAction, onClose }) {
+function DetailPanel({ detail, busy, onAction, can, onClose }) {
   const run = detail.run;
-  const actions = ACTIONS[run.state] || [];
+  // Loc action theo quyen (backend van enforce 403). can=undefined -> hien het.
+  const actions = (ACTIONS[run.state] || []).filter(
+    ([a]) => !can || can(ACTION_PERM[a]),
+  );
   const fresh = detail.preflight_fresh || {};
   return (
     <div style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: 16, marginTop: 16, background: "#fff" }}>
