@@ -65,7 +65,40 @@ Chỉ khi cần **non-repudiation mật mã** cho audit ngoài / pháp lý. Gi�
 
 ---
 
-## §3. RACI (điền tên khi nghiệm thu)
+## §3. RACI (giai đoạn xây dựng — Directive 70)
+
+| Vai | Người hiện tại | Tier A | Tier B |
+|---|---|---|---|
+| Service Owner / PO | **HOAI** | ✓ | ✓ |
+| Tier A Operator | **signer1** (role `m4_signing_operator`) | vận hành + tự approve | — |
+| Tier B Operator / Approver | (PO chỉ định) | — | operator ≠ approver (SoD máy ép) |
+| Security Custodian (USB CA02) | PO | — | ✓ |
+| Incident Owner | **HOAI** | nhận `CLEANUP_FAILED` | nhận alert |
+
+Tên "Staff N" là placeholder; PO chỉ định người thật sau go-live (xem acceptance §5).
+
+## §5. Provisioning operator + break-glass (hardened — Directive 70 + 70A)
+
+Cấp/thu hồi operator ký + reset admin **chỉ qua CLI version-controlled** (không qua dashboard;
+`/staff` UI có subset-check chặn). Ai chạy: **PO hoặc operator chính được PO ủy quyền** (custody SSH).
+
+**Bắt buộc mọi lần:** `--actor` (người thực hiện) + `--ticket` (change ticket) + `--reason` — thiếu
+là fail-closed. Chạy `--dry-run` xem plan trước, thêm `--yes` mới thực thi. Mật khẩu nhập **ẩn qua
+terminal** (getpass), không qua lệnh/env. Mỗi lần ghi **audit bất biến** (`audit_log`: actor/target/
+role/grants/ticket/reason/result — không secret).
+
+| Việc | Lệnh (trong container api, KHÔNG -T) |
+|---|---|
+| Cấp operator (plan) | `python scripts/provision_m4_signing_operator.py <user> --actor hoai --ticket <T> --reason "..." --dry-run` |
+| Cấp operator (thực thi) | như trên, bỏ `--dry-run`, thêm `--yes` (sẽ hỏi mật khẩu) |
+| **Thu hồi** operator → dormant | `... provision_m4_signing_operator.py <user> --revoke --actor hoai --ticket <T> --reason "..." --yes` |
+| Reset admin | `python scripts/reset_admin_user.py <user> --actor hoai --ticket <T> --reason "..." --yes` |
+
+**Bất biến:** role `m4_signing_operator` chỉ có đúng 5 quyền `m4.signing.run.*` (migration 048 chốt +
+DB trigger allowlist chống cấp quyền ngoài); script **chỉ gán role cố định**, không tạo/grant quyền
+→ không escalation. **Assignment ≠ activation** — có operator vẫn cần Activation Gate riêng mới ký thật.
+
+## §6. RACI cũ (Tier A/B — tham chiếu)
 
 | Vai | Tier A | Tier B |
 |---|---|---|
