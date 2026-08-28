@@ -1,46 +1,45 @@
-# M4-9 — PO / Operations Acceptance Record (mẫu để ký)
+# M4-9 — PO / Operations Acceptance Record (Tiered model — mẫu để ký)
 
-> Tracked action #1 của CA Review 62. Đây là **bản ký nghiệm thu** để đóng handover M4-9.
-> PO/Operations đọc runbook + tự chạy được (hoặc chấp nhận điều kiện), rồi điền + ký §4.
+> Đóng handover M4-9 (CA Review 62/65). Ký cho **mô hình tiered** đã được CA chấp nhận (Review 64/65).
+> PO/Operations đọc runbook 2 tầng + tự chạy được Tier A, rồi điền RACI + ký §4.
 
 ## 1. Phạm vi nghiệm thu
 
-Dashboard-triggered Signing Run (control/approval surface) theo:
-- `docs/M4-9-DASHBOARD-TRIGGER-DESIGN-VI.md` (thiết kế)
-- `docs/M4-9-OPERATOR-RUNBOOK-VI.md` (vận hành + RACI)
-- `docs/M4-9-THREAT-MODEL-VI.md` (bảo mật)
-- Integrated Handover Package `PHASE1B-M4-9-INTEGRATED-HANDOVER-PACKAGE-VI` (bằng chứng test).
+Dashboard-triggered Signing Run (tiered) theo:
+- `docs/M4-9-DASHBOARD-TRIGGER-DESIGN-VI.md` §10 (tiered)
+- `docs/M4-9-OPERATOR-RUNBOOK-VI.md` (2 tầng)
+- `docs/M4-9-THREAT-MODEL-VI.md` (SoD conditional)
+- Correction Package `PHASE1B-M4-9-TIERED-CORRECTION-PACKAGE-VI` (CA ACCEPT — Review 65).
 
-## 2. Xác nhận Operations tự vận hành được
+## 2. Xác nhận Operations tự vận hành được (Tier A)
 
 | Mục | Xác nhận |
 |---|---|
-| Đã đọc runbook + hiểu trình tự start→confirm→preflight→ceremony→canary→execute→close | ☐ |
-| Hiểu SoD: người approve canary **phải khác** operator | ☐ |
-| Hiểu abort/break-glass luôn khả dụng, yêu cầu reason | ☐ |
-| Hiểu `CLEANUP_FAILED` là trạng thái nguy hiểm → Incident Owner vào cuộc | ☐ |
-| Biết pin_secret nạp server-side (ngoài dashboard), không nhập qua UI | ☐ |
+| Đã đọc runbook §1 (Tier A "1 người, 1 màn hình") | ☐ |
+| Tự chạy được Tier A trên dashboard: Start→Preflight(checklist)→Ceremony→Canary→Execute→CLOSED | ☐ |
+| Hiểu **đọc checklist xanh/đỏ** thay vì nhớ tiền điều kiện | ☐ |
+| Hiểu hệ thống **tự nâng Tier B** (fail-closed) nếu non-repudiation/PII/batch>260/quota>5 | ☐ |
+| Hiểu abort luôn có; `CLEANUP_FAILED` → Incident Owner | ☐ |
+| Hiểu Tier B (hiếm) cần 2 người + USB + SoD — theo runbook §2 | ☐ |
 
 ## 3. Phân vai (RACI — điền tên)
 
-| Vai | Người |
-|---|---|
-| Service Owner / PO | ______________________ |
-| Operator / SRE | ______________________ |
-| Approver (khác Operator) | ______________________ |
-| Security Custodian (USB/secret) | ______________________ |
-| Incident Owner + escalation path | ______________________ |
+| Vai | Tier A | Tier B |
+|---|---|---|
+| Service Owner / PO | ______________________ | (như Tier A) |
+| Operator | ______________________ (kiêm approve) | ______________________ |
+| Approver (khác Operator) | (kiêm) | ______________________ |
+| Security Custodian (USB CA02) | — | ______________________ |
+| Incident Owner + escalation | ______________________ | (như Tier A) |
 
-## 4. Xác nhận & tracked-action disposition
+## 4. Xác nhận
 
-- **Full signer-stack rehearsal (#2):** ☐ đã xem bằng chứng `M4_9_FULLSTACK_PASS` (worker→runner→signer,
-  synthetic, dormant) / ☐ chấp nhận như điều kiện riêng trước production signing.
-- **Frontend permission UX (#3):** ☐ chấp nhận (UI ẩn nút theo quyền, backend enforce 403).
-- **pin_secret↔JWT (#4, T9-03):** owner = **PO (anh Hoài)**; gate riêng, lên lịch sau; **không**
-  tuyên bố production-signing readiness dựa trên rehearsal hiện tại. ☐ đồng ý.
+- **Mô hình tiered:** ☐ chấp nhận (Tier A single-operator; Tier B giữ SoD+ceremony+Ed25519-KMS).
+- **Auto-escalate fail-closed:** ☐ chấp nhận (cap batch 260, quota routine 5).
+- **pin_secret↔JWT (T9-03):** owner = **PO (anh Hoài)**, gate riêng sau. ☐ đồng ý.
 
 ```
 Tôi, PO/Service Owner dự án alpha3s (danh tính: HOAI), xác nhận Operations tự vận hành được M4-9
-trong policy đã duyệt, chấp nhận các tracked-action disposition trên.
+tiered (Tier A single-operator; Tier B giữ ceremony/SoD), chấp nhận các disposition trên.
 Ký — ngày __/__/2026: ______________________
 ```
