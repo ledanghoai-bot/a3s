@@ -72,6 +72,10 @@ async def me(staff: dict = Depends(require_staff_session)) -> dict:
     return {
         "id": staff["id"], "username": staff["username"], "name": staff["name"],
         "role_key": staff.get("role_key"),
+        # M4-9 tracked action #3: tra permissions de UI an nut theo quyen (backend van la nguon
+        # enforce that — 403). set -> sorted list cho JSON.
+        "permissions": sorted(staff.get("permissions", set())),
+        "rbac_provisioned": staff.get("rbac_provisioned", False),
         "must_change_password": staff.get("must_change_password", False),
     }
 

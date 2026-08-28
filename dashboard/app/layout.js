@@ -25,6 +25,7 @@ export default function RootLayout({ children }) {
           <a href="/faq">FAQ</a>
           <a href="/metrics">Metrics</a>
           <a href="/ops">Vận hành</a>
+          <a href="/signing">Ký transcript</a>
           <a href="/staff">Nhân viên</a>
           <NavUser />
         </nav>

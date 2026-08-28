@@ -8,6 +8,7 @@ from app.api.auth_router import router as auth_router
 from app.api.dashboard import router as dashboard_router
 from app.api.inventory import router as inventory_router
 from app.api.legal import router as legal_router
+from app.api.m4_signing import router as m4_signing_router
 from app.api.webhook import router as webhook_router
 from app.config import settings
 from app.db_pool import close_pool
@@ -60,6 +61,7 @@ app.include_router(auth_router)
 app.include_router(dashboard_router)
 app.include_router(inventory_router)  # I-B M2: order transitions + inventory + adjustments
 app.include_router(legal_router)  # /privacy /terms /data-deletion (Meta App Review)
+app.include_router(m4_signing_router)  # M4-9: dashboard-triggered signing run (control surface)
 
 
 @app.get("/health")

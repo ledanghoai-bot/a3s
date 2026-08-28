@@ -153,6 +153,40 @@ async def retention_job(ctx) -> None:
         print(f"[retention] job loi (bo qua vong nay): {safe_exc(e)}")
 
 
+async def m4_signing_execute(ctx, payload: dict) -> dict:
+    """M4-9: background execution cua signing run. Goi CLI adapter (run execute) roi chuyen state.
+
+    Fail-closed: bat ky loi nao -> chuyen run sang FAILED (khong bao gio de treo o EXECUTING).
+    CLEANUP_FAILED tu runner = danger -> FAILED + terminal_reason ro rang de alert rieng.
+    """
+    from app.services.m4_signing import cli_adapter, run_store
+    run_id = payload["run_id"]
+    try:
+        result = await cli_adapter.run_execute(
+            run_id,
+            manifest=payload["manifest"],
+            approval_ref=payload["approval_ref"],
+            operator_staff_id=payload["operator_staff_id"],
+            reviewer_staff_id=payload["reviewer_staff_id"],
+        )
+        if result.ok:
+            await run_store.transition(run_id, "execute_success", actor_staff_id=None,
+                                       reason="lifecycle success", detail=result.as_dict())
+        else:
+            reason = "CLEANUP_FAILED (nguy hiem)" if result.danger else "lifecycle failed"
+            await run_store.transition(run_id, "execute_fail", actor_staff_id=None,
+                                       reason=reason, detail=result.as_dict())
+        return result.as_dict()
+    except Exception as e:  # noqa: BLE001 - phai chuyen FAILED, khong de treo EXECUTING
+        try:
+            await run_store.transition(run_id, "execute_fail", actor_staff_id=None,
+                                       reason=f"adapter loi: {safe_exc(e)}")
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[m4-signing] execute loi run={run_id}: {safe_exc(e)}")
+        raise
+
+
 async def _on_shutdown(ctx) -> None:
     # Dong DB pool cua worker luc shutdown (I-B M0.2). Pool tao lazy trong event loop cua worker.
     from app.db_pool import close_pool
@@ -160,7 +194,7 @@ async def _on_shutdown(ctx) -> None:
 
 
 class WorkerSettings:
-    functions = [process_message]
+    functions = [process_message, m4_signing_execute]
     # I-B M1: cron drain outbox moi 10 giay (poller). Producer chi sinh event khi flag BAT.
     cron_jobs = [
         cron(deliver_outbox_job, second={0, 10, 20, 30, 40, 50}, run_at_startup=False),
