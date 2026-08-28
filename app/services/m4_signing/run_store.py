@@ -11,11 +11,24 @@ duoc kiem "no-secret" o ca service (`_assert_no_secret`) lan DB CHECK.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import re
 from typing import Any
 
 from app.db_pool import get_pool
+
+
+def _parse_ts(v: str | _dt.datetime | None) -> _dt.datetime | None:
+    """Chuyen ISO string (ke ca hau to 'Z') -> datetime cho asyncpg timestamptz."""
+    if v is None or isinstance(v, _dt.datetime):
+        return v
+    s = str(v).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return _dt.datetime.fromisoformat(s)
 
 # --- State machine -----------------------------------------------------------
 # Transition hop le: {from_state: {event: to_state}}. Bat ky cap (state,event) khong co o day
@@ -62,6 +75,34 @@ class ActiveRunExists(RunStoreError):
     pass
 
 
+_JSONB_RUN_COLS = ("scope", "data_boundary", "public_metadata")
+
+
+def _hydrate_run(row) -> dict:
+    """asyncpg tra jsonb duoi dang str -> decode ve dict cho cac cot JSON cua run."""
+    d = dict(row)
+    for col in _JSONB_RUN_COLS:
+        if isinstance(d.get(col), str):
+            try:
+                d[col] = json.loads(d[col])
+            except (ValueError, TypeError):
+                d[col] = {}
+    return d
+
+
+def _hydrate_json(rows, col: str = "detail") -> list[dict]:
+    out = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get(col), str):
+            try:
+                d[col] = json.loads(d[col])
+            except (ValueError, TypeError):
+                d[col] = {}
+        out.append(d)
+    return out
+
+
 def _assert_no_secret(obj: Any, where: str) -> None:
     """Chan secret hien nhien lot vao payload JSON tu dashboard."""
     if obj is None:
@@ -105,10 +146,11 @@ async def create_run(
                 INSERT INTO m4_signing_run
                   (run_kind, change_ticket, scope, window_start, window_end,
                    quota_sts, quota_sign, data_boundary, created_by, state)
-                VALUES ($1,$2,$3::jsonb,$4::timestamptz,$5::timestamptz,$6,$7,$8::jsonb,$9,'CREATED')
+                VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7,$8::jsonb,$9,'CREATED')
                 RETURNING run_id, state, run_kind, created_at
                 """,
-                run_kind, change_ticket, json.dumps(scope), window_start, window_end,
+                run_kind, change_ticket, json.dumps(scope),
+                _parse_ts(window_start), _parse_ts(window_end),
                 quota_sts, quota_sign, json.dumps(data_boundary), created_by,
             )
             await _write_event(
@@ -122,7 +164,7 @@ async def get_run(run_id: str) -> dict | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM m4_signing_run WHERE run_id = $1", run_id)
-    return dict(row) if row else None
+    return _hydrate_run(row) if row else None
 
 
 async def list_runs(limit: int = 50) -> list[dict]:
@@ -145,7 +187,7 @@ async def list_events(run_id: str) -> list[dict]:
             "FROM m4_signing_run_event WHERE run_id = $1 ORDER BY created_at",
             run_id,
         )
-    return [dict(r) for r in rows]
+    return _hydrate_json(rows, "detail")
 
 
 async def attempt_counts(run_id: str) -> dict[str, int]:
@@ -228,7 +270,13 @@ async def transition(
 
             new_meta = None
             if public_metadata is not None:
-                merged = dict(row["public_metadata"] or {})
+                existing = row["public_metadata"]
+                if isinstance(existing, str):
+                    try:
+                        existing = json.loads(existing)
+                    except (ValueError, TypeError):
+                        existing = {}
+                merged = dict(existing or {})
                 merged.update(public_metadata)
                 new_meta = json.dumps(merged)
 
@@ -251,7 +299,7 @@ async def transition(
                 actor_staff_id=actor_staff_id, reason=reason, detail=detail,
             )
             updated = await conn.fetchrow("SELECT * FROM m4_signing_run WHERE run_id = $1", run_id)
-    return dict(updated)
+    return _hydrate_run(updated)
 
 
 async def _write_event(
