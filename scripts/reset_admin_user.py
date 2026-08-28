@@ -8,18 +8,19 @@ Khac `create_staff_user.py` (chi TAO moi, loi neu username da ton tai) — scrip
 
 Hash dung PBKDF2-HMAC-SHA256 200k iterations (khop `auth_service._hash_password` — login verify duoc).
 
-BAO MAT: mat khau doc tu BIEN MOI TRUONG `NEW_ADMIN_PASSWORD` (khong hien trong process list /
-shell history). Neu chua set, script bao loi va huong dan — KHONG nhan qua CLI arg.
+BAO MAT: mat khau NHAP TRUC TIEP TU TERMINAL qua prompt AN (getpass) — KHONG hien trong lenh,
+shell history, process list hay bien moi truong. Nhap 2 lan de xac nhan. (Truong hop khong co TTY
+— vd automation — cho phep dat bien `NEW_ADMIN_PASSWORD`, nhung day KHONG phai cach dung thuong.)
 
-Cach dung (chay trong container api tren VPS):
-    docker compose -f docker-compose.prod.yml exec -T -e NEW_ADMIN_PASSWORD='MatKhauManh...' \
-        api python scripts/reset_admin_user.py <username> ["Ten hien thi"]
+Cach dung (chay trong container api tren VPS — LUU Y KHONG dung `-T` de co TTY nhap mat khau):
+    docker compose -f docker-compose.prod.yml exec api python scripts/reset_admin_user.py <username> ["Ten hien thi"]
 
 Vi du:
-    docker compose -f docker-compose.prod.yml exec -T -e NEW_ADMIN_PASSWORD='...' \
-        api python scripts/reset_admin_user.py hoai "Anh Hoai"
+    docker compose -f docker-compose.prod.yml exec api python scripts/reset_admin_user.py hoai "Anh Hoai"
+    -> script hoi: "Mat khau admin moi:" (go, khong hien) -> "Nhap lai de xac nhan:"
 """
 import asyncio
+import getpass
 import os
 import sys
 from pathlib import Path
@@ -39,17 +40,31 @@ def _db_url() -> str:
 async def main() -> int:
     if len(sys.argv) < 2:
         print("Dung: python scripts/reset_admin_user.py <username> [\"Ten hien thi\"]")
-        print("Mat khau moi PHAI truyen qua bien moi truong NEW_ADMIN_PASSWORD (khong qua CLI).")
+        print("Mat khau nhap truc tiep tu terminal (prompt an). Chay voi TTY (KHONG dung -T).")
         return 2
 
     username = sys.argv[1]
     name = sys.argv[2] if len(sys.argv) > 2 else username
-    password = os.environ.get("NEW_ADMIN_PASSWORD", "")
+
+    # Mat khau: uu tien nhap AN tu terminal (getpass), nhap 2 lan xac nhan.
+    if sys.stdin.isatty():
+        password = getpass.getpass(f"Mat khau admin moi cho '{username}' (go, khong hien): ")
+        confirm = getpass.getpass("Nhap lai de xac nhan: ")
+        if password != confirm:
+            print("Loi: hai lan nhap khong khop. Chay lai.")
+            return 2
+    else:
+        # Khong co TTY (automation): fallback bien moi truong, canh bao.
+        password = os.environ.get("NEW_ADMIN_PASSWORD", "")
+        if not password:
+            print("Loi: khong co TTY de nhap mat khau. Chay lenh KHONG kem `-T` de co terminal:")
+            print("  docker compose -f docker-compose.prod.yml exec api "
+                  "python scripts/reset_admin_user.py " + username)
+            print("(Hoac cho automation: dat bien NEW_ADMIN_PASSWORD.)")
+            return 2
 
     if len(password) < 8:
-        print("Loi: dat NEW_ADMIN_PASSWORD (toi thieu 8 ky tu) qua bien moi truong, vd:")
-        print("  docker compose -f docker-compose.prod.yml exec -T -e NEW_ADMIN_PASSWORD='...' \\")
-        print("     api python scripts/reset_admin_user.py " + username)
+        print("Loi: mat khau can toi thieu 8 ky tu.")
         return 2
 
     password_hash, salt = auth_service._hash_password(password)  # noqa: SLF001 - dung chung thuat toan
