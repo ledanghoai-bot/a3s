@@ -57,6 +57,13 @@ async def main() -> int:
                                "VALUES('signer1','x','x') RETURNING id")
         appr = await c.fetchval("INSERT INTO staff_users(username,password_hash,password_salt) "
                                 "VALUES('po','x','x') RETURNING id")
+        # Buoc 1: preflight THAT can registry public key (localdev) + Redis + control (050 seed).
+        from app.services.pii.signing_backend import LocalDevBackend
+        _b = LocalDevBackend(key_id="m4-transcript-ed25519-localdev")
+        await c.execute(
+            "INSERT INTO m4_stage0p_transcript_public_keys(key_id,key_version,algorithm,public_key) "
+            "VALUES('m4-transcript-ed25519-localdev',$1,'Ed25519',$2) ON CONFLICT DO NOTHING",
+            _b.key_version(), _b.public_key_raw())
         # [1] capability + table
         cap = await c.fetchval("SELECT 1 FROM permissions WHERE key='m4.signing.activate.production'")
         tbl = await c.fetchval("SELECT to_regclass('public.m4_signing_activation') IS NOT NULL")
@@ -132,13 +139,26 @@ async def main() -> int:
     _check(ac["receipt"]["state"] == "ACTIVE" and ac["receipt"]["digest"] == DIGEST,
            "5b activate -> ACTIVE + receipt (digest khop)")
 
-    # [7] stale preflight (run moi)
+    # [8] TTL expiry (aid dang ACTIVE) — set window het -> expire_due. Lam TRUOC [7] de giai phong
+    #     slot single-active (preflight that co check no_conflicting_incident: 1 ceremony/lan).
+    c = await asyncpg.connect(_plain(DB_URL))
+    try:
+        await c.execute("UPDATE m4_signing_activation SET window_end=now()-interval '1 minute' "
+                        "WHERE activation_id=$1", aid)
+    finally:
+        await c.close()
+    n_exp = await A.expire_due()
+    st = await A.get(aid)
+    _check(n_exp >= 1 and st["state"] == "EXPIRED", "8 TTL het -> expire_due -> EXPIRED (auto dormant)")
+
+    # [7] stale preflight (run moi — aid da EXPIRED nen khong xung dot single-active)
     rq2 = await A.create_request(request_id="R2", scope={"t": "y"}, artifact_digest=DIGEST,
                                  manifest_ref=None, max_sign_count=1, reason="r", ticket="T-2",
                                  requester_staff_id=req, delegated_by=None, rollback_owner="h",
                                  actor="signer1")
     aid2 = str(rq2["activation_id"])
-    await A.run_preflight(aid2, actor="system")
+    pf2 = await A.run_preflight(aid2, actor="system")
+    _check(pf2["ok"] and pf2["state"] == "PREFLIGHT_PASSED", "7a preflight aid2 PASS (khong xung dot)")
     c = await asyncpg.connect(_plain(DB_URL))
     try:
         await c.execute("UPDATE m4_signing_activation SET preflight_at=now()-interval '20 minutes' "
@@ -150,17 +170,6 @@ async def main() -> int:
         _check(False, "7 stale preflight phai chan approve")
     except A.ActivationError:
         _check(True, "7 stale preflight chan approve")
-
-    # [8] TTL expiry (aid dang ACTIVE) — set window het -> expire_due
-    c = await asyncpg.connect(_plain(DB_URL))
-    try:
-        await c.execute("UPDATE m4_signing_activation SET window_end=now()-interval '1 minute' "
-                        "WHERE activation_id=$1", aid)
-    finally:
-        await c.close()
-    n_exp = await A.expire_due()
-    st = await A.get(aid)
-    _check(n_exp >= 1 and st["state"] == "EXPIRED", "8 TTL het -> expire_due -> EXPIRED (auto dormant)")
 
     # [9] revoke (aid2 dang PREFLIGHT_PASSED)
     rv = await A.revoke(aid2, actor="hoai", reason="huy test")
