@@ -9,8 +9,8 @@ from app.api.dashboard import router as dashboard_router
 from app.api.inventory import router as inventory_router
 from app.api.legal import router as legal_router
 from app.api.m4_signer_access import router as m4_signer_access_router
-from app.api.m5_address_dataset import router as m5_address_dataset_router
 from app.api.m4_signing import router as m4_signing_router
+from app.api.m5_address_dataset import router as m5_address_dataset_router
 from app.api.webhook import router as webhook_router
 from app.config import settings
 from app.db_pool import close_pool
