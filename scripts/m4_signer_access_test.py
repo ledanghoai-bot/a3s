@@ -226,14 +226,31 @@ async def main() -> int:
     finally:
         await c.close()
 
+    # [18] CONTROL: grant temp role fail-closed thieu authz (Addendum 70A) — chung minh KHONG bypass
+    from app.services.m4_signing import rbac_provisioning as RP
+    c = await asyncpg.connect(_plain(DB_URL))
+    try:
+        try:
+            await RP.grant_temp_signer_role(c, staff_id=signer, request_id="X",
+                                            valid_until=await c.fetchval("SELECT now()"),
+                                            granted_by=po, actor="", reason="r", ticket="T")
+            _check(False, "18 control grant phai fail-closed thieu actor")
+        except RP.ProvisioningError:
+            _check(True, "18 control grant fail-closed thieu actor (Addendum 70A, khong bypass)")
+    finally:
+        await c.close()
+
     # [17] audit no-secret
     c = await asyncpg.connect(_plain(DB_URL))
     try:
         acts = sorted({x["action"] for x in await c.fetch(
-            "SELECT DISTINCT action FROM audit_log WHERE action LIKE 'signer_access.%'")})
+            "SELECT DISTINCT action FROM audit_log WHERE action LIKE 'signer_access.%' "
+            "OR action LIKE 'rbac.%temp_signer_role'")})
+        # provisioning temp role di QUA control rbac_provisioning (Directive 91 / Addendum 70A)
         _check(all(a in acts for a in ["signer_access.submit", "signer_access.approve",
-               "signer_access.provision_role", "signer_access.close", "signer_access.expire"]),
-               "17a audit ghi du buoc (incl provision_role)")
+               "signer_access.close", "signer_access.expire",
+               "rbac.grant_temp_signer_role", "rbac.revoke_temp_signer_role"]),
+               "17a audit du buoc: signer_access.* + rbac.grant/revoke_temp_signer_role (control chuan)")
         leak = await c.fetchval("SELECT count(*) FROM audit_log WHERE after::text ~* '(pin_secret|password|-----BEGIN|ya29\\.)'")
         _check(leak == 0, "17b audit KHONG secret")
     finally:

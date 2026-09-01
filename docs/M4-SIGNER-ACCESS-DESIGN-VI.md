@@ -11,9 +11,15 @@ CLOSED / EXPIRED / REVOKED = terminal
 ```
 
 **approve tách 2 event (audit riêng):**
-1. `provision_role` — INSERT `m4_temp_signer_role_grant` (staff=requester, role=`m4_signing_operator`,
-   valid_until=window_end, is_rehearsal). BỎ QUA nếu requester đã có static role (chỉ issue window).
+1. **provision temp role — QUA CONTROL chuẩn `rbac_provisioning.grant_temp_signer_role`** (Directive 91 +
+   Addendum 70A): `_require_auth` (actor/reason/ticket fail-closed) + `_assert_audit_ready` + `_role_ready`
+   (role version-controlled) + allowlist role=`m4_signing_operator` + immutable audit
+   `rbac.grant_temp_signer_role` (no-secret). signer_access **KHÔNG INSERT trực tiếp** — đây là đường
+   DUY NHẤT ghi `m4_temp_signer_role_grant`, không có API bypass. BỎ QUA nếu requester đã có static role.
 2. `approve` — INSERT `m4_signing_activation` (window APPROVED, TTL) + link `activation_id`.
+
+**Revoke temp role** cũng qua control `rbac_provisioning.revoke_temp_signer_role` (immutable audit
+`rbac.revoke_temp_signer_role`). Không sweep UPDATE trực tiếp (perms tự hết theo valid_until).
 
 **Auto-revoke** (worker cron 60s `signer_access_expiry_job` + close/revoke): request ACTIVE quá
 window_end → EXPIRED; revoke temp grant (revoked_at); terminal activation. Defensive sweep revoke mọi

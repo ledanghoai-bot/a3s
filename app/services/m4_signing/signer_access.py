@@ -18,7 +18,7 @@ import uuid as _uuid
 
 from app.db_pool import get_pool
 from app.services import audit_service
-from app.services.m4_signing import activation, preflight_checks
+from app.services.m4_signing import activation, preflight_checks, rbac_provisioning
 
 ROLE_KEY = "m4_signing_operator"
 PREFLIGHT_FRESH_SECONDS = 15 * 60
@@ -170,15 +170,14 @@ async def approve(request_id: str, *, approver_staff_id: int, actor: str) -> dic
             already = await _staff_has_static_role(conn, requester)
             grant_id = None
             if not already:
-                grant_id = await conn.fetchval(
-                    "INSERT INTO m4_temp_signer_role_grant "
-                    "(request_id,staff_id,role_key,granted_by,valid_until,is_rehearsal) "
-                    "VALUES ($1,$2,$3,$4,$5,$6) RETURNING grant_id",
-                    request_id, requester, ROLE_KEY, approver_staff_id, win_end, is_reh)
-                await _audit(conn, "provision_role", request_id, actor, approver_staff_id, None,
-                             {"grant_id": str(grant_id), "staff_id": requester, "role": ROLE_KEY,
-                              "valid_until": str(win_end), "is_rehearsal": is_reh,
-                              "confers_perms": (not is_reh)}, "temp signer role")
+                # CONTROL chuan Addendum 70A (Directive 91): cap temp role QUA rbac_provisioning
+                # (allowlist role + _require_auth + audit-ready + immutable audit fail-closed) —
+                # KHONG INSERT truc tiep o day. Day la duong duy nhat provisioning temp role.
+                grant_id = await rbac_provisioning.grant_temp_signer_role(
+                    conn, staff_id=requester, request_id=request_id, valid_until=win_end,
+                    granted_by=approver_staff_id, actor=actor,
+                    reason=req["reason"] or "signer access", ticket=req["ticket"] or request_id,
+                    is_rehearsal=is_reh)
             # EVENT 2: issue activation window (m4_signing_activation row lien ket)
             act = await conn.fetchrow(
                 "INSERT INTO m4_signing_activation "
@@ -212,10 +211,9 @@ async def _terminate(request_id: str, to_state: str, reason: str, *, actor: str,
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # auto-revoke temp role grant(s) cua request nay
-            await conn.execute(
-                "UPDATE m4_temp_signer_role_grant SET revoked_at=now(), revoke_reason=$2 "
-                "WHERE request_id=$1 AND revoked_at IS NULL", request_id, reason)
+            # auto-revoke temp role grant(s) QUA control chuan rbac_provisioning (immutable audit)
+            await rbac_provisioning.revoke_temp_signer_role(
+                conn, request_id=request_id, actor=actor, reason=reason)
             # terminal activation lien ket (neu con active)
             if req["activation_id"]:
                 act_to = "CLOSED" if to_state == "CLOSED" else ("EXPIRED" if to_state == "EXPIRED" else "REVOKED")
@@ -257,9 +255,7 @@ async def expire_due(*, actor: str = "system") -> int:
             n += 1
         except SignerAccessError:
             pass
-    # defensive: revoke bat ky temp grant qua han con sot (khong gan request active)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE m4_temp_signer_role_grant SET revoked_at=now(), revoke_reason='ttl_expired' "
-            "WHERE revoked_at IS NULL AND valid_until < now()")
+    # Ghi chu: grant het valid_until TU DONG khong con cap quyen (permission resolution kiem
+    # valid_until>now); revoke (audit) di qua _terminate -> rbac_provisioning.revoke_temp_signer_role.
+    # KHONG sweep UPDATE truc tiep o day (tranh duong provisioning ngoai control).
     return n

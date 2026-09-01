@@ -199,3 +199,45 @@ async def _has_col(conn, col: str) -> bool:
     return bool(await conn.fetchval(
         "SELECT 1 FROM information_schema.columns WHERE table_name='staff_users' AND column_name=$1",
         col))
+
+
+async def grant_temp_signer_role(conn, *, staff_id: int, request_id: str, valid_until,
+                                 granted_by: int | None, actor: str, reason: str, ticket: str,
+                                 is_rehearsal: bool = False) -> str:
+    """Directive 91: cap TAM THOI role signer qua CONTROL chuan Addendum 70A (KHONG INSERT truc tiep
+    o signer_access). Allowlist role = OPERATOR_ROLE (co dinh); _require_auth fail-closed + audit-ready
+    + role-ready + immutable audit no-secret. Tham gia transaction cua caller (conn). Day la DUONG DUY
+    NHAT ghi m4_temp_signer_role_grant. Rehearsal grant duoc ghi nhung KHONG cap quyen that (permission
+    resolution loai is_rehearsal)."""
+    _require_auth(actor, reason, ticket)
+    await _assert_audit_ready(conn)
+    await _role_ready(conn)  # role m4_signing_operator phai version-controlled (migration 048)
+    grant_id = await conn.fetchval(
+        "INSERT INTO m4_temp_signer_role_grant "
+        "(request_id,staff_id,role_key,granted_by,valid_until,is_rehearsal) "
+        "VALUES ($1,$2,$3,$4,$5,$6) RETURNING grant_id",
+        request_id, staff_id, OPERATOR_ROLE, granted_by, valid_until, is_rehearsal)
+    await audit_service.record(
+        conn, actor_type="cli", action="rbac.grant_temp_signer_role", actor_ref=actor,
+        actor_staff_id=granted_by, entity_type="m4_temp_signer_role_grant", entity_id=str(grant_id),
+        before=None,
+        after={"role": OPERATOR_ROLE, "grants": list(OPERATOR_PERMS), "staff_id": staff_id,
+               "request_id": request_id, "valid_until": str(valid_until), "is_rehearsal": is_rehearsal,
+               "confers_perms": (not is_rehearsal), "ticket": ticket}, reason=reason)
+    return str(grant_id)
+
+
+async def revoke_temp_signer_role(conn, *, request_id: str, actor: str, reason: str) -> int:
+    """Directive 91: thu hoi temp signer role cua 1 request qua CONTROL chuan + immutable audit.
+    Fail-safe (chi go quyen). Tra so grant da revoke."""
+    _require_auth(actor, reason, request_id)
+    await _assert_audit_ready(conn)
+    rows = await conn.fetch(
+        "UPDATE m4_temp_signer_role_grant SET revoked_at=now(), revoke_reason=$2 "
+        "WHERE request_id=$1 AND revoked_at IS NULL RETURNING grant_id", request_id, reason)
+    for r in rows:
+        await audit_service.record(
+            conn, actor_type="cli", action="rbac.revoke_temp_signer_role", actor_ref=actor,
+            actor_staff_id=None, entity_type="m4_temp_signer_role_grant", entity_id=str(r["grant_id"]),
+            before={"revoked": False}, after={"revoked": True, "request_id": request_id}, reason=reason)
+    return len(rows)
