@@ -1,4 +1,5 @@
 import "./globals.css";
+import NavSigning from "./components/NavSigning";
 import NavUser from "./components/NavUser";
 
 // BẮT BUỘC cho nonce-CSP (CA-REVIEW-M0-DEV-004 §5): ép mọi route dashboard render động per-request để
@@ -25,8 +26,7 @@ export default function RootLayout({ children }) {
           <a href="/faq">FAQ</a>
           <a href="/metrics">Metrics</a>
           <a href="/ops">Vận hành</a>
-          <a href="/signing">Ký transcript</a>
-          <a href="/signer-access">Kích hoạt ký</a>
+          <NavSigning />
           <a href="/staff">Nhân viên</a>
           <NavUser />
         </nav>

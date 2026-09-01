@@ -136,7 +136,7 @@ export default function SignerAccessPage() {
   return (
     <main style={{ padding: 24 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1>Kích hoạt ký — Signer Access</h1>
+        <h1>Mở phiên niêm phong — Cấp quyền ký (Signer Access)</h1>
         <div>
           <button onClick={loadReqs} disabled={loading}>Tải lại</button>{" "}
           {can("m4.signer_access.request") && (
