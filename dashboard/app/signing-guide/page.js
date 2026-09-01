@@ -24,8 +24,9 @@ export default function SigningGuidePage() {
           phong</b> cũng được ghi lại.
         </p>
         <p style={{ fontSize: 14.5, lineHeight: 1.7 }}>
-          Việc này nhằm bảo vệ dữ liệu khách hàng và phục vụ tuân thủ <b>Nghị định 13/2023/NĐ-CP về bảo vệ
-          dữ liệu cá nhân</b> (yêu cầu bảo đảm <b>an toàn</b> và <b>tính toàn vẹn</b> của dữ liệu).
+          Việc này <b>góp phần</b> bảo vệ dữ liệu khách hàng và <b>hỗ trợ</b> tuân thủ <b>Nghị định
+          13/2023/NĐ-CP về bảo vệ dữ liệu cá nhân</b> (yêu cầu bảo đảm <b>an toàn</b> và <b>tính toàn vẹn</b>
+          của dữ liệu).
         </p>
         <p style={{ fontSize: 13, color: "#6b7280" }}>
           Lưu ý: niêm phong <b>không phải khóa/giấu</b> nội dung — vẫn xem được; nó chỉ <b>chống bị sửa</b>.
