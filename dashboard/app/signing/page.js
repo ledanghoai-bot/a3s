@@ -170,7 +170,7 @@ export default function SigningPage() {
   return (
     <main style={{ padding: 24 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1>Ký transcript — Signing Run</h1>
+        <h1>Thực hiện niêm phong — Ký transcript (Signing Run)</h1>
         <div>
           <button onClick={loadRuns} disabled={loading}>Tải lại</button>{" "}
           {can("m4.signing.run.start") && (
