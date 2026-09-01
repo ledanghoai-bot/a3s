@@ -39,6 +39,9 @@ export default function NavSigning() {
           <a href="/signing" style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>
             Thực hiện niêm phong
           </a>
+          <a href="/signing-guide" style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>
+            Hướng dẫn niêm phong hội thoại
+          </a>
         </span>
       )}
     </span>
