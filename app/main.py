@@ -12,6 +12,8 @@ from app.api.m4_signer_access import router as m4_signer_access_router
 from app.api.m4_signing import router as m4_signing_router
 from app.api.m5_address_dataset import router as m5_address_dataset_router
 from app.api.m5_address_resolution import router as m5_address_resolution_router
+from app.api.m5_address_workflow import confirmation_router as m5_confirmation_router
+from app.api.m5_address_workflow import review_router as m5_review_router
 from app.api.webhook import router as webhook_router
 from app.config import settings
 from app.db_pool import close_pool
@@ -68,6 +70,8 @@ app.include_router(m4_signing_router)  # M4-9: dashboard-triggered signing run (
 app.include_router(m4_signer_access_router)  # Directive 91: signer access request (role+window)
 app.include_router(m5_address_dataset_router)  # M5 Phase 1 (Directive 104): admin dataset registry (dormant)
 app.include_router(m5_address_resolution_router)  # M5 Phase 2 (Directive 108): address resolution (dormant)
+app.include_router(m5_confirmation_router)  # M5 Phase 3 (Directive 112): customer confirmation (dormant)
+app.include_router(m5_review_router)  # M5 Phase 3 (Directive 112): staff review queue (dormant)
 
 
 @app.get("/health")
