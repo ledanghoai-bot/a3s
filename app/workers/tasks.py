@@ -153,6 +153,21 @@ async def retention_job(ctx) -> None:
         print(f"[retention] job loi (bo qua vong nay): {safe_exc(e)}")
 
 
+async def signer_access_expiry_job(ctx) -> None:
+    """Directive 91: auto-revoke worker — quet signer-access request ACTIVE qua window_end -> EXPIRED
+    + revoke temp signer role + expire activation window. Chay moi 60s. Bang chua ton tai (pre-051)
+    -> loi bat, no-op. Loi khong duoc lam sap worker; role het han khong bi bo quen (defensive sweep
+    trong expire_due cung revoke moi grant qua valid_until)."""
+    try:
+        from app.services.m4_signing import signer_access
+        n = await signer_access.expire_due(actor="cron")
+        if n:
+            print(f"[signer-access] expired {n} request(s) + revoked temp role")
+    except Exception as e:  # noqa: BLE001 - sweep loi khong duoc lam sap worker
+        # pre-051 (bang chua co) hoac loi tam -> bo qua vong nay
+        print(f"[signer-access] expiry sweep bo qua vong nay: {safe_exc(e)}")
+
+
 async def m4_signing_execute(ctx, payload: dict) -> dict:
     """M4-9: background execution cua signing run. Goi CLI adapter (run execute) roi chuyen state.
 
@@ -202,6 +217,8 @@ class WorkerSettings:
         cron(expire_reservations_job, second={0}, run_at_startup=False),
         # I-B M3-S6: retention executor 03:15 hang ngay. Flag m3_retention_executor TAT -> no-op.
         cron(retention_job, hour={3}, minute={15}, run_at_startup=False),
+        # Directive 91: auto-revoke temp signer role + expire signer-access window moi 60s.
+        cron(signer_access_expiry_job, second={0}, run_at_startup=False),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20
