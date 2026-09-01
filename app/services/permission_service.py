@@ -26,11 +26,25 @@ async def permissions_for_role(conn, role_key: str | None) -> set[str]:
 
 
 async def load_staff_authz(conn, staff_id: int) -> dict:
-    """Tra ve {role_key, permissions, rbac_provisioned} cho 1 staff. Feature-detect an toan."""
+    """Tra ve {role_key, permissions, rbac_provisioned} cho 1 staff. Feature-detect an toan.
+
+    Directive 91: permissions = quyen role tinh HOP quyen tu temp signer-role grant DANG hieu luc
+    (valid_from<=now<valid_until, chua revoke, KHONG rehearsal). Rehearsal grant KHONG cap quyen that.
+    Temp grant tu dong het hieu luc theo valid_until (auto-revoke) — query moi request, khong cache."""
     if not await rbac_provisioned(conn):
         return {"role_key": None, "permissions": set(), "rbac_provisioned": False}
     role_key = await conn.fetchval("SELECT role_key FROM staff_users WHERE id=$1", staff_id)
     perms = await permissions_for_role(conn, role_key)
+    # UNION temp signer-role grant dang hieu luc (feature-detect: bang co the chua ton tai pre-051)
+    if await conn.fetchval("SELECT to_regclass('public.m4_temp_signer_role_grant') IS NOT NULL"):
+        temp = await conn.fetch(
+            "SELECT DISTINCT rp.permission_key "
+            "FROM m4_temp_signer_role_grant g "
+            "JOIN role_permissions rp ON rp.role_key = g.role_key "
+            "WHERE g.staff_id=$1 AND g.revoked_at IS NULL AND g.is_rehearsal = false "
+            "AND g.valid_from <= now() AND g.valid_until > now()", staff_id)
+        if temp:
+            perms = set(perms) | {r["permission_key"] for r in temp}
     return {"role_key": role_key, "permissions": perms, "rbac_provisioned": True}
 
 
