@@ -33,6 +33,57 @@ def test_good_dataset_passes_all_8():
                 declared_sha256=sha)
     assert rep["passed"], [c for c in rep["checks"] if not c["ok"]]
     assert len(rep["checks"]) == 8
+    assert rep["topology"] == "3-tier"  # regression: 3-tier van pass + ghi topology
+
+
+def _two_tier():
+    """CA Review 122: dataset 2 cap (Tinh->Xa), khong district; ward parent = province."""
+    units = [
+        {"level": "province", "code": "01", "name": "Thành phố Hà Nội", "parent_code": None},
+        {"level": "ward", "code": "00004", "name": "Phường Ba Đình", "parent_code": "01"},
+        {"level": "ward", "code": "00008", "name": "Phường Hoàn Kiếm", "parent_code": "01"},
+    ]
+    aliases = [{"unit_code": "00004", "alias_name": "Phường Trúc Bạch", "alias_kind": "legacy"}]
+    prov = {"source_url": "https://danhmuchanhchinh.nso.gov.vn/", "source_kind": "authoritative",
+            "downloaded_at": "2025-07-01", "license": "OGL", "first_version": True,
+            "expected_counts": {"province": 1, "ward": 2}}
+    return units, aliases, prov, g.canonical_checksum(units, aliases)
+
+
+def test_two_tier_passes_topology_recorded():
+    units, aliases, prov, sha = _two_tier()
+    rep = g.run(version="VN-ADMIN-2025-07-v1", units=units, aliases=aliases, provenance=prov,
+                declared_sha256=sha)
+    assert rep["passed"], [c for c in rep["checks"] if not c["ok"]]
+    assert rep["topology"] == "2-tier"
+
+
+def test_mixed_topology_fails():
+    # co district nhung 1 ward tro thang province -> hybrid -> fail-closed (khong "uu tien")
+    units = [
+        {"level": "province", "code": "P01", "name": "Cà Mau", "parent_code": None},
+        {"level": "district", "code": "D01", "name": "Đầm Dơi", "parent_code": "P01"},
+        {"level": "ward", "code": "W01", "name": "Tân Duyệt", "parent_code": "D01"},
+        {"level": "ward", "code": "W02", "name": "Phường X", "parent_code": "P01"},  # bo qua district
+    ]
+    aliases = []
+    prov = {"source_url": "x", "source_kind": "authoritative", "downloaded_at": "2025-07-01",
+            "license": "OGL", "first_version": True,
+            "expected_counts": {"province": 1, "district": 1, "ward": 2}}
+    rep = g.run(version="VN-ADMIN-2025-07-v1", units=units, aliases=aliases, provenance=prov,
+                declared_sha256=g.canonical_checksum(units, aliases))
+    assert not _check(rep, "parent_child")["ok"]
+    assert rep["topology"] == "mixed"
+
+
+def test_two_tier_orphan_ward_fails():
+    units, aliases, prov, _ = _two_tier()
+    units[1]["parent_code"] = "99"  # ward tro province khong ton tai
+    sha = g.canonical_checksum(units, aliases)
+    rep = g.run(version="VN-ADMIN-2025-07-v1", units=units, aliases=aliases, provenance=prov,
+                declared_sha256=sha)
+    assert not _check(rep, "parent_child")["ok"]
+    assert rep["topology"] == "2-tier"
 
 
 def test_bad_version_format_fails_schema():

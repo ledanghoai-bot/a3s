@@ -99,15 +99,28 @@ def run(
                     overlaps.append(code)
     checks.append(_c("code_range", not overlaps, "code trung/chong effective: " + ",".join(sorted(set(overlaps))[:8])))
 
-    # 3. parent_child
+    # 3. parent_child — TOPOLOGY-AWARE (CA Review 122): 2-tier (province->ward) HOAC 3-tier
+    #    (province->district->ward). Topology xac dinh o cap TOAN DATASET (co district hay khong).
+    #    Hybrid/mixed (co district nhung mot phan ward tro province) -> FAIL-CLOSED (khong "uu tien").
     codes_by_level = {lv: {x["code"] for x in units if x["level"] == lv} for lv in _LEVELS}
+    provinces, districts = codes_by_level["province"], codes_by_level["district"]
+    has_district = len(districts) > 0
     orphans = []
+    mixed = False
     for x in units:
-        if x["level"] == "ward" and x.get("parent_code") not in codes_by_level["district"]:
-            orphans.append(f"ward {x['code']}->{x.get('parent_code')}")
-        if x["level"] == "district" and x.get("parent_code") not in codes_by_level["province"]:
-            orphans.append(f"district {x['code']}->{x.get('parent_code')}")
-    checks.append(_c("parent_child", not orphans, "; ".join(orphans[:8])))
+        if x["level"] == "district" and x.get("parent_code") not in provinces:
+            orphans.append(f"district {x['code']}->{x.get('parent_code')} (parent phai province)")
+        if x["level"] == "ward":
+            p = x.get("parent_code")
+            if has_district:
+                if p not in districts:
+                    orphans.append(f"ward {x['code']}->{p} (3-tier: parent phai district)")
+                    if p in provinces:
+                        mixed = True   # ward bo qua district trong dataset 3-tier -> hybrid
+            elif p not in provinces:
+                orphans.append(f"ward {x['code']}->{p} (2-tier: parent phai province)")
+    topology = "mixed" if mixed else ("3-tier" if has_district else "2-tier")
+    checks.append(_c("parent_child", not orphans and not mixed, f"topology={topology}; " + "; ".join(orphans[:8])))
 
     # 4. coverage vs authoritative expected_counts
     exp = (provenance or {}).get("expected_counts") or {}
@@ -164,7 +177,7 @@ def run(
     checks.append(_c("provenance", not miss and rb_ok, "; ".join(detail8)))
 
     passed = all(c["ok"] for c in checks)
-    return {"passed": passed, "checks": checks, "computed_sha256": computed}
+    return {"passed": passed, "checks": checks, "computed_sha256": computed, "topology": topology}
 
 
 def _ranges_overlap(a: dict, b: dict) -> bool:
