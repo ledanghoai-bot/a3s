@@ -41,6 +41,7 @@ def read_conversion(path):
     ws = wb["Tổng hợp_không merge "]
     wards = {}          # ma_xa_moi -> (ten, province_code)
     aliases = []        # {unit_code, alias_name, alias_kind, source(ma cu)}
+    seen = set()        # dedup theo (unit_code, alias_normalized): dong "Nhap toan bo/mot phan" tach doi
     for i, row in enumerate(ws.iter_rows(min_row=3, values_only=True)):
         tinh, ten_moi, ma_moi, ten_cu, ma_cu = row[0], row[1], row[2], row[3], row[4]
         if not ma_moi:
@@ -54,8 +55,13 @@ def read_conversion(path):
         if ma_moi not in wards and ten_moi:
             wards[ma_moi] = (str(ten_moi).strip(), pcode)
         if ten_cu:
-            aliases.append({"unit_code": ma_moi, "alias_name": str(ten_cu).strip(),
-                            "alias_kind": "legacy", "source": (str(ma_cu).strip() if ma_cu else None)})
+            an = str(ten_cu).strip()
+            key = (ma_moi, gate.normalize(an))   # khop PK admin_unit_alias (unit_code, alias_normalized)
+            if key in seen:
+                continue                          # bo alias trung (cung xa cu -> cung xa moi, tach 2 dong)
+            seen.add(key)
+            aliases.append({"unit_code": ma_moi, "alias_name": an, "alias_kind": "legacy",
+                            "source": (str(ma_cu).strip() if ma_cu else None)})
     return wards, aliases
 
 
