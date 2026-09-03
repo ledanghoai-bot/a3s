@@ -93,3 +93,20 @@ def test_alias_not_override_canonical():
     r = m.resolve(u, a, province="Cà Mau", district=None, ward=None)
     # van resolve ve canonical P01, khong bi alias cua P02 lam ambiguous
     assert r["province_code"] == "P01" and r["status"] == "auto_verified"
+
+
+def test_duplicate_legacy_alias_stays_ambiguous():
+    # CA Review 122: ten xa cu trung giua nhieu don vi -> nhieu candidate -> KHONG auto-select.
+    units = [
+        {"level": "province", "code": "01", "name": "Thành phố Hà Nội", "parent_code": None},
+        {"level": "ward", "code": "W1", "name": "Phường A", "parent_code": "01"},
+        {"level": "ward", "code": "W2", "name": "Phường B", "parent_code": "01"},
+    ]
+    aliases = [
+        {"unit_code": "W1", "alias_name": "Xã Cũ Trùng", "alias_kind": "legacy"},
+        {"unit_code": "W2", "alias_name": "Xã Cũ Trùng", "alias_kind": "legacy"},
+    ]
+    r = m.resolve(units, aliases, province="Thành phố Hà Nội", district=None, ward="Xã Cũ Trùng")
+    assert r["status"] == "needs_staff_review"
+    assert any(x.startswith("one_to_many") for x in r["rules_applied"])
+    assert r["ward_code"] is None  # khong tu chon
