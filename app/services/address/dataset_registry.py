@@ -237,5 +237,50 @@ async def rollback(conn, *, to_version: str, actor: str, reason: str, ticket: st
     return plan
 
 
+async def deactivate(conn, *, version: str, actor: str, reason: str, ticket: str, apply: bool = False) -> dict:
+    """PO owner deactivate: dua active_version ve NULL (dormant) + version dang active -> rolled_back.
+    Dung cho rollback FIRST version (khong co version truoc de tro ve) — CA G-A-137-05.
+
+    CONTRACT (CA G-A-138-01): REPLAY-SAFE FAIL-CLOSED REJECTION (KHONG phai idempotent-success). Goi lai khi
+    version khong con active -> tu choi (khong mutate). ATOMIC (CA G-A-138-02): khoa dataset row + config
+    singleton FOR UPDATE trong 1 transaction (thu tu dataset-roi-config, dong bo voi activate/rollback de tranh
+    deadlock); conditional update kiem exact affected-row; fail khong mutate pointer/audit neu concurrency
+    mismatch. SoD deactivator != custodian ingest. Immutable audit address.dataset.deactivate."""
+    _require_auth(actor, reason, ticket)
+    await _assert_audit_ready(conn)
+    if not apply:
+        cur = await get_active(conn)  # dry-run: doc trang thai, khong lock/khong mutate
+        return {"action": "deactivate", "version": version, "from_active": cur, "dry_run": True}
+    async with conn.transaction():
+        # khoa target dataset row TRUOC (cung thu tu voi activate/rollback), roi config singleton
+        row = await conn.fetchrow(
+            "SELECT status, ingested_by FROM admin_unit_dataset WHERE version=$1 FOR UPDATE", version)
+        if not row:
+            raise RegistryError(f"version {version} khong ton tai")
+        cur = await conn.fetchval(
+            "SELECT value FROM address_dataset_config WHERE key='active_version' FOR UPDATE")
+        if cur != version or row["status"] != "active":
+            raise RegistryError(
+                f"version {version} khong phai active hien tai (active={cur}, status={row['status']}) "
+                "— replay-safe reject (khong mutate)")
+        if row.get("ingested_by") and actor.strip() == row["ingested_by"].strip():
+            raise RegistryError("SoD: deactivator phai KHAC custodian ingest")
+        r1 = await conn.execute(
+            "UPDATE admin_unit_dataset SET status='rolled_back', terminal_at=now() "
+            "WHERE version=$1 AND status='active'", version)
+        if r1 != "UPDATE 1":
+            raise RegistryError("concurrency: dataset khong con active (mismatch) — huy deactivate")
+        r2 = await conn.execute(
+            "UPDATE address_dataset_config SET value=NULL, updated_at=now() "
+            "WHERE key='active_version' AND value=$1", version)
+        if r2 != "UPDATE 1":
+            raise RegistryError("concurrency: active_version da doi (mismatch) — huy deactivate")
+        await audit_service.record(
+            conn, actor_type="cli", action="address.dataset.deactivate", actor_ref=actor,
+            entity_type="admin_unit_dataset", entity_id=version, before={"active": version},
+            after={"active": None, "rolled_back": version, "ticket": ticket}, reason=reason)
+    return {"action": "deactivate", "version": version, "from_active": version, "applied": True}
+
+
 def _json(d) -> str:
     return json.dumps(d or {}, ensure_ascii=False, default=str)

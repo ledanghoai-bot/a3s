@@ -120,3 +120,16 @@ async def rollback(staff: dict = Depends(require_active_session), body: dict = B
         raise HTTPException(status_code=400, detail=f"thieu truong {e}") from e
     except Exception as e:  # noqa: BLE001
         raise _err(e) from e
+
+
+@router.post("/{version}/deactivate", dependencies=[Depends(require_permission("address.dataset.manage"))])
+async def deactivate(version: str, staff: dict = Depends(require_active_session),
+                     body: dict = Body(default={})) -> dict:
+    # CA G-A-137-05: deactivate first version -> active_version NULL. actor tu session (khong tin body).
+    try:
+        async with (await get_pool()).acquire() as conn:
+            return await reg.deactivate(conn, version=version, actor=staff["username"],
+                                        reason=body.get("reason"), ticket=body.get("ticket"),
+                                        apply=bool(body.get("apply")))
+    except Exception as e:  # noqa: BLE001
+        raise _err(e) from e
