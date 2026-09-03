@@ -237,5 +237,39 @@ async def rollback(conn, *, to_version: str, actor: str, reason: str, ticket: st
     return plan
 
 
+async def deactivate(conn, *, version: str, actor: str, reason: str, ticket: str, apply: bool = False) -> dict:
+    """PO owner deactivate: dua active_version ve NULL (dormant) + version dang active -> rolled_back.
+    Dung cho rollback FIRST version (khong co version truoc de tro ve) — CA G-A-137-05.
+    Fail-closed: chi deactivate version DANG active; SoD deactivator != custodian ingest; idempotent
+    (version khong active -> tu choi). Immutable audit address.dataset.deactivate."""
+    _require_auth(actor, reason, ticket)
+    await _assert_audit_ready(conn)
+    row = await _row(conn, version)
+    if not row:
+        raise RegistryError(f"version {version} khong ton tai")
+    cur = await get_active(conn)
+    if cur != version or row["status"] != "active":
+        raise RegistryError(f"version {version} khong phai active hien tai (active={cur}, status={row['status']}) "
+                            "— tu choi deactivate (idempotent/fail-closed)")
+    if row.get("ingested_by") and actor.strip() == row["ingested_by"].strip():
+        raise RegistryError("SoD: deactivator phai KHAC custodian ingest")
+    plan = {"action": "deactivate", "version": version, "from_active": cur}
+    if not apply:
+        plan["dry_run"] = True
+        return plan
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE admin_unit_dataset SET status='rolled_back', terminal_at=now() "
+            "WHERE version=$1 AND status='active'", version)
+        await conn.execute(
+            "UPDATE address_dataset_config SET value=NULL, updated_at=now() WHERE key='active_version'")
+        await audit_service.record(
+            conn, actor_type="cli", action="address.dataset.deactivate", actor_ref=actor,
+            entity_type="admin_unit_dataset", entity_id=version, before={"active": version},
+            after={"active": None, "rolled_back": version, "ticket": ticket}, reason=reason)
+    plan["applied"] = True
+    return plan
+
+
 def _json(d) -> str:
     return json.dumps(d or {}, ensure_ascii=False, default=str)
