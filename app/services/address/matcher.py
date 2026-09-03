@@ -46,10 +46,9 @@ def _index(units: list[dict], aliases: list[dict], level: str, as_of):
         if a["unit_code"] not in codes_ok:
             continue
         n = normalize(a["alias_name"])
-        # alias KHONG override canonical: neu normalized da la canonical cua unit khac -> bo qua alias do
-        existing = idx.get(n, [])
-        if any(k == "canonical" and c != a["unit_code"] for c, k in existing):
-            continue
+        # CA Review 126: alias trung canonical cua unit KHAC = ambiguity hop le -> GIU CA HAI candidate
+        # (canonical KHONG am tham thang, khong lam mat candidate legacy). Collision -> one_to_many ->
+        # needs_staff_review (hard rule, khong ha xuong customer confirmation).
         kind = a["alias_kind"] if a["alias_kind"] in _KIND_SCORE else "other"
         idx.setdefault(n, []).append((a["unit_code"], kind))
     return idx
