@@ -342,11 +342,30 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
 **Còn treo (không chặn — phụ thuộc bên ngoài):**
 - [ ] **Rotate secret Meta** (`META_APP_SECRET`/`PAGE_ACCESS_TOKEN`) — vẫn là secret cũ đã lộ
       trong git history (xem #1). Cần anh Hoài làm qua Meta Developer Console.
-- [ ] **Meta App review** — xin approve app trước khi mở Messenger cho khách thật (fanpage hiện
-      chưa có khách nên đã cutover sớm để dev/test). **Cẩm nang thực thi đầy đủ:**
+- [ ] **Meta App review / mở Live mode** — xin approve app trước khi mở Messenger cho khách thật
+      (fanpage hiện chưa có khách nên đã cutover sớm để dev/test). **Cẩm nang thực thi đầy đủ:**
       `docs/META-APP-REVIEW-VI.md` (bản EN `-EN`). Rào cản chính: Business Verification (Robanme),
       Privacy Policy URL (chưa có), và xung đột "bot phải khai báo tự động" vs system_prompt hiện
       bắt bot nói như người thật — xem §7 tài liệu đó.
+      - **Audit 03/9/2026 (Claude Code, Graph API + Developer Console):** hạ tầng thông suốt
+        (page token hợp lệ không hết hạn, webhook app+page active → `a3s.robanme.com/webhook`,
+        GET challenge 200, 8/8 container Up). Rào cản cũ đã hạ gần hết: **Business Verification
+        "Đã xác minh"** (Robanme Coffee, BM 237350590125240); Privacy/Terms/Data-deletion URL đã
+        điền (`https://a3s.robanme.com/{privacy,terms,datadeletion}` — cả 3 trả 200). **App vẫn
+        ở chế độ Phát triển** — khách thật chưa nhắn được; App Review chưa gửi; `pages_messaging`
+        Standard access (có thể đủ cho page thuộc BM đã verify khi bật Live). Việc còn lại là
+        quyết định PO: gạt toggle Live + xử lý xung đột khai báo bot (§7).
+      - **Data Access Renewal 03/9/2026 (hạn chót 01/11/2026):** wizard 4 bước; bước 1-2 anh Hoài
+        đã làm; bước 3 "Xử lý dữ liệu" Claude Code điền theo ủy quyền PO: processors = Robanme
+        Coffee (VN), AZ VPS (hosting, VN), DeepSeek (LLM API, Trung Quốc); bên kiểm soát dữ liệu
+        = Robanme Coffee (Lê Đăng Hoài), VN; chưa từng nhận yêu cầu an ninh quốc gia; 3 chính
+        sách (xem xét hợp pháp + giảm thiểu + ghi chép) theo quy trình mới ban hành
+        `docs/GOVERNMENT-DATA-REQUEST-POLICY-VI.md`. Bước 4 "Hướng dẫn cho người xét duyệt" cũng
+        đã điền (privacy URL pre-fill ✓; app URL = m.me/101836879023068 + hướng dẫn test tiếng
+        Anh; Facebook Login integrated = Không — câu bắt buộc từng bị ẩn dưới cuối trang khiến
+        nút Tiếp im lặng không chuyển). Tổng quan 4/4 phần tick xanh. **ĐÃ GỬI 03/9/2026 (anh
+        Hoài bấm Gửi) — trạng thái "Đang xem xét", Meta báo xem xét trong ~10 ngày, hiện không
+        cần làm gì thêm; kết quả về qua email + Hộp thư thông báo Developer Console.**
 - [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).

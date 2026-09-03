@@ -358,11 +358,32 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
 **Still open (non-blocking — external dependencies):**
 - [ ] **Rotate Meta secrets** (`META_APP_SECRET`/`PAGE_ACCESS_TOKEN`) — still the old ones leaked in
       git history (see #1). Hoài to do via the Meta Developer Console.
-- [ ] **Meta App review** — get the app approved before opening Messenger to real customers (the
-      fanpage has no customers yet, so cutover was done early for dev/test). **Full execution
-      playbook:** `docs/META-APP-REVIEW-EN.md` (VI source `-VI`). Main blockers: Business
-      Verification (Robanme), Privacy Policy URL (none yet), and the "bot must disclose it's
-      automated" conflict vs the current system_prompt that makes the bot sound human — see §7.
+- [ ] **Meta App review / go Live** — get the app approved before opening Messenger to real
+      customers (the fanpage has no customers yet, so cutover was done early for dev/test).
+      **Full execution playbook:** `docs/META-APP-REVIEW-EN.md` (VI source `-VI`). Main blockers:
+      Business Verification (Robanme), Privacy Policy URL (none yet), and the "bot must disclose
+      it's automated" conflict vs the current system_prompt that makes the bot sound human — see §7.
+      - **Audit 2026-09-03 (Claude Code, Graph API + Developer Console):** plumbing all green
+        (page token valid & non-expiring, app+page webhook active → `a3s.robanme.com/webhook`,
+        GET challenge 200, 8/8 containers Up). Old blockers mostly cleared: **Business
+        Verification "Verified"** (Robanme Coffee, BM 237350590125240); Privacy/Terms/Data-deletion
+        URLs filled (`https://a3s.robanme.com/{privacy,terms,datadeletion}` — all 200). **App
+        still in Development mode** — real customers can't message yet; App Review not submitted;
+        `pages_messaging` at Standard access (likely sufficient for a page owned by the verified
+        BM once Live). Remaining work is the PO's call: flip the Live toggle + resolve the
+        bot-disclosure conflict (§7).
+      - **Data Access Renewal 2026-09-03 (deadline 2026-11-01):** 4-step wizard; steps 1-2 done
+        by Hoài; step 3 "Data handling" filled by Claude Code under PO authorization: processors
+        = Robanme Coffee (VN), AZ VPS (hosting, VN), DeepSeek (LLM API, China); data controller
+        = Robanme Coffee (Lê Đăng Hoài), VN; no national-security requests ever received; 3
+        policies (legality review + data minimization + documentation) per the newly issued
+        `docs/GOVERNMENT-DATA-REQUEST-POLICY-VI.md`. Step 4 "Reviewer instructions" also filled
+        (privacy URL pre-filled ✓; app URL = m.me/101836879023068 + English test instructions;
+        Facebook Login integrated = No — a required question hidden below the fold that silently
+        blocked the Next button). Overview showed 4/4 sections green. **SUBMITTED 2026-09-03
+        (Hoài clicked Submit) — status "In review", Meta says most submissions are reviewed
+        within ~10 days, nothing to do for now; result arrives via email + the Developer Console
+        notification inbox.**
 - [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).
