@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # KHONG degrade nua, va startup fail neu RBAC provisioned nhung catalog/mapping thieu.
     rbac_strict: bool = False
 
+    # M5 Phase 4 (CA Directive 116): shadow-mode cho quote_shipping enforcement. MAC DINH OFF
+    # (dormant) — path quote/fulfillment production KHONG bi ep dung verified_address_id cho toi khi
+    # PO/CA bat rieng. Bind/snapshot van chay duoc de test, nhung khong ep order production.
+    enable_address_quote_enforcement: bool = False
+
     # Session TTL (I-B M0.5, CA-REVIEW-M0-DEV-003 §8): giam tu 7 ngay -> 48h cho auth/session
     # temporary exception (localStorage). Cau hinh duoc de production dat <=48h.
     session_ttl_hours: int = 48
