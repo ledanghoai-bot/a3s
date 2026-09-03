@@ -118,12 +118,24 @@ async def main():
             await cA.close()
             await cB.close()
         active = await reg.get_active(conn)
-        # final consistency: active pointer == 1 dataset co status active (khong torn)
-        act_rows = await conn.fetch("SELECT version FROM admin_unit_dataset WHERE status='active'")
-        consistent = (active is None and len(act_rows) == 0) or \
-                     (len(act_rows) == 1 and act_rows[0]["version"] == active)
-        ok("concurrency: no torn state (pointer==active dataset)", consistent,
-           f"(active={active}, active_rows={[r['version'] for r in act_rows]}, gather={[type(x).__name__ for x in res]})")
+        act_rows = [r["version"] for r in
+                    await conn.fetch("SELECT version FROM admin_unit_dataset WHERE status='active'")]
+        deact_res, act_res = res  # deactivate(v1), activate(v2)
+        # CA Review 139/141: siet — EXPECTED final active = v2 (activate luon apply duoc trong ca 2 thu tu);
+        # phan loai tung ket qua; loai truong hop "ca hai fail, v1 con active".
+        deact_ok = isinstance(deact_res, dict) and deact_res.get("applied")
+        deact_rejected = isinstance(deact_res, reg.RegistryError)
+        act_ok = isinstance(act_res, dict) and act_res.get("applied")
+        # dung 1 trong 2 kich ban hop le:
+        #  A) deactivate truoc (NULL) roi activate v2 -> deact_ok & act_ok
+        #  B) activate v2 truoc (v1 retired) roi deactivate(v1) bi tu choi -> deact_rejected & act_ok
+        classified = (deact_ok and act_ok) or (deact_rejected and act_ok)
+        v1_not_active = "VN-ADMIN-2025-09-v1" not in act_rows
+        expected_final = (active == "VN-ADMIN-2025-09-v2" and act_rows == ["VN-ADMIN-2025-09-v2"])
+        ok("concurrency: EXPECTED final active=v2 + classified + v1 khong active + no-torn",
+           classified and v1_not_active and expected_final and act_ok,
+           f"(active={active}, active_rows={act_rows}, deact={type(deact_res).__name__}"
+           f"/{'ok' if deact_ok else 'reject' if deact_rejected else '?'}, act={'ok' if act_ok else '?'})")
 
         print(f"\nSUMMARY: {len(PASS)} pass, {len(FAIL)} fail")
         if FAIL:
