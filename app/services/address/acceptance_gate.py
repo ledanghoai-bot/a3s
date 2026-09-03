@@ -129,21 +129,24 @@ def run(
     checks.append(_c("coverage", bool(exp) and not mism,
                      ("thieu expected_counts" if not exp else "; ".join(mism))))
 
-    # 5. duplicate + alias khong override canonical cua unit khac
+    # 5. duplicate (CA Review 126): trung CODE -> HARD FAIL; alias target khong ton tai -> HARD FAIL.
+    #    Legacy alias trung canonical unit KHAC = AMBIGUITY hop le (KHONG fail) -> ghi legacy_name_collisions
+    #    (count + candidate-set digest) vao report; matcher xu ly thanh one_to_many -> staff review.
+    all_codes = {x["code"] for x in units}
     dup_codes = [c for c, rows in by_code.items() if len(rows) > 1 and c not in overlaps]
     canon_by_norm: dict[str, str] = {normalize(x["name"]): x["code"] for x in units}
-    alias_override = []
-    for a in aliases:
-        n = normalize(a["alias_name"])
-        owner = canon_by_norm.get(n)
-        if owner is not None and owner != a["unit_code"]:
-            alias_override.append(f"{a['unit_code']}:{a['alias_name']}->canonical cua {owner}")
+    missing_targets = sorted({a["unit_code"] for a in aliases if a["unit_code"] not in all_codes})
+    collisions = sorted({(normalize(a["alias_name"]), a["unit_code"], canon_by_norm[normalize(a["alias_name"])])
+                         for a in aliases
+                         if canon_by_norm.get(normalize(a["alias_name"])) not in (None, a["unit_code"])})
+    coll_digest = hashlib.sha256(json.dumps(collisions, ensure_ascii=False).encode("utf-8")).hexdigest()
     dup_detail = []
     if dup_codes:
         dup_detail.append("code trung: " + ",".join(sorted(set(dup_codes))[:8]))
-    if alias_override:
-        dup_detail.append("alias override canonical: " + "; ".join(alias_override[:8]))
-    checks.append(_c("duplicate", not dup_codes and not alias_override, " | ".join(dup_detail)))
+    if missing_targets:
+        dup_detail.append("alias target khong ton tai: " + ",".join(missing_targets[:8]))
+    dup_detail.append(f"legacy_name_collisions={len(collisions)} (ambiguity, khong fail)")
+    checks.append(_c("duplicate", not dup_codes and not missing_targets, " | ".join(dup_detail)))
 
     # 6. mapping regression — legacy_norm -> expected_code van resolve
     alias_index: dict[str, set[str]] = {}
@@ -177,7 +180,8 @@ def run(
     checks.append(_c("provenance", not miss and rb_ok, "; ".join(detail8)))
 
     passed = all(c["ok"] for c in checks)
-    return {"passed": passed, "checks": checks, "computed_sha256": computed, "topology": topology}
+    return {"passed": passed, "checks": checks, "computed_sha256": computed, "topology": topology,
+            "legacy_name_collisions": {"count": len(collisions), "digest": coll_digest, "version": version}}
 
 
 def _ranges_overlap(a: dict, b: dict) -> bool:

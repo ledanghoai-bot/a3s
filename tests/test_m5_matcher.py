@@ -87,12 +87,15 @@ def test_as_of_effective_range():
     assert r_in["province_code"] == "P09"
 
 
-def test_alias_not_override_canonical():
+def test_legacy_alias_canonical_collision_ambiguous():
+    # CA Review 126: alias(P02) trung canonical cua P01 -> GIU CA HAI -> one_to_many -> needs_staff_review
+    # (canonical KHONG am tham thang, khong auto-select, khong ha xuong customer confirmation).
     u, a = _ds()
-    a.append({"unit_code": "P02", "alias_name": "Cà Mau", "alias_kind": "other"})  # alias trung canonical P01
+    a.append({"unit_code": "P02", "alias_name": "Cà Mau", "alias_kind": "legacy"})
     r = m.resolve(u, a, province="Cà Mau", district=None, ward=None)
-    # van resolve ve canonical P01, khong bi alias cua P02 lam ambiguous
-    assert r["province_code"] == "P01" and r["status"] == "auto_verified"
+    assert r["status"] == "needs_staff_review"
+    assert any(x.startswith("one_to_many") for x in r["rules_applied"])
+    assert r["province_code"] is None
 
 
 def test_duplicate_legacy_alias_stays_ambiguous():

@@ -111,14 +111,38 @@ def test_coverage_mismatch_fails():
     assert not _check(rep, "coverage")["ok"]
 
 
-def test_alias_override_canonical_fails_duplicate():
+def test_legacy_canonical_collision_recorded_not_failed():
+    # CA Review 126: alias legacy trung canonical unit khac = AMBIGUITY hop le -> KHONG fail, ghi vao report.
     units, aliases, prov, _ = _good_dataset()
-    # alias cua D01 trung ten canonical cua P01 (Cà Mau) -> override canonical unit khac
-    aliases.append({"unit_code": "D01", "alias_name": "Cà Mau", "alias_kind": "other"})
+    aliases.append({"unit_code": "D01", "alias_name": "Cà Mau", "alias_kind": "legacy"})  # trung canonical P01
+    sha = g.canonical_checksum(units, aliases)
+    rep = g.run(version="VN-ADMIN-2025-07-v1", units=units, aliases=aliases, provenance=prov,
+                declared_sha256=sha)
+    assert _check(rep, "duplicate")["ok"]  # khong fail
+    assert rep["legacy_name_collisions"]["count"] >= 1
+    assert len(rep["legacy_name_collisions"]["digest"]) == 64
+    assert rep["legacy_name_collisions"]["version"] == "VN-ADMIN-2025-07-v1"
+
+
+def test_missing_alias_target_fails_duplicate():
+    # alias tro toi unit_code khong ton tai trong dataset -> HARD FAIL (Review 126)
+    units, aliases, prov, _ = _good_dataset()
+    aliases.append({"unit_code": "NOPE", "alias_name": "Xã Cũ", "alias_kind": "legacy"})
     sha = g.canonical_checksum(units, aliases)
     rep = g.run(version="VN-ADMIN-2025-07-v1", units=units, aliases=aliases, provenance=prov,
                 declared_sha256=sha)
     assert not _check(rep, "duplicate")["ok"]
+
+
+def test_duplicate_code_still_hard_fails():
+    # Review 126: trung administrative code van HARD-FAIL gate (qua code_range overlap hoac duplicate).
+    units, aliases, prov, _ = _good_dataset()
+    units.append({"level": "ward", "code": "W01", "name": "Trùng Mã", "parent_code": "D01"})  # W01 da ton tai
+    sha = g.canonical_checksum(units, aliases)
+    rep = g.run(version="VN-ADMIN-2025-07-v1", units=units, aliases=aliases, provenance=prov,
+                declared_sha256=sha)
+    assert not rep["passed"]
+    assert not _check(rep, "code_range")["ok"]
 
 
 def test_checksum_mismatch_fails():
