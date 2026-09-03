@@ -76,14 +76,17 @@ async def main():
         await reg.accept(conn, version=d["version"], actor="po", apply=True, **AUTH)
         await reg.activate(conn, version=d["version"], actor="po", apply=True, **AUTH)
 
-        # verified resolution (auto) cho customer C1
-        R = await resolver.resolve(conn, subject_type="customer", subject_id="C1", province="Cà Mau",
+        # verified resolution (auto) cho customer '1' (khop orders.customer_id=1)
+        R = await resolver.resolve(conn, subject_type="customer", subject_id="1", province="Cà Mau",
                                    district="Đầm Dơi", ward="Tân Duyệt", actor="op", **AUTH)
         ok("resolution auto_verified", R["status"] == "auto_verified")
-        R2 = await resolver.resolve(conn, subject_type="customer", subject_id="C1", province="Bạc Liêu",
+        R2 = await resolver.resolve(conn, subject_type="customer", subject_id="1", province="Bạc Liêu",
                                     actor="op", **AUTH)
-        U = await resolver.resolve(conn, subject_type="customer", subject_id="C1", province="Cà Mau",
+        U = await resolver.resolve(conn, subject_type="customer", subject_id="1", province="Cà Mau",
                                    district="Hòa Bình", actor="op", **AUTH)  # conflict -> needs_staff_review
+        # resolution thuoc customer KHAC (2) — dung de chung minh ownership derive tu DB, khong tin body
+        OTHER = await resolver.resolve(conn, subject_type="customer", subject_id="2", province="Cà Mau",
+                                       district="Đầm Dơi", ward="Tân Duyệt", actor="op", **AUTH)
 
         # quote contract
         await err("quote reject unverified/free-text",
@@ -91,23 +94,22 @@ async def main():
         q = await ob.quote_shipping(conn, verified_address_id=R["id"])
         ok("quote verified -> shadow", q["ok"] and q["mode"] == "shadow")
 
-        # bind happy
-        b = await ob.bind_order(conn, order_id=1, resolution_id=R["id"], actor="staff",
-                                expected_customer_ref="C1", apply=True, **AUTH)
+        # bind happy (owner derive tu orders.customer_id=1, khong tin body)
+        b = await ob.bind_order(conn, order_id=1, resolution_id=R["id"], actor="staff", apply=True, **AUTH)
         ovid = await conn.fetchval("SELECT verified_address_id FROM orders WHERE id=1")
         ok("bind order -> snapshot + order.verified_address_id", b["order_id"] == 1 and str(ovid) == R["id"])
         # idempotent
-        b2 = await ob.bind_order(conn, order_id=1, resolution_id=R["id"], actor="staff",
-                                 expected_customer_ref="C1", apply=True, **AUTH)
+        b2 = await ob.bind_order(conn, order_id=1, resolution_id=R["id"], actor="staff", apply=True, **AUTH)
         ok("bind idempotent", b2["id"] == b["id"])
         # conflict different resolution
         await err("bind conflict (resolution khac)",
                   ob.bind_order(conn, order_id=1, resolution_id=R2["id"], actor="staff", apply=True, **AUTH),
                   ob.BindingError)
-        # wrong customer
-        await err("wrong-customer binding rejected",
-                  ob.bind_order(conn, order_id=2, resolution_id=R["id"], actor="staff",
-                                expected_customer_ref="C999", apply=True, **AUTH), ob.BindingError)
+        # wrong-owner: resolution cua customer 2 bind vao order 2 (customer_id=1) -> reject (owner tu DB).
+        # Chung minh KHONG bypass duoc bang body: service chi dung orders.customer_id, khong nhan ref body.
+        await err("wrong-owner (forged) rejected",
+                  ob.bind_order(conn, order_id=2, resolution_id=OTHER["id"], actor="staff", apply=True, **AUTH),
+                  ob.BindingError)
         # unverified
         await err("unverified rejected",
                   ob.bind_order(conn, order_id=3, resolution_id=U["id"], actor="staff", apply=True, **AUTH),

@@ -31,8 +31,8 @@ async def _assert_audit(conn):
         raise BindingError("audit_log chua provision — fail-closed")
 
 
-async def _load_verified_resolution(conn, resolution_id, *, expected_customer_ref=None):
-    """Load resolution + kiem tra verified/owner/dataset. Fail-closed."""
+async def _load_verified_resolution(conn, resolution_id):
+    """Load resolution + kiem tra verified/dataset (KHONG xet owner o day). Fail-closed."""
     r = await conn.fetchrow("SELECT * FROM address_resolution WHERE id=$1::uuid", str(resolution_id))
     if not r:
         raise BindingError("resolution khong ton tai")
@@ -46,14 +46,31 @@ async def _load_verified_resolution(conn, resolution_id, *, expected_customer_re
         raise BindingError("dataset_version khong truy nguyen duoc — tu choi")
     if ds["status"] == "rolled_back":
         raise BindingError("dataset da rolled_back — resolution stale, tu choi")
-    if expected_customer_ref is not None and str(r["subject_id"]) != str(expected_customer_ref):
-        raise BindingError("resolution khong thuoc dung customer/order context (wrong-owner) — tu choi")
     return r
 
 
+async def _assert_owns_order(conn, resolution: dict, order_id: int):
+    """OWNERSHIP tu context CO THAM QUYEN (DB), KHONG tin body (CA Review 117): owner = orders.customer_id
+    that. Resolution phai thuoc dung order do (subject_type='order') hoac dung customer cua order
+    (subject_type='customer'). adhoc khong the bind vao order that."""
+    order = await conn.fetchrow("SELECT id, customer_id FROM orders WHERE id=$1", order_id)
+    if not order:
+        raise BindingError("order khong ton tai — tu choi")
+    stype, sid = resolution["subject_type"], str(resolution["subject_id"])
+    if stype == "order":
+        if sid != str(order_id):
+            raise BindingError("resolution khong thuoc dung order (wrong-owner) — tu choi")
+    elif stype == "customer":
+        if order["customer_id"] is None or sid != str(order["customer_id"]):
+            raise BindingError("resolution khong thuoc dung customer cua order (wrong-owner) — tu choi")
+    else:
+        raise BindingError("resolution adhoc khong the bind vao order (khong xac dinh owner) — tu choi")
+
+
 async def bind_order(conn, *, order_id: int, resolution_id: str, actor: str, reason: str, ticket: str,
-                     expected_customer_ref=None, apply: bool = False) -> dict:
-    """Bind verified resolution vao order + snapshot bat bien. Idempotent theo order_id."""
+                     apply: bool = False) -> dict:
+    """Bind verified resolution vao order + snapshot bat bien. Idempotent theo order_id. Ownership derive tu
+    orders.customer_id (khong tin body — CA Review 117)."""
     _require(actor, reason, ticket)
     await _assert_audit(conn)
     ex = await conn.fetchrow("SELECT * FROM order_address_snapshot WHERE order_id=$1", order_id)
@@ -62,7 +79,8 @@ async def bind_order(conn, *, order_id: int, resolution_id: str, actor: str, rea
         if str(ex["resolution_id"]) == str(resolution_id):
             return _snap(ex)  # idempotent
         raise BindingError("order da bind resolution KHAC — tu choi (snapshot bat bien)")
-    res = await _load_verified_resolution(conn, resolution_id, expected_customer_ref=expected_customer_ref)
+    res = await _load_verified_resolution(conn, resolution_id)
+    await _assert_owns_order(conn, res, order_id)
     prov = await conn.fetchval("SELECT provenance FROM admin_unit_dataset WHERE version=$1",
                                res["dataset_version"])
     if isinstance(prov, str):
@@ -90,13 +108,15 @@ async def bind_order(conn, *, order_id: int, resolution_id: str, actor: str, rea
     return _snap(row)
 
 
-async def quote_shipping(conn, *, verified_address_id: str | None, order_id: int | None = None,
-                         expected_customer_ref=None) -> dict:
+async def quote_shipping(conn, *, verified_address_id: str | None, order_id: int | None = None) -> dict:
     """Contract moi: CHI nhan verified_address_id. Tu choi None/free-text/unverified/stale/wrong-owner.
-    Shadow-mode: neu enforcement OFF -> tra ket qua nhung danh dau shadow (khong ep production)."""
+    Neu co order_id -> enforce ownership tu orders.customer_id (khong tin body). Shadow-mode: enforcement OFF
+    -> tra ket qua nhung danh dau shadow (khong ep production)."""
     if not verified_address_id:
         raise BindingError("quote_shipping chi nhan verified_address_id — tu choi free-text/unverified")
-    res = await _load_verified_resolution(conn, verified_address_id, expected_customer_ref=expected_customer_ref)
+    res = await _load_verified_resolution(conn, verified_address_id)
+    if order_id is not None:
+        await _assert_owns_order(conn, res, order_id)
     enforced = bool(settings.enable_address_quote_enforcement)
     return {"ok": True, "verified_address_id": str(verified_address_id),
             "province_code": res["province_code"], "dataset_version": res["dataset_version"],

@@ -30,9 +30,9 @@ def _err(exc: Exception) -> HTTPException:
 async def bind(staff: dict = Depends(require_active_session), body: dict = Body(...)) -> dict:
     try:
         async with (await get_pool()).acquire() as conn:
+            # OWNERSHIP tu context DB (orders.customer_id), KHONG nhan customer ref tu body (CA Review 117).
             return await ob.bind_order(conn, order_id=int(body["order_id"]), resolution_id=body["resolution_id"],
                                        actor=staff["username"], reason=body.get("reason"), ticket=body.get("ticket"),
-                                       expected_customer_ref=body.get("expected_customer_ref"),
                                        apply=bool(body.get("apply")))
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"thieu truong {e}") from e
@@ -45,8 +45,7 @@ async def quote(body: dict = Body(...)) -> dict:
     try:
         async with (await get_pool()).acquire() as conn:
             return await ob.quote_shipping(conn, verified_address_id=body.get("verified_address_id"),
-                                           order_id=body.get("order_id"),
-                                           expected_customer_ref=body.get("expected_customer_ref"))
+                                           order_id=body.get("order_id"))
     except Exception as e:  # noqa: BLE001
         raise _err(e) from e
 
