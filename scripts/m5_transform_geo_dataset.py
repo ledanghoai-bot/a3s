@@ -40,9 +40,10 @@ def read_conversion(path):
     wb = openpyxl.load_workbook(path, read_only=True)
     ws = wb["Tổng hợp_không merge "]
     wards = {}          # ma_xa_moi -> (ten, province_code)
-    aliases = []        # {unit_code, alias_name, alias_kind, source(ma cu)}
-    seen = set()        # dedup theo (unit_code, alias_normalized): dong "Nhap toan bo/mot phan" tach doi
-    for i, row in enumerate(ws.iter_rows(min_row=3, values_only=True)):
+    # LOSSLESS (CA G-A-137-01): gom theo (unit_code, alias_normalized) — dong "Nhap toan bo/mot phan" tach doi
+    # tao alias trung PK. Giu MOI old_code + old_name (khong first-wins) trong source (JSON), deterministic.
+    groups = {}         # (unit_code, norm) -> {codes: set, names: set}
+    for row in ws.iter_rows(min_row=3, values_only=True):
         tinh, ten_moi, ma_moi, ten_cu, ma_cu = row[0], row[1], row[2], row[3], row[4]
         if not ma_moi:
             continue
@@ -56,12 +57,22 @@ def read_conversion(path):
             wards[ma_moi] = (str(ten_moi).strip(), pcode)
         if ten_cu:
             an = str(ten_cu).strip()
-            key = (ma_moi, gate.normalize(an))   # khop PK admin_unit_alias (unit_code, alias_normalized)
-            if key in seen:
-                continue                          # bo alias trung (cung xa cu -> cung xa moi, tach 2 dong)
-            seen.add(key)
-            aliases.append({"unit_code": ma_moi, "alias_name": an, "alias_kind": "legacy",
-                            "source": (str(ma_cu).strip() if ma_cu else None)})
+            key = (ma_moi, gate.normalize(an))
+            g = groups.setdefault(key, {"codes": set(), "names": set()})
+            if ma_cu:
+                g["codes"].add(str(ma_cu).strip())
+            g["names"].add(an)
+
+    aliases = []
+    for (uc, _norm), g in groups.items():
+        codes = sorted(g["codes"])
+        names = sorted(g["names"])
+        # alias_name deterministic: old_name cua old_code nho nhat (neu co code), else ten dau sap xep
+        alias_name = names[0]
+        # source lossless: JSON sort deterministic {old_codes, old_names}
+        source = json.dumps({"old_codes": codes, "old_names": names}, ensure_ascii=False, sort_keys=True)
+        aliases.append({"unit_code": uc, "alias_name": alias_name, "alias_kind": "legacy", "source": source})
+    aliases.sort(key=lambda a: (a["unit_code"], gate.normalize(a["alias_name"])))
     return wards, aliases
 
 
