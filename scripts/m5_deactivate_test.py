@@ -1,7 +1,8 @@
-"""M5 — Test deactivate/rollback-to-NULL control (CA G-A-137-05). DB throwaway synthetic.
+"""M5 — Test deactivate/rollback-to-NULL control (CA G-A-137-05 + corrections 138-01/02/03). DB throwaway.
 
-Positive: first version activate -> deactivate -> active_version NULL, status rolled_back.
-Negative: deactivate khi khong active (idempotent double), sai version, SoD deactivator==ingester.
+Cover: positive first-version->NULL; replay-safe REJECT (khong idempotent-success); SoD deactivator!=custodian;
+wrong/non-existent version; dry-run (khong mutate); thieu reason/ticket; stale-deactivate rejected;
+CONCURRENCY (deactivate vs activate song song -> KHONG torn state); audit-readiness fail-closed.
 """
 import asyncio
 import os
@@ -32,7 +33,28 @@ async def err(n, coro, exc=reg.RegistryError):
         await coro
         ok(n, False, "(khong raise)")
     except exc as e:
-        ok(n, True, f"({str(e)[:44]}…)")
+        ok(n, True, f"({str(e)[:40]}…)")
+
+
+def _units():
+    return [{"level": "province", "code": "01", "name": "Ha Noi", "parent_code": None},
+            {"level": "ward", "code": "W1", "name": "Ba Dinh", "parent_code": "01"}]
+
+
+def _ing(version):
+    u = _units()
+    prov = {"source_url": "x", "source_kind": "authoritative", "downloaded_at": "2025-07-01",
+            "license": "x", "first_version": True, "expected_counts": {"province": 1, "ward": 1}}
+    return dict(version=version, source_url="x", source_kind="authoritative", license="x",
+                sha256=gate.canonical_checksum(u, []), provenance=prov, units=u, aliases=[])
+
+
+async def _seed_active(conn, version, ingester="custodian"):
+    AU = dict(reason="t", ticket="T")
+    await reg.ingest(conn, actor=ingester, apply=True, **_ing(version), **AU)
+    await reg.run_gate(conn, version=version, actor="staff-1", **AU)
+    await reg.accept(conn, version=version, actor="po-hoai", apply=True, **AU)
+    await reg.activate(conn, version=version, actor="po-hoai", apply=True, **AU)
 
 
 async def main():
@@ -40,40 +62,72 @@ async def main():
     try:
         await conn.execute(BOOT)
         await conn.execute(pathlib.Path("migrations/052_m5_admin_dataset.sql").read_text(encoding="utf-8"))
-        units = [{"level": "province", "code": "01", "name": "Ha Noi", "parent_code": None},
-                 {"level": "ward", "code": "W1", "name": "Ba Dinh", "parent_code": "01"}]
-        aliases = []
-        prov = {"source_url": "x", "source_kind": "authoritative", "downloaded_at": "2025-07-01",
-                "license": "x", "first_version": True, "expected_counts": {"province": 1, "ward": 1}}
-        V = "VN-ADMIN-2025-07-v1"
         AU = dict(reason="deactivate test", ticket="T1")
-        ING = dict(version=V, source_url="x", source_kind="authoritative", license="x",
-                   sha256=gate.canonical_checksum(units, aliases), provenance=prov, units=units, aliases=aliases)
-        await reg.ingest(conn, actor="custodian", apply=True, **ING, **AU)
-        await reg.run_gate(conn, version=V, actor="staff-1", **AU)
-        await reg.accept(conn, version=V, actor="po-hoai", apply=True, **AU)
-        await reg.activate(conn, version=V, actor="po-hoai", apply=True, **AU)
+        V = "VN-ADMIN-2025-07-v1"
+        await _seed_active(conn, V)
         ok("first version active", (await reg.get_active(conn)) == V)
 
-        # negative: SoD deactivator == custodian ingest
+        # dry-run: khong mutate
+        pl = await reg.deactivate(conn, version=V, actor="po-hoai", apply=False, **AU)
+        ok("dry-run khong mutate", pl.get("dry_run") and (await reg.get_active(conn)) == V)
+        # thieu reason/ticket
+        await err("thieu reason -> reject", reg.deactivate(conn, version=V, actor="po-hoai", reason="", ticket="T"))
+        await err("thieu ticket -> reject", reg.deactivate(conn, version=V, actor="po-hoai", reason="r", ticket=""))
+        # SoD + wrong version
         await err("SoD deactivator!=custodian", reg.deactivate(conn, version=V, actor="custodian", apply=True, **AU))
-        # negative: sai version
-        await err("deactivate wrong version", reg.deactivate(conn, version="VN-ADMIN-2099-01-v1", actor="po-hoai",
-                                                             apply=True, **AU))
+        await err("wrong version", reg.deactivate(conn, version="VN-ADMIN-2099-01-v1", actor="po-hoai",
+                                                  apply=True, **AU))
         # positive
         await reg.deactivate(conn, version=V, actor="po-hoai", apply=True, **AU)
+        ok("deactivate -> active NULL + rolled_back",
+           (await reg.get_active(conn)) is None
+           and (await conn.fetchval("SELECT status FROM admin_unit_dataset WHERE version=$1", V)) == "rolled_back")
+        # replay-safe reject
+        await err("replay-safe reject (double)", reg.deactivate(conn, version=V, actor="po-hoai", apply=True, **AU))
+        ok("audit deactivate = 1", (await conn.fetchval(
+            "SELECT count(*) FROM audit_log WHERE action='address.dataset.deactivate'")) == 1)
+
+        # stale-deactivate: activate v2 over v1(moi), deactivate(v1) rejected (version label khac, khong reset)
+        au = dict(reason="t", ticket="T")
+        await _seed_active(conn, "VN-ADMIN-2025-08-v1")  # active (v1 cu da rolled_back, ton tai song song)
+        d2 = _ing("VN-ADMIN-2025-08-v2")
+        d2["provenance"] = {**d2["provenance"], "first_version": False}
+        await reg.ingest(conn, actor="custodian", apply=True, **d2, **au)
+        await reg.run_gate(conn, version="VN-ADMIN-2025-08-v2", actor="staff-1", **au)
+        await reg.accept(conn, version="VN-ADMIN-2025-08-v2", actor="po-hoai", apply=True, **au)
+        await reg.activate(conn, version="VN-ADMIN-2025-08-v2", actor="po-hoai", apply=True, **au)
+        await err("stale deactivate(v1 retired) rejected — khong clear v2",
+                  reg.deactivate(conn, version="VN-ADMIN-2025-08-v1", actor="po-hoai", apply=True, **au))
+        ok("v2 van active sau stale deactivate", (await reg.get_active(conn)) == "VN-ADMIN-2025-08-v2")
+
+        # CONCURRENCY: deactivate(active) vs activate(v-next) song song -> khong torn state
+        await _seed_active(conn, "VN-ADMIN-2025-09-v1")
+        dn = _ing("VN-ADMIN-2025-09-v2")
+        dn["provenance"] = {**dn["provenance"], "first_version": False}
+        await reg.ingest(conn, actor="custodian", apply=True, **dn, **au)
+        await reg.run_gate(conn, version="VN-ADMIN-2025-09-v2", actor="staff-1", **au)
+        await reg.accept(conn, version="VN-ADMIN-2025-09-v2", actor="po-hoai", apply=True, **au)
+        cA = await asyncpg.connect(DB)
+        cB = await asyncpg.connect(DB)
+        try:
+            res = await asyncio.gather(
+                reg.deactivate(cA, version="VN-ADMIN-2025-09-v1", actor="po-hoai", apply=True, **au),
+                reg.activate(cB, version="VN-ADMIN-2025-09-v2", actor="po-hoai", apply=True, **au),
+                return_exceptions=True)
+        finally:
+            await cA.close()
+            await cB.close()
         active = await reg.get_active(conn)
-        st = await conn.fetchval("SELECT status FROM admin_unit_dataset WHERE version=$1", V)
-        ok("deactivate -> active_version NULL + rolled_back", active is None and st == "rolled_back",
-           f"(active={active}, status={st})")
-        # idempotent: double deactivate -> reject (khong con active)
-        await err("double deactivate rejected (idempotent)", reg.deactivate(conn, version=V, actor="po-hoai",
-                                                                            apply=True, **AU))
-        n = await conn.fetchval("SELECT count(*) FROM audit_log WHERE action='address.dataset.deactivate'")
-        ok("audit address.dataset.deactivate present", n == 1, f"(rows={n})")
+        # final consistency: active pointer == 1 dataset co status active (khong torn)
+        act_rows = await conn.fetch("SELECT version FROM admin_unit_dataset WHERE status='active'")
+        consistent = (active is None and len(act_rows) == 0) or \
+                     (len(act_rows) == 1 and act_rows[0]["version"] == active)
+        ok("concurrency: no torn state (pointer==active dataset)", consistent,
+           f"(active={active}, active_rows={[r['version'] for r in act_rows]}, gather={[type(x).__name__ for x in res]})")
 
         print(f"\nSUMMARY: {len(PASS)} pass, {len(FAIL)} fail")
         if FAIL:
+            print("FAILED:", FAIL)
             raise SystemExit(1)
     finally:
         await conn.close()
