@@ -1,50 +1,80 @@
--- Migration 056: M5 Gate A — Dataset SoD role provisioning (version-controlled, anti-escalation).
+-- Migration 056: M5 Gate A — Dataset SoD role provisioning (version-controlled, fail-closed, anti-escalation).
 --
--- Authority: chuan bi cho Production Gate A (Directive 148 aborted vi 3 principal chua co role/grant path).
---            Nhan pattern migration 048 (m4_9_rbac_provisioning): dinh nghia role->permission BANG CODE
---            (reviewed), khong grant tay/ad-hoc.
+-- Authority: chuan bi cho Production Gate A (Directive 148 abort vi 3 principal chua co role/grant path).
+--            Nhan pattern migration 048 (m4_9_rbac_provisioning) + siet fail-closed theo CA Review 149.
 --
--- BOI CANH: migration 052 seed permissions catalog `address.dataset.view/ingest/review/manage` NHUNG CO Y
--- KHONG seed role_permissions (dormant). role_permissions chi seed qua migration (018/020/023/026/046/048...);
--- KHONG co duong runtime INSERT role_permissions. => 3 account (custodian/staff-1/po-hoai) khong co role
--- mang quyen dataset => require_permission tu choi => Gate A khong chay duoc. Migration nay vá dung mảnh do.
+-- BOI CANH: 052 seed catalog permissions address.dataset.view/ingest/review/manage NHUNG co y KHONG seed
+-- role_permissions (dormant). role_permissions chi seed qua migration; khong co duong runtime INSERT.
+-- => 3 account Gate A khong co role mang quyen dataset => require_permission tu choi. Migration nay va mảnh do.
 --
--- SoD: 3 role TACH BIET, moi role DUNG 1 quyen mutation (khong chong lan) — bao toan
--- accepter != reviewer != ingester o TANG RBAC (control layer van ep SoD actor-distinct doc lap):
---   m5_dataset_custodian -> address.dataset.ingest   (Custodian nap draft)
---   m5_dataset_reviewer  -> address.dataset.review   (Reviewer chay acceptance gate)
---   m5_dataset_owner     -> address.dataset.manage   (PO Data Owner accept/activate/deactivate/rollback)
+-- SoD: 3 role TACH BIET, moi role DUNG 1 quyen mutation:
+--   m5_dataset_custodian -> address.dataset.ingest
+--   m5_dataset_reviewer  -> address.dataset.review
+--   m5_dataset_owner     -> address.dataset.manage
 --
--- PHAM VI: THUAN CONG THEM (3 role + 3 grant + 1 guard trigger). Khong dung bang khac. KHONG gan role cho
--- staff nao (viec gan role = thao tac van hanh trong window Gate A qua duong quan tri co audit, revoke sau).
--- => sau migration nay: role ton tai nhung CHUA account nao giu => VAN DORMANT (khong ai ingest/gate/accept
--- /activate duoc cho toi khi PO gan role trong window). Idempotent (ap lai = no-op).
+-- FAIL-CLOSED (Review 149):
+--  * G-A-149-03: hard-stop neu thieu bat ky permission catalog key nao (khong dua vao WHERE EXISTS im lang).
+--  * G-A-149-04: hard-stop neu role key da ton tai voi is_system=true (khong coerce role la).
+--  * G-A-149-02: hard-stop neu 3 role da co grant NGOAI allowlist tu truoc (trigger chi soi INSERT sau khi tao).
+--  * Postcondition trong transaction: khang dinh dung 3 role (is_system=false,is_active=true) + dung 3 tuple
+--    role-permission, khong thua/thieu.
+--  * Trigger anti-escalation cho INSERT/UPDATE ve sau.
 --
--- LUU Y: migration nay CHUA duoc apply/merge/deploy — nop trong Gate A RBAC Provisioning Package de CA review;
--- merge/deploy + gan role + window Gate A can directive rieng (PO-approved). Rollback: xem cuoi.
+-- PHAM VI: THUAN CONG THEM (3 role + 3 grant + 1 guard trigger). KHONG dung bang khac. KHONG gan role cho staff
+-- => sau migration: role ton tai nhung chua account nao giu => VAN DORMANT. Idempotent (ap lai = no-op).
+-- LUU Y: CHUA apply/merge/deploy — nop de CA review; merge/deploy + gan role + window Gate A can directive rieng.
 -- transactional: true
 
 BEGIN;
 
--- 1. Ba role SoD chuyen biet (idempotent).
+-- 0. PRE-CONDITIONS (fail-closed truoc moi mutation).
+DO $pre$
+DECLARE
+  missing TEXT;
+  bad TEXT;
+BEGIN
+  -- (149-03) ca ba permission key phai ton tai dung mot lan.
+  SELECT string_agg(v.p, ', ') INTO missing
+  FROM (VALUES ('address.dataset.ingest'),('address.dataset.review'),('address.dataset.manage')) AS v(p)
+  WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE key = v.p);
+  IF missing IS NOT NULL THEN
+    RAISE EXCEPTION '056 pre-condition FAIL: thieu permission catalog key(s): %', missing;
+  END IF;
+
+  -- (149-04) khong role dich nao ton tai voi is_system=true (khong coerce role he thong/role la).
+  SELECT string_agg(key, ', ') INTO bad FROM roles
+  WHERE key IN ('m5_dataset_custodian','m5_dataset_reviewer','m5_dataset_owner') AND is_system = true;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '056 pre-condition FAIL: role key ton tai voi is_system=true (tu choi coerce): %', bad;
+  END IF;
+
+  -- (149-02) khong 3 role nao co grant NGOAI allowlist tu truoc.
+  SELECT string_agg(rp.role_key||'->'||rp.permission_key, ', ') INTO bad
+  FROM role_permissions rp
+  WHERE (rp.role_key = 'm5_dataset_custodian' AND rp.permission_key <> 'address.dataset.ingest')
+     OR (rp.role_key = 'm5_dataset_reviewer'  AND rp.permission_key <> 'address.dataset.review')
+     OR (rp.role_key = 'm5_dataset_owner'     AND rp.permission_key <> 'address.dataset.manage');
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '056 pre-condition FAIL: pre-existing out-of-allowlist grant(s): %', bad;
+  END IF;
+END $pre$;
+
+-- 1. Ba role SoD chuyen biet (idempotent). is_system luon false (da chan is_system=true o pre-condition).
 INSERT INTO roles (key, name, is_system, is_active) VALUES
-  ('m5_dataset_custodian', 'M5 Dataset Custodian (nap draft)',        false, true),
-  ('m5_dataset_reviewer',  'M5 Dataset Reviewer (acceptance gate)',   false, true),
-  ('m5_dataset_owner',     'M5 Dataset Owner (accept/activate)',      false, true)
+  ('m5_dataset_custodian', 'M5 Dataset Custodian (nap draft)',      false, true),
+  ('m5_dataset_reviewer',  'M5 Dataset Reviewer (acceptance gate)', false, true),
+  ('m5_dataset_owner',     'M5 Dataset Owner (accept/activate)',    false, true)
 ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, is_active = true;
 
--- 2. Grant DUNG 1 quyen dataset cho moi role (allowlist chot o migration). Chi grant khi permission ton tai.
-INSERT INTO role_permissions (role_key, permission_key)
-SELECT r, p FROM (VALUES
+-- 2. Grant DUNG 1 quyen/role. Khong WHERE EXISTS (da assert o tren; FK role_permissions->permissions cung
+--    dam bao fail-closed neu key bien mat giua chung). Idempotent.
+INSERT INTO role_permissions (role_key, permission_key) VALUES
   ('m5_dataset_custodian', 'address.dataset.ingest'),
   ('m5_dataset_reviewer',  'address.dataset.review'),
   ('m5_dataset_owner',     'address.dataset.manage')
-) AS v(r, p)
-WHERE EXISTS (SELECT 1 FROM permissions WHERE key = v.p)
 ON CONFLICT DO NOTHING;
 
--- 3. Chan escalation: 3 role tren CHI duoc giu dung 1 quyen dataset cua no, khong quyen nao khac.
---    Trigger chi soi 3 role nay; role khac khong bi anh huong. (Song song, khong dung, voi trigger 048.)
+-- 3. Trigger anti-escalation: 3 role tren CHI duoc giu dung 1 quyen cua no. Role khac khong bi anh huong.
 CREATE OR REPLACE FUNCTION m5_guard_dataset_role_grants()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -65,6 +95,35 @@ DROP TRIGGER IF EXISTS m5_dataset_role_grants_allowlist ON role_permissions;
 CREATE TRIGGER m5_dataset_role_grants_allowlist
   BEFORE INSERT OR UPDATE ON role_permissions
   FOR EACH ROW EXECUTE FUNCTION m5_guard_dataset_role_grants();
+
+-- 4. POSTCONDITIONS (fail-closed trong CUNG transaction — rollback het neu sai).
+DO $post$
+DECLARE
+  n_roles INT;
+  n_grants INT;
+BEGIN
+  SELECT count(*) INTO n_roles FROM roles
+  WHERE key IN ('m5_dataset_custodian','m5_dataset_reviewer','m5_dataset_owner')
+    AND is_system = false AND is_active = true;
+  IF n_roles <> 3 THEN
+    RAISE EXCEPTION '056 postcondition FAIL: expected 3 well-formed roles (is_system=false,is_active=true), got %',
+                    n_roles;
+  END IF;
+
+  SELECT count(*) INTO n_grants FROM role_permissions
+  WHERE role_key IN ('m5_dataset_custodian','m5_dataset_reviewer','m5_dataset_owner');
+  IF n_grants <> 3 THEN
+    RAISE EXCEPTION '056 postcondition FAIL: expected exactly 3 grants for the 3 roles, got %', n_grants;
+  END IF;
+
+  IF NOT (
+        EXISTS (SELECT 1 FROM role_permissions WHERE role_key='m5_dataset_custodian' AND permission_key='address.dataset.ingest')
+    AND EXISTS (SELECT 1 FROM role_permissions WHERE role_key='m5_dataset_reviewer'  AND permission_key='address.dataset.review')
+    AND EXISTS (SELECT 1 FROM role_permissions WHERE role_key='m5_dataset_owner'     AND permission_key='address.dataset.manage')
+  ) THEN
+    RAISE EXCEPTION '056 postcondition FAIL: 3 exact tuple(s) khong dung';
+  END IF;
+END $post$;
 
 COMMIT;
 
