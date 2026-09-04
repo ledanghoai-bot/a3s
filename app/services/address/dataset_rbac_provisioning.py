@@ -15,11 +15,12 @@ TRUST BOUNDARY (G-A-159-01 — TRUNG THUC): service KHONG the authenticate calle
 Kiem soat khac:
   - allowlist CO DINH 3 role<->3 quyen (056); restore CHI ve NULL (prior_role_key phai None — G-A-157-01);
     immutable id BAT BUOC (G-A-157-03); 149-06 assign chi khi role_key NULL.
-  - CONCURRENCY (G-A-158-02 + 159-03): transaction **SERIALIZABLE**; target+operator staff row va role def
-    `SELECT ... FOR UPDATE`; moi validation + mutation trong CUNG transaction -> role/grant/authority/active-state
-    duoc bao ve toi commit (concurrent role/permission change -> serialization_failure).
-  - dry-run (G-A-159-02): chay FULL validation trong transaction (khong mutation) roi rollback -> dry-run = plan
-    da validate, khong phai syntax-only.
+  - CONCURRENCY (G-A-158-02 + 159-03 + 160-01): transaction **SERIALIZABLE**; khoa row FOR UPDATE theo LOCK-ORDER
+    co dinh (tranh deadlock): (1) target dataset role + role_permissions cua no; (2) target staff row; (3) operator
+    staff row; (4) operator role + tuple `staff.manage`. Operator role phai ACTIVE. Concurrent revoke/role-disable
+    tren role/grant/operator-authority bi block toi commit (khong dua vao SERIALIZABLE mot minh cho moi writer).
+  - dry-run (G-A-159-02): chay FULL validation TRONG transaction (khong ghi application data — chi FOR UPDATE) roi
+    return; tx commit binh thuong -> dry-run = plan da validate, khong phai syntax-only.
   - immutable AUDIT in-tx (fail-closed neu audit chua ready); khong ghi secret.
 """
 from __future__ import annotations
@@ -81,17 +82,24 @@ async def _lock_target(conn, *, username: str, expect_id: int):
 
 
 async def _verify_operator_claim(conn, actor: str, *, target_id: int) -> int:
-    """CLAIMED operator (KHONG authenticate caller). Sanity: active + co staff.manage + KHAC target. Lock FOR UPDATE.
-    Tra ve claimed id de ghi PROVENANCE (caller_verified=false)."""
+    """CLAIMED operator (KHONG authenticate caller). Sanity: active account + role ACTIVE co staff.manage + KHAC
+    target. LOCK operator staff row + operator role row + staff.manage tuple FOR UPDATE toi commit (G-A-160-01:
+    active-role validation + concurrent revoke/role-disable bi block toi commit). Tra ve claimed id de ghi
+    PROVENANCE (caller_verified=false). Lock-order (xem module docstring) tranh deadlock."""
     row = await conn.fetchrow("SELECT id, is_active, role_key FROM staff_users WHERE username=$1 FOR UPDATE", actor)
     if row is None or not row["is_active"]:
         raise ProvisioningError(f"claimed operator '{actor}' khong phai account active — tu choi")
     if row["id"] == target_id:
         raise ProvisioningError(f"claimed operator '{actor}' trung target (id={target_id}) — tu choi self-mutation")
-    can = await conn.fetchval(
-        "SELECT EXISTS(SELECT 1 FROM role_permissions WHERE role_key=$1 AND permission_key=$2)",
-        row["role_key"], BOOTSTRAP_PERM)
-    if not can:
+    op_role = row["role_key"]
+    if not op_role:
+        raise ProvisioningError(f"claimed operator '{actor}' khong co role — thieu authority bootstrap — tu choi")
+    rr = await conn.fetchrow("SELECT is_active FROM roles WHERE key=$1 FOR UPDATE", op_role)
+    if rr is None or rr["is_active"] is not True:
+        raise ProvisioningError(f"claimed operator '{actor}' co role '{op_role}' KHONG active — tu choi")
+    has = await conn.fetchval(
+        "SELECT 1 FROM role_permissions WHERE role_key=$1 AND permission_key=$2 FOR UPDATE", op_role, BOOTSTRAP_PERM)
+    if not has:
         raise ProvisioningError(f"claimed operator '{actor}' thieu quyen '{BOOTSTRAP_PERM}' "
                                 "(authority bootstrap) — tu choi")
     return row["id"]
@@ -128,7 +136,7 @@ async def assign_dataset_role(
         plan.update({"id": st["id"], "operator_id_claimed": op_id})
         if not apply:
             plan["dry_run"] = True
-            return plan  # rollback read-only (no mutation) — dry-run da validate
+            return plan  # return trong tx: khong ghi application data (chi FOR UPDATE); tx commit binh thuong
         res = await conn.execute(
             "UPDATE staff_users SET role_key=$1 WHERE id=$2 AND username=$3 AND role_key IS NULL",
             role, st["id"], username)
