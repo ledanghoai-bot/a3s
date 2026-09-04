@@ -28,12 +28,17 @@
 BEGIN;
 
 -- 0. PRE-CONDITIONS (fail-closed truoc moi mutation).
+--    Chinh sach (Review 150 G-A-150-01): moi target role key phai HOAC absent hoan toan, HOAC dang o dung
+--    exact migration-managed state (name dung, is_system=false, is_active=true, khong grant ngoai exact tuple).
+--    Moi trang thai khac -> RAISE. KHONG coerce (khong DO UPDATE ten/activation cua role khong exact).
 DO $pre$
 DECLARE
   missing TEXT;
-  bad TEXT;
+  rec RECORD;
+  r RECORD;
+  badgrant TEXT;
 BEGIN
-  -- (149-03) ca ba permission key phai ton tai dung mot lan.
+  -- (149-03) ca ba permission key phai ton tai.
   SELECT string_agg(v.p, ', ') INTO missing
   FROM (VALUES ('address.dataset.ingest'),('address.dataset.review'),('address.dataset.manage')) AS v(p)
   WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE key = v.p);
@@ -41,30 +46,36 @@ BEGIN
     RAISE EXCEPTION '056 pre-condition FAIL: thieu permission catalog key(s): %', missing;
   END IF;
 
-  -- (149-04) khong role dich nao ton tai voi is_system=true (khong coerce role he thong/role la).
-  SELECT string_agg(key, ', ') INTO bad FROM roles
-  WHERE key IN ('m5_dataset_custodian','m5_dataset_reviewer','m5_dataset_owner') AND is_system = true;
-  IF bad IS NOT NULL THEN
-    RAISE EXCEPTION '056 pre-condition FAIL: role key ton tai voi is_system=true (tu choi coerce): %', bad;
-  END IF;
-
-  -- (149-02) khong 3 role nao co grant NGOAI allowlist tu truoc.
-  SELECT string_agg(rp.role_key||'->'||rp.permission_key, ', ') INTO bad
-  FROM role_permissions rp
-  WHERE (rp.role_key = 'm5_dataset_custodian' AND rp.permission_key <> 'address.dataset.ingest')
-     OR (rp.role_key = 'm5_dataset_reviewer'  AND rp.permission_key <> 'address.dataset.review')
-     OR (rp.role_key = 'm5_dataset_owner'     AND rp.permission_key <> 'address.dataset.manage');
-  IF bad IS NOT NULL THEN
-    RAISE EXCEPTION '056 pre-condition FAIL: pre-existing out-of-allowlist grant(s): %', bad;
-  END IF;
+  -- (149-04 + 150-01) exact-state-or-absent cho tung role.
+  FOR rec IN SELECT * FROM (VALUES
+      ('m5_dataset_custodian', 'M5 Dataset Custodian (nap draft)',      'address.dataset.ingest'),
+      ('m5_dataset_reviewer',  'M5 Dataset Reviewer (acceptance gate)', 'address.dataset.review'),
+      ('m5_dataset_owner',     'M5 Dataset Owner (accept/activate)',    'address.dataset.manage')
+    ) AS v(k, expname, expperm)
+  LOOP
+    SELECT key, name, is_system, is_active INTO r FROM roles WHERE key = rec.k;
+    IF FOUND THEN
+      IF r.is_system <> false OR r.is_active <> true OR r.name <> rec.expname THEN
+        RAISE EXCEPTION '056 pre-condition FAIL: role % ton tai voi state KHONG khop managed '
+          '(name=%, is_system=%, is_active=%; expected name=%, is_system=false, is_active=true) — tu choi coerce',
+          rec.k, r.name, r.is_system, r.is_active, rec.expname;
+      END IF;
+      -- khong grant NGOAI exact tuple (exact tuple hoac rong deu chap nhan).
+      SELECT string_agg(permission_key, ', ') INTO badgrant
+      FROM role_permissions WHERE role_key = rec.k AND permission_key <> rec.expperm;
+      IF badgrant IS NOT NULL THEN
+        RAISE EXCEPTION '056 pre-condition FAIL: role % co grant ngoai allowlist: %', rec.k, badgrant;
+      END IF;
+    END IF;
+  END LOOP;
 END $pre$;
 
--- 1. Ba role SoD chuyen biet (idempotent). is_system luon false (da chan is_system=true o pre-condition).
+-- 1. Ba role SoD chuyen biet. DO NOTHING (khong coerce; da dam bao exact-state-or-absent o pre-condition).
 INSERT INTO roles (key, name, is_system, is_active) VALUES
   ('m5_dataset_custodian', 'M5 Dataset Custodian (nap draft)',      false, true),
   ('m5_dataset_reviewer',  'M5 Dataset Reviewer (acceptance gate)', false, true),
   ('m5_dataset_owner',     'M5 Dataset Owner (accept/activate)',    false, true)
-ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, is_active = true;
+ON CONFLICT (key) DO NOTHING;
 
 -- 2. Grant DUNG 1 quyen/role. Khong WHERE EXISTS (da assert o tren; FK role_permissions->permissions cung
 --    dam bao fail-closed neu key bien mat giua chung). Idempotent.
@@ -103,10 +114,12 @@ DECLARE
   n_grants INT;
 BEGIN
   SELECT count(*) INTO n_roles FROM roles
-  WHERE key IN ('m5_dataset_custodian','m5_dataset_reviewer','m5_dataset_owner')
-    AND is_system = false AND is_active = true;
+  WHERE (key,name,is_system,is_active) IN (
+      ('m5_dataset_custodian','M5 Dataset Custodian (nap draft)',      false, true),
+      ('m5_dataset_reviewer', 'M5 Dataset Reviewer (acceptance gate)', false, true),
+      ('m5_dataset_owner',    'M5 Dataset Owner (accept/activate)',    false, true));
   IF n_roles <> 3 THEN
-    RAISE EXCEPTION '056 postcondition FAIL: expected 3 well-formed roles (is_system=false,is_active=true), got %',
+    RAISE EXCEPTION '056 postcondition FAIL: expected 3 roles voi exact name/is_system=false/is_active=true, got %',
                     n_roles;
   END IF;
 
