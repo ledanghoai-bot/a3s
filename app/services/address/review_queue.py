@@ -87,6 +87,10 @@ async def resolve(conn, *, queue_id: str, chosen_code: str, actor: str, reason: 
     q = dict(q)
     if q["state"] not in ("open", "assigned"):
         raise ReviewQueueError(f"khong resolve duoc o trang thai {q['state']} (replay/duplicate)")
+    # assignee ownership (Gate C DoD #7): item da assign chi nguoi duoc assign moi resolve (tru override co approver).
+    if q["state"] == "assigned" and q["assignee"] and actor.strip() != q["assignee"].strip() and not is_override:
+        raise ReviewQueueError(f"wrong assignee: item assigned cho '{q['assignee']}', khong phai '{actor}' "
+                               "(can override + approver de vuot)")
     snap = q["candidate_snapshot"]
     if isinstance(snap, str):
         snap = json.loads(snap or "[]")
@@ -119,6 +123,25 @@ async def resolve(conn, *, queue_id: str, chosen_code: str, actor: str, reason: 
             entity_id=str(queue_id), before={"state": q["state"]},
             after={"state": new_state, "chosen_code": chosen_code if accept else None, "is_override": is_override,
                    "approver": approver, "result_resolution_id": new_rid, "ticket": ticket}, reason=reason)
+    return _row(await conn.fetchrow("SELECT * FROM address_review_queue WHERE id=$1::uuid", str(queue_id)))
+
+
+async def expire(conn, *, queue_id: str, actor: str, reason: str) -> dict:
+    """Chuyen queue item open/assigned -> expired (Gate C §5/§6 DoD #6). Fail-closed + immutable audit."""
+    if not (actor and actor.strip() and reason and reason.strip()):
+        raise ReviewQueueError("thieu actor/reason")
+    await _assert_audit(conn)
+    q = await conn.fetchrow("SELECT state FROM address_review_queue WHERE id=$1::uuid", str(queue_id))
+    if not q:
+        raise ReviewQueueError("queue item khong ton tai")
+    if q["state"] not in ("open", "assigned"):
+        raise ReviewQueueError(f"chi expire khi open/assigned (dang {q['state']}) — replay/duplicate")
+    async with conn.transaction():
+        await conn.execute("UPDATE address_review_queue SET state='expired', resolved_at=now() WHERE id=$1::uuid",
+                           str(queue_id))
+        await audit_service.record(conn, actor_type="cli", action="address.review.expire", actor_ref=actor,
+                                   entity_type="address_review_queue", entity_id=str(queue_id),
+                                   before={"state": q["state"]}, after={"state": "expired"}, reason=reason)
     return _row(await conn.fetchrow("SELECT * FROM address_review_queue WHERE id=$1::uuid", str(queue_id)))
 
 
