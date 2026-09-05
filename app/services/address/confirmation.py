@@ -80,6 +80,55 @@ async def issue(conn, *, resolution_id: str, channel: str, bound_ref: str, expir
     return _row(row)
 
 
+async def issue_with_delivery(conn, *, resolution_id: str, channel: str, bound_ref: str, expiry_minutes: int,
+                              actor: str, reason: str, ticket: str, idempotency_key: str | None = None) -> dict:
+    """ATOMIC (G-A-180-02): tao confirmation request + DUNG MOT outbox delivery item TRONG CUNG transaction
+    (+audit). Transport dispatch chi sau commit (worker goi outbox.deliver_once). Idempotency: cung idempotency_key
+    -> tra ve request+outbox cu, khong tao delivery trung. Route /issue dung ham nay -> khong the tao issued request
+    ma thieu outbox row. tx fail -> rollback CA HAI."""
+    if not (actor and actor.strip()):
+        raise ConfirmationError("thieu actor (session)")
+    if not (bound_ref and bound_ref.strip()):
+        raise ConfirmationError("thieu bound_ref (channel/session binding)")
+    if not (1 <= int(expiry_minutes) <= 10080):
+        raise ConfirmationError("expiry_minutes ngoai [1,10080]")
+    await _assert_audit(conn)
+    if idempotency_key:
+        ex = await conn.fetchrow("SELECT * FROM address_confirmation_request WHERE idempotency_key=$1",
+                                 idempotency_key)
+        if ex:
+            ob = await conn.fetchrow("SELECT id FROM address_confirmation_outbox WHERE request_id=$1", ex["id"])
+            return {**_row(ex), "outbox_id": str(ob["id"]) if ob else None, "idempotent": True}
+    res = await _resolution(conn, resolution_id)
+    if not res:
+        raise ConfirmationError("resolution khong ton tai")
+    if res["status"] != "needs_customer_confirmation":
+        raise ConfirmationError(f"chi phat hanh cho needs_customer_confirmation (dang {res['status']})")
+    snapshot = res["candidates"]
+    if isinstance(snapshot, str):
+        snapshot = json.loads(snapshot or "[]")
+    async with conn.transaction():  # ATOMIC: request + outbox + audit
+        row = await conn.fetchrow(
+            "INSERT INTO address_confirmation_request (resolution_id,subject_type,subject_id,candidate_snapshot,"
+            "channel,bound_ref,expiry,idempotency_key,issued_by,reason,ticket) "
+            "VALUES ($1::uuid,$2,$3,$4::jsonb,$5,$6,now()+($7||' minutes')::interval,$8,$9,$10,$11) RETURNING *",
+            str(resolution_id), res["subject_type"], res["subject_id"], json.dumps(snapshot, ensure_ascii=False),
+            channel, bound_ref, str(int(expiry_minutes)), idempotency_key, actor, reason, ticket)
+        rid = str(row["id"])
+        payload = {"request_id": rid, "channel": channel, "action": "confirm_address",
+                   "candidate_codes": sorted(_codes(snapshot))}
+        ob = await conn.fetchrow(
+            "INSERT INTO address_confirmation_outbox (request_id,channel,payload,dedupe_key) "
+            "VALUES ($1::uuid,$2,$3::jsonb,$4) RETURNING id", rid, channel,
+            json.dumps(payload, ensure_ascii=False), f"confirm:{rid}")
+        await audit_service.record(
+            conn, actor_type="cli", action="address.confirm.issue", actor_ref=actor,
+            entity_type="address_confirmation_request", entity_id=rid, before=None,
+            after={"resolution_id": str(resolution_id), "channel": channel, "state": "issued",
+                   "outbox_id": str(ob["id"]), "ticket": ticket}, reason=reason)
+    return {**_row(row), "outbox_id": str(ob["id"]), "idempotent": False}
+
+
 async def respond(conn, *, request_id: str, chosen_code: str, responder_ref: str,
                   accept: bool = True, idempotency_key: str | None = None) -> dict:
     """Khach phan hoi. Binding: responder_ref phai == bound_ref. Stale: chosen_code in snapshot. Replay:

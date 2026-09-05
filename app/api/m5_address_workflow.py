@@ -40,10 +40,12 @@ async def issue(staff: dict = Depends(require_active_session),
                 body: dict = Body(...)) -> dict:
     try:
         async with (await get_pool()).acquire() as conn:
-            return await conf.issue(conn, resolution_id=body["resolution_id"], channel=body.get("channel", "web"),
-                                    bound_ref=body.get("bound_ref"), expiry_minutes=body.get("expiry_minutes", 60),
-                                    actor=staff["username"], reason=body.get("reason"), ticket=body.get("ticket"),
-                                    idempotency_key=idempotency_key)
+            # G-A-180-02: atomic issue + exactly one outbox delivery item (transport dispatch after commit).
+            return await conf.issue_with_delivery(
+                conn, resolution_id=body["resolution_id"], channel=body.get("channel", "web"),
+                bound_ref=body.get("bound_ref"), expiry_minutes=body.get("expiry_minutes", 60),
+                actor=staff["username"], reason=body.get("reason"), ticket=body.get("ticket"),
+                idempotency_key=idempotency_key)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"thieu truong {e}") from e
     except Exception as e:  # noqa: BLE001
