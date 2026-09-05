@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     # OFF => khong goi resolver, khong resolution, khong doi pointer, khong side effect. Order free-text
     # + Gate E + quote enforcement KHONG doi.
     enable_address_resolver: bool = False
+    # Pilot allowlist (customer_id CSV) cho live verify — MAC DINH RONG = KHONG khach nao eligible.
+    # Chi khach trong danh sach nay + tren kenh Telegram khach moi chay resolver (Directive 196 Review 197 C2).
+    address_resolver_pilot_customer_ids: str = ""
 
     # Session TTL (I-B M0.5, CA-REVIEW-M0-DEV-003 §8): giam tu 7 ngay -> 48h cho auth/session
     # temporary exception (localStorage). Cau hinh duoc de production dat <=48h.

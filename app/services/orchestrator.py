@@ -96,22 +96,22 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
         if name == "check_stock":
             return await tools.check_stock(**args)
         if name == "create_order":
-            # M5 Nửa A (Directive 196): tach de xuat ten tinh/phuong khoi args -> KHONG di vao create_order
-            # (order free-text giu nguyen, §3.12). create_order signature khong doi.
+            # M5 Nửa A (Directive 196 + Review 197): tach de xuat ten tinh/phuong khoi args -> KHONG di vao
+            # create_order (order free-text giu nguyen, §3.12). create_order signature khong doi.
             prov_prop = args.pop("province", None)
             ward_prop = args.pop("ward", None)
-            result = await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
-            # Live verify + auto-link — flag default OFF; loi KHONG BAO GIO lam vo reply/don (§3.11).
+            # C1: verify + auto-link chay TRUOC create_order -> khi Gate E bat, pointer verified da san sang
+            # cho create_order (khong deadlock). Flag default OFF; loi KHONG BAO GIO lam vo reply/don (§3.11,
+            # bat NGOAI transaction verify). C3: KHONG fallback sender_id — thieu event id that thi verify skip.
             if settings.enable_address_resolver:
                 try:
-                    ev = (command_ctx or {}).get("provider_message_id") or sender_id
-                    ch = (command_ctx or {}).get("channel")
                     await address_live_verify.verify_and_link(
-                        psid=sender_id, channel=ch, province_proposal=prov_prop,
-                        ward_proposal=ward_prop, event_id=ev)
+                        psid=sender_id, channel=(command_ctx or {}).get("channel"),
+                        province_proposal=prov_prop, ward_proposal=ward_prop,
+                        event_id=(command_ctx or {}).get("provider_message_id"))
                 except Exception as e:  # noqa: BLE001 — never break the customer reply/order
                     print(f"[orchestrator] M5 live address verify skipped: {safe_exc(e)}")
-            return result
+            return await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
         if name == "escalate_to_human":
             return await tools.escalate_to_human(psid=sender_id, last_message=last_message, **args)
         return {"error": f"Tool khong ton tai: {name}"}
