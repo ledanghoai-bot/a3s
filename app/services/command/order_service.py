@@ -18,6 +18,7 @@ import asyncpg
 from app.config import settings
 from app.db_pool import acquire, release
 from app.services import audit_service
+from app.services.address import order_binding
 from app.services.command import errors
 from app.services.command import receipt as receipt_mod
 from app.services.command import repository as repo
@@ -185,6 +186,10 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     )
     # (override đã consume atomic ở bước pricing — FINDING 2)
 
+    # --- M5 Gate E: verified-address binding + immutable snapshot TRONG CUNG transaction (CA Directive 190) ---
+    # Branch-only, default OFF. Bind loi -> raise -> rollback CA don (fail-closed, khong order mo coi/snapshot le).
+    await _maybe_bind_gate_e(conn, env, order_id, customer_id)
+
     # --- M2: reserve ATOMIC khi flag ledger bật; products.stock là MIRROR của balance (CA M2-S2-F01) ---
     # Ledger ON: reserve trên balance rồi materialize stock := available (KHÔNG delta trên giá trị stale
     #   -> Phase C an toàn, không stock âm). Ledger OFF: legacy stock -= qty (hành vi M1).
@@ -256,6 +261,41 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         outcome=receipt_mod.SUCCEEDED, result_payload=result_payload,
         committed_at=_fmt_ts(completed_at), duplicate=False,
     )
+
+
+def _gate_e_scope() -> set[int]:
+    """Parse canary customer-id allowlist (CSV) -> set[int]. Rong/khong hop le = khong ai trong scope."""
+    out: set[int] = set()
+    for tok in (settings.gate_e_canary_customer_ids or "").split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            out.add(int(tok))
+    return out
+
+
+async def _maybe_bind_gate_e(conn, env: CommandEnvelope, order_id: int, customer_id: int | None) -> None:
+    """M5 Gate E (CA Directive 190): trong CUNG transaction tao don, bind verified resolution + snapshot bat
+    bien khi selector ON + kill switch OFF + customer trong canary scope + customer co
+    current_address_resolution_id (server-side, KHONG lay tu request body -> body khong the chon owner, §4.1).
+    Bind loi -> BindingError propagate -> _run_winner vo -> rollback CA don (fail-closed, §4.4/§4.7)."""
+    if not settings.enable_gate_e_order_wiring:
+        return  # OFF (default): hanh vi legacy y het, KHONG snapshot, KHONG coi free-text la verified (§4.8)
+    if settings.gate_e_kill_switch:
+        return  # kill switch engaged: chan MOI bind moi o request boundary ke tiep (§4.9)
+    if customer_id is None or customer_id not in _gate_e_scope():
+        return  # ngoai canary scope -> hanh vi legacy (§4.8)
+    rid = await conn.fetchval(
+        "SELECT current_address_resolution_id FROM customers WHERE id=$1", customer_id)
+    if rid is None:
+        # Trong canary scope (selector ON, kill OFF) NHUNG khach chua co verified resolution linked
+        # (server-side): fail-closed — KHONG tao don khong verified (§5.4). Ngoai scope moi la legacy
+        # passthrough; da o trong scope thi enrollment = yeu cau verified address.
+        raise order_binding.BindingError(
+            "gate-e: khach trong canary scope nhung chua co verified resolution — tu choi (fail-closed)")
+    atype, aref, _ = _audit_actor(env)
+    await order_binding.bind_in_order_tx(
+        conn, order_id=order_id, resolution_id=str(rid), actor=(aref or "system"),
+        reason="gate-e-order-wiring", ticket=f"GATEE:{env.command_id}")
 
 
 async def _reject(conn, env: CommandEnvelope, code: str, detail: str

@@ -54,6 +54,20 @@ class Settings(BaseSettings):
     # PO/CA bat rieng. Bind/snapshot van chay duoc de test, nhung khong ep order production.
     enable_address_quote_enforcement: bool = False
 
+    # M5 Gate E (CA Directive 190): wiring verified-address binding + immutable snapshot INTO the
+    # canonical create-order transaction. Branch-only, MAC DINH OFF (dormant, production khong doi).
+    # - enable_gate_e_order_wiring: master selector. OFF => create-order giu hanh vi legacy y het,
+    #   KHONG tao snapshot, KHONG coi free-text la verified. ON => trong canary scope, neu customer
+    #   co current_address_resolution_id (server-side, KHONG tu body) thi bind trong CUNG transaction
+    #   tao don; bind loi => rollback ca don (fail-closed, khong order mo coi).
+    # - gate_e_kill_switch: cong tac dung khan. ON => chan MOI bind moi ngay o request boundary ke
+    #   tiep (khong pha snapshot da commit). Uu tien cao hon selector.
+    # - gate_e_canary_customer_ids: CSV customer id trong canary scope (rong = KHONG ai). Owner van
+    #   luon derive server-side tu orders.customer_id; scope chi gioi han pham vi thu nghiem.
+    enable_gate_e_order_wiring: bool = False
+    gate_e_kill_switch: bool = False
+    gate_e_canary_customer_ids: str = ""
+
     # Session TTL (I-B M0.5, CA-REVIEW-M0-DEV-003 §8): giam tu 7 ngay -> 48h cho auth/session
     # temporary exception (localStorage). Cau hinh duoc de production dat <=48h.
     session_ttl_hours: int = 48
