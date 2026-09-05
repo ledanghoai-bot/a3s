@@ -262,14 +262,12 @@ services:
       - api
     restart: unless-stopped
 
-  # pm_site — "So tay PM" (a3s-pmm.robanme.com): site TINH build tu Markdown trong ./pm-handbook/content.
-  # Noi dung hoc tap NGOAI pham vi van hanh Alpha3s (khong API/DB/quyen/du lieu khach). Caddy chinh
-  # reverse_proxy {$PM_DOMAIN} -> pm_site:80. Khong mo cong ra host.
+  # pm_site — "So tay PM" (a3s-pmm.robanme.com): site TINH, nguon la repo RIENG github.com/ledanghoai-bot/a3s-pmm.
+  # Image duoc build TREN VPS boi /srv/a3s-pmm/scripts/deploy-site.sh (nhan revision = commit a3s-pmm), KHONG build
+  # tu repo nay va KHONG nam trong SERVICES cua scripts/deploy.sh. Caddy chinh reverse_proxy {$PM_DOMAIN} -> pm_site:80.
   pm_site:
-    build:
-      context: ./pm-handbook
-      args:
-        GIT_COMMIT: ${GIT_COMMIT:-}
+    image: a3s-pmm-site:current
+    pull_policy: never
     restart: unless-stopped
 
   caddy:

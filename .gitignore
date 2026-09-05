@@ -25,7 +25,3 @@ terraform.tfvars
 *.auto.tfvars
 tfplan
 *.tfplan
-
-# pm-handbook (So tay PM): dau ra build + deps local, KHONG commit
-pm-handbook/dist/
-pm-handbook/site/node_modules/

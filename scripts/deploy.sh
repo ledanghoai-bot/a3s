@@ -26,14 +26,15 @@ cd /srv/alpha3s
 # Compose se chay `migrate` TRUOC, va neu no exit != 0 thi `up` that bai -> `set -e` o dau file lam
 # deploy.sh thoat != 0 -> stage deploy cua CI do -> ung dung KHONG duoc rollout tren schema cu.
 # Day la fail-closed o CA HAI lop: Compose (khong start service) va CI (stage do).
-# pm_site: site tinh "So tay PM" (pm-handbook/). caddy: co mat de compose ap doi thay doi env
-# (PM_DOMAIN) — khi cau hinh khong doi, `up -d` KHONG recreate caddy (no-op).
-SERVICES="db redis migrate api worker dashboard pm_site caddy telegram_customer_bot telegram_bot"
+# caddy: co mat de compose ap doi thay doi env (PM_DOMAIN); khi cau hinh khong doi, `up -d` KHONG recreate.
+# pm_site (So tay PM) KHONG nam o day: image cua no build tu repo rieng a3s-pmm, deploy boi
+# /srv/a3s-pmm/scripts/deploy-site.sh. Compose van khai bao pm_site (image: a3s-pmm-site:current) de caddy route.
+SERVICES="db redis migrate api worker dashboard caddy telegram_customer_bot telegram_bot"
 
 # F-PR27-E01: tap con cua SERVICES duoc BUILD TU Dockerfile trong repo nay -- chi nhung image do
 # moi mang duoc nhan commit. `db` (pgvector) va `redis` la image thuong nguon ngoai, khong co va
 # KHONG NEN co nhan cua ta; dua chung vao buoc kiem se tao bao dong gia roi som muon bi lam ngo.
-SERVICES_CO_NHAN="migrate api worker dashboard pm_site telegram_customer_bot telegram_bot"
+SERVICES_CO_NHAN="migrate api worker dashboard telegram_customer_bot telegram_bot"
 
 # F-PR27-E01 (CA PHASE1B-M4-PR27-MERGE-DEPLOY-DORMANT-EVIDENCE-REVIEW-1-VI): commit dang deploy
 # phai di VAO image, khong phai chi nam trong checkout.
