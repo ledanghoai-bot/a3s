@@ -16,3 +16,8 @@
 	# Dashboard Next.js
 	reverse_proxy dashboard:3000
 }
+
+{$PM_DOMAIN} {
+	# So tay PM — site tinh (pm-handbook/), noi dung hoc tap ngoai pham vi van hanh
+	reverse_proxy pm_site:80
+}

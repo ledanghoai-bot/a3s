@@ -262,6 +262,16 @@ services:
       - api
     restart: unless-stopped
 
+  # pm_site — "So tay PM" (pm-a3s.robanme.com): site TINH build tu Markdown trong ./pm-handbook/content.
+  # Noi dung hoc tap NGOAI pham vi van hanh Alpha3s (khong API/DB/quyen/du lieu khach). Caddy chinh
+  # reverse_proxy {$PM_DOMAIN} -> pm_site:80. Khong mo cong ra host.
+  pm_site:
+    build:
+      context: ./pm-handbook
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
+    restart: unless-stopped
+
   caddy:
     image: caddy:2-alpine
     ports:
@@ -270,6 +280,8 @@ services:
     environment:
       DOMAIN: ${DOMAIN:?Phai dat DOMAIN trong .env (domain tro ve VPS, cho webhook/API)}
       DASH_DOMAIN: ${DASH_DOMAIN:?Phai dat DASH_DOMAIN trong .env (domain dashboard)}
+      # Mac dinh san de khong pha deploy khi .env chua co PM_DOMAIN; doi qua .env neu can.
+      PM_DOMAIN: ${PM_DOMAIN:-pm-a3s.robanme.com}
     volumes:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -277,6 +289,7 @@ services:
     depends_on:
       - api
       - dashboard
+      - pm_site
     restart: unless-stopped
 
   db:
