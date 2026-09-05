@@ -13,6 +13,7 @@ import json
 
 from app.config import settings
 from app.services import audit_service
+from app.services.address import completeness
 
 VERIFIED = ("auto_verified", "customer_confirmed", "staff_confirmed")
 
@@ -46,6 +47,8 @@ async def _load_verified_resolution(conn, resolution_id):
         raise BindingError("dataset_version khong truy nguyen duoc — tu choi")
     if ds["status"] == "rolled_back":
         raise BindingError("dataset da rolled_back — resolution stale, tu choi")
+    # Gate C §4 completeness: chi fulfillment-ready khi co province+ward (province-only = informational only).
+    completeness.assert_fulfillment_ready(r)
     return r
 
 

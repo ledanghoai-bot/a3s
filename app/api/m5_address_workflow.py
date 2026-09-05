@@ -40,10 +40,12 @@ async def issue(staff: dict = Depends(require_active_session),
                 body: dict = Body(...)) -> dict:
     try:
         async with (await get_pool()).acquire() as conn:
-            return await conf.issue(conn, resolution_id=body["resolution_id"], channel=body.get("channel", "web"),
-                                    bound_ref=body.get("bound_ref"), expiry_minutes=body.get("expiry_minutes", 60),
-                                    actor=staff["username"], reason=body.get("reason"), ticket=body.get("ticket"),
-                                    idempotency_key=idempotency_key)
+            # G-A-180-02 atomic issue+outbox; Amendment 182 staff-relay: bound customer derive server-side tu
+            # resolution.subject; body bound_ref/actor/issued_by BI BO QUA.
+            return await conf.issue_with_delivery(
+                conn, resolution_id=body["resolution_id"], channel=body.get("channel", "web"),
+                expiry_minutes=body.get("expiry_minutes", 60), actor=staff["username"],
+                reason=body.get("reason"), ticket=body.get("ticket"), idempotency_key=idempotency_key)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"thieu truong {e}") from e
     except Exception as e:  # noqa: BLE001
@@ -51,11 +53,14 @@ async def issue(staff: dict = Depends(require_active_session),
 
 
 @confirmation_router.post("/{request_id}/respond", dependencies=[Depends(require_permission("address.confirm"))])
-async def respond(request_id: str, body: dict = Body(...)) -> dict:
+async def respond(request_id: str, staff: dict = Depends(require_active_session), body: dict = Body(...)) -> dict:
+    # Amendment 182 staff-relay: BUSINESS fields only (chosen_code/accept/reason/ticket). responding actor derive tu
+    # staff session; body responder_ref/customer_ref/session_ref/actor/responded_by BI BO QUA (khong xac thuc).
     try:
         async with (await get_pool()).acquire() as conn:
             return await conf.respond(conn, request_id=request_id, chosen_code=body.get("chosen_code"),
-                                      responder_ref=body.get("responder_ref"), accept=bool(body.get("accept", True)),
+                                      actor=staff["username"], accept=bool(body.get("accept", True)),
+                                      reason=body.get("reason"), ticket=body.get("ticket"),
                                       idempotency_key=body.get("idempotency_key"))
     except Exception as e:  # noqa: BLE001
         raise _err(e) from e
