@@ -1,4 +1,4 @@
-# Sổ tay PM — site tĩnh `pm-a3s.robanme.com`
+# Sổ tay PM — site tĩnh `a3s-pmm.robanme.com`
 
 Nội dung học tập cho PO/manager về quản lý dự án AI, lấy Alpha3s làm case tham chiếu. **Ngoài phạm vi vận hành Alpha3s**: không API, không dữ liệu khách, không quyền, không migration. Không cần directive CA hay window để cập nhật.
 
@@ -13,7 +13,7 @@ Nội dung học tập cho PO/manager về quản lý dự án AI, lấy Alpha3s
 | `Dockerfile` | Stage node build → stage `caddy:2-alpine` phục vụ `/srv`. Có nhãn `GIT_COMMIT` như mọi image khác. |
 | `Caddyfile` | Caddy bên trong container: file_server + header bảo mật. |
 
-Caddy chính của VPS (`docker/caddy/Caddyfile`) có block `{$PM_DOMAIN}` reverse_proxy tới `pm_site:80`. Biến `PM_DOMAIN` trong `docker-compose.prod.yml` mặc định `pm-a3s.robanme.com`; đổi qua `.env` trên VPS nếu cần.
+Caddy chính của VPS (`docker/caddy/Caddyfile`) có block `{$PM_DOMAIN}` reverse_proxy tới `pm_site:80`. Biến `PM_DOMAIN` trong `docker-compose.prod.yml` mặc định `a3s-pmm.robanme.com`; đổi qua `.env` trên VPS nếu cần.
 
 ## Xem thử ở máy dev
 

@@ -2,7 +2,7 @@
   "name": "pm-handbook-site",
   "version": "1.0.0",
   "private": true,
-  "description": "Static site generator cho So tay PM (pm-a3s.robanme.com): Markdown trong ../content -> HTML tinh trong ../dist",
+  "description": "Static site generator cho So tay PM (a3s-pmm.robanme.com): Markdown trong ../content -> HTML tinh trong ../dist",
   "type": "module",
   "scripts": {
     "build": "node build.mjs --content ../content --out ../dist",

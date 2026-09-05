@@ -1,4 +1,4 @@
-# pm_site — "Sổ tay PM" (pm-a3s.robanme.com): site tĩnh build từ Markdown trong ./content.
+# pm_site — "Sổ tay PM" (a3s-pmm.robanme.com): site tĩnh build từ Markdown trong ./content.
 #
 # Stage 1 (node): npm ci + node site/build.mjs -> /build/dist
 # Stage 2 (caddy): chỉ chứa HTML/CSS đã build + Caddyfile phục vụ tĩnh cổng 80.

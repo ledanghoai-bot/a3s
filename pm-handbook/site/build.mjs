@@ -1,4 +1,4 @@
-// Static site generator cho "Sổ tay PM" (pm-a3s.robanme.com).
+// Static site generator cho "Sổ tay PM" (a3s-pmm.robanme.com).
 //
 // Đầu vào : thư mục Markdown (bản sao repo cẩm nang) — mặc định ../content
 // Đầu ra  : HTML tĩnh — mặc định ../dist. Mỗi tệp .md -> .html cùng đường dẫn; README.md -> index.html.
