@@ -75,8 +75,6 @@ const NAV = [
     ["nguon/NGUON-VA-PHUONG-PHAP.md", "Nguồn và phương pháp"],
     ["nguon/DAU-VAN-TAY-NGUON.md", "Dấu vân tay nguồn"],
     ["bien-tap/BAO-CAO-KIEM-TRA.md", "Báo cáo kiểm tra bản thảo"],
-    ["bien-tap/BAO-CAO-REVIEW-DEV-PM.md", "Review Dev/PM"],
-    ["bien-tap/DANH-GIA-DONG-GOP-REVIEW-DEV-PM.md", "Đánh giá đóng góp review"],
     ["bien-tap/HUONG-DAN-CAP-NHAT.md", "Hướng dẫn cập nhật"],
     ["CHANGELOG.md", "Lịch sử biên soạn"],
   ]},
@@ -256,8 +254,10 @@ for (const rel of files) {
 // nhãn ngắn trong NAV ưu tiên cho prev/next
 for (const g of NAV) for (const [rel, label] of g.items) if (titles.has(rel)) titles.set(rel, label);
 
+// Site chỉ chứa thông tin public: mọi tệp trong content PHẢI được khai báo trong NAV. Tệp lạ (vd tài liệu
+// biên tập nội bộ chép nhầm vào) làm build DỪNG thay vì âm thầm xuất bản.
 const missingInNav = files.filter((f) => !ORDER.includes(f));
-if (missingInNav.length) console.warn("Tệp có trong content nhưng chưa có trong NAV (vẫn build, chỉ không hiện ở sidebar):", missingInNav);
+if (missingInNav.length) { console.error("DỪNG: tệp có trong content nhưng không có trong NAV (không xuất bản tệp chưa duyệt):", missingInNav); process.exit(1); }
 const missingFiles = ORDER.filter((f) => !files.includes(f));
 if (missingFiles.length) { console.error("NAV trỏ tới tệp không tồn tại:", missingFiles); process.exit(1); }
 

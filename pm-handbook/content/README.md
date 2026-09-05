@@ -17,7 +17,6 @@ Một dự án AI không kết thúc khi bot trả lời trôi chảy. Người 
 - [Từ điển thuật ngữ](phu-luc/C-thuat-ngu.md).
 - [Nguồn và giới hạn diễn giải](nguon/NGUON-VA-PHUONG-PHAP.md).
 - [Báo cáo kiểm tra bản thảo](bien-tap/BAO-CAO-KIEM-TRA.md).
-- [Báo cáo review Dev/PM](bien-tap/BAO-CAO-REVIEW-DEV-PM.md).
 
 ### Bạn sẽ học được gì?
 

@@ -3,7 +3,7 @@
 ## 1.0.1 — 05/09/2026
 
 - Sửa lỗi chương 2 §2.2: "S01–S24" thành "S01–S25" cho đúng danh mục 25 nguồn, ở cả bản theo chương và HANDBOOK.
-- Thêm [báo cáo review Dev/PM](bien-tap/BAO-CAO-REVIEW-DEV-PM.md): tái lập toàn bộ kiểm tra bản thảo, đối chiếu 25 nguồn, ghi trạng thái Gate B/Gate C đã đi qua mốc cắt (chưa cập nhật nội dung, chờ bản 1.1).
+- Thêm báo cáo review Dev/PM (tài liệu biên tập nội bộ, không đăng trên site public): tái lập toàn bộ kiểm tra bản thảo, đối chiếu 25 nguồn, ghi trạng thái Gate B/Gate C đã đi qua mốc cắt (chưa cập nhật nội dung, chờ bản 1.1).
 
 ## 1.0 — 05/09/2026
 
