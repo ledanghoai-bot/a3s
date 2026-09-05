@@ -418,6 +418,8 @@ TOOL_DEFINITIONS = [
                         "description": "So dien thoai VN, vd 0912345678.",
                     },
                     "address": {"type": "string", "description": "Dia chi giao hang day du."},
+                    "province": {"type": "string", "description": "TEN tinh/thanh cua dia chi (vd 'Thanh pho Ha Noi'). CHI ten, KHONG ma so. De trong neu khong ro."},
+                    "ward": {"type": "string", "description": "TEN phuong/xa cua dia chi (vd 'Phuong Ba Dinh'). CHI ten, KHONG ma so. De trong neu khong ro."},
                     "sku": {"type": "string", "description": "Ma san pham, vd '3S-100G'. Lay tu ket qua search_products, KHONG tu bia."},
                     "quantity": {"type": "integer", "description": "So luong don vi muon mua (hu/tui/goi tuy san pham)."},
                 },

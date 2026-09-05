@@ -21,6 +21,7 @@ from openai import AsyncOpenAI
 
 from app.config import settings
 from app.services import conversation_log, data_deletion, handoff, products, tools
+from app.services.address import live_verify as address_live_verify
 from app.services.messenger_profile import get_user_profile
 from app.services.nlu_hint import get_nlu_hint
 from app.services.pii import shadow as pii_shadow
@@ -95,7 +96,22 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
         if name == "check_stock":
             return await tools.check_stock(**args)
         if name == "create_order":
-            return await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
+            # M5 Nửa A (Directive 196): tach de xuat ten tinh/phuong khoi args -> KHONG di vao create_order
+            # (order free-text giu nguyen, §3.12). create_order signature khong doi.
+            prov_prop = args.pop("province", None)
+            ward_prop = args.pop("ward", None)
+            result = await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
+            # Live verify + auto-link — flag default OFF; loi KHONG BAO GIO lam vo reply/don (§3.11).
+            if settings.enable_address_resolver:
+                try:
+                    ev = (command_ctx or {}).get("provider_message_id") or sender_id
+                    ch = (command_ctx or {}).get("channel")
+                    await address_live_verify.verify_and_link(
+                        psid=sender_id, channel=ch, province_proposal=prov_prop,
+                        ward_proposal=ward_prop, event_id=ev)
+                except Exception as e:  # noqa: BLE001 — never break the customer reply/order
+                    print(f"[orchestrator] M5 live address verify skipped: {safe_exc(e)}")
+            return result
         if name == "escalate_to_human":
             return await tools.escalate_to_human(psid=sender_id, last_message=last_message, **args)
         return {"error": f"Tool khong ton tai: {name}"}
