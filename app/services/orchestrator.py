@@ -334,7 +334,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
 
         reply = ""
         created_order_ids: list = []  # order_id create_order tra ve THAT trong luot nay
-        for _ in range(MAX_TOOL_ITERATIONS):
+        for _iter in range(MAX_TOOL_ITERATIONS):
             response = await client.chat.completions.create(
                 model=settings.llm_model,
                 messages=turn_messages,
@@ -351,10 +351,12 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 if not reply:
                     # Model tra ve KHONG tool_call ma content cung RONG. Voi model co suy luan,
                     # nguyen nhan pho bien nhat la reasoning_content dot het budget ->
-                    # finish_reason='length' (xem MAX_OUTPUT_TOKENS). Log ro de chan doan —
-                    # neu con tai dien voi finish_reason='length' thi tang MAX_OUTPUT_TOKENS them.
-                    print(f"[orchestrator] LLM tra reply RONG (finish_reason={finish_reason}) "
-                          f"cho {sender_id} — roi vao fallback rong, KHONG goi tool nao.")
+                    # finish_reason='length' (xem MAX_OUTPUT_TOKENS). Log SAFE-TRACE (Directive 209-02):
+                    # CHI event class + finish_reason + iteration; TUYET DOI KHONG log sender_id/telegram id,
+                    # dia chi, ten, sdt, message, tool-arg, prompt, reasoning content hay token.
+                    # Neu con tai dien voi finish_reason='length' thi tang MAX_OUTPUT_TOKENS them.
+                    print(f"[orchestrator] empty_reply_fallback finish_reason={finish_reason} "
+                          f"iteration={_iter} — khong goi tool nao.")
                 break
 
             # Ghi lai message cua assistant (co tool_calls) vao messages de model
