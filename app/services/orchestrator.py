@@ -15,6 +15,7 @@ Luong:
 
 import json
 from pathlib import Path
+from time import perf_counter
 
 import redis.asyncio as aioredis
 from openai import AsyncOpenAI
@@ -75,6 +76,40 @@ def _reply_claims_order_created(reply: str) -> bool:
     voi viec create_order co that su chay thanh cong trong luot nay hay khong)."""
     low = reply.lower()
     return any(marker in low for marker in _ORDER_CLAIM_MARKERS)
+
+
+# M5 upgrade (Directive 214 §6.D + Memo 213 §6): TAT reasoning cho duong tool-calling giao dich.
+# deepseek-v4-flash la REASONING model -> reasoning_content dot max_tokens + lam cham (den phut qua
+# nhieu vong tool). Probe xac nhan extra_body={"thinking":{"type":"disabled"}} -> ~1.5s, tool-calling
+# nguyen ven, het truncation 'length'. Giu FALLBACK khi provider KHONG ho tro tham so (Memo 213 §6):
+# thu 1 lan co extra_body; neu bi tu choi dung tham so 'thinking' thi nho lai + goi lai KHONG co param.
+_THINKING_DISABLED_BODY = {"thinking": {"type": "disabled"}}
+_thinking_control_supported = True  # optimistic; flip False khi provider tu choi param
+
+
+def _thinking_unsupported(exc: Exception) -> bool:
+    """True neu loi la do tham so 'thinking' khong duoc provider ho tro (KHONG nuot loi khac)."""
+    s = str(exc).lower()
+    if "thinking" not in s:
+        return False
+    return any(t in s for t in ("unsupported", "invalid", "unexpected", "not support",
+                                "deserialize", "unknown", "extra"))
+
+
+async def _llm_create(client, **kwargs):
+    """chat.completions.create voi thinking TAT (khi bat + duoc ho tro), fallback an toan 1 lan."""
+    global _thinking_control_supported
+    if settings.disable_llm_reasoning and _thinking_control_supported:
+        try:
+            return await client.chat.completions.create(extra_body=_THINKING_DISABLED_BODY, **kwargs)
+        except Exception as e:  # noqa: BLE001 — chi fallback khi dung loi tham so thinking
+            if _thinking_unsupported(e):
+                _thinking_control_supported = False
+                print(f"[orchestrator] thinking.disabled khong duoc ho tro -> fallback bo param: "
+                      f"{safe_exc(e)}")
+            else:
+                raise
+    return await client.chat.completions.create(**kwargs)
 
 
 def _redis_key(sender_id: str) -> str:
@@ -141,6 +176,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
     # key cho command (order.create). None -> fallback sender_id.
     # channel: kenh goi toi (tuong minh, do caller truyen) - quyet dinh muc do
     # bat buoc khai bao "tro ly tu dong". Mac dinh "messenger" (kenh chinh).
+    _t_start = perf_counter()  # M5 upgrade §6.D: do end-to-end handle_message (SAFE, khong payload)
     # Ket noi Redis
     redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
 
@@ -334,8 +370,18 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
 
         reply = ""
         created_order_ids: list = []  # order_id create_order tra ve THAT trong luot nay
+        # M5 upgrade (Directive 214 §6.D + Memo 213 §6): do latency + token (SAFE — khong payload).
+        _llm_ms = 0.0
+        _tool_ms = 0.0
+        _tok_in = 0
+        _tok_out = 0
+        _n_iter = 0
+        finish_reason = None
         for _iter in range(MAX_TOOL_ITERATIONS):
-            response = await client.chat.completions.create(
+            _n_iter += 1
+            _t_llm = perf_counter()
+            response = await _llm_create(
+                client,
                 model=settings.llm_model,
                 messages=turn_messages,
                 tools=tools.TOOL_DEFINITIONS,
@@ -343,6 +389,11 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.1,
             )
+            _llm_ms += (perf_counter() - _t_llm) * 1000.0
+            _usage = getattr(response, "usage", None)
+            if _usage is not None:
+                _tok_in += getattr(_usage, "prompt_tokens", 0) or 0
+                _tok_out += getattr(_usage, "completion_tokens", 0) or 0
             message = response.choices[0].message
             finish_reason = response.choices[0].finish_reason
 
@@ -401,8 +452,10 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                         "causation_id": pmid,
                         "provider_message_id": pmid,
                     }
+                _t_tool = perf_counter()
                 result = await _execute_tool(tc.function.name, args, sender_id, text,
                                              command_ctx=cmd_ctx)
+                _tool_ms += (perf_counter() - _t_tool) * 1000.0
                 if (
                     tc.function.name == "create_order"
                     and isinstance(result, dict)
@@ -483,6 +536,16 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         await _save_history(redis, sender_id, history)
         await conversation_log.log_message(conversation_id, "customer", text)
         await conversation_log.log_message(conversation_id, "bot", reply)
+
+        # M5 upgrade (§6.D + Memo 213 §6): 1 dong metric AN TOAN — TUYET DOI khong ten/sdt/dia chi/
+        # message/prompt/reasoning/payload; chi so lieu tong hop de collector tinh p50/p95/max theo
+        # kenh/route. route: order (co create_order thanh cong) | clarify (B) | reply.
+        _route = "order" if created_order_ids else "reply"
+        print(f"[latency] event=chat channel={channel} route={_route} "
+              f"ms_total={int((perf_counter() - _t_start) * 1000)} ms_llm={int(_llm_ms)} "
+              f"ms_tool={int(_tool_ms)} iters={_n_iter} tok_in={_tok_in} tok_out={_tok_out} "
+              f"finish={finish_reason} "
+              f"think_off={settings.disable_llm_reasoning and _thinking_control_supported}")
 
         return reply
 

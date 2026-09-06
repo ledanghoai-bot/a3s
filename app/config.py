@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
     llm_model: str = "deepseek-v4-flash"  # deepseek-chat bi DeepSeek deprecate (25/7) -> v4-flash
+    # M5 upgrade (Directive 214 §6.D + Memo 213 §6): TAT reasoning cho duong chat/tool-calling giao dich.
+    # deepseek-v4-flash sinh reasoning_content truoc content/tool_calls -> latency phut + truncation
+    # 'length' + reply rong. Luong ban hang chu yeu goi tool, khong can suy luan sau. Orchestrator van
+    # co FALLBACK tu dong khi provider khong ho tro tham so nay (giu tuong thich model khac).
+    disable_llm_reasoning: bool = True
 
     # Embedding local
     embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
