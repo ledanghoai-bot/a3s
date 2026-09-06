@@ -35,6 +35,18 @@ SYSTEM_PROMPT = (
 MAX_HISTORY = 10  # so luot chat giu lai (moi luot = 1 user + 1 assistant)
 MAX_TOOL_ITERATIONS = 4  # chan vong lap tool_calls vo han neu model lien tuc goi tool
 
+# Ngan sach token dau ra moi lan goi LLM. QUAN TRONG: model hien tai (deepseek-v4-flash)
+# la model CO SUY LUAN - no sinh 'reasoning_content' (chuoi suy nghi) TRUOC khi sinh
+# 'content'/'tool_calls', va reasoning_content cung tinh vao max_tokens. Voi budget cu 512,
+# phan suy luan cho don hang (nhieu rang buoc: ten/sdt/dia chi/sku/so luong + xac nhan)
+# thuong dot het budget -> API tra finish_reason='length' voi content RONG va KHONG co
+# tool_call nao -> orchestrator roi vao fallback rong ("Doi ngu 3S Coffee se kiem tra va
+# phan hoi..."), khong bao gio goi create_order (chinh la trieu chung canary Directive 207).
+# Do bang API that: 512 hay bi cat, >=4096 thi create_order dat toi tin cay. Cap nay chi
+# CHAN cat ngang, KHONG lam model suy luan dai them (model suy luan theo nhu cau, khong
+# theo cap). Cau tra loi hien thi van ngan (~250-360 ky tu).
+MAX_OUTPUT_TOKENS = 4096
+
 # Kenh BAT BUOC khai bao "tro ly tu dong" o tin dau (yeu cau Meta App Review cho
 # Messenger). Cac kenh khac (telegram/zalo/web) chi KHUYEN NGHI - xem mo ta bom
 # vao system prompt ben duoi + docs/META-APP-REVIEW-VI.md §7. Truyen channel
@@ -328,13 +340,21 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 messages=turn_messages,
                 tools=tools.TOOL_DEFINITIONS,
                 tool_choice="auto",
-                max_tokens=512,
+                max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.1,
             )
             message = response.choices[0].message
+            finish_reason = response.choices[0].finish_reason
 
             if not message.tool_calls:
                 reply = (message.content or "").strip()
+                if not reply:
+                    # Model tra ve KHONG tool_call ma content cung RONG. Voi model co suy luan,
+                    # nguyen nhan pho bien nhat la reasoning_content dot het budget ->
+                    # finish_reason='length' (xem MAX_OUTPUT_TOKENS). Log ro de chan doan —
+                    # neu con tai dien voi finish_reason='length' thi tang MAX_OUTPUT_TOKENS them.
+                    print(f"[orchestrator] LLM tra reply RONG (finish_reason={finish_reason}) "
+                          f"cho {sender_id} — roi vao fallback rong, KHONG goi tool nao.")
                 break
 
             # Ghi lai message cua assistant (co tool_calls) vao messages de model
