@@ -68,6 +68,19 @@ class Settings(BaseSettings):
     gate_e_kill_switch: bool = False
     gate_e_canary_customer_ids: str = ""
 
+    # M5 "Nửa A" — live address verify + auto-link (CA Directive 196). MAC DINH OFF (dormant).
+    # Khi ON: trong luong Telegram khach, LLM DE XUAT ten tinh/phuong (chi ten) -> resolver M5 verify
+    # tat dinh vao dataset v2 -> neu auto_verified + du province+ward + dung owner thi ghi
+    # customers.current_address_resolution_id (atomic resolution+pointer+audit). LLM KHONG quyet
+    # code/status/confidence/owner. Non-auto -> giu resolution/audit lam bang chung, KHONG link.
+    # Loi verify/LLM/resolver KHONG BAO GIO lam vo reply/don (bọc try/except NGOAI transaction verify).
+    # OFF => khong goi resolver, khong resolution, khong doi pointer, khong side effect. Order free-text
+    # + Gate E + quote enforcement KHONG doi.
+    enable_address_resolver: bool = False
+    # Pilot allowlist (customer_id CSV) cho live verify — MAC DINH RONG = KHONG khach nao eligible.
+    # Chi khach trong danh sach nay + tren kenh Telegram khach moi chay resolver (Directive 196 Review 197 C2).
+    address_resolver_pilot_customer_ids: str = ""
+
     # Session TTL (I-B M0.5, CA-REVIEW-M0-DEV-003 §8): giam tu 7 ngay -> 48h cho auth/session
     # temporary exception (localStorage). Cau hinh duoc de production dat <=48h.
     session_ttl_hours: int = 48
