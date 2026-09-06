@@ -151,6 +151,19 @@ def test_old_name_alias_needs_confirmation():
     assert r["ward_code"] == "24169"
 
 
+def test_match_keys_abbrev_families():
+    # Corpus §7.3: moi ho viet tat hanh chinh -> mo rong dung + sinh dang tran.
+    assert m._match_keys("T. Đắk Lắk") == ["tinh dak lak", "dak lak"]
+    assert m._match_keys("TP. Hà Nội") == ["thanh pho ha noi", "ha noi"]
+    assert m._match_keys("P. Ea Kao") == ["phuong ea kao", "ea kao"]
+    assert m._match_keys("Q. 1") == ["quan 1", "1"]
+    assert m._match_keys("H. Đầm Dơi") == ["huyen dam doi", "dam doi"]
+    assert m._match_keys("X. Tân Lập") == ["xa tan lap", "tan lap"]
+    # Ten tran (khong tien to) -> 1 key duy nhat; ten thuong bat dau bang tu 2 ky tu khong bi coi la viet tat
+    assert m._match_keys("Đắk Lắk") == ["dak lak"]
+    assert m._match_keys("Ea Kao") == ["ea kao"]
+
+
 def test_bare_ambiguous_same_parent_staff():
     # Hai phuong cung ten tran + cung parent -> input tran -> one_to_many -> staff (khong tu chon).
     u, a = _ds_pref()
