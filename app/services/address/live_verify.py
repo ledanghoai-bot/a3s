@@ -131,8 +131,21 @@ async def verify_and_link(*, psid: str, channel: str | None, province_proposal, 
         # may_bind = eligible (auto_verified + du province+ward + dataset active v2). Chi khi may_bind thi
         # orchestrator moi truyen verified_resolution_id xuong Gate E de bind (sua F2). resolution_id van
         # tra ve du non-may_bind (lam bang chung), nhung KHONG duoc bind.
+        # B (Q2): tra TEN hanh chinh canonical (tu code da chon) de orchestrator dung cho clarify — LLM
+        # doc TEN de hoi khach xac nhan (khong bat khach biet code). Chi ten (public admin), khong PII.
+        pname = await _unit_name(conn, r.get("dataset_version"), r.get("province_code"))
+        wname = await _unit_name(conn, r.get("dataset_version"), r.get("ward_code"))
         return {"status": r["status"], "confidence_band": _band(r.get("confidence")),
                 "linked": linked, "customer_id": cid,
-                "resolution_id": r["id"], "may_bind": bool(eligible)}
+                "resolution_id": r["id"], "may_bind": bool(eligible),
+                "province_name": pname, "ward_name": wname}
     finally:
         await release(conn)
+
+
+async def _unit_name(conn, dataset_version, code) -> str | None:
+    """Ten canonical cua 1 don vi hanh chinh (public data) — cho clarify. None neu thieu code/dataset."""
+    if not (code and dataset_version):
+        return None
+    return await conn.fetchval(
+        "SELECT name FROM admin_unit WHERE dataset_version=$1 AND code=$2", dataset_version, code)

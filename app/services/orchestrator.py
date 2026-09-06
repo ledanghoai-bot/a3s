@@ -112,6 +112,50 @@ async def _llm_create(client, **kwargs):
     return await client.chat.completions.create(**kwargs)
 
 
+# M5 upgrade (Directive 214 §6.B + Q2 + Memo 213 §4-5): clarify-before-escalate. SERVER lam chu outcome
+# + dem luot; LLM chi DIEN DAT cau hoi. <=2 luot hoi lam ro/dia chi chua verify, giu bot ACTIVE; het luot
+# moi escalate. may_bind CHI tu server (auto_verified) — LLM khong the tu nang status/chon resolution.
+_ADDRESS_CLARIFY_MAX = 2
+
+
+async def _address_clarify(sender_id: str, vr: dict, prov_prop, ward_prop) -> dict | None:
+    """Tra tool-result huong dan LLM HOI khach xac nhan dia chi (server-owned). None = da het <=2 luot
+    (caller escalate). Dem luot keyed theo sender (attempt hien tai), TTL 30 phut."""
+    key = f"addr_clarify:{sender_id}"
+    r = await aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        n = await r.incr(key)
+        if n == 1:
+            await r.expire(key, 1800)
+    finally:
+        await r.aclose()
+    if n > _ADDRESS_CLARIFY_MAX:
+        return None  # het luot -> escalate (caller)
+    pname = vr.get("province_name") or (prov_prop if isinstance(prov_prop, str) else "")
+    wname = vr.get("ward_name") or (ward_prop if isinstance(ward_prop, str) else "")
+    predicted = ", ".join(x for x in (wname, pname) if x)
+    return {
+        "address_needs_clarification": True,
+        "resolver_outcome": vr.get("status"),
+        "predicted_admin": predicted or None,
+        "instruction": (
+            "Dia chi hanh chinh CHUA duoc xac minh tu dong. "
+            + (f"Du doan: {predicted}. HOI khach XAC NHAN co dung khong. " if predicted
+               else "HOI khach cho biet ro TINH va PHUONG/XA. ")
+            + "Neu chua dung, xin lai tinh/phuong. TUYET DOI CHUA tao don (chua goi lai create_order), "
+            "KHONG noi da tao don. Sau khi khach xac nhan/sua thi moi thu tao don lai."),
+    }
+
+
+async def _address_clarify_reset(sender_id: str) -> None:
+    """Xoa bo dem clarify (khi dia chi da verified/tao don thanh cong)."""
+    r = await aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        await r.delete(f"addr_clarify:{sender_id}")
+    finally:
+        await r.aclose()
+
+
 def _redis_key(sender_id: str) -> str:
     return f"chat:{sender_id}"
 
@@ -156,12 +200,29 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                         psid=sender_id, channel=(command_ctx or {}).get("channel"),
                         province_proposal=prov_prop, ward_proposal=ward_prop,
                         event_id=(command_ctx or {}).get("provider_message_id"))
-                    # M5 upgrade §6.C (sua F2): CHI khi server verify dia chi cua CHINH request nay
-                    # auto_verified (may_bind) moi truyen resolution REQUEST-SCOPED xuong Gate E de bind.
-                    # Non-may_bind -> khong truyen -> Gate E fail-closed (khong bind pointer cu khac phuong).
-                    # LLM khong the tu cap resolution id (chi lay tu ket qua server-side).
-                    if command_ctx is not None and vr.get("may_bind") and vr.get("resolution_id"):
-                        command_ctx["verified_resolution_id"] = vr["resolution_id"]
+                    # §6.C (sua F2): CHI khi server verify dia chi cua CHINH request nay auto_verified
+                    # (may_bind) moi truyen resolution REQUEST-SCOPED xuong Gate E de bind. LLM khong the
+                    # tu cap resolution id (chi lay tu ket qua server-side).
+                    if vr.get("may_bind") and vr.get("resolution_id"):
+                        if command_ctx is not None:
+                            command_ctx["verified_resolution_id"] = vr["resolution_id"]
+                        await _address_clarify_reset(sender_id)
+                    elif settings.enable_gate_e_order_wiring and "status" in vr:
+                        # §6.B (Q2 + Memo 213): dia chi CHUA verified nhung Gate E se bind -> CLARIFY truoc
+                        # khi tao don (khong tao don sai/khong bind pointer cu). Server dem <=2 luot, giu bot
+                        # active; het luot moi escalate. Order CHUA duoc tao o nhanh nay.
+                        clarify = await _address_clarify(sender_id, vr, prov_prop, ward_prop)
+                        if clarify is not None:
+                            return clarify  # LLM dien dat cau hoi xac nhan; order CHUA tao
+                        # Het <=2 luot khong giai duoc -> escalate that su (bounded sequence)
+                        await tools.escalate_to_human(
+                            psid=sender_id,
+                            reason="Dia chi khong xac minh duoc sau 2 luot lam ro",
+                            last_message=last_message)
+                        await _address_clarify_reset(sender_id)
+                        return {"address_unresolved_escalated": True,
+                                "instruction": ("Da chuyen nhan vien ho tro xac minh dia chi. Bao khach "
+                                                "doi phan hoi trong it phut. KHONG noi da tao don.")}
                 except Exception as e:  # noqa: BLE001 — never break the customer reply/order
                     print(f"[orchestrator] M5 live address verify skipped: {safe_exc(e)}")
             return await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
