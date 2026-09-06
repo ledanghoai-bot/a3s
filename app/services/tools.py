@@ -153,6 +153,32 @@ def _unit_price_for_quantity(tiers: list[asyncpg.Record], quantity: int) -> int 
     return max(applicable, key=lambda t: t["min_qty"])["unit_price_vnd"]
 
 
+def _gate_e_scope_ids() -> set[int]:
+    """Parse gate_e_canary_customer_ids (CSV) -> set[int]. Rong = khong ai."""
+    out: set[int] = set()
+    for tok in (settings.gate_e_canary_customer_ids or "").split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            out.add(int(tok))
+    return out
+
+
+async def _gate_e_pilot_route(psid: str, command_ctx: dict) -> bool:
+    """CA Directive 202: request co phai Gate E pilot path khong (server-side, KHONG tin body/LLM).
+    True khi: enable_gate_e_order_wiring BAT + channel telegram_customer + customer resolve tu psid da
+    xac thuc nam trong gate_e_canary_customer_ids. Short-circuit khi Gate E OFF (khong DB lookup)."""
+    if not settings.enable_gate_e_order_wiring:
+        return False
+    if command_ctx.get("channel") != "telegram_customer":
+        return False
+    conn = await acquire()
+    try:
+        cid = await conn.fetchval("SELECT id FROM customers WHERE psid=$1", psid)
+    finally:
+        await release(conn)
+    return cid is not None and cid in _gate_e_scope_ids()
+
+
 async def create_order(
     psid: str,
     customer_name: str,
@@ -174,20 +200,29 @@ async def create_order(
     + channel + actor), route qua command service (idempotent + atomic outbox + deterministic receipt).
     Mac dinh TAT -> giu nguyen luong legacy ben duoi. command_ctx=None -> luon legacy (backward-compat).
     """
-    if settings.m1_reliable_order_command and command_ctx is not None:
-        from app.services.command import order_gateway
-        if order_gateway.can_route(command_ctx.get("channel", "")):
-            return await order_gateway.create_order_command(
-                channel=command_ctx["channel"],
-                actor_type=command_ctx.get("actor_type", "customer"),
-                actor_id=command_ctx.get("actor_id", psid),
-                idempotency_key=command_ctx.get("idempotency_key"),  # None (AI) -> gateway derive (CR-04R)
-                provider_message_id=command_ctx.get("provider_message_id"),
-                customer_name=customer_name, phone=phone, address=address,
-                sku=sku, quantity=quantity, psid=psid,
-                conversation_id=command_ctx.get("conversation_id"),
-                causation_id=command_ctx.get("causation_id"),
-            )
+    # Routing (CA Directive 202): command bus khi (1) global M1 BAT, HOAC (2) dung Gate E pilot path
+    # (channel telegram_customer + enable_gate_e_order_wiring + customer server-resolved tu psid trong
+    # gate_e_canary_customer_ids). enable_address_resolver DON DOC KHONG chon command bus. Global M1=True giu
+    # nguyen hanh vi. Pilot da enroll: KHONG fallback legacy khi khong route duoc (fail-closed §4).
+    if command_ctx is not None:
+        pilot = (not settings.m1_reliable_order_command) and await _gate_e_pilot_route(psid, command_ctx)
+        if settings.m1_reliable_order_command or pilot:
+            from app.services.command import order_gateway
+            if order_gateway.can_route(command_ctx.get("channel", "")):
+                return await order_gateway.create_order_command(
+                    channel=command_ctx["channel"],
+                    actor_type=command_ctx.get("actor_type", "customer"),
+                    actor_id=command_ctx.get("actor_id", psid),
+                    idempotency_key=command_ctx.get("idempotency_key"),  # None (AI) -> gateway derive (CR-04R)
+                    provider_message_id=command_ctx.get("provider_message_id"),
+                    customer_name=customer_name, phone=phone, address=address,
+                    sku=sku, quantity=quantity, psid=psid,
+                    conversation_id=command_ctx.get("conversation_id"),
+                    causation_id=command_ctx.get("causation_id"),
+                )
+            if pilot:
+                # enrolled pilot nhung khong route duoc command bus -> tu choi, KHONG fallback legacy
+                return {"error": "gate-e pilot: khong route duoc command bus — tu choi (fail-closed)"}
 
     if quantity <= 0:
         return {"error": "So luong phai lon hon 0."}
