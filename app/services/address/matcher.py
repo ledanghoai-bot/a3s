@@ -14,12 +14,55 @@ Nguyen tac (Directive 108 + PO Decision #4):
 """
 from __future__ import annotations
 
+import re
+
 from app.services.address.acceptance_gate import normalize
 
 # base score theo kind match
 _KIND_SCORE = {"canonical": 1.00, "accentless": 0.97, "legacy": 0.90, "abbrev": 0.85, "other": 0.80}
 _LEGACY_KINDS = {"legacy", "abbrev", "other"}
 _LEVEL_ORDER = ("province", "district", "ward")
+
+# --- M5 upgrade (Directive 214 §6.A + Memo 213 §4): khop nhan-biet TIEN TO hanh chinh + VIET TAT ---
+# Bug F1 (PROVEN): dataset luu ten CO tien to ("Tinh Dak Lak", "Phuong Ea Kao") va matcher khop
+# NGUYEN CHUOI da normalize. Nen input tran "Dak Lak" (thieu "Tinh") hay viet tat "P. Ea Kao"
+# KHONG khop, du cung don vi hanh chinh. Fix: sinh KEY khop uu tien [dang-day-du, dang-tran] + mo
+# rong viet tat token hanh chinh dau cum. KHONG fuzzy tu che — chi chuan hoa xac dinh; alias cu/moi
+# van chi qua admin_unit_alias versioned.
+# Token viet tat (da normalize, khong dau cham) -> tien to day du.
+_ADMIN_ABBREV = {
+    "tp": "thanh pho", "t": "tinh", "p": "phuong", "q": "quan",
+    "h": "huyen", "x": "xa", "tt": "thi tran", "tx": "thi xa",
+}
+# Tien to hanh chinh (da normalize) de tao dang TRAN. Cum nhieu tu dat TRUOC de strip dung.
+_ADMIN_PREFIXES = ("thanh pho", "thi tran", "thi xa", "tinh", "phuong", "quan", "huyen", "xa")
+_ABBREV_RE = re.compile(r"^([a-z]{1,2})\.?\s+(.+)$")
+
+
+def _match_keys(name: str) -> list[str]:
+    """Sinh key khop theo THU TU UU TIEN: [dang-day-du-da-mo-viet-tat, dang-tran-bo-tien-to].
+
+    Vi du: "Tinh Dak Lak" -> ["tinh dak lak", "dak lak"]; "P. Ea Kao" -> ["phuong ea kao", "ea kao"];
+    "Dak Lak" -> ["dak lak"]. Uu tien dang day du de GIU tinh dac hieu (input "Phuong Tan Lap" khop
+    dung 1 phuong, KHONG roi xuong "tan lap" gay one_to_many voi cac "Xa Tan Lap"). Dung CHUNG ham nay
+    ca khi index dataset lan khi match input -> nhat quan hai phia (bai hoc tieng Viet CLAUDE.md).
+    """
+    n = normalize(name)
+    if not n:
+        return []
+    # Mo rong viet tat token dau ("p. ea kao"/"p ea kao" -> "phuong ea kao"); chi khi token la abbrev
+    # hanh chinh da biet (khong dung cham vao ten thuong nhu "Ea Kao").
+    m = _ABBREV_RE.match(n)
+    if m and m.group(1) in _ADMIN_ABBREV:
+        n = f"{_ADMIN_ABBREV[m.group(1)]} {m.group(2)}"
+    keys = [n]
+    for pre in _ADMIN_PREFIXES:
+        if n.startswith(pre + " "):
+            bare = n[len(pre) + 1:].strip()
+            if bare and bare not in keys:
+                keys.append(bare)
+            break
+    return keys
 
 
 def _effective(u: dict, as_of) -> bool:
@@ -41,31 +84,41 @@ def _index(units: list[dict], aliases: list[dict], level: str, as_of):
     for u in units:
         if u["level"] != level or u["code"] not in codes_ok:
             continue
-        idx.setdefault(normalize(u["name"]), []).append((u["code"], "canonical"))
+        # M5 upgrade A: index duoi CA dang day-du VA tran (bo tien to). _match uu tien key day du nen
+        # bare chi la fallback khi input tran -> khong lam mat tinh dac hieu.
+        for key in _match_keys(u["name"]):
+            idx.setdefault(key, []).append((u["code"], "canonical"))
     for a in aliases:
         if a["unit_code"] not in codes_ok:
             continue
-        n = normalize(a["alias_name"])
         # CA Review 126: alias trung canonical cua unit KHAC = ambiguity hop le -> GIU CA HAI candidate
         # (canonical KHONG am tham thang, khong lam mat candidate legacy). Collision -> one_to_many ->
         # needs_staff_review (hard rule, khong ha xuong customer confirmation).
         kind = a["alias_kind"] if a["alias_kind"] in _KIND_SCORE else "other"
-        idx.setdefault(n, []).append((a["unit_code"], kind))
+        for key in _match_keys(a["alias_name"]):
+            idx.setdefault(key, []).append((a["unit_code"], kind))
     return idx
 
 
 def _match(idx, name):
-    """Match 1 ten -> list[(code, kind)] duy nhat theo code (giu kind diem cao nhat)."""
+    """Match 1 ten -> list[(code, kind)] duy nhat theo code (giu kind diem cao nhat).
+
+    Thu KEY theo THU TU UU TIEN (_match_keys): dang day-du truoc, dang tran sau. Lay candidate tu
+    KEY DAU TIEN co ket qua -> input dac hieu ("Phuong Tan Lap") khong bi hoa lan voi cac don vi khac
+    cung ten tran ("Xa Tan Lap"). Chi roi xuong dang tran khi input von khong co tien to (vd "Dak Lak").
+    """
     if not name:
         return None  # cap khong duoc cung cap
-    cands = idx.get(normalize(name))
-    if not cands:
-        return []  # cung cap nhung khong tim thay -> fail-closed cap do
-    best: dict[str, str] = {}
-    for code, kind in cands:
-        if code not in best or _KIND_SCORE[kind] > _KIND_SCORE[best[code]]:
-            best[code] = kind
-    return [(c, k) for c, k in best.items()]
+    for key in _match_keys(name):
+        cands = idx.get(key)
+        if not cands:
+            continue
+        best: dict[str, str] = {}
+        for code, kind in cands:
+            if code not in best or _KIND_SCORE[kind] > _KIND_SCORE[best[code]]:
+                best[code] = kind
+        return [(c, k) for c, k in best.items()]
+    return []  # cung cap nhung khong tim thay o bat ky key nao -> fail-closed cap do
 
 
 def resolve(units, aliases, *, province, district, ward, as_of=None) -> dict:

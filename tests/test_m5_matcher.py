@@ -98,6 +98,69 @@ def test_legacy_alias_canonical_collision_ambiguous():
     assert r["province_code"] is None
 
 
+# --- M5 upgrade (Directive 214 §6.A): tien to hanh chinh + viet tat ---
+
+def _ds_pref():
+    """Fixture mo phong dataset v2 THAT: ten CO tien to hanh chinh ("Tinh ...", "Phuong ...")."""
+    units = [
+        {"level": "province", "code": "66", "name": "Tỉnh Đắk Lắk", "parent_code": None},
+        {"level": "province", "code": "44", "name": "Tỉnh Khác", "parent_code": None},
+        {"level": "ward", "code": "24169", "name": "Phường Ea Kao", "parent_code": "66"},
+        {"level": "ward", "code": "24121", "name": "Phường Tân Lập", "parent_code": "66"},
+        {"level": "ward", "code": "19462", "name": "Xã Tân Lập", "parent_code": "44"},
+    ]
+    aliases = [{"unit_code": "24169", "alias_name": "Xã Ea Kao", "alias_kind": "legacy"}]
+    return units, aliases
+
+
+def test_prod_regression_bare_prov_abbrev_ward_auto():
+    # Chinh ca that lam order #4 fail: "Dak Lak" (thieu "Tinh") + "P. Ea Kao" (viet tat) -> gio AUTO.
+    u, a = _ds_pref()
+    r = m.resolve(u, a, province="Dak Lak", district=None, ward="P. Ea Kao")
+    assert r["status"] == "auto_verified" and r["method"] == "current"
+    assert r["province_code"] == "66" and r["ward_code"] == "24169"
+    assert r["confidence"] == 1.0
+
+
+def test_prefixed_full_still_auto():
+    u, a = _ds_pref()
+    r = m.resolve(u, a, province="Tỉnh Đắk Lắk", district=None, ward="Phường Ea Kao")
+    assert r["status"] == "auto_verified" and r["ward_code"] == "24169"
+
+
+def test_abbrev_province_tinh():
+    u, a = _ds_pref()
+    r = m.resolve(u, a, province="T. Đắk Lắk", district=None, ward=None)
+    assert r["status"] == "auto_verified" and r["province_code"] == "66"
+
+
+def test_specificity_preserved_not_downgraded():
+    # "Phuong Tan Lap" phai khop DUNG 1 phuong (24121), KHONG roi xuong "tan lap" gay one_to_many
+    # voi "Xa Tan Lap" (19462) o tinh khac.
+    u, a = _ds_pref()
+    r = m.resolve(u, a, province="Đắk Lắk", district=None, ward="Phường Tân Lập")
+    assert r["status"] == "auto_verified" and r["ward_code"] == "24121"
+    assert not any(x.startswith("one_to_many") for x in r["rules_applied"])
+
+
+def test_old_name_alias_needs_confirmation():
+    # Ten cu "Xa Ea Kao" -> mapped nhung method legacy -> needs_customer_confirmation (khong auto).
+    u, a = _ds_pref()
+    r = m.resolve(u, a, province="Đắk Lắk", district=None, ward="Xã Ea Kao")
+    assert r["method"] == "legacy_mapping" and r["status"] == "needs_customer_confirmation"
+    assert r["ward_code"] == "24169"
+
+
+def test_bare_ambiguous_same_parent_staff():
+    # Hai phuong cung ten tran + cung parent -> input tran -> one_to_many -> staff (khong tu chon).
+    u, a = _ds_pref()
+    u.append({"level": "ward", "code": "24170", "name": "Xã Ea Kao", "parent_code": "66"})  # trung "ea kao"
+    r = m.resolve(u, a, province="Đắk Lắk", district=None, ward="Ea Kao")
+    assert r["status"] == "needs_staff_review"
+    assert any(x.startswith("one_to_many") for x in r["rules_applied"])
+    assert r["ward_code"] is None
+
+
 def test_duplicate_legacy_alias_stays_ambiguous():
     # CA Review 122: ten xa cu trung giua nhieu don vi -> nhieu candidate -> KHONG auto-select.
     units = [
