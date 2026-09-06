@@ -40,6 +40,35 @@ def validate_transition(current: str, new: str) -> None:
         raise ValueError(f"Khong the chuyen nguoc tu '{current}' ve '{new}'.")
 
 
+async def has_recent_order(psid: str, minutes: int = 120) -> bool:
+    """True neu khach (theo psid) co don tao trong `minutes` phut gan day.
+
+    Dung cho GUARD CHONG BIA DON trong orchestrator: create_order chi chay MOT lan
+    (luot dat don), nhung o cac luot SAU khach van co the nhac lai don vua tao
+    ("don cua em xong chua", "giao toi dia chi X nhe") va model nhac lai "da tao
+    don" — dieu do DUNG SU THAT, khong phai bia. Chi khi khach KHONG co don that
+    nao gan day ma model van bao "da tao don" thi moi la bia (DB rong). Tuong minh
+    theo psid (khong suy tu prefix) — bai hoc CLAUDE.md.
+    """
+    conn = await acquire()
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT 1
+            FROM orders o
+            JOIN customers cu ON cu.id = o.customer_id
+            WHERE cu.psid = $1
+              AND o.created_at >= now() - make_interval(mins => $2)
+            LIMIT 1
+            """,
+            psid,
+            minutes,
+        )
+        return row is not None
+    finally:
+        await release(conn)
+
+
 async def list_orders(limit: int = 200) -> list[dict]:
     conn = await acquire()
     try:

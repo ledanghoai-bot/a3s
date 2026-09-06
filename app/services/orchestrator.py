@@ -20,7 +20,7 @@ import redis.asyncio as aioredis
 from openai import AsyncOpenAI
 
 from app.config import settings
-from app.services import conversation_log, data_deletion, handoff, products, tools
+from app.services import conversation_log, data_deletion, handoff, orders, products, tools
 from app.services.address import live_verify as address_live_verify
 from app.services.messenger_profile import get_user_profile
 from app.services.nlu_hint import get_nlu_hint
@@ -342,6 +342,13 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 tool_choice="auto",
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.1,
+                # deepseek-v4-flash la REASONING model: mac dinh sinh reasoning_content truoc
+                # content/tool_calls, tinh vao max_tokens VA lam cham (den 3 phut/tin qua nhieu vong
+                # tool). Luong ban hang cua ta chu yeu GOI TOOL, khong can suy luan sau -> TAT thinking:
+                # nhanh ~4x, het truncation 'length' (khong con reply rong), giam bia don. Probe da xac
+                # nhan tool-calling van fire binh thuong khi disabled. reasoning_effort='none' cung tat
+                # duoc; dung struct thinking cho tuong minh.
+                extra_body={"thinking": {"type": "disabled"}},
             )
             message = response.choices[0].message
             finish_reason = response.choices[0].finish_reason
@@ -453,11 +460,21 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # bia (da gap that: bot tu che "Ma don #3" ma khong goi tool -> DB khong co
         # don, khach tuong da mua). Chuyen human that su + tra loi an toan, KHONG de
         # khach tin nham la da dat hang thanh cong.
-        if not created_order_ids and _reply_claims_order_created(reply):
+        # Grounding chong FALSE-POSITIVE: neu khach co don THAT gan day (luot truoc vua
+        # tao), viec model nhac lai "da tao don" o luot sau la DUNG, khong phai bia ->
+        # KHONG escalate/pause. Chi escalate khi khach bao da tao don ma KHONG co don
+        # nao ca (create_order khong chay luot nay VA khong co don gan day) => bia that.
+        claims_order = not created_order_ids and _reply_claims_order_created(reply)
+        if claims_order:
+            try:
+                claims_order = not await orders.has_recent_order(sender_id)
+            except Exception as e:  # noqa: BLE001 - loi tra cuu khong duoc lam sap luong
+                print(f"[orchestrator] has_recent_order loi, giu guard: {safe_exc(e)}")
+        if claims_order:
             # M3-S4: KHONG in noi dung reply (ngu canh xac nhan don thuong chua ten/tien) — metadata.
             print(
                 f"[orchestrator] CHAN BIA DON: reply bao da tao don nhung khong co "
-                f"create_order thanh cong trong luot nay. sender={sender_id} "
+                f"don that nao (luot nay + gan day). sender={sender_id} "
                 f"reply_len={len(reply)}"
             )
             try:
