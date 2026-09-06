@@ -107,7 +107,8 @@ async def verify_and_link(*, psid: str, channel: str | None, province_proposal, 
                 conn, subject_type="customer", subject_id=str(cid), province=prov, ward=ward,
                 actor=f"live-verify:{channel}", reason="telegram-live-verify",
                 ticket=f"LIVEVERIFY:{event_id}", idempotency_key=idem)
-            if await _link_eligible(conn, r):
+            eligible = await _link_eligible(conn, r)
+            if eligible:
                 cur_rid = await conn.fetchval(
                     "SELECT current_address_resolution_id FROM customers WHERE id=$1", cid)
                 cur_seq = -1
@@ -126,7 +127,12 @@ async def verify_and_link(*, psid: str, channel: str | None, province_proposal, 
                                "dataset_version": r["dataset_version"], "event_seq": seq},
                         reason="telegram-live-verify")
                     linked = True
+        # M5 upgrade (Directive 214 §6.C + Q2): tra resolution_id REQUEST-SCOPED + may_bind (server-owned).
+        # may_bind = eligible (auto_verified + du province+ward + dataset active v2). Chi khi may_bind thi
+        # orchestrator moi truyen verified_resolution_id xuong Gate E de bind (sua F2). resolution_id van
+        # tra ve du non-may_bind (lam bang chung), nhung KHONG duoc bind.
         return {"status": r["status"], "confidence_band": _band(r.get("confidence")),
-                "linked": linked, "customer_id": cid}
+                "linked": linked, "customer_id": cid,
+                "resolution_id": r["id"], "may_bind": bool(eligible)}
     finally:
         await release(conn)

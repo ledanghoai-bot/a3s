@@ -274,25 +274,28 @@ def _gate_e_scope() -> set[int]:
 
 
 async def _maybe_bind_gate_e(conn, env: CommandEnvelope, order_id: int, customer_id: int | None) -> None:
-    """M5 Gate E (CA Directive 190): trong CUNG transaction tao don, bind verified resolution + snapshot bat
-    bien khi selector ON + kill switch OFF + customer trong canary scope + customer co
-    current_address_resolution_id (server-side, KHONG lay tu request body -> body khong the chon owner, §4.1).
-    Bind loi -> BindingError propagate -> _run_winner vo -> rollback CA don (fail-closed, §4.4/§4.7)."""
+    """M5 Gate E (CA Directive 190, sua F2 theo Directive 214 §6.C + Q3): trong CUNG transaction tao don,
+    bind resolution REQUEST-SCOPED (env.verified_resolution_id — server chi set khi da verify dia chi cua
+    CHINH request nay auto_verified) + snapshot bat bien, khi selector ON + kill OFF + customer trong
+    canary scope. KHONG con doc customers.current_address_resolution_id (pointer CU): dia chi request hien
+    tai fail/chua verify thi KHONG bind pointer cu khac phuong (zero verified delta — sua F2).
+    Bind loi -> BindingError -> _run_winner vo -> rollback CA don (fail-closed §4.4/§4.7)."""
     if not settings.enable_gate_e_order_wiring:
         return  # OFF (default): hanh vi legacy y het, KHONG snapshot, KHONG coi free-text la verified (§4.8)
     if settings.gate_e_kill_switch:
         return  # kill switch engaged: chan MOI bind moi o request boundary ke tiep (§4.9)
     if customer_id is None or customer_id not in _gate_e_scope():
         return  # ngoai canary scope -> hanh vi legacy (§4.8)
-    rid = await conn.fetchval(
-        "SELECT current_address_resolution_id FROM customers WHERE id=$1", customer_id)
-    if rid is None:
-        # Trong canary scope (selector ON, kill OFF) NHUNG khach chua co verified resolution linked
-        # (server-side): fail-closed — KHONG tao don khong verified (§5.4). Ngoai scope moi la legacy
-        # passthrough; da o trong scope thi enrollment = yeu cau verified address.
+    rid = env.verified_resolution_id  # request-scoped (Q3), KHONG phai pointer cu cua khach
+    if not rid:
+        # Trong canary scope (selector ON, kill OFF) NHUNG request KHONG co verified resolution scope
+        # (dia chi hien tai chua auto_verified / chua confirm): fail-closed — KHONG tao don khong verified,
+        # KHONG bind pointer cu (§5.4 + F2). Enrollment = yeu cau dia chi cua request nay verified.
         raise order_binding.BindingError(
-            "gate-e: khach trong canary scope nhung chua co verified resolution — tu choi (fail-closed)")
+            "gate-e: request chua co verified resolution scope — tu choi (fail-closed, khong bind pointer cu)")
     atype, aref, _ = _audit_actor(env)
+    # bind_in_order_tx -> _validate_for_bind kiem tra status verified + owner == order.customer_id
+    # (order_binding._assert_owns_order) -> resolution khong thuoc khach nay hoac chua verified se bi tu choi.
     await order_binding.bind_in_order_tx(
         conn, order_id=order_id, resolution_id=str(rid), actor=(aref or "system"),
         reason="gate-e-order-wiring", ticket=f"GATEE:{env.command_id}")

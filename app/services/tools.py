@@ -219,6 +219,9 @@ async def create_order(
                     sku=sku, quantity=quantity, psid=psid,
                     conversation_id=command_ctx.get("conversation_id"),
                     causation_id=command_ctx.get("causation_id"),
+                    # M5 §6.C: resolution request-scoped (chi set khi server verify dia chi request nay
+                    # auto_verified) -> Gate E bind CHINH no, KHONG doc pointer cu (sua F2).
+                    verified_resolution_id=command_ctx.get("verified_resolution_id"),
                 )
             if pilot:
                 # enrolled pilot nhung khong route duoc command bus -> tu choi, KHONG fallback legacy

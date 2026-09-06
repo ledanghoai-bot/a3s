@@ -152,10 +152,16 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
             # bat NGOAI transaction verify). C3: KHONG fallback sender_id — thieu event id that thi verify skip.
             if settings.enable_address_resolver:
                 try:
-                    await address_live_verify.verify_and_link(
+                    vr = await address_live_verify.verify_and_link(
                         psid=sender_id, channel=(command_ctx or {}).get("channel"),
                         province_proposal=prov_prop, ward_proposal=ward_prop,
                         event_id=(command_ctx or {}).get("provider_message_id"))
+                    # M5 upgrade §6.C (sua F2): CHI khi server verify dia chi cua CHINH request nay
+                    # auto_verified (may_bind) moi truyen resolution REQUEST-SCOPED xuong Gate E de bind.
+                    # Non-may_bind -> khong truyen -> Gate E fail-closed (khong bind pointer cu khac phuong).
+                    # LLM khong the tu cap resolution id (chi lay tu ket qua server-side).
+                    if command_ctx is not None and vr.get("may_bind") and vr.get("resolution_id"):
+                        command_ctx["verified_resolution_id"] = vr["resolution_id"]
                 except Exception as e:  # noqa: BLE001 — never break the customer reply/order
                     print(f"[orchestrator] M5 live address verify skipped: {safe_exc(e)}")
             return await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)

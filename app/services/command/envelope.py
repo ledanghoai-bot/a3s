@@ -52,6 +52,11 @@ class CommandEnvelope:
     request_hash: str
     payload: dict[str, Any]          # normalized FULL (in-memory)
     stored_payload: dict[str, Any]   # allowlist (persisted)
+    # M5 upgrade (Directive 214 §6.C + Q3): resolution REQUEST-SCOPED de bind Gate E. KHONG vao
+    # request_hash (khong doi idempotency), KHONG persist (binding directive tam thoi trong RAM). Chi
+    # duoc set khi server verify dia chi cua CHINH request nay auto_verified (may_bind). None => Gate E
+    # fail-closed (khong bind pointer cu — sua F2).
+    verified_resolution_id: str | None = None
 
     def validate(self) -> None:
         if self.channel not in CHANNELS:
@@ -101,9 +106,13 @@ def build_order_create_envelope(
     correlation_id: str | None = None,
     causation_id: str | None = None,
     command_id: str | None = None,
+    verified_resolution_id: str | None = None,
 ) -> CommandEnvelope:
     """Dung envelope order.create v1 tu input tho + trusted context. Validate + hash.
-    Raise CommandError khi payload/channel/actor invalid (KHONG tao order)."""
+    Raise CommandError khi payload/channel/actor invalid (KHONG tao order).
+
+    verified_resolution_id (M5 §6.C): resolution request-scoped de Gate E bind; KHONG anh huong
+    request_hash/stored_payload."""
     if channel not in CHANNELS:
         raise errors.CommandError(errors.INVALID_ENVELOPE, f"channel khong hop le: {channel}")
     if actor.type not in ACTOR_TYPES or not actor.id:
@@ -134,6 +143,7 @@ def build_order_create_envelope(
         request_hash=request_hash,
         payload=normalized,
         stored_payload=stored,
+        verified_resolution_id=verified_resolution_id,
     )
     env.validate()
     return env
