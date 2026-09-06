@@ -29,9 +29,13 @@ from app.services.address import dataset_registry as reg
 from app.services.address import resolver
 
 TELEGRAM_CUSTOMER_CHANNEL = "telegram_customer"
+# M5 upgrade (Directive 214 §6.E): live verify chay tren CA HAI kenh khach. Core contract giong nhau;
+# chi adapter event/idempotency khac (Telegram co message-id so tang dan -> latest-event theo so;
+# Messenger mid opaque -> latest-event dua vao khoa customer FOR UPDATE, last-write-wins trong lock).
+_CUSTOMER_CHANNELS = frozenset({"telegram_customer", "messenger"})
 _MAX_NAME = 120
-_EVENT_RE = re.compile(r"^tg:(\d+)$")  # dinh dang event id Telegram that: 'tg:<message_id>'
-_TRAILING_INT = re.compile(r"(\d+)$")  # so cuoi cua idempotency_key da luu = message-id
+_TG_EVENT_RE = re.compile(r"^tg:(\d+)$")  # Telegram: 'tg:<message_id>' (co thu tu so)
+_TRAILING_INT = re.compile(r"(\d+)$")  # so cuoi cua idempotency_key da luu = message-id (chi Telegram)
 
 
 def _clean_name(v) -> str | None:
@@ -44,12 +48,17 @@ def _clean_name(v) -> str | None:
     return s
 
 
-def _event_seq(event_id) -> int | None:
-    """Validate + trich so thu tu (message-id) tu event id Telegram 'tg:<so>'. Sai dang -> None (C3)."""
-    if not isinstance(event_id, str):
-        return None
-    m = _EVENT_RE.match(event_id.strip())
-    return int(m.group(1)) if m else None
+def _event_ok(event_id, channel) -> tuple[bool, int | None]:
+    """(valid, seq) theo kenh (§6.E). Telegram: 'tg:<so>' -> (True, so). Messenger: mid string khong rong
+    -> (True, None) (khong thu tu so; latest-event dua vao lock). Sai/thieu -> (False, None) (C3)."""
+    if not isinstance(event_id, str) or not event_id.strip():
+        return (False, None)
+    if channel == TELEGRAM_CUSTOMER_CHANNEL:
+        m = _TG_EVENT_RE.match(event_id.strip())
+        return (True, int(m.group(1))) if m else (False, None)
+    if channel == "messenger":
+        return (True, None)  # mid opaque hop le neu khong rong
+    return (False, None)
 
 
 def _band(conf) -> str:
@@ -80,13 +89,13 @@ async def verify_and_link(*, psid: str, channel: str | None, province_proposal, 
                           event_id) -> dict:
     """Verify de xuat + auto-link neu du dieu kien. Tra metrics an toan (route/band/linked) — KHONG raw
     address/customer/psid. Co the raise (caller nuot NGOAI transaction). Flag da duoc caller kiem tra."""
-    # C3: bat buoc event id that (khong fallback) — thieu/sai -> skip
-    seq = _event_seq(event_id)
-    if seq is None:
-        return {"skipped": "bad_event_id"}
-    # C2: chi kenh Telegram khach
-    if channel != TELEGRAM_CUSTOMER_CHANNEL:
+    # C2: chi kenh khach ho tro (Telegram + Messenger, §6.E)
+    if channel not in _CUSTOMER_CHANNELS:
         return {"skipped": "channel_not_eligible"}
+    # C3: bat buoc event id that theo kenh (khong fallback) — thieu/sai -> skip
+    ev_ok, seq = _event_ok(event_id, channel)
+    if not ev_ok:
+        return {"skipped": "bad_event_id"}
     prov = _clean_name(province_proposal)
     ward = _clean_name(ward_proposal)
     if not prov:  # resolver fail-closed neu thieu province -> bo qua som
@@ -109,15 +118,21 @@ async def verify_and_link(*, psid: str, channel: str | None, province_proposal, 
                 ticket=f"LIVEVERIFY:{event_id}", idempotency_key=idem)
             eligible = await _link_eligible(conn, r)
             if eligible:
-                cur_rid = await conn.fetchval(
-                    "SELECT current_address_resolution_id FROM customers WHERE id=$1", cid)
-                cur_seq = -1
-                if cur_rid is not None:
-                    cur_key = await conn.fetchval(
-                        "SELECT idempotency_key FROM address_resolution WHERE id=$1", cur_rid)
-                    m = _TRAILING_INT.search(cur_key or "")
-                    cur_seq = int(m.group(1)) if m else -1
-                if seq > cur_seq:  # chi link khi event moi hon event dang link
+                # Latest-event guard theo kenh (§6.E): Telegram (seq int) chi link khi event moi hon
+                # event dang link (so message-id); Messenger (seq None, mid opaque) -> last-write-wins
+                # trong lock customer FOR UPDATE (khong so sanh so).
+                do_update = True
+                if seq is not None:
+                    cur_rid = await conn.fetchval(
+                        "SELECT current_address_resolution_id FROM customers WHERE id=$1", cid)
+                    cur_seq = -1
+                    if cur_rid is not None:
+                        cur_key = await conn.fetchval(
+                            "SELECT idempotency_key FROM address_resolution WHERE id=$1", cur_rid)
+                        m = _TRAILING_INT.search(cur_key or "")
+                        cur_seq = int(m.group(1)) if m else -1
+                    do_update = seq > cur_seq
+                if do_update:
                     await conn.execute(
                         "UPDATE customers SET current_address_resolution_id=$2::uuid WHERE id=$1", cid, r["id"])
                     await audit_service.record(

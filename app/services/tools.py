@@ -163,13 +163,19 @@ def _gate_e_scope_ids() -> set[int]:
     return out
 
 
+# M5 upgrade (Directive 214 §6.E): tester path chay tren CA HAI kenh khach (Telegram + Messenger).
+# Allowlist la customer_id (doc lap kenh); chi cong kenh la khac. Danh tinh khach van resolve server-side
+# tu psid (khong tin body/LLM); non-tester khong vao duoc (customer_id khong trong scope).
+_M5_TESTER_CHANNELS = frozenset({"telegram_customer", "messenger"})
+
+
 async def _gate_e_pilot_route(psid: str, command_ctx: dict) -> bool:
-    """CA Directive 202: request co phai Gate E pilot path khong (server-side, KHONG tin body/LLM).
-    True khi: enable_gate_e_order_wiring BAT + channel telegram_customer + customer resolve tu psid da
-    xac thuc nam trong gate_e_canary_customer_ids. Short-circuit khi Gate E OFF (khong DB lookup)."""
+    """CA Directive 202 + 214 §6.E: request co phai Gate E pilot path khong (server-side, KHONG tin body/LLM).
+    True khi: enable_gate_e_order_wiring BAT + channel la kenh khach ho tro (telegram_customer|messenger) +
+    customer resolve tu psid da xac thuc nam trong gate_e_canary_customer_ids. Short-circuit khi Gate E OFF."""
     if not settings.enable_gate_e_order_wiring:
         return False
-    if command_ctx.get("channel") != "telegram_customer":
+    if command_ctx.get("channel") not in _M5_TESTER_CHANNELS:
         return False
     conn = await acquire()
     try:
