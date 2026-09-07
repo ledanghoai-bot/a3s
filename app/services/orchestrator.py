@@ -244,9 +244,14 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                             # request_hash + input cua order_fingerprint. Chi khi may_bind (dia chi request nay
                             # da auto_verified) moi co du ma.
                             from app.services.command import order_intent as _oi
+                            # CA 225-06: canonical delivery-detail (bo thanh phan hanh chinh da resolve) —
+                            # KHONG hash raw address (con chua province/ward text) -> 'P. Ea Kao' == 'Phuong
+                            # Ea Kao' sau verify -> cung fingerprint (case 17). Ten canonical tu vr (server).
+                            _detail = _oi.canonical_delivery_detail(
+                                args.get("address"), vr.get("province_name"), vr.get("ward_name"))
                             command_ctx["verified_address_fingerprint"] = _oi.verified_address_fingerprint(
                                 vr.get("dataset_version"), vr.get("province_code"), vr.get("ward_code"),
-                                args.get("address"))
+                                _detail)
                         await _address_clarify_reset(sender_id, prov_prop, ward_prop)
                     elif settings.enable_gate_e_order_wiring and "status" in vr:
                         # §6.B (Q2 + Memo 213): dia chi CHUA verified nhung Gate E se bind -> CLARIFY truoc

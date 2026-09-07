@@ -9,6 +9,7 @@ o buoc sau.
 from __future__ import annotations
 
 import hashlib
+import re
 
 from app.services.address.acceptance_gate import normalize
 
@@ -41,6 +42,47 @@ def can_transition(frm: str, to: str) -> bool:
 def _h(*parts: str) -> str:
     """sha256 mot chieu tren cac phan da normalize (join bang | de tranh nhap nhang bien)."""
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+# --- Canonical delivery-detail extraction (CA Review 225-06) ---
+# Bo cac thanh phan hanh chinh DA RESOLVE (ten canonical + dang bare + prefix/viet tat) khoi dia chi
+# free-text -> chi con so nha/duong. TAT DINH: cung vi tri qua bien the chinh ta/viet tat (P./Phuong,
+# co/khong dau) -> cung detail -> cung fingerprint (case 17). Khac so nha/duong cung phuong -> khac
+# detail (case 16). KHONG chua ten hanh chinh -> fingerprint on dinh khi dataset doi ten cap tren.
+_ADMIN_LEADING = ("thanh pho", "thi xa", "thi tran", "tinh", "quan", "huyen", "phuong", "xa",
+                  "tp", "tx", "tt")
+# Token CHAC CHAN hanh chinh, an toan bo sau khi da go ten (KHONG go token da nghia nhu thanh/pho/thi/
+# tran/h/x/t vi co the la ten duong).
+_ADMIN_DROP_TOKENS = frozenset({"phuong", "quan", "huyen", "xa", "tinh", "p", "q", "tp", "tx", "tt", "kp"})
+
+
+def _strip_leading_admin(nn: str) -> str:
+    """'phuong ea kao' -> 'ea kao'; 'tinh dak lak' -> 'dak lak'. Tra nguyen neu khong co prefix."""
+    for pre in _ADMIN_LEADING:
+        if nn.startswith(pre + " "):
+            return nn[len(pre) + 1:]
+    return nn
+
+
+def canonical_delivery_detail(address: str | None, province_name: str | None = None,
+                              ward_name: str | None = None, district_name: str | None = None) -> str:
+    """Trich delivery-detail canonical tu dia chi free-text + ten hanh chinh DA RESOLVE (server-side).
+    Dung LAM delivery_detail cho verified_address_fingerprint (thay raw address) -> fingerprint semantic
+    canonical (CA 225-06). Chi goi khi da co ten canonical tu resolver (khong doan mo)."""
+    n = normalize(address or "")
+    phrases: list[str] = []
+    for nm in (province_name, district_name, ward_name):
+        if not nm:
+            continue
+        nn = normalize(nm)
+        phrases.append(nn)
+        bare = _strip_leading_admin(nn)
+        if bare and bare != nn:
+            phrases.append(bare)
+    for ph in sorted(set(phrases), key=len, reverse=True):
+        n = re.sub(r"\b" + re.escape(ph) + r"\b", " ", n)
+    toks = [t for t in re.split(r"[^a-z0-9]+", n) if t and t not in _ADMIN_DROP_TOKENS]
+    return " ".join(toks).strip()
 
 
 def verified_address_fingerprint(dataset_version: str, province_code: str, ward_code: str,
