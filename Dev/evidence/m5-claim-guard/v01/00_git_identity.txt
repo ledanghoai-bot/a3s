@@ -1,0 +1,7 @@
+directive: CA 238
+base/merge-base (deployed baseline): 778002d7b135e74d67dae49e47452f84e96aa415
+candidate head (=tip): c159d1453d477451bcb023513952b04793185a5b
+candidate tree: bf97fd990b5262bd0caf461e997f161f98ec4a48
+branch: feat/m5-claim-guard-server-state
+delta vs deployed: 3 files (orchestrator.py, system_prompt.md, m5_claim_guard_dod_harness.py); NO migration change (059-061 unchanged, AC-6)
+generated: 2026-09-07T22:55:56Z

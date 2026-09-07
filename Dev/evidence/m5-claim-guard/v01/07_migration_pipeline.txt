@@ -1,0 +1,7 @@
+### fresh apply 001..061 (migrations UNCHANGED from 237/238 baseline) ###
+  validation OK: scripts/operational_seed_validation.sql
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+### idempotent ###
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).

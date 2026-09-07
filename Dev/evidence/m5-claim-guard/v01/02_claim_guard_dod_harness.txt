@@ -1,0 +1,38 @@
+[orchestrator] claim_guard (server-state-aware): cid:0c64157d8211 state=open reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=330 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-1 COLLECTING claim -> state giữ COLLECTING, no escalate :: state=COLLECTING esc=0
+[orchestrator] server-extract READY -> summary armed cid:0c64157d8211
+  [PASS] DoD-1 cùng intent tiếp tục -> READY :: READY_TO_COMMIT
+[orchestrator] claim_guard (server-state-aware): cid:ce824fb3402e state=open reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=62 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-2 ADDRESS_CHECK claim -> draft giữ (open), no escalate :: ADDRESS_CHECK
+[orchestrator] claim_guard (server-state-aware): cid:41d488106301 state=open reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=46 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-3 NEEDS_CLARIFICATION claim -> giữ nguyên, no escalate :: NEEDS_CLARIFICATION
+[orchestrator] server-extract READY -> summary armed cid:bc81d685945f
+  [PASS] DoD-4 setup READY
+[orchestrator] claim_guard (server-state-aware): cid:bc81d685945f state=ready reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=44 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-4 READY claim -> confirm prompt, KHÔNG commit, no escalate :: orders=0 state=READY_TO_COMMIT
+[cmd] {"event": "order.create.succeeded", "command_id": "7b86bc71-6194-450c-8b52-a80555fe61c4", "correlation_id": "a30a8ba3-9da9-42ec-98c9-e07f7716ae61", "causation_id": null, "channel": "telegram_customer", "resource_id": 392}
+[orchestrator] server confirm->commit order_committed cid:bc81d685945f
+  [PASS] DoD-5 setup COMMITTED
+[orchestrator] claim_guard (server-state-aware): cid:bc81d685945f state=committed reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=36 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-5 post-COMMITTED claim -> neutral, no escalate, no extra order :: orders=1 esc=0
+[orchestrator] claim_guard (server-state-aware): cid:9738e26b7070 state=none reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=41 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-6 baseless claim -> correction, no order/intent/escalation :: intents=0 esc=0
+[orchestrator] claim_guard (server-state-aware): cid:9738e26b7070 state=none reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=34 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-7 baseless claim lần 2 -> vẫn KHÔNG admin notify (structured log để quan sát) :: esc=0
+  [PASS] DoD-8 wants_human -> escalate ĐÚNG 1 lần :: esc=1
+[orchestrator] server-extract READY -> summary armed cid:5e8929c64d0d
+  [PASS] DoD-9a cancel -> CANCELLED :: CANCELLED
+[orchestrator] server-extract READY -> summary armed cid:5e8929c64d0d
+[cmd] {"event": "order.create.succeeded", "command_id": "2b0bce3e-fdb5-4f59-a4bb-2c6a2c559306", "correlation_id": "f1f8649f-1f3a-4386-9b86-0932d1cbecb6", "causation_id": null, "channel": "telegram_customer", "resource_id": 393}
+[orchestrator] server confirm->commit order_committed cid:5e8929c64d0d
+  [PASS] DoD-9b valid confirm -> commit ĐÚNG 1 order :: 1
+  [PASS] DoD-10 nhánh order-claim guard KHÔNG gọi escalate_to_human/terminalize
+
+RESULT: ALL PASS
