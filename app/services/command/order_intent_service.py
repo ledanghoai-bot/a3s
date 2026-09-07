@@ -29,13 +29,64 @@ async def create_intent(conn, *, customer_id: int, conversation_id, channel: str
     return dict(row)
 
 
+# Cot draft + summary (CA 232 §3/§6). draft_address = PROTECTED business data (khong in raw ra log/evidence).
+_DRAFT_COLS = ("draft_sku,draft_quantity,draft_customer_name,draft_phone,draft_address,"
+               "summary_version,summary_fingerprint")
+_DRAFT_FIELDS = ("sku", "quantity", "customer_name", "phone", "address")
+
+
+def draft_complete(row: dict) -> bool:
+    """True neu draft du field bat buoc de commit (SKU/qty/contact/address). Chi kiem tra ton tai."""
+    return all(row.get(f"draft_{f}") not in (None, "") for f in _DRAFT_FIELDS)
+
+
 async def get_intent(conn, intent_id, *, for_update: bool = False) -> dict | None:
     q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
-         "verified_address_fingerprint,verified_resolution_id,committed_order_id,terminal_reason,error_code "
-         "FROM order_intents WHERE id=$1")
+         "verified_address_fingerprint,verified_resolution_id,committed_order_id,terminal_reason,error_code,"
+         f"{_DRAFT_COLS} FROM order_intents WHERE id=$1")
     if for_update:
         q += " FOR UPDATE"
     row = await conn.fetchrow(q, intent_id)
+    return dict(row) if row else None
+
+
+async def update_draft(conn, intent_id, *, expected_version: int, sku=None, quantity=None,
+                       customer_name=None, phone=None, address=None) -> dict | None:
+    """CA 232 §3: luu/ghi de field draft server-owned (COALESCE: chi doi field co gia tri moi; field khach
+    cung cap moi thay the field cu). Optimistic version (compare-and-set). Tra row moi hoac None (version
+    lech). state_version TANG de bat ky readiness/summary cu bi vo hieu (§3)."""
+    row = await conn.fetchrow(
+        "UPDATE order_intents SET state_version=state_version+1, "
+        "draft_sku=COALESCE($3,draft_sku), draft_quantity=COALESCE($4,draft_quantity), "
+        "draft_customer_name=COALESCE($5,draft_customer_name), draft_phone=COALESCE($6,draft_phone), "
+        "draft_address=COALESCE($7,draft_address) "
+        "WHERE id=$1 AND state_version=$2 "
+        f"RETURNING id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
+        f"verified_address_fingerprint,verified_resolution_id,committed_order_id,{_DRAFT_COLS}",
+        intent_id, expected_version, sku, quantity, customer_name, phone, address)
+    return dict(row) if row else None
+
+
+async def clear_address_binding(conn, intent_id, *, expected_version: int) -> dict | None:
+    """CA 232 §3/§5: dia chi doi -> XOA verified binding/fingerprint cu truoc khi verify lai (khong bind
+    pointer cu). Optimistic version."""
+    row = await conn.fetchrow(
+        "UPDATE order_intents SET state_version=state_version+1, verified_resolution_id=NULL, "
+        "verified_address_fingerprint=NULL, summary_version=NULL, summary_fingerprint=NULL "
+        "WHERE id=$1 AND state_version=$2 RETURNING id,state,state_version",
+        intent_id, expected_version)
+    return dict(row) if row else None
+
+
+async def present_summary(conn, intent_id, *, expected_version: int, order_fingerprint: str) -> dict | None:
+    """CA 232 §6: server VUA present deterministic summary READY -> ghi summary_version + fingerprint. Xac
+    nhan sau do CHI hop le neu intent VAN o dung version/fingerprint nay (correction doi fingerprint -> vo
+    hieu). KHONG doi state_version (chi danh dau da present)."""
+    row = await conn.fetchrow(
+        "UPDATE order_intents SET summary_version=$3, summary_fingerprint=$4, summary_presented_at=now() "
+        "WHERE id=$1 AND state_version=$2 AND state='READY_TO_COMMIT' "
+        "RETURNING id,state,state_version,summary_version,summary_fingerprint",
+        intent_id, expected_version, expected_version, order_fingerprint)
     return dict(row) if row else None
 
 
@@ -44,8 +95,8 @@ async def find_open_intent(conn, *, customer_id: int, conversation_id,
     """Tim intent OPEN HIEN TAI cho (customer, conversation) — "prospective order dang mo" (CA 225-01).
     Correction cap nhat CHINH intent nay. Unique index oi_one_open_per_conversation bao dam <=1 open."""
     q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
-         "verified_address_fingerprint,verified_resolution_id,committed_order_id,"
-         "(expires_at IS NOT NULL AND expires_at < now()) AS is_expired FROM order_intents "
+         "verified_address_fingerprint,verified_resolution_id,committed_order_id,summary_presented_at,"
+         f"{_DRAFT_COLS},(expires_at IS NOT NULL AND expires_at < now()) AS is_expired FROM order_intents "
          "WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 "
          "AND state = ANY($3::text[]) ORDER BY created_at DESC LIMIT 1")
     if for_update:

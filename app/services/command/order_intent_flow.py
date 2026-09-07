@@ -91,6 +91,54 @@ async def drive(*, customer_id: int | None, conversation_id, channel: str, order
             await release(conn)
 
 
+async def try_server_commit(*, customer_id: int | None, conversation_id, channel: str, actor_id: str,
+                            provider_message_id: str | None) -> dict | None:
+    """CA Directive 232 §6: SERVER tu chot READY draft khi khach xac nhan TUONG MINH — KHONG doi model goi
+    create_order. Caller (orchestrator) da xac dinh tin nhan la high-precision confirmation TRUOC khi goi.
+
+    Chi commit khi DONG THOI: intent open = READY_TO_COMMIT + draft du field + summary da present khop DUNG
+    state_version + order_fingerprint hien tai (correction sau summary -> version/fingerprint doi -> stale ->
+    KHONG commit). Xay envelope tu DRAFT + goi order_gateway.create_order_command (command/intent tx = only
+    write path; guard _run_winner + idempotency intent -> exactly-once ke ca concurrent/redelivered).
+    Tra dict ket qua (order_id/receipt/duplicate) neu commit; None neu khong du dieu kien (caller di tiep LLM)."""
+    if customer_id is None:
+        return None
+    conn = None
+    try:
+        conn = await acquire()
+        row = await svc.find_open_intent(conn, customer_id=customer_id, conversation_id=conversation_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"[order_intent_flow] try_server_commit read skipped: {safe_exc(e)}")
+        return None
+    finally:
+        if conn is not None:
+            await release(conn)
+    if row is None or row["state"] != "READY_TO_COMMIT":
+        return None
+    if not svc.draft_complete(row):
+        return None
+    # §6: summary PHAI vua present cho DUNG version/fingerprint hien tai (chong stale-summary sau correction).
+    if row.get("summary_presented_at") is None:
+        return None
+    if row.get("summary_version") != row["state_version"] or \
+            row.get("summary_fingerprint") != row.get("order_fingerprint"):
+        return None
+    from app.services.command import order_gateway as _ogw
+    if not _ogw.can_route(channel):
+        return None
+    # Commit tu draft server-owned (khong lay tu model/LLM). _run_winner guard owner/channel/conv/fingerprint
+    # + mark_committed atomic. Concurrent/redelivered -> 1 order + same receipt.
+    return await _ogw.create_order_command(
+        channel=channel, actor_type="customer", actor_id=actor_id, idempotency_key=None,
+        provider_message_id=provider_message_id, psid=actor_id, conversation_id=conversation_id,
+        customer_name=row["draft_customer_name"], phone=row["draft_phone"], address=row["draft_address"],
+        sku=row["draft_sku"], quantity=row["draft_quantity"],
+        verified_resolution_id=(str(row["verified_resolution_id"]) if row.get("verified_resolution_id")
+                                else None),
+        verified_address_fingerprint=row.get("verified_address_fingerprint"),
+        order_intent_id=str(row["id"]))
+
+
 async def terminalize(*, customer_id: int | None, conversation_id, to_state: str,
                       reason: str | None = None) -> bool:
     """Terminal transition cho open intent hien tai (CA 225-01: cancel/escalate/expire transition intent
