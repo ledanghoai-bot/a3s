@@ -20,6 +20,7 @@ from app.db_pool import acquire, release
 from app.services import audit_service
 from app.services.address import order_binding
 from app.services.command import errors
+from app.services.command import order_intent
 from app.services.command import receipt as receipt_mod
 from app.services.command import repository as repo
 from app.services.command.envelope import CommandEnvelope
@@ -101,10 +102,45 @@ async def get_command_receipt(command_id: str, actor_context: dict | None = None
 # Winner path (mutation trong transaction)
 # ---------------------------------------------------------------------------
 
+async def _intent_duplicate_receipt(conn, env: CommandEnvelope, order_id: int) -> receipt_mod.CommandReceipt:
+    """Order-intent da COMMITTED (retry/redelivery/stale-confirm cung intent) -> tra receipt don da co,
+    duplicate=True, ZERO mutation moi (CA Amendment 224 §7.4)."""
+    row = await conn.fetchrow(
+        "SELECT o.status, o.total_vnd, o.created_at, oi.quantity, oi.unit_price_vnd, p.sku "
+        "FROM orders o JOIN order_items oi ON oi.order_id=o.id JOIN products p ON p.id=oi.product_id "
+        "WHERE o.id=$1", order_id)
+    result_payload = {
+        "order_id": order_id,
+        "status": row["status"] if row else "new",
+        "sku": row["sku"] if row else env.payload.get("sku"),
+        "quantity": row["quantity"] if row else env.payload.get("quantity"),
+        "unit_price_vnd": row["unit_price_vnd"] if row else 0,
+        "total_vnd": row["total_vnd"] if row else 0,
+    }
+    return receipt_mod.build_order_create_receipt(
+        command_id=env.command_id, correlation_id=env.correlation_id,
+        outcome=receipt_mod.SUCCEEDED, result_payload=result_payload,
+        committed_at=_fmt_ts(row["created_at"]) if row else None, duplicate=True)
+
+
 async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     p = env.payload  # normalized FULL (co address/psid) — chi in-memory
     sku = p["sku"]
     qty = p["quantity"]
+
+    # M5 order-intent (CA 223/224 §6): idempotency + atomic AT-MOST-ONCE qua intent (khi orchestrator cap
+    # order_intent_id — server-owned). LOCK intent (FOR UPDATE) -> serialize concurrent worker + cac luot
+    # xac nhan/redelivery/retry cung intent. Da COMMITTED -> tra duplicate receipt, ZERO mutation moi.
+    intent_row = None
+    if env.order_intent_id:
+        intent_row = await conn.fetchrow(
+            "SELECT id,state,committed_order_id FROM order_intents WHERE id=$1 FOR UPDATE",
+            env.order_intent_id)
+        if intent_row and intent_row["state"] == "COMMITTED" and intent_row["committed_order_id"]:
+            return await _intent_duplicate_receipt(conn, env, intent_row["committed_order_id"])
+        if intent_row and intent_row["state"] in order_intent.TERMINAL_STATES:
+            return await _reject(conn, env, errors.INVALID_ENVELOPE,
+                                 f"order_intent terminal state={intent_row['state']}")
 
     product = await conn.fetchrow(
         "SELECT id, price_vnd, stock FROM products WHERE sku = $1 FOR UPDATE", sku
@@ -207,6 +243,14 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         await inv_repo.materialize_stock_mirror(conn, loc_reserve, product["id"])
     else:
         await conn.execute("UPDATE products SET stock = stock - $1 WHERE id = $2", qty, product["id"])
+
+    # M5 order-intent: danh dau intent COMMITTED voi committed_order_id (trong CUNG tx tao order+stock+
+    # binding -> atomic). Unique oi_one_committed_order dam bao at-most-one order/intent. Ta dang giu lock
+    # intent (FOR UPDATE tu dau) nen khong worker khac chen ngang.
+    if intent_row is not None:
+        await conn.execute(
+            "UPDATE order_intents SET state='COMMITTED', committed_order_id=$2, "
+            "state_version=state_version+1 WHERE id=$1", env.order_intent_id, order_id)
 
     # --- Persist deterministic result (committed truth) ---
     result_payload = {
