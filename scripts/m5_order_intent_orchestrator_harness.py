@@ -111,6 +111,18 @@ async def main():
                                           channel="telegram_customer",provider_message_id=f"h4dup-{RUN}")  # CUNG id
     ck("H4 duplicate provider event -> 1 don (case 6)", await n_orders(cid)==n0+1)
 
+    # H5 — ambiguous/unverifiable address (case 2): resolver+GateE ON, dia chi khong verify -> CLARIFY, 0 order
+    settings.m1_reliable_order_command=False
+    settings.enable_gate_e_order_wiring=True
+    settings.enable_address_resolver=True
+    cid=await setup_customer(f"tg:h5-{RUN}"); n0=await n_orders(cid)
+    settings.gate_e_canary_customer_ids=str(cid); settings.address_resolver_pilot_customer_ids=str(cid)
+    ORD5=dict(ORD, address="cho X, tinh Y khong ro", province="Tinh Khong Ton Tai", ward="Phuong Khong Ro")
+    _SCRIPT.clear(); _SCRIPT+=[{"tools":[{"name":"create_order","args":ORD5}]}, {"text":"Anh/chị cho em xin lại phường/tỉnh ạ."}]
+    await orchestrator.handle_message(f"tg:h5-{RUN}","giao cho X tinh Y khong ro 0900001234 Hoa",
+                                      channel="telegram_customer",provider_message_id=f"tg:9{RUN}")
+    ck("H5 ambiguous address -> CLARIFY, 0 order (case 2)", await n_orders(cid)==n0)
+
     print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: '+','.join(FAILS)}")
     await close_pool(); sys.exit(1 if FAILS else 0)
 
