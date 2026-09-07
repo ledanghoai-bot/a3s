@@ -52,6 +52,11 @@ class CommandEnvelope:
     request_hash: str
     payload: dict[str, Any]          # normalized FULL (in-memory)
     stored_payload: dict[str, Any]   # allowlist (persisted)
+    # M5 upgrade (Directive 214 §6.C + Q3): resolution REQUEST-SCOPED de bind Gate E. KHONG vao
+    # request_hash (khong doi idempotency), KHONG persist (binding directive tam thoi trong RAM). Chi
+    # duoc set khi server verify dia chi cua CHINH request nay auto_verified (may_bind). None => Gate E
+    # fail-closed (khong bind pointer cu — sua F2).
+    verified_resolution_id: str | None = None
 
     def validate(self) -> None:
         if self.channel not in CHANNELS:
@@ -101,9 +106,13 @@ def build_order_create_envelope(
     correlation_id: str | None = None,
     causation_id: str | None = None,
     command_id: str | None = None,
+    verified_resolution_id: str | None = None,
 ) -> CommandEnvelope:
     """Dung envelope order.create v1 tu input tho + trusted context. Validate + hash.
-    Raise CommandError khi payload/channel/actor invalid (KHONG tao order)."""
+    Raise CommandError khi payload/channel/actor invalid (KHONG tao order).
+
+    verified_resolution_id (M5 §6.C): resolution request-scoped de Gate E bind; KHONG anh huong
+    request_hash/stored_payload."""
     if channel not in CHANNELS:
         raise errors.CommandError(errors.INVALID_ENVELOPE, f"channel khong hop le: {channel}")
     if actor.type not in ACTOR_TYPES or not actor.id:
@@ -111,10 +120,18 @@ def build_order_create_envelope(
 
     normalized = registry.validate_order_create_payload(raw_payload)
     hash_input = registry.order_create_hash_input(normalized)
+    # M5 upgrade (CA Review 216-01): binding context PHAI vao request_hash de duplicate/conflict detection
+    # phan biet cung order nhung resolution KHAC. verified_resolution_id la UUID (KHONG PII). Duoc them
+    # vao hash_input (khong vao idempotency KEY — key giu on dinh de cung key + resolution khac -> CONFLICT
+    # thay vi tra receipt cu nham). Cung persist vao stored_payload (audit/replay, khong dia chi raw).
+    if verified_resolution_id:
+        hash_input = {**hash_input, "verified_resolution_id": verified_resolution_id}
     request_hash = registry.compute_request_hash(
         registry.ORDER_CREATE, registry.ORDER_CREATE_VERSION, hash_input
     )
     stored = registry.order_create_stored_payload(normalized)
+    if verified_resolution_id:
+        stored = {**stored, "verified_resolution_id": verified_resolution_id}
     scope = idempotency.build_scope(registry.ORDER_CREATE, channel, actor.id)
 
     env = CommandEnvelope(
@@ -134,6 +151,7 @@ def build_order_create_envelope(
         request_hash=request_hash,
         payload=normalized,
         stored_payload=stored,
+        verified_resolution_id=verified_resolution_id,
     )
     env.validate()
     return env
