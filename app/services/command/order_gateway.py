@@ -25,6 +25,8 @@ async def create_order_command(
     conversation_id: int | None = None, correlation_id: str | None = None,
     causation_id: str | None = None, provider_message_id: str | None = None,
     verified_resolution_id: str | None = None,
+    verified_address_fingerprint: str | None = None,
+    order_intent_id: str | None = None,
 ) -> dict:
     """Build envelope + execute_order_create + adapt ve legacy dict. Loi validate/conflict ->
     {"error":..., "error_code":...} (khong raise ra caller — giu contract legacy).
@@ -57,6 +59,8 @@ async def create_order_command(
             idempotency_key=idempotency_key, conversation_id=conversation_id,
             correlation_id=correlation_id, causation_id=causation_id,
             verified_resolution_id=verified_resolution_id,
+            verified_address_fingerprint=verified_address_fingerprint,
+            order_intent_id=order_intent_id,
         )
         rec = await order_service.execute_order_create(env)
     except errors.CommandError as e:

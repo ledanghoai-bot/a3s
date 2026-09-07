@@ -57,6 +57,11 @@ class CommandEnvelope:
     # duoc set khi server verify dia chi cua CHINH request nay auto_verified (may_bind). None => Gate E
     # fail-closed (khong bind pointer cu — sua F2).
     verified_resolution_id: str | None = None
+    # M5 order-intent (223/224 §5): semantic address identity TAT DINH (dataset+province+ward+hash-detail)
+    # dung trong request_hash THAY resolution-UUID ngau nhien -> cung dia chi qua cac luot = cung hash =
+    # duplicate sach. order_intent_id: intent server-owned (orchestrator cap) de commit atomic at-most-once.
+    verified_address_fingerprint: str | None = None
+    order_intent_id: str | None = None
 
     def validate(self) -> None:
         if self.channel not in CHANNELS:
@@ -107,6 +112,8 @@ def build_order_create_envelope(
     causation_id: str | None = None,
     command_id: str | None = None,
     verified_resolution_id: str | None = None,
+    verified_address_fingerprint: str | None = None,
+    order_intent_id: str | None = None,
 ) -> CommandEnvelope:
     """Dung envelope order.create v1 tu input tho + trusted context. Validate + hash.
     Raise CommandError khi payload/channel/actor invalid (KHONG tao order).
@@ -124,14 +131,22 @@ def build_order_create_envelope(
     # phan biet cung order nhung resolution KHAC. verified_resolution_id la UUID (KHONG PII). Duoc them
     # vao hash_input (khong vao idempotency KEY — key giu on dinh de cung key + resolution khac -> CONFLICT
     # thay vi tra receipt cu nham). Cung persist vao stored_payload (audit/replay, khong dia chi raw).
-    if verified_resolution_id:
-        hash_input = {**hash_input, "verified_resolution_id": verified_resolution_id}
+    # M5 order-intent (223/224 §5): DUNG verified_address_fingerprint (TAT DINH: dataset+province+ward+
+    # hash-detail) trong request_hash THAY resolution-UUID ngau nhien -> cung dia chi qua cac luot xac nhan
+    # = cung hash = duplicate SACH (khong bi conflict vi UUID moi moi luot). Giu 216-01 intent (binding
+    # context vao hash) nhung dung identity TAT DINH. Fallback: neu chua co fingerprint, dung resolution_id
+    # (tuong thich nguoc). KHONG vao idempotency KEY. Persist verified_resolution_id cho audit/binding.
+    _hash_addr = verified_address_fingerprint or verified_resolution_id
+    if _hash_addr:
+        hash_input = {**hash_input, "verified_address": _hash_addr}
     request_hash = registry.compute_request_hash(
         registry.ORDER_CREATE, registry.ORDER_CREATE_VERSION, hash_input
     )
     stored = registry.order_create_stored_payload(normalized)
     if verified_resolution_id:
         stored = {**stored, "verified_resolution_id": verified_resolution_id}
+    if verified_address_fingerprint:
+        stored = {**stored, "verified_address_fingerprint": verified_address_fingerprint}
     scope = idempotency.build_scope(registry.ORDER_CREATE, channel, actor.id)
 
     env = CommandEnvelope(
@@ -152,6 +167,8 @@ def build_order_create_envelope(
         payload=normalized,
         stored_payload=stored,
         verified_resolution_id=verified_resolution_id,
+        verified_address_fingerprint=verified_address_fingerprint,
+        order_intent_id=order_intent_id,
     )
     env.validate()
     return env

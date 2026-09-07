@@ -1,0 +1,117 @@
+"""Layer B — orchestrator-side order-intent CONTROL PLANE (CA Directive 223 + Amendment 224 + Review 225).
+
+Intent server-owned la CONTROL PLANE THAT tu order-proposal DAU TIEN (225-01), KHONG phai lop khai bao
+song song. Moi luot create_order: get-or-create MOT open intent cho (customer, conversation) roi DRIVE state
+theo ket qua verify:
+  - dia chi verified (may_bind)         -> ADDRESS_CHECK -> READY_TO_COMMIT  -> action 'ready'  (caller commit)
+  - dia chi ambiguous/chua verified     -> ADDRESS_CHECK -> NEEDS_CLARIFICATION -> action 'clarify'
+  - da COMMITTED + stale-confirm         -> action 'duplicate' (tra receipt cu, ZERO mutation)
+  - loi thiet lap intent (enrolled route)-> action 'error' (FAIL-CLOSED, caller KHONG commit)
+
+Correction = cung open intent duoc cap nhat (re-enter ADDRESS_CHECK, tang version) — KHONG tao intent song
+song (unique index oi_one_open_per_conversation). Terminal transitions (cancel/escalate/expire) qua
+`terminalize`. DB-AUTHORITATIVE (225-04): open + committed lookup tu DB, KHONG phu thuoc Redis (Redis flush/
+restart/TTL khong doi order semantics). Tren enrolled order-intent route, loi -> FAIL-CLOSED zero mutation.
+"""
+from __future__ import annotations
+
+from app.db_pool import acquire, release
+from app.services.command import order_intent_service as svc
+from app.services.safe_log import safe_exc
+
+
+async def _to_address_check(conn, intent: dict, *, order_fp, addr_fp, resolution_id) -> dict | None:
+    """Dua open intent ve ADDRESS_CHECK (tu COLLECTING/NEEDS_CLARIFICATION/READY_TO_COMMIT = correction) +
+    cap nhat fingerprint/resolution. Tra row moi hoac None neu version lech."""
+    st = intent["state"]
+    if st == "ADDRESS_CHECK":
+        # da o ADDRESS_CHECK (hiem giua luot) — chi cap nhat fingerprint qua 1 no-op transition khong hop le;
+        # thay vao do ghi truc tiep fingerprint bang transition READY? Don gian: coi nhu da o dung state.
+        return intent
+    return await svc.transition(conn, intent["id"], expected_version=intent["state_version"],
+                                to_state="ADDRESS_CHECK", order_fingerprint=order_fp,
+                                verified_address_fingerprint=addr_fp, verified_resolution_id=resolution_id)
+
+
+async def drive(*, customer_id: int | None, conversation_id, channel: str, order_fp: str,
+                addr_fp: str | None = None, verified_resolution_id: str | None = None,
+                verified: bool, explicit_new_order: bool = False) -> dict:
+    """CA 225-01 control-plane driver. Tra {"action": ..., "order_intent_id": ...[, "committed_order_id"]}.
+    action in {ready, clarify, duplicate, error, skip}. 'skip' = khong the tao intent (customer_id None) ->
+    caller giu legacy (KHONG enrolled). Loi tren enrolled route -> 'error' (fail-closed)."""
+    if customer_id is None:
+        return {"action": "skip"}  # khach chua co row (pilot/tester luon co) -> khong enrolled
+    conn = None
+    try:
+        conn = await acquire()
+        async with conn.transaction():
+            open_row = await svc.find_open_intent(
+                conn, customer_id=customer_id, conversation_id=conversation_id, for_update=True)
+            # Lazy-expiry (CA 225-01): open intent qua TTL -> terminalize EXPIRED deterministic, coi nhu
+            # khong con open (request sau tao intent MOI — case 13).
+            if open_row is not None and open_row.get("is_expired"):
+                await svc.transition(conn, open_row["id"], expected_version=open_row["state_version"],
+                                     to_state="EXPIRED", terminal_reason="ttl")
+                open_row = None
+            if open_row is None:
+                # Khong con open intent. Stale-confirm (DB-authoritative) neu co COMMITTED cung fingerprint
+                # va KHONG phai don moi tuong minh (225-04/§7.4). Nguoc lai -> intent MOI (225-05 case 15).
+                if not explicit_new_order:
+                    committed = await svc.find_recent_committed(
+                        conn, customer_id=customer_id, conversation_id=conversation_id,
+                        order_fingerprint=order_fp)
+                    if committed is not None:
+                        return {"action": "duplicate", "order_intent_id": str(committed["id"]),
+                                "committed_order_id": committed["committed_order_id"]}
+                new = await svc.create_intent(conn, customer_id=customer_id,
+                                              conversation_id=conversation_id, channel=channel)
+                open_row = await svc.get_intent(conn, new["id"], for_update=True)
+            # Dua ve ADDRESS_CHECK + cap nhat fingerprint (correction cung intent), roi phan nhanh verified.
+            ac = await _to_address_check(conn, open_row, order_fp=order_fp, addr_fp=addr_fp,
+                                         resolution_id=verified_resolution_id)
+            if ac is None:
+                return {"action": "error"}  # version lech giua luot -> fail-closed
+            iid = str(ac["id"])
+            if verified:
+                r = await svc.transition(conn, iid, expected_version=ac["state_version"],
+                                         to_state="READY_TO_COMMIT")
+                if r is None:
+                    return {"action": "error"}
+                return {"action": "ready", "order_intent_id": iid}
+            r = await svc.transition(conn, iid, expected_version=ac["state_version"],
+                                     to_state="NEEDS_CLARIFICATION")
+            if r is None:
+                return {"action": "error"}
+            return {"action": "clarify", "order_intent_id": iid}
+    except Exception as e:  # noqa: BLE001 — enrolled route: caller fail-closed tren 'error'
+        print(f"[order_intent_flow] drive error (fail-closed): {safe_exc(e)}")
+        return {"action": "error"}
+    finally:
+        if conn is not None:
+            await release(conn)
+
+
+async def terminalize(*, customer_id: int | None, conversation_id, to_state: str,
+                      reason: str | None = None) -> bool:
+    """Terminal transition cho open intent hien tai (CA 225-01: cancel/escalate/expire transition intent
+    THAT). to_state in {CANCELLED, ESCALATED, EXPIRED}. Tra True neu da transition. Best-effort (khong vo
+    reply). DB-authoritative."""
+    if customer_id is None or to_state not in ("CANCELLED", "ESCALATED", "EXPIRED"):
+        return False
+    conn = None
+    try:
+        conn = await acquire()
+        async with conn.transaction():
+            open_row = await svc.find_open_intent(
+                conn, customer_id=customer_id, conversation_id=conversation_id, for_update=True)
+            if open_row is None:
+                return False
+            r = await svc.transition(conn, open_row["id"], expected_version=open_row["state_version"],
+                                     to_state=to_state, terminal_reason=reason)
+            return r is not None
+    except Exception as e:  # noqa: BLE001
+        print(f"[order_intent_flow] terminalize skipped: {safe_exc(e)}")
+        return False
+    finally:
+        if conn is not None:
+            await release(conn)
