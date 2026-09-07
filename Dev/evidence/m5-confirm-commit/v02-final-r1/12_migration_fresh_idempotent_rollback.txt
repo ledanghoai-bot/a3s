@@ -1,0 +1,23 @@
+### fresh apply 001..061 ###
+Applied 61 migration(s).
+  validation OK: scripts/operational_seed_validation.sql
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+
+### idempotent re-run ###
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+
+### status ###
+059_m5_order_intent_draft                applied
+060_m5_confirm_commit_dedupe             applied
+061_m5_inbound_event_dedupe              applied
+ inbound_event_log + msg.dedupe_key + summary_content_hash: 1/1/1
+
+### rollback 061+060+059 ###
+DROP TABLE
+DROP INDEX
+ALTER TABLE
+ALTER TABLE
+ remaining m5 objects: 0
+

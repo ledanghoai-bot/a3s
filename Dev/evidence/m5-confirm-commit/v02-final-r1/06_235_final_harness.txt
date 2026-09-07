@@ -1,0 +1,37 @@
+[orchestrator] server-extract READY -> summary armed cid:192a74fcfca9
+[cmd] {"event": "order.create.rejected", "command_id": "f0ff6e66-c9b2-4078-b802-8a32faf77cc8", "correlation_id": "9f7c48dc-196c-487b-8b48-63adefe956d3", "channel": "telegram_customer", "error_code": "invalid_envelope"}
+[latency] event=chat channel=telegram_customer route=reply ms_total=121 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 235-01a expired READY -> 0 order + EXPIRED :: EXPIRED
+[orchestrator] server-extract READY -> summary armed cid:0a9e2b09cf56
+[cmd] {"event": "order.create.rejected", "command_id": "cea9609d-aadf-48f9-b553-b49ebbd5146f", "correlation_id": "488e3da3-e11a-487e-8a3d-02b7562b4760", "channel": "telegram_customer", "error_code": "invalid_envelope"}
+[latency] event=chat channel=telegram_customer route=reply ms_total=62 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 235-01b NULL content_hash -> 0 order (fail-closed)
+[orchestrator] server-extract READY -> summary armed cid:bf156c3ac8a7
+[cmd] {"event": "order.create.rejected", "command_id": "259260fc-4676-4d6c-b011-2435f4890cb7", "correlation_id": "4da75445-a757-44fd-81f6-510482a9f518", "channel": "telegram_customer", "error_code": "invalid_envelope"}
+[latency] event=chat channel=telegram_customer route=reply ms_total=65 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 235-01c missing summary response row -> 0 order (fail-closed)
+[latency] event=chat channel=telegram_customer route=reply ms_total=83 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+[latency] event=chat channel=telegram_customer route=reply ms_total=44 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 235-02a provider replay -> KHONG bump version / KHONG intent moi :: v 4->4 intents 1->1
+  [PASS] 235-02a replay -> draft KHONG bi mutate (qty van 1, khong phai 9) :: 1
+[orchestrator] server-extract READY -> summary armed cid:60a73ba6de21
+[cmd] {"event": "order.create.succeeded", "command_id": "37279d1f-a025-4948-a604-d328e03be055", "correlation_id": "0664a9f9-db08-43c3-ba4c-7e3ddf03a0a1", "causation_id": null, "channel": "telegram_customer", "resource_id": 340}
+[orchestrator] server confirm->commit order_committed cid:60a73ba6de21
+  [PASS] 235-02b baseline commit
+[orchestrator] server-extract READY -> summary armed cid:60a73ba6de21
+  [PASS] 235-02b direct new order (khong 'them') -> intent MOI :: intents 1->2 state=READY_TO_COMMIT
+[orchestrator] server-extract READY -> summary armed cid:22514710610f
+[cmd] {"event": "order.create.succeeded", "command_id": "bc481266-01cb-427f-88be-f97b96685c35", "correlation_id": "7c667ad8-0615-4d84-8853-15f575e86932", "causation_id": null, "channel": "telegram_customer", "resource_id": 341}
+[orchestrator] server confirm->commit order_committed cid:22514710610f
+  [PASS] 235-02c partial stale sau COMMITTED (ENTERS path) -> no-op, khong intent/order moi :: intents 1->1
+[orchestrator] server-extract fail-closed: thieu provider_message_id cid:291e2458b0f4
+[latency] event=chat channel=telegram_customer route=reply ms_total=134 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 235-02d thieu provider_message_id -> fail-closed (0 intent, khong dung sender_id lam event id)
+[orchestrator] server-extract READY -> summary armed cid:87c95c98a479
+[cmd] {"event": "order.create.succeeded", "command_id": "71dd1a86-b2e8-4ba2-ae0f-811d3903d4c9", "correlation_id": "eeb0e742-cc2e-481e-bcbd-dfc7dda47b17", "causation_id": null, "channel": "telegram_customer", "resource_id": 342}
+[orchestrator] log receipt to messages skipped (retryable): RuntimeError: staff-log failure injected
+[orchestrator] server confirm->commit order_committed cid:87c95c98a479
+  [PASS] 235-03 staff-log failure -> order committed + staff row THIEU (chua co) :: oid=342 staff0=0
+  [PASS] 235-03 reconcile -> tao ĐÚNG 1 staff row; chay lai -> +0 :: staff 0->1->1 (reconciled n1>=1)
+
+RESULT: ALL PASS

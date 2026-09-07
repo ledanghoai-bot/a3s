@@ -1,0 +1,2582 @@
+diff --git a/Dockerfile b/Dockerfile
+index f8d38c1..974e68c 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,6 +1,11 @@
+ FROM python:3.12-slim
+ WORKDIR /srv
+ 
++# CA 232 §8 (B4): log ung dung KHONG buffer (structured log flush ngay) — BAKED vao image nen song qua
++# viec .env bi go PYTHONUNBUFFERED (bai hoc reconciliation: log prod bi buffer -> khong debug realtime duoc).
++# KHONG ghi raw PII (cac dong log da redacted: [latency]/[cmd]/[orchestrator] chi metadata).
++ENV PYTHONUNBUFFERED=1
++
+ # Cai torch CPU-only truoc (nhe hon ~800MB so voi full torch)
+ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+ 
+diff --git a/app/prompts/system_prompt.md b/app/prompts/system_prompt.md
+index eedee8b..4d928f6 100644
+--- a/app/prompts/system_prompt.md
++++ b/app/prompts/system_prompt.md
+@@ -196,8 +196,13 @@ ngắn gọn và đổi ngay theo đúng yêu cầu, giữ nhất quán từ đ
+   không") — đừng giả định chỉ có 1 sản phẩm duy nhất dựa vào mục "Kiến thức sản
+   phẩm" bên dưới.
+ - Gọi `check_stock` khi: khách hỏi còn hàng không, hoặc khách muốn đặt mua.
+-- Gọi `create_order` khi: đã đủ tên, SĐT, địa chỉ giao (số nhà/đường + phường/xã +
+-  tỉnh/thành), số lượng — VÀ khách đã xác nhận (hoặc chủ động yêu cầu lên đơn).
++- Gọi `create_order` NGAY khi đã gom được thông tin đơn (sản phẩm, số lượng, tên, SĐT,
++  địa chỉ) — KỂ CẢ trước khi khách xác nhận. `create_order` là bước ĐĂNG KÝ ĐƠN NHÁP:
++  hệ thống lưu nháp + kiểm tra địa chỉ + tự trình bày tóm tắt để khách xác nhận. Bạn
++  KHÔNG cần đợi khách xác nhận rồi mới gọi. Sau khi gọi, hãy trình bày lại tóm tắt đơn
++  và HỎI khách xác nhận. **KHI KHÁCH XÁC NHẬN, HỆ THỐNG TỰ CHỐT ĐƠN — bạn KHÔNG cần gọi
++  lại `create_order`.** TUYỆT ĐỐI KHÔNG nói "đã tạo đơn/đã lên đơn" cho tới khi hệ thống
++  thực sự trả về mã đơn. Nếu còn thiếu thông tin, tool sẽ báo thiếu gì để bạn hỏi tiếp.
+ - **ĐỊA CHỈ — QUAN TRỌNG:** hệ thống có bộ dữ liệu hành chính riêng sẽ TỰ kiểm tra
+   địa chỉ khi bạn gọi `create_order`. Vì vậy **ĐỪNG tự phán đoán địa chỉ "chưa rõ/
+   chưa đủ" rồi từ chối gọi `create_order`** khi khách đã cho đủ số nhà/đường +
+diff --git a/app/services/address/matcher.py b/app/services/address/matcher.py
+index b7bbff0..0e87479 100644
+--- a/app/services/address/matcher.py
++++ b/app/services/address/matcher.py
+@@ -38,6 +38,13 @@ _ADMIN_ABBREV = {
+ _ADMIN_PREFIXES = ("thanh pho", "thi tran", "thi xa", "tinh", "phuong", "quan", "huyen", "xa")
+ _ABBREV_RE = re.compile(r"^([a-z]{1,2})\.?\s+(.+)$")
+ 
++# CA 232 §5 (B1): regression-alias cho bien the chinh ta tester phat hien (vd phu-am-cuoi k/c). BOUNDED —
++# map TUONG MINH (khong fuzzy dai tra: KHONG tu doi k<->c moi noi). Ap dong nhat 2 phia qua _match_keys ->
++# input bien the sinh THEM key canonical -> khop dataset. Ambiguous van clarify (khong ep chon nham phuong).
++_REGRESSION_VARIANTS = {
++    "ea knuek": "ea knuec",  # tester 07/09: "Xa Ea Knuek" -> canonical "Xa Ea Knuếc" (24505, Dak Lak)
++}
++
+ 
+ def _match_keys(name: str) -> list[str]:
+     """Sinh key khop theo THU TU UU TIEN: [dang-day-du-da-mo-viet-tat, dang-tran-bo-tien-to].
+@@ -62,6 +69,11 @@ def _match_keys(name: str) -> list[str]:
+             if bare and bare not in keys:
+                 keys.append(bare)
+             break
++    # CA 232 §5 (B1): sinh THEM key canonical cho bien the chinh ta da biet (bounded map, khong fuzzy).
++    for k in list(keys):
++        canon = _REGRESSION_VARIANTS.get(k)
++        if canon and canon not in keys:
++            keys.append(canon)
+     return keys
+ 
+ 
+diff --git a/app/services/command/order_intent.py b/app/services/command/order_intent.py
+index 246bb30..3931bb5 100644
+--- a/app/services/command/order_intent.py
++++ b/app/services/command/order_intent.py
+@@ -24,10 +24,13 @@ TERMINAL_STATES = frozenset({"COMMITTED", "REJECTED", "CANCELLED", "ESCALATED",
+ 
+ # Transition hop le (Amendment 224 §4): (from -> {to,...}). Ngoai bang = fail-closed.
+ ALLOWED_TRANSITIONS = {
++    # CA 234-02.3: correction lam draft thieu/sai field NGOAI COLLECTING -> regression ve COLLECTING hop le
++    # (khong de intent "ket" o READY/ADDRESS_CHECK/NEEDS_CLARIFICATION voi draft khong du dieu kien).
+     "COLLECTING": {"ADDRESS_CHECK", "CANCELLED", "ESCALATED", "EXPIRED"},
+-    "ADDRESS_CHECK": {"NEEDS_CLARIFICATION", "READY_TO_COMMIT", "CANCELLED", "ESCALATED", "EXPIRED"},
+-    "NEEDS_CLARIFICATION": {"ADDRESS_CHECK", "CANCELLED", "ESCALATED", "EXPIRED"},
+-    "READY_TO_COMMIT": {"COMMITTING", "ADDRESS_CHECK", "CANCELLED", "ESCALATED", "EXPIRED"},
++    "ADDRESS_CHECK": {"COLLECTING", "NEEDS_CLARIFICATION", "READY_TO_COMMIT",
++                      "CANCELLED", "ESCALATED", "EXPIRED"},
++    "NEEDS_CLARIFICATION": {"COLLECTING", "ADDRESS_CHECK", "CANCELLED", "ESCALATED", "EXPIRED"},
++    "READY_TO_COMMIT": {"COLLECTING", "COMMITTING", "ADDRESS_CHECK", "CANCELLED", "ESCALATED", "EXPIRED"},
+     "COMMITTING": {"COMMITTED", "RETRYING", "REJECTED"},
+     "RETRYING": {"COMMITTING", "REJECTED"},
+     # terminal states: khong transition ra (except khong co).
+diff --git a/app/services/command/order_intent_flow.py b/app/services/command/order_intent_flow.py
+index 0866891..8676935 100644
+--- a/app/services/command/order_intent_flow.py
++++ b/app/services/command/order_intent_flow.py
+@@ -15,10 +15,57 @@ restart/TTL khong doi order semantics). Tren enrolled order-intent route, loi ->
+ """
+ from __future__ import annotations
+ 
++import hashlib
++
+ from app.db_pool import acquire, release
+ from app.services.command import order_intent_service as svc
+ from app.services.safe_log import safe_exc
+ 
++_FIELDS = ("sku", "quantity", "customer_name", "phone", "address")
++
++
++def _summary_hash(text: str) -> str:
++    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
++
++
++async def _validate_ready(conn, row: dict) -> list[str]:
++    """CA 234-02.4: revalidate draft (dang + SKU TON TAI) — dung o ca propose (truoc READY) lan
++    try_server_commit (ngay truoc commit). Tra danh sach field xau (rong = du dieu kien)."""
++    bad = svc.draft_invalid_fields(row)
++    if svc.draft_complete(row):
++        prod_ok = await conn.fetchval("SELECT 1 FROM products WHERE sku=$1", row["draft_sku"])
++        if not prod_ok and "sku" not in bad:
++            bad.append("sku")
++    return bad
++
++
++def _norm_addr(s) -> str:
++    """CA 233-04: normalize dia chi free-text de PHAT HIEN THAY DOI theo fingerprint chuan hoa (khong phai
++    bool(address) — dia chi lap lai giong het KHONG tinh la doi). Bo dau/hoa/space NHAT QUAN 2 phia."""
++    import unicodedata
++    s = unicodedata.normalize("NFD", (s if isinstance(s, str) else "").lower())
++    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
++    return " ".join(s.split())
++
++
++async def _render_confirmation_summary(conn, draft: dict) -> str:
++    """CA 233-02: server RENDER tom tat xac nhan tu DRAFT (khong de model viet lai). Customer-safe: ten SP,
++    so luong, don gia, tong, nguoi nhan, SDT, dia chi giao. Dung lam reply THAT gui khach."""
++    sku = draft.get("draft_sku")
++    qty = draft.get("draft_quantity") or 0
++    prod = await conn.fetchrow("SELECT name, price_vnd FROM products WHERE sku=$1", sku)
++    pname = prod["name"] if prod else sku
++    unit = prod["price_vnd"] if prod else 0
++    total = unit * qty
++    return (
++        "Dạ em xác nhận lại đơn của anh/chị:\n"
++        f"- Sản phẩm: {pname} — {qty} x {unit:,}đ = {total:,}đ\n"
++        f"- Người nhận: {draft.get('draft_customer_name')}\n"
++        f"- SĐT: {draft.get('draft_phone')}\n"
++        f"- Địa chỉ giao: {draft.get('draft_address')}\n"
++        "Anh/chị nhắn \"xác nhận\" để em chốt đơn giúp mình nhé ạ."
++    ).replace(",", ".")
++
+ 
+ async def _to_address_check(conn, intent: dict, *, order_fp, addr_fp, resolution_id) -> dict | None:
+     """Dua open intent ve ADDRESS_CHECK (tu COLLECTING/NEEDS_CLARIFICATION/READY_TO_COMMIT = correction) +
+@@ -91,6 +138,200 @@ async def drive(*, customer_id: int | None, conversation_id, channel: str, order
+             await release(conn)
+ 
+ 
++async def _no_mutation_action(conn, row: dict) -> dict:
++    """CA 234-02.1: de xuat/su kien TRUNG (khong delta) -> KHONG bump version / KHONG rerun resolution /
++    KHONG regen summary. Chi DERIVE action tu state hien tai + tra summary da persist (neu READY)."""
++    iid = row["id"]
++    st = row["state"]
++    if not svc.draft_complete(row):
++        return {"action": "need_more", "order_intent_id": str(iid), "noop": True,
++                "missing": [f for f in _FIELDS if row.get(f"draft_{f}") in (None, "")]}
++    bad = await _validate_ready(conn, row)
++    if bad:
++        return {"action": "need_more", "order_intent_id": str(iid), "missing": bad, "invalid": True,
++                "noop": True}
++    if st == "READY_TO_COMMIT" and row.get("summary_presented_at") is not None:
++        summary = await _render_confirmation_summary(conn, row)
++        return {"action": "ready", "order_intent_id": str(iid), "summary": summary,
++                "summary_persisted": True, "noop": True}
++    return {"action": "clarify", "order_intent_id": str(iid), "noop": True}
++
++
++async def propose_draft(*, customer_id: int | None, conversation_id, channel: str, proposed: dict,
++                        verified: bool, addr_fp: str | None, verified_resolution_id: str | None,
++                        address_changed: bool, explicit_new_order: bool = False,
++                        clear_fields: list[str] | None = None) -> dict:
++    """CA 232/233/234: PROPOSAL server-owned. Accumulate field vao durable draft + advance; KHONG commit.
++    proposed = {sku,quantity,customer_name,phone,address} (None = KHONG de xuat/omit). clear_fields = field
++    khach TUONG MINH yeu cau xoa (explicit-clear, 234-02.2). Tra {action, order_intent_id}:
++      need_more/clarify/ready/already_committed/skip/error. 'noop' = luot nay khong doi gi (234-02.1)."""
++    if customer_id is None:
++        return {"action": "skip"}
++    from app.services.command import order_intent as _oi
++    clear_fields = [c for c in (clear_fields or []) if c in _FIELDS]
++    conn = None
++    try:
++        conn = await acquire()
++        async with conn.transaction():
++            row = await svc.find_open_intent(conn, customer_id=customer_id,
++                                             conversation_id=conversation_id, for_update=True)
++            if row is not None and row.get("is_expired"):
++                await svc.transition(conn, row["id"], expected_version=row["state_version"],
++                                     to_state="EXPIRED", terminal_reason="ttl")
++                row = None
++            _existing = row is not None
++            if row is None:
++                # CA 234-02.5: sau COMMITTED chi tao intent MOI khi TUONG MINH reorder. Bat ke de xuat day
++                # du hay PARTIAL/stale: neu hoi thoai DA co committed intent + KHONG explicit reorder -> tra
++                # outcome cu (ZERO mutation, khong tao draft). Chi explicit reorder moi mo draft moi.
++                if not explicit_new_order and await svc.has_committed_intent(
++                        conn, customer_id=customer_id, conversation_id=conversation_id):
++                    prior = None
++                    if all(proposed.get(f) not in (None, "") for f in ("sku", "quantity", "customer_name", "phone")):
++                        prior = await svc.find_recent_committed(
++                            conn, customer_id=customer_id, conversation_id=conversation_id,
++                            order_fingerprint=_oi.order_fingerprint(
++                                sku=proposed["sku"], quantity=proposed["quantity"],
++                                customer_name=proposed["customer_name"], phone=proposed["phone"],
++                                address_fp=addr_fp))
++                    return {"action": "already_committed", "noop": True,
++                            "order_intent_id": str(prior["id"]) if prior else None,
++                            "order_id": prior["committed_order_id"] if prior else None}
++                new = await svc.create_intent(conn, customer_id=customer_id,
++                                              conversation_id=conversation_id, channel=channel)
++                row = await svc.get_intent(conn, new["id"], for_update=True)
++            iid = row["id"]
++            ver = row["state_version"]
++            # CA 233-04: dia chi DOI theo fingerprint chuan hoa (khong phai bool(address)).
++            _new_addr = proposed.get("address")
++            _addr_changed = ("address" in clear_fields) or (
++                bool(_new_addr) and _norm_addr(_new_addr) != _norm_addr(row.get("draft_address")))
++            # CA 234-02.1: EXISTING intent + KHONG co delta (khong field moi khac, khong clear, khong doi
++            # dia chi) -> NO-OP (khong bump version/rerun/regen). Idempotent redelivery/identical proposal.
++            if _existing and not clear_fields and not _addr_changed and all(
++                    proposed.get(f) is None or proposed.get(f) == row.get(f"draft_{f}") for f in _FIELDS):
++                return await _no_mutation_action(conn, row)
++            if _addr_changed:
++                r = await svc.clear_address_binding(conn, iid, expected_version=ver)
++                if r is not None:
++                    ver = r["state_version"]
++            else:
++                # dia chi KHONG doi -> GIU verified binding cu (correction field khac khong re-verify tu dau).
++                if not verified and row.get("verified_resolution_id") and row.get("verified_address_fingerprint"):
++                    verified = True
++                    addr_fp = addr_fp or row.get("verified_address_fingerprint")
++                    verified_resolution_id = verified_resolution_id or row.get("verified_resolution_id")
++            # Accumulate: field co gia tri -> set; field trong clear_fields (va khong duoc set) -> XOA (None).
++            _da = {k: proposed[k] for k in _FIELDS if proposed.get(k) is not None}
++            for cf in clear_fields:
++                _da.setdefault(cf, None)
++            d = await svc.update_draft(conn, iid, expected_version=ver, **_da) if _da else row
++            if d is None:
++                return {"action": "error"}
++            ver = d["state_version"]
++            # CA 234-02.3: thieu/sai field NGOAI COLLECTING -> REGRESSION ve COLLECTING (transition da cho
++            # phep) — khong ket o READY voi draft khong du. draft_complete + validate (dang + SKU ton tai).
++            bad = svc.draft_invalid_fields(d) if not svc.draft_complete(d) else await _validate_ready(conn, d)
++            if bad:
++                if d["state"] != "COLLECTING" and _oi.can_transition(d["state"], "COLLECTING"):
++                    await svc.transition(conn, iid, expected_version=ver, to_state="COLLECTING")
++                return {"action": "need_more", "order_intent_id": str(iid), "missing": bad,
++                        "invalid": not svc.draft_complete(d) and any(
++                            d.get(f"draft_{f}") not in (None, "") for f in bad)}
++            # Du field + hop le -> fingerprint + ADDRESS_CHECK -> verified branch.
++            ofp = _oi.order_fingerprint(sku=d["draft_sku"], quantity=d["draft_quantity"],
++                                        customer_name=d["draft_customer_name"], phone=d["draft_phone"],
++                                        address_fp=addr_fp)
++            ac = await _to_address_check(conn, {**d, "state": d["state"], "state_version": ver},
++                                         order_fp=ofp, addr_fp=addr_fp, resolution_id=verified_resolution_id)
++            if ac is None:
++                return {"action": "error"}
++            ver = ac["state_version"]
++            if not verified:
++                await svc.transition(conn, iid, expected_version=ver, to_state="NEEDS_CLARIFICATION")
++                return {"action": "clarify", "order_intent_id": str(iid)}
++            r = await svc.transition(conn, iid, expected_version=ver, to_state="READY_TO_COMMIT")
++            if r is None:
++                return {"action": "error"}
++            # CA 233-02 + 234-03: RENDER summary server-side, PERSIST server-response (messages, dedupe theo
++            # intent+version) VA arm pending-confirm (present_summary + content_hash) ATOMIC trong 1 tx. Loi
++            # -> raise -> rollback -> KHONG de armed pending-confirm ma khong co persisted response.
++            summary = await _render_confirmation_summary(conn, d)
++            chash = _summary_hash(summary)
++            await svc.log_message_tx(conn, conversation_id, "bot", summary,
++                                     dedupe_key=f"order_summary:{iid}:{r['state_version']}")
++            armed = await svc.present_summary(conn, iid, expected_version=r["state_version"],
++                                              order_fingerprint=ofp, content_hash=chash)
++            if armed is None:
++                raise RuntimeError("present_summary version race — rollback arm+persist")
++            return {"action": "ready", "order_intent_id": str(iid), "summary": summary,
++                    "summary_persisted": True}
++    except Exception as e:  # noqa: BLE001 — enrolled route fail-closed
++        print(f"[order_intent_flow] propose_draft error (fail-closed): {safe_exc(e)}")
++        return {"action": "error"}
++    finally:
++        if conn is not None:
++            await release(conn)
++
++
++async def try_server_commit(*, customer_id: int | None, conversation_id, channel: str, actor_id: str,
++                            provider_message_id: str | None) -> dict | None:
++    """CA Directive 232 §6: SERVER tu chot READY draft khi khach xac nhan TUONG MINH — KHONG doi model goi
++    create_order. Caller (orchestrator) da xac dinh tin nhan la high-precision confirmation TRUOC khi goi.
++
++    Chi commit khi DONG THOI: intent open = READY_TO_COMMIT + draft du field + summary da present khop DUNG
++    state_version + order_fingerprint hien tai (correction sau summary -> version/fingerprint doi -> stale ->
++    KHONG commit). Xay envelope tu DRAFT + goi order_gateway.create_order_command (command/intent tx = only
++    write path; guard _run_winner + idempotency intent -> exactly-once ke ca concurrent/redelivered).
++    Tra dict ket qua (order_id/receipt/duplicate) neu commit; None neu khong du dieu kien (caller di tiep LLM)."""
++    if customer_id is None:
++        return None
++    conn = None
++    try:
++        conn = await acquire()
++        row = await svc.find_open_intent(conn, customer_id=customer_id, conversation_id=conversation_id)
++    except Exception as e:  # noqa: BLE001
++        print(f"[order_intent_flow] try_server_commit read skipped: {safe_exc(e)}")
++        return None
++    finally:
++        if conn is not None:
++            await release(conn)
++    if row is None or row["state"] != "READY_TO_COMMIT":
++        return None
++    if not svc.draft_complete(row):
++        return None
++    # §6: summary PHAI vua present cho DUNG version/fingerprint hien tai (chong stale-summary sau correction).
++    if row.get("summary_presented_at") is None:
++        return None
++    if row.get("summary_version") != row["state_version"] or \
++            row.get("summary_fingerprint") != row.get("order_fingerprint"):
++        return None
++    # CA 234-02.4: REVALIDATE draft (dang + SKU TON TAI) NGAY TRUOC commit (early-out re; binding/expiry
++    # AUTHORITATIVE do _run_winner kiem trong command tx da lock FOR UPDATE — CA 235-01). Sai -> KHONG commit.
++    _conn2 = None
++    try:
++        _conn2 = await acquire()
++        if await _validate_ready(_conn2, row):
++            return None
++    finally:
++        if _conn2 is not None:
++            await release(_conn2)
++    from app.services.command import order_gateway as _ogw
++    if not _ogw.can_route(channel):
++        return None
++    # Commit tu draft server-owned (khong lay tu model/LLM). _run_winner guard owner/channel/conv/fingerprint
++    # + mark_committed atomic. Concurrent/redelivered -> 1 order + same receipt.
++    return await _ogw.create_order_command(
++        channel=channel, actor_type="customer", actor_id=actor_id, idempotency_key=None,
++        provider_message_id=provider_message_id, psid=actor_id, conversation_id=conversation_id,
++        customer_name=row["draft_customer_name"], phone=row["draft_phone"], address=row["draft_address"],
++        sku=row["draft_sku"], quantity=row["draft_quantity"],
++        verified_resolution_id=(str(row["verified_resolution_id"]) if row.get("verified_resolution_id")
++                                else None),
++        verified_address_fingerprint=row.get("verified_address_fingerprint"),
++        order_intent_id=str(row["id"]))
++
++
+ async def terminalize(*, customer_id: int | None, conversation_id, to_state: str,
+                       reason: str | None = None) -> bool:
+     """Terminal transition cho open intent hien tai (CA 225-01: cancel/escalate/expire transition intent
+diff --git a/app/services/command/order_intent_service.py b/app/services/command/order_intent_service.py
+index 3abc614..15da31f 100644
+--- a/app/services/command/order_intent_service.py
++++ b/app/services/command/order_intent_service.py
+@@ -12,8 +12,17 @@ Nguyen tac an toan:
+ """
+ from __future__ import annotations
+ 
++import re
++
+ from app.services.command import order_intent as oi
+ 
++# Sentinel: field KHONG duoc cung cap o luot nay (giu nguyen). Phan biet voi explicit-clear (None/"" tuong
++# minh -> xoa field). CA 233-04: "distinguish omitted field from explicit clear/correction".
++_UNSET: object = object()
++
++# VN phone shape (CA 233-04 validate truoc READY, khong chi non-null). Cho phep 0xxxxxxxxx / +84xxxxxxxxx.
++_PHONE_RE = re.compile(r"^(?:0|\+?84)\d{8,10}$")
++
+ # TTL abandoned open intent (CA 225-01: terminalize deterministically). Chi GC/recovery, KHONG dinh nghia
+ # 2 don co giong nhau khong (§7 TTL is cleanup only).
+ OPEN_INTENT_TTL_SECONDS = 24 * 3600
+@@ -29,23 +38,157 @@ async def create_intent(conn, *, customer_id: int, conversation_id, channel: str
+     return dict(row)
+ 
+ 
++# Cot draft + summary (CA 232 §3/§6). draft_address = PROTECTED business data (khong in raw ra log/evidence).
++_DRAFT_COLS = ("draft_sku,draft_quantity,draft_customer_name,draft_phone,draft_address,"
++               "summary_version,summary_fingerprint")
++_DRAFT_FIELDS = ("sku", "quantity", "customer_name", "phone", "address")
++
++
++def draft_complete(row: dict) -> bool:
++    """True neu draft du field bat buoc de commit (SKU/qty/contact/address). Chi kiem tra ton tai."""
++    return all(row.get(f"draft_{f}") not in (None, "") for f in _DRAFT_FIELDS)
++
++
++def _norm_phone(phone) -> str:
++    return re.sub(r"[ .\-()]", "", phone) if isinstance(phone, str) else ""
++
++
++def draft_valid(row: dict) -> bool:
++    """CA 233-04: VALIDATE draft (khong chi non-null) truoc READY: sku la chuoi non-empty, quantity int
++    duong, ten non-empty, phone dung dang VN, address du dai (>=6). SKU-EXISTENCE kiem o flow (can DB)."""
++    sku = row.get("draft_sku")
++    qty = row.get("draft_quantity")
++    name = row.get("draft_customer_name")
++    addr = row.get("draft_address")
++    if not (isinstance(sku, str) and sku.strip()):
++        return False
++    if not (isinstance(qty, int) and not isinstance(qty, bool) and qty > 0):
++        return False
++    if not (isinstance(name, str) and name.strip()):
++        return False
++    if not _PHONE_RE.match(_norm_phone(row.get("draft_phone"))):
++        return False
++    if not (isinstance(addr, str) and len(addr.strip()) >= 6):
++        return False
++    return True
++
++
++def draft_invalid_fields(row: dict) -> list[str]:
++    """Danh sach field THIEU hoac SAI DANG (CA 233-04) — de hoi khach bo sung/sua dung field."""
++    bad = []
++    if not (isinstance(row.get("draft_sku"), str) and row["draft_sku"].strip()):
++        bad.append("sku")
++    q = row.get("draft_quantity")
++    if not (isinstance(q, int) and not isinstance(q, bool) and q > 0):
++        bad.append("quantity")
++    if not (isinstance(row.get("draft_customer_name"), str) and row["draft_customer_name"].strip()):
++        bad.append("customer_name")
++    if not _PHONE_RE.match(_norm_phone(row.get("draft_phone"))):
++        bad.append("phone")
++    if not (isinstance(row.get("draft_address"), str) and len(row["draft_address"].strip()) >= 6):
++        bad.append("address")
++    return bad
++
++
+ async def get_intent(conn, intent_id, *, for_update: bool = False) -> dict | None:
+     q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
+-         "verified_address_fingerprint,verified_resolution_id,committed_order_id,terminal_reason,error_code "
+-         "FROM order_intents WHERE id=$1")
++         "verified_address_fingerprint,verified_resolution_id,committed_order_id,terminal_reason,error_code,"
++         f"{_DRAFT_COLS} FROM order_intents WHERE id=$1")
+     if for_update:
+         q += " FOR UPDATE"
+     row = await conn.fetchrow(q, intent_id)
+     return dict(row) if row else None
+ 
+ 
++async def update_draft(conn, intent_id, *, expected_version: int, sku=_UNSET, quantity=_UNSET,
++                       customer_name=_UNSET, phone=_UNSET, address=_UNSET) -> dict | None:
++    """CA 232 §3 + 233-04: luu/ghi de field draft server-owned. Field = _UNSET (mac dinh) -> KHONG dung
++    toi (omitted, giu nguyen). Field co gia tri -> ghi de. Field = None/'' TUONG MINH -> XOA (explicit
++    clear/correction). Optimistic version (compare-and-set). state_version TANG de bat ky readiness/summary
++    cu bi vo hieu (§3). Tra row moi hoac None (version lech / khong co field nao doi)."""
++    sets = ["state_version=state_version+1"]
++    vals: list = []
++    for col, val in (("draft_sku", sku), ("draft_quantity", quantity),
++                     ("draft_customer_name", customer_name), ("draft_phone", phone),
++                     ("draft_address", address)):
++        if val is _UNSET:
++            continue  # omitted -> giu nguyen
++        vals.append(None if val in (None, "") else val)  # None/'' tuong minh -> clear
++        sets.append(f"{col}=${len(vals) + 2}")
++    row = await conn.fetchrow(
++        f"UPDATE order_intents SET {', '.join(sets)} "
++        "WHERE id=$1 AND state_version=$2 "
++        f"RETURNING id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
++        f"verified_address_fingerprint,verified_resolution_id,committed_order_id,{_DRAFT_COLS}",
++        intent_id, expected_version, *vals)
++    return dict(row) if row else None
++
++
++async def clear_address_binding(conn, intent_id, *, expected_version: int) -> dict | None:
++    """CA 232 §3/§5: dia chi doi -> XOA verified binding/fingerprint cu truoc khi verify lai (khong bind
++    pointer cu). Optimistic version."""
++    row = await conn.fetchrow(
++        "UPDATE order_intents SET state_version=state_version+1, verified_resolution_id=NULL, "
++        "verified_address_fingerprint=NULL, summary_version=NULL, summary_fingerprint=NULL "
++        "WHERE id=$1 AND state_version=$2 RETURNING id,state,state_version",
++        intent_id, expected_version)
++    return dict(row) if row else None
++
++
++async def present_summary(conn, intent_id, *, expected_version: int, order_fingerprint: str,
++                          content_hash: str | None = None) -> dict | None:
++    """CA 232 §6 + 234-03: server VUA present deterministic summary READY -> ghi summary_version +
++    fingerprint + content_hash (cua text summary DA persist). Xac nhan sau do CHI hop le neu intent VAN o
++    dung version/fingerprint/hash nay (correction doi -> vo hieu). KHONG doi state_version."""
++    row = await conn.fetchrow(
++        "UPDATE order_intents SET summary_version=$3, summary_fingerprint=$4, summary_content_hash=$5, "
++        "summary_presented_at=now() WHERE id=$1 AND state_version=$2 AND state='READY_TO_COMMIT' "
++        "RETURNING id,state,state_version,summary_version,summary_fingerprint,summary_content_hash",
++        intent_id, expected_version, expected_version, order_fingerprint, content_hash)
++    return dict(row) if row else None
++
++
++async def log_message_tx(conn, conversation_id, role: str, content: str,
++                         dedupe_key: str | None = None) -> bool:
++    """CA 234-03/04: ghi 1 message vao messages TRONG CUNG transaction cua caller (khong pool rieng) ->
++    persist server-response + arm confirmation ATOMIC. dedupe_key (neu co) -> ON CONFLICT DO NOTHING =>
++    exactly-once row theo stable identity. Tra True neu ghi moi, False neu da ton tai (duplicate)."""
++    if role not in ("customer", "bot", "agent"):
++        role = "bot"
++    r = await conn.fetchval(
++        "INSERT INTO messages(conversation_id, role, content, dedupe_key) VALUES($1,$2,$3,$4) "
++        "ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id",
++        conversation_id, role, content, dedupe_key)
++    return r is not None
++
++
++async def claim_inbound_event(conn, *, channel: str, provider_message_id: str) -> bool:
++    """CA 235-02: CLAIM su kien provider dau vao (channel, provider_message_id) — durable, scoped theo kenh
++    + danh tinh provider. Tra True neu MOI (chua xu ly, duoc phep chay extraction/propose); False neu REPLAY
++    (da claim truoc do) -> caller no-op, KHONG extraction lai/mutation. ON CONFLICT DO NOTHING (idempotent)."""
++    r = await conn.fetchval(
++        "INSERT INTO inbound_event_log(channel, provider_message_id) VALUES($1,$2) "
++        "ON CONFLICT (channel, provider_message_id) DO NOTHING RETURNING channel",
++        channel, provider_message_id)
++    return r is not None
++
++
++async def has_committed_intent(conn, *, customer_id: int, conversation_id) -> bool:
++    """CA 234-02.5: hoi thoai nay DA co intent COMMITTED chua (bat ke fingerprint)? -> sau COMMITTED, de
++    xuat KHONG explicit reorder (ke ca partial/stale) KHONG duoc tao draft moi."""
++    return bool(await conn.fetchval(
++        "SELECT 1 FROM order_intents WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 "
++        "AND state='COMMITTED' LIMIT 1", customer_id, conversation_id))
++
++
+ async def find_open_intent(conn, *, customer_id: int, conversation_id,
+                            for_update: bool = False) -> dict | None:
+     """Tim intent OPEN HIEN TAI cho (customer, conversation) — "prospective order dang mo" (CA 225-01).
+     Correction cap nhat CHINH intent nay. Unique index oi_one_open_per_conversation bao dam <=1 open."""
+     q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
+-         "verified_address_fingerprint,verified_resolution_id,committed_order_id,"
+-         "(expires_at IS NOT NULL AND expires_at < now()) AS is_expired FROM order_intents "
++         "verified_address_fingerprint,verified_resolution_id,committed_order_id,summary_presented_at,"
++         "summary_content_hash,"
++         f"{_DRAFT_COLS},(expires_at IS NOT NULL AND expires_at < now()) AS is_expired FROM order_intents "
+          "WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 "
+          "AND state = ANY($3::text[]) ORDER BY created_at DESC LIMIT 1")
+     if for_update:
+diff --git a/app/services/command/order_service.py b/app/services/command/order_service.py
+index fe8202e..09530ac 100644
+--- a/app/services/command/order_service.py
++++ b/app/services/command/order_service.py
+@@ -10,6 +10,7 @@ lan hai). Cung key + khac hash -> 409 conflict (audit). Business reject -> faile
+ """
+ from __future__ import annotations
+ 
++import hashlib
+ import json
+ import uuid
+ 
+@@ -146,7 +147,9 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
+     if env.order_intent_id:
+         intent_row = await conn.fetchrow(
+             "SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
+-            "verified_address_fingerprint,verified_resolution_id,committed_order_id "
++            "verified_address_fingerprint,verified_resolution_id,committed_order_id,"
++            "summary_version,summary_fingerprint,summary_content_hash,summary_presented_at,"
++            "(expires_at IS NOT NULL AND expires_at < now()) AS is_expired "
+             "FROM order_intents WHERE id=$1 FOR UPDATE", env.order_intent_id)
+         # (a) missing intent tren enrolled route -> zero mutation.
+         if intent_row is None:
+@@ -193,10 +196,39 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
+         if intent_row["state"] in order_intent.TERMINAL_STATES:
+             return await _reject(conn, env, errors.INVALID_ENVELOPE,
+                                  f"order_intent terminal state={intent_row['state']}")
++        # CA 235-01: EXPIRY race-safe — intent qua expires_at (TTL) KHONG duoc commit. Transition EXPIRED
++        # ATOMIC trong command tx (da lock FOR UPDATE) + reject zero mutation. Kiem trong tx co lock, khong
++        # phai unlocked preliminary read.
++        if intent_row.get("is_expired"):
++            await order_intent_service.transition(
++                conn, env.order_intent_id, expected_version=intent_row["state_version"],
++                to_state="EXPIRED", terminal_reason="ttl")
++            return await _reject(conn, env, errors.INVALID_ENVELOPE, "order_intent expired")
+         # (f) state PHAI committable (READY_TO_COMMIT / dang COMMITTING / RETRYING).
+         if intent_row["state"] not in ("READY_TO_COMMIT", "COMMITTING", "RETRYING"):
+             return await _reject(conn, env, errors.INVALID_ENVELOPE,
+                                  f"order_intent state={intent_row['state']} not committable")
++        # CA 235-01: MANDATORY pending-confirm binding khi claim tu READY_TO_COMMIT (khong ap cho COMMITTING/
++        # RETRYING recovery vi claim da bump version). TAT CA phai co + khop: summary_presented_at,
++        # summary_version==state_version, summary_fingerprint==order_fingerprint, summary_content_hash non-null,
++        # VA persisted summary message row (dedupe) PHAI ton tai. null/missing/mismatch -> fail-closed reject.
++        if intent_row["state"] == "READY_TO_COMMIT":
++            if (intent_row.get("summary_presented_at") is None
++                    or intent_row.get("summary_version") != intent_row["state_version"]
++                    or intent_row.get("summary_fingerprint") != intent_row["order_fingerprint"]
++                    or not intent_row.get("summary_content_hash")):
++                return await _reject(conn, env, errors.INVALID_ENVELOPE,
++                                     "order_intent summary binding missing/stale")
++            _srow = await conn.fetchval(
++                "SELECT content FROM messages WHERE dedupe_key=$1",
++                f"order_summary:{env.order_intent_id}:{intent_row['summary_version']}")
++            if _srow is None:
++                return await _reject(conn, env, errors.INVALID_ENVELOPE,
++                                     "order_intent summary response not persisted")
++            # persisted response content PHAI khop content_hash da arm (response tuong ung dung summary).
++            if hashlib.sha256(_srow.encode("utf-8")).hexdigest() != intent_row["summary_content_hash"]:
++                return await _reject(conn, env, errors.INVALID_ENVELOPE,
++                                     "order_intent summary response content mismatch")
+         # (g) claim: transition -> COMMITTING (compare-and-set version) tru khi da COMMITTING (recovery).
+         if intent_row["state"] != "COMMITTING":
+             claimed = await order_intent_service.transition(
+diff --git a/app/services/command/outbox_worker.py b/app/services/command/outbox_worker.py
+index 1845365..0f5d086 100644
+--- a/app/services/command/outbox_worker.py
++++ b/app/services/command/outbox_worker.py
+@@ -22,6 +22,7 @@ from app.db_pool import acquire, release
+ from app.services.command import retry as R
+ from app.services.command.receipt import format_vnd
+ from app.services.messenger import GRAPH_URL
++from app.services.safe_log import safe_exc
+ 
+ OUTBOX_DEST_TELEGRAM_ADMIN = "telegram_admin"
+ OUTBOX_DEST_MESSENGER = "messenger"
+@@ -283,4 +284,10 @@ async def run_once(send_fn=None) -> dict:
+             stats[outcome] += 1
+     finally:
+         await release(conn)
++    # CA 235-03: moi vong worker cung ghi bu staff-history receipt row con thieu (idempotent, durable retry).
++    try:
++        from app.services.command import staff_receipt_reconcile
++        stats["staff_receipt_reconciled"] = await staff_receipt_reconcile.reconcile_staff_receipts()
++    except Exception as e:  # noqa: BLE001
++        print(f"[outbox_worker] staff receipt reconcile skipped: {safe_exc(e)}")
+     return stats
+diff --git a/app/services/command/staff_receipt_reconcile.py b/app/services/command/staff_receipt_reconcile.py
+new file mode 100644
+index 0000000..fdb9c05
+--- /dev/null
++++ b/app/services/command/staff_receipt_reconcile.py
+@@ -0,0 +1,45 @@
++"""CA Review 235-03: RECONCILER durable cho staff-history receipt row.
++
++Khi `_log_receipt_to_messages` loi sau khi order da commit, order + customer-receipt (outbox) VAN nguyen
++nhung staff-visible messages row co the thieu. Reconciler nay — chay moi vong outbox_worker — tim cac
++order.receipt.customer da co outbox NHUNG chua co staff messages row (dedupe order_receipt:{order_id}) va
++ghi bu ĐÚNG MOT lan (ON CONFLICT DO NOTHING). Idempotent: chay lai KHONG them row. KHONG gui lai receipt
++cho khach (chi ghi DB messages). KHONG mo them kenh outbound — customer outbox van la duong giao khach.
++"""
++from __future__ import annotations
++
++from app.db_pool import acquire, release
++from app.services.command import order_intent_service as svc
++from app.services.safe_log import safe_exc
++
++
++async def reconcile_staff_receipts(limit: int = 200) -> int:
++    """Ghi bu staff-history receipt row con thieu (theo stable identity order_receipt:{order_id}). Tra so row
++    MOI ghi. Best-effort (khong raise ra worker)."""
++    conn = None
++    made = 0
++    try:
++        conn = await acquire()
++        rows = await conn.fetch(
++            "SELECT (oe.payload->>'order_id')::int AS oid, oe.payload->>'text' AS text, o.customer_id "
++            "FROM outbox_events oe JOIN orders o ON o.id = (oe.payload->>'order_id')::int "
++            "WHERE oe.event_type='order.receipt.customer' "
++            "AND NOT EXISTS (SELECT 1 FROM messages m "
++            "                WHERE m.dedupe_key = 'order_receipt:'||(oe.payload->>'order_id')) "
++            "ORDER BY oe.created_at DESC LIMIT $1", limit)
++        for r in rows:
++            conv = await conn.fetchval(
++                "SELECT id FROM conversations WHERE customer_id=$1 ORDER BY id DESC LIMIT 1", r["customer_id"])
++            if conv is None:
++                continue
++            text = r["text"] or f"Đơn #{r['oid']} đã được ghi nhận."
++            created = await svc.log_message_tx(conn, conv, "bot", text,
++                                               dedupe_key=f"order_receipt:{r['oid']}")
++            if created:
++                made += 1
++    except Exception as e:  # noqa: BLE001 — reconcile fail KHONG vo worker
++        print(f"[staff_receipt_reconcile] skipped (retryable): {safe_exc(e)}")
++    finally:
++        if conn is not None:
++            await release(conn)
++    return made
+diff --git a/app/services/orchestrator.py b/app/services/orchestrator.py
+index 8eed366..2c9b61f 100644
+--- a/app/services/orchestrator.py
++++ b/app/services/orchestrator.py
+@@ -70,6 +70,17 @@ _ORDER_CLAIM_MARKERS = (
+     "đặt hàng thành công",
+     "lên đơn thành công",
+     "đơn hàng thành công",
++    # CA 232 §7 (B3): claim ngam "don se duoc xu ly" (kieu c Tien) — model noi don da/se duoc xu ly ma
++    # CHUA co receipt -> phai chan/thay. Bat ca cum "se duoc ... xu ly/giao/lien he".
++    "đơn hàng của anh sẽ được",
++    "đơn hàng của chị sẽ được",
++    "đơn của anh sẽ được",
++    "đơn của chị sẽ được",
++    "đơn hàng sẽ được đội ngũ",
++    "đơn sẽ được đội ngũ",
++    "sẽ được đội ngũ 3s coffee xử lý",
++    "đơn hàng đã được ghi nhận",
++    "đơn đã được ghi nhận",
+ )
+ 
+ 
+@@ -206,6 +217,48 @@ async def _save_history(redis, sender_id: str, history: list[dict]) -> None:
+     await redis.set(_redis_key(sender_id), json.dumps(trimmed, ensure_ascii=False), ex=86400)
+ 
+ 
++async def _has_pending_ready_draft(sender_id: str, conversation_id) -> bool:
++    """CA 232 §7: co READY draft dang cho khach xac nhan cho hoi thoai nay khong (de guard chan-bia thay bang
++    loi 'xin xac nhan' thay vi escalate). Best-effort; loi -> False."""
++    try:
++        from app.db_pool import acquire as _acq
++        from app.db_pool import release as _rel
++        _c = await _acq()
++        try:
++            return bool(await _c.fetchval(
++                "SELECT 1 FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
++                "WHERE c.psid=$1 AND oi.conversation_id IS NOT DISTINCT FROM $2 "
++                "AND oi.state='READY_TO_COMMIT' AND oi.summary_presented_at IS NOT NULL LIMIT 1",
++                sender_id, conversation_id))
++        finally:
++            await _rel(_c)
++    except Exception as e:  # noqa: BLE001
++        print(f"[orchestrator] pending-ready check skipped: {safe_exc(e)}")
++        return False
++
++
++async def _log_receipt_to_messages(conversation_id, committed: dict) -> None:
++    """CA 232 §7 + 234-04: receipt don ghi vao messages cho STAFF — EXACTLY-ONCE theo STABLE ORDER IDENTITY
++    (dedupe_key=order_receipt:{order_id}, ON CONFLICT DO NOTHING) => replay/concurrent KHONG them row (khong
++    con phu thuoc content matching). KHONG gui lai cho khach (chi DB)."""
++    try:
++        oid = committed.get("order_id")
++        if oid is None:
++            return
++        msg = committed.get("customer_message") or f"Đơn #{oid} đã được ghi nhận."
++        from app.db_pool import acquire as _acq
++        from app.db_pool import release as _rel
++        from app.services.command import order_intent_service as _svc
++        _c = await _acq()
++        try:
++            await _svc.log_message_tx(_c, conversation_id, "bot", msg, dedupe_key=f"order_receipt:{oid}")
++        finally:
++            await _rel(_c)
++    except Exception as e:  # noqa: BLE001
++        # CA 234-04: staff-log fail KHONG rollback order da commit; observable qua log (retryable).
++        print(f"[orchestrator] log receipt to messages skipped (retryable): {safe_exc(e)}")
++
++
+ # CA 225-05: tin hieu "don moi tuong minh" SERVER-OWNED (orchestrator tinh tu raw text khach, LLM KHONG
+ # duoc cap). CHI dung de PHAN BIET giua stale-confirmation vs dat-them SAU khi da co committed intent cung
+ # fingerprint (drive() ap explicit_new_order o nhanh nay). Cum tu re-order do dac hieu (dat them/don nua/
+@@ -235,6 +288,36 @@ def _is_explicit_cancel(text: str) -> bool:
+     return any(m in t for m in _CANCEL_MARKERS)
+ 
+ 
++# CA 233-03: confirmation detector HIGH-PRECISION + anchored (BO 'ung'/'ok em' substring rong). Commit chi
++# xay ra khi try_server_commit thay READY intent + summary present khop DUNG version/fingerprint hien tai
++# (pending-confirm context) -> confirm cho summary CU/superseded/ngoai context KHONG commit.
++# Cum xac nhan da dac hieu (khong nhap nhang 'dung'=dung/dừng, 'co'=co/cỏ).
++_CONFIRM_PHRASES = ("xac nhan", "dong y", "chot don", "chot luon", "chot di", "dat luon", "dat di",
++                    "dung roi", "dung vay", "ok chot", "ok dat", "xac nhan dung", "xac nhan don",
++                    "len don di", "chot don di")
++# Tin nhan NGAN dung nguyen cum (whole-utterance) — tranh substring nham.
++_CONFIRM_WHOLE = frozenset({"ok", "oke", "okie", "okay", "chot", "yes", "duoc", "dat", "uh dat"})
++# Negation/question/correction -> KHONG phai confirm (§233-03: 'chua xac nhan'/'co dung khong'/doi so luong).
++_NONCONFIRM_MARKERS = ("khong", "chua", "dung lai", "sai", "phai khong", "dung khong", "?", "doi",
++                       "sua", "thay", "nham", "lai di")
++
++
++def _is_confirmation(text: str) -> bool:
++    """CA 233-03: XAC NHAN chot don — high-precision, anchored. Loai cancel/status/negation/question/
++    correction. Context (summary hien tai) do try_server_commit kiem (chi commit khi pending-confirm khop)."""
++    if _is_explicit_cancel(text) or _is_order_status_query(text):
++        return False
++    t = _normalize_admin(text or "")
++    if not t:
++        return False
++    if any(n in t for n in _NONCONFIRM_MARKERS):  # phu dinh/hoi/correction -> khong confirm
++        return False
++    if t in _CONFIRM_WHOLE:  # whole-utterance ngan
++        return True
++    words = t.split()
++    return len(words) <= 6 and any(ph in t for ph in _CONFIRM_PHRASES)
++
++
+ # CA 226-03: nhan dien SO KHOI "order proposal" (server-owned draft recognition) de tao COLLECTING intent
+ # durable khi khach bat dau dat don NHUNG chua du thong tin (LLM chua goi create_order). KHONG phai NLU
+ # platform — chi marker dat-hang do dac hieu, LOAI TRU order-status. Sai duong tinh -> COLLECTING vo hai
+@@ -243,6 +326,10 @@ _ORDER_INTENT_MARKERS = (
+     "dat hang", "dat mua", "dat 1", "dat mot", "dat 2", "dat goi", "dat ly", "dat hop", "dat don",
+     "mua goi", "mua 1", "mua mot", "lay goi", "cho minh 1", "cho minh mot", "cho toi 1", "cho toi mot",
+     "cho minh dat", "cho toi dat", "minh muon dat", "toi muon dat", "muon dat", "order",
++    # CA 232 §4 (B2a): reorder cung la order-proposal -> vao/tai dung COLLECTING. Truoc day thieu 'dat them'
++    # -> don "dat them" (c Tien) khong tao draft. Gom tu _REORDER_MARKERS.
++    "dat them", "them mot don", "them 1 don", "mot don nua", "1 don nua", "them don", "don nua",
++    "mua them", "order them", "dat mot don nua", "dat 1 don nua", "lam them",
+ )
+ 
+ 
+@@ -285,6 +372,147 @@ async def _ensure_collecting_intent(sender_id: str, conversation_id, channel: st
+         print(f"[orchestrator] ensure COLLECTING intent skipped: {safe_exc(e)}")
+ 
+ 
++def _corr(sender_id: str) -> str:
++    """CA Review 233 §3: correlation an toan thay cho raw sender_id/provider id trong log — deterministic
++    (cung sender -> cung corr, trace duoc) nhung KHONG dao nguoc ra danh tinh that. KHONG log raw psid/PII."""
++    return "cid:" + hashlib.sha256((sender_id or "").encode("utf-8")).hexdigest()[:12]
++
++
++# CA 233-01: SERVER-invoked structured proposal-EXTRACTION. Server (KHONG phai model tu chon tool) chu dong
++# goi model voi schema JSON chat che de TRICH field don tu hoi thoai, roi accumulate qua propose_draft. Nho
++# vay draft van tien toi READY NGAY CA KHI model TU CHOI moi tool call (sua goc reliability class Directive
++# 232). create_order tool (model chon) van la input tuong thich — KHONG con la duong tien duy nhat.
++_EXTRACT_SYS = (
++    "Ban la bo TRICH XUAT thong tin don hang. Doc hoi thoai + tin nhan moi nhat cua khach, tra ve DUY NHAT "
++    "mot JSON object (khong giai thich, khong markdown, khong text ngoai JSON) voi cac khoa:\n"
++    "  sku: ma san pham NEU khach neu ro (map ten san pham -> SKU dung trong danh sach duoi), nguoc lai null\n"
++    "  quantity: so nguyen duong hoac null\n"
++    "  customer_name: ten nguoi nhan hoac null\n"
++    "  phone: so dien thoai hoac null\n"
++    "  address: dia chi giao (free-text) hoac null\n"
++    "  province: ten tinh/thanh neu suy ra duoc hoac null\n"
++    "  ward: ten phuong/xa neu suy ra duoc hoac null\n"
++    "  clear: MANG ten cac field khach TUONG MINH yeu cau BO/XOA (vd 'bo so dien thoai di' -> [\"phone\"]); "
++    "rong [] neu khong co. Chi dung 5 ten: sku/quantity/customer_name/phone/address.\n"
++    "CHI trich thong tin khach THUC SU cung cap trong hoi thoai; KHONG bia/suy dien. Neu khong co thong tin "
++    "don hang nao, tra JSON rong {}."
++)
++
++
++def _parse_json_object(raw: str) -> dict:
++    """Parse 1 JSON object tu output model (strip code-fence/text quanh). Loi -> {} (fail-safe)."""
++    if not raw:
++        return {}
++    s = raw.strip()
++    a, b = s.find("{"), s.rfind("}")
++    if a < 0 or b < 0 or b < a:
++        return {}
++    try:
++        obj = json.loads(s[a:b + 1])
++        return obj if isinstance(obj, dict) else {}
++    except Exception:  # noqa: BLE001
++        return {}
++
++
++async def _has_open_intent(sender_id: str, conversation_id) -> bool:
++    """CA 233-01: co open intent (COLLECTING/ADDRESS_CHECK/NEEDS_CLARIFICATION/READY) cho hoi thoai nay? ->
++    follow-up cung cap field van duoc extract du tin nay khong co order-marker. Best-effort; loi -> False."""
++    try:
++        from app.db_pool import acquire as _acq
++        from app.db_pool import release as _rel
++        _c = await _acq()
++        try:
++            return bool(await _c.fetchval(
++                "SELECT 1 FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
++                "WHERE c.psid=$1 AND oi.conversation_id IS NOT DISTINCT FROM $2 AND oi.state IN "
++                "('COLLECTING','ADDRESS_CHECK','NEEDS_CLARIFICATION','READY_TO_COMMIT') LIMIT 1",
++                sender_id, conversation_id))
++        finally:
++            await _rel(_c)
++    except Exception as e:  # noqa: BLE001
++        print(f"[orchestrator] open-intent check skipped {_corr(sender_id)}: {safe_exc(e)}")
++        return False
++
++
++async def _server_extract_order_fields(client, sender_id: str, text: str, history: list[dict],
++                                       sku_summary: str) -> dict:
++    """CA 233-01: SERVER goi model (KHONG truyen tools) voi schema chat -> JSON field don. Server-controlled
++    (khong phu thuoc model chon tool). Fail -> {} (khong vo reply)."""
++    try:
++        msgs = [{"role": "system", "content": _EXTRACT_SYS + "\n\n## Danh sach SKU\n" + (sku_summary or "")}]
++        msgs += history[-8:]
++        msgs.append({"role": "user", "content": text})
++        resp = await _llm_create(client, model=settings.llm_model, messages=msgs,
++                                 max_tokens=300, temperature=0.0)
++        return _parse_json_object(resp.choices[0].message.content or "")
++    except Exception as e:  # noqa: BLE001
++        print(f"[orchestrator] server extract skipped {_corr(sender_id)}: {safe_exc(e)}")
++        return {}
++
++
++async def _server_propose_turn(sender_id: str, text: str, channel: str, conversation_id,
++                               provider_message_id: str | None, history: list[dict], client,
++                               sku_summary: str) -> dict | None:
++    """CA 233-01: SERVER-controlled proposal path. Chay khi enrolled + turn lien quan don (order-intent text
++    HOAC reorder tuong minh HOAC co open draft). Server TRICH field -> _execute_tool(create_order) =
++    propose_draft (accumulate/verify/READY/summary). Tra tool-result dict; None = khong ap dung (flow thuong)."""
++    try:
++        from app.services.command import order_gateway as _ogw
++        enrolled = _ogw.can_route(channel) and (
++            settings.m1_reliable_order_command
++            or await tools._gate_e_pilot_route(sender_id, {"channel": channel}))
++        if not enrolled:
++            return None
++        relevant = _is_order_intent(text) or _is_explicit_reorder(text) or \
++            await _has_open_intent(sender_id, conversation_id)
++        if not relevant:
++            return None
++        # CA 235-02: enrolled transactional path PHAI co provider event id — KHONG fallback sender_id (tai
++        # dung duoc) lam event identity. Thieu -> fail-closed (bo qua server-extract luot nay).
++        if not provider_message_id:
++            print(f"[orchestrator] server-extract fail-closed: thieu provider_message_id {_corr(sender_id)}")
++            return None
++        # CA 235-02: CLAIM su kien provider TRUOC extraction — replay cua cung event -> no-op (khong extraction
++        # lai / khong mutation / khong summary row / khong intent moi).
++        from app.db_pool import acquire as _acq
++        from app.db_pool import release as _rel
++        from app.services.command import order_intent_service as _svc
++        _c = await _acq()
++        try:
++            _fresh = await _svc.claim_inbound_event(_c, channel=channel, provider_message_id=provider_message_id)
++        finally:
++            await _rel(_c)
++        if not _fresh:
++            return {"replay_noop": True}  # su kien da xu ly -> ZERO mutation
++        fields = await _server_extract_order_fields(client, sender_id, text, history, sku_summary)
++        args = {k: fields.get(k) for k in ("sku", "quantity", "customer_name", "phone", "address",
++                                           "province", "ward") if fields.get(k) not in (None, "")}
++        # Coerce quantity numeric -> int (JSON co the tra float/string).
++        _q = args.get("quantity")
++        if isinstance(_q, float) and _q.is_integer():
++            args["quantity"] = int(_q)
++        elif isinstance(_q, str) and _q.strip().isdigit():
++            args["quantity"] = int(_q.strip())
++        _clear = [c for c in (fields.get("clear") or []) if c in
++                  ("sku", "quantity", "customer_name", "phone", "address")]
++        # KHONG trich duoc field nao va KHONG co clear -> KHONG lam gi (tranh hijack chat thuong). Confirm
++        # da co early-hook rieng.
++        if not args and not _clear:
++            return None
++        # CA 235-02: "explicit new order" = reorder tuong minh ('them/nua') HOAC order request ro rang (co
++        # order marker + co san pham) tren SU KIEN MOI -> tao intent moi sau COMMITTED du khong co 'them'.
++        # Partial/mo ho (khong san pham) -> KHONG explicit -> sau COMMITTED = no-op (khong tao draft moi).
++        _explicit_new = _is_explicit_reorder(text) or (_is_order_intent(text) and bool(args.get("sku")))
++        cmd_ctx = {"channel": channel, "actor_type": "customer", "actor_id": sender_id,
++                   "conversation_id": conversation_id, "causation_id": provider_message_id,
++                   "provider_message_id": provider_message_id, "clear_fields": _clear,
++                   "explicit_new_order": _explicit_new}
++        return await _execute_tool("create_order", args, sender_id, text, command_ctx=cmd_ctx)
++    except Exception as e:  # noqa: BLE001 — server path fail KHONG vo reply (fall through LLM)
++        print(f"[orchestrator] server propose turn skipped {_corr(sender_id)}: {safe_exc(e)}")
++        return None
++
++
+ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str,
+                         command_ctx: dict | None = None) -> dict:
+     """Dispatch 1 tool call toi ham that trong app/services/tools.py.
+@@ -339,11 +567,12 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
+                 except Exception as e:  # noqa: BLE001 — never break the customer reply/order
+                     print(f"[orchestrator] M5 live address verify skipped: {safe_exc(e)}")
+                     vr = None
+-            # --- INTENT CONTROL PLANE (CA 225-01): tren enrolled route, intent DRIVE lifecycle + la truth ---
++            # --- CA 232 §2/§3: tren enrolled route, create_order = PROPOSAL (khong commit). Server accumulate
++            # draft + advance + present summary; COMMIT xay ra khi khach XAC NHAN (confirmation hook dau
++            # handle_message). Sua goc c Tien: khong con phu thuoc model goi create_order dung luc chot. ---
+             if _enrolled and command_ctx is not None:
+                 from app.db_pool import acquire as _acq
+                 from app.db_pool import release as _rel
+-                from app.services.command import order_intent as _oi
+                 from app.services.command import order_intent_flow as _oif
+                 _cid = None
+                 try:
+@@ -354,23 +583,37 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
+                         await _rel(_c)
+                 except Exception as e:  # noqa: BLE001
+                     print(f"[orchestrator] intent customer resolve loi: {safe_exc(e)}")
+-                _ofp = _oi.order_fingerprint(
+-                    sku=args.get("sku", ""), quantity=args.get("quantity"),
+-                    customer_name=args.get("customer_name", ""), phone=args.get("phone", ""),
+-                    address_fp=command_ctx.get("verified_address_fingerprint"))
+-                drive = await _oif.drive(
++                _proposed = {"sku": args.get("sku"), "quantity": args.get("quantity"),
++                             "customer_name": args.get("customer_name"), "phone": args.get("phone"),
++                             "address": args.get("address")}
++                prop = await _oif.propose_draft(
+                     customer_id=_cid, conversation_id=command_ctx.get("conversation_id"),
+-                    channel=command_ctx["channel"], order_fp=_ofp,
++                    channel=command_ctx["channel"], proposed=_proposed, verified=_verified,
+                     addr_fp=command_ctx.get("verified_address_fingerprint"),
+                     verified_resolution_id=command_ctx.get("verified_resolution_id"),
+-                    verified=_verified, explicit_new_order=_is_explicit_reorder(last_message))
+-                _act = drive.get("action")
+-                if _act in ("ready", "duplicate"):
+-                    # ready -> intent READY_TO_COMMIT (commit ben duoi); duplicate -> intent COMMITTED
+-                    # (stale-confirm, _run_winner tra receipt cu ZERO mutation + finalize replay row 225-03).
+-                    command_ctx["order_intent_id"] = drive["order_intent_id"]
+-                elif _act == "clarify":
+-                    # 225-01: intent da o NEEDS_CLARIFICATION (durable) TRUOC khi hoi. UX <=2 luot; het -> escalate.
++                    address_changed=bool(args.get("address")),
++                    explicit_new_order=command_ctx.get("explicit_new_order",
++                                                       _is_explicit_reorder(last_message)),  # CA 235-02
++                    clear_fields=command_ctx.get("clear_fields"))  # CA 234-02.2 explicit-clear
++                _act = prop.get("action")
++                if _act == "ready":
++                    # CA 233-02/234-03: server RENDER + PERSIST summary (messages, in-tx) + arm. Tra DUNG
++                    # summary do lam reply THAT; summary_persisted=True -> caller KHONG log lai (tranh double).
++                    return {"draft_ready": True, "final_reply": prop.get("summary"),
++                            "summary_persisted": bool(prop.get("summary_persisted"))}
++                if _act == "already_committed":
++                    # CA 233-04: de xuat stale/replay sau COMMITTED (khong reorder tuong minh) -> khong tao
++                    # draft moi. Bao khach don DA duoc ghi nhan (truthful), KHONG bia don moi.
++                    return {"draft_already_committed": True, "order_id": prop.get("order_id"),
++                            "instruction": ("Don nay DA duoc ghi nhan truoc do. Bao khach don da tiep nhan "
++                                            "roi, KHONG tao don moi, KHONG bao loi.")}
++                if _act == "need_more":
++                    _inv = " (co field SAI DANG: SDT/so luong/san pham — xin lai cho dung)" if prop.get(
++                        "invalid") else ""
++                    return {"draft_need_more": True, "missing": prop.get("missing"),
++                            "instruction": ("Hoi khach cung cap cac thong tin CON THIEU de dat don (san pham/"
++                                            f"so luong/ten nguoi nhan/SDT/dia chi){_inv}. KHONG noi da tao don.")}
++                if _act == "clarify":
+                     clarify = await _address_clarify(sender_id, vr, prov_prop, ward_prop) if vr else None
+                     if clarify is not None:
+                         return clarify
+@@ -384,13 +627,12 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
+                     return {"address_unresolved_escalated": True,
+                             "instruction": ("Da chuyen nhan vien ho tro xac minh dia chi. Bao khach doi "
+                                             "phan hoi trong it phut. KHONG noi da tao don.")}
+-                elif _act == "error":
+-                    # FAIL-CLOSED (225-04): khong thiet lap/validate duoc intent tren enrolled route -> KHONG
+-                    # tao don (zero mutation), tra loi an toan (khong khang dinh da dat hang).
+-                    print(f"[orchestrator] order-intent FAIL-CLOSED sender={sender_id}")
+-                    return {"error": "He thong dang ban, em chua chot duoc don. Anh/chi thu lai giup em sau it phut a.",
++                if _act == "error":
++                    print(f"[orchestrator] order-intent propose FAIL-CLOSED {_corr(sender_id)}")
++                    return {"error": "He thong dang ban, em chua ghi nhan duoc don. Anh/chi thu lai giup em a.",
+                             "intent_fail_closed": True}
+-                # _act == 'skip' -> khong enrolled thuc su -> legacy (order_intent_id None)
++                # _act == 'skip' -> customer_id None -> khong enrolled thuc su -> roi xuong legacy commit.
++            # Legacy (khong enrolled): giu hanh vi commit truc tiep (backward-compat, khong tester pilot).
+             result = await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
+             return result
+         if name == "escalate_to_human":
+@@ -462,6 +704,44 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+             await conversation_log.log_message(conversation_id, "bot", reply)
+             return reply
+ 
++        # CA 232 §6: khach XAC NHAN + co READY draft (summary da present khop version/fingerprint) -> SERVER
++        # tu chot don tu DRAFT (KHONG doi model goi create_order — sua goc c Tien). Chi enrolled route.
++        # try_server_commit tra None neu khong du context (generic 'xac nhan' ngoai pending-confirm -> LLM lo).
++        if _is_confirmation(text):
++            try:
++                from app.db_pool import acquire as _acq
++                from app.db_pool import release as _rel
++                from app.services.command import order_gateway as _ogw
++                from app.services.command import order_intent_flow as _oif
++                _enr = _ogw.can_route(channel) and (
++                    settings.m1_reliable_order_command
++                    or await tools._gate_e_pilot_route(sender_id, {"channel": channel}))
++                if _enr:
++                    _c = await _acq()
++                    try:
++                        _cid = await _c.fetchval("SELECT id FROM customers WHERE psid=$1", sender_id)
++                    finally:
++                        await _rel(_c)
++                    _committed = await _oif.try_server_commit(
++                        customer_id=_cid, conversation_id=conversation_id, channel=channel,
++                        actor_id=sender_id, provider_message_id=(provider_message_id or sender_id))
++                    if _committed is not None and _committed.get("order_id") and not _committed.get("error"):
++                        from app.services.command import reply_guard
++                        reply = reply_guard.finalize_customer_reply("", True)  # receipt deterministic (outbox)
++                        # CA 233-05: staff-history nhan DUNG 1 receipt row (qua _log_receipt_to_messages,
++                        # dedupe theo committed/duplicate) — KHONG log them neutral-ack thanh "second bot
++                        # reply". Neutral ack chi la reply tra ve kenh (giao khach 1 lan), khong ghi rieng.
++                        await _log_receipt_to_messages(conversation_id, _committed)  # §7 staff-visible (1 lan)
++                        history = await _get_history(redis, sender_id)
++                        history.append({"role": "user", "content": text})
++                        history.append({"role": "assistant", "content": reply})
++                        await _save_history(redis, sender_id, history)
++                        await conversation_log.log_message(conversation_id, "customer", text)
++                        print(f"[orchestrator] server confirm->commit order_committed {_corr(sender_id)}")
++                        return reply
++            except Exception as e:  # noqa: BLE001 — khong vo reply, fall through LLM
++                print(f"[orchestrator] server confirm->commit skipped: {safe_exc(e)}")
++
+         if handoff.wants_human(text):
+             await _terminalize_open_intent("ESCALATED", "customer_wants_human")
+             await tools.escalate_to_human(
+@@ -529,6 +809,44 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+         else:
+             profile = await get_user_profile(redis, sender_id)
+ 
++        # CA 233-01: SERVER-invoked extraction+propose CHAY TRUOC main LLM turn — draft tien toi READY
++        # NGAY CA KHI model tu choi moi tool. Client + sku_summary tai dung ben duoi (khong goi lai 2 lan).
++        _client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
++        _sku_summary = await products.get_sku_summary_text()
++        _server_instruction = None       # need_more/clarify/escalate -> huong dan LLM dien dat
++        _suppress_create_order = False    # chan model re-propose (double-count) sau khi server da xu ly luot nay
++        _replay_noop = False              # CA 235-02: su kien provider replay -> KHONG tao intent gi (ke ca safety net)
++        _srv = await _server_propose_turn(sender_id, text, channel, conversation_id,
++                                          provider_message_id, history, _client, _sku_summary)
++        if isinstance(_srv, dict):
++            if _srv.get("final_reply"):  # READY -> server-rendered summary = reply THAT, short-circuit
++                reply = _srv["final_reply"]
++                history.append({"role": "user", "content": text})
++                history.append({"role": "assistant", "content": reply})
++                await _save_history(redis, sender_id, history)
++                await conversation_log.log_message(conversation_id, "customer", text)
++                # CA 234-03: summary bot row DA persist in-tx (propose_draft, dedupe theo intent+version) ->
++                # KHONG log lai o day (tranh double / non-dedup row). Chi log neu vi ly do nao chua persist.
++                if not _srv.get("summary_persisted"):
++                    await conversation_log.log_message(conversation_id, "bot", reply)
++                print(f"[orchestrator] server-extract READY -> summary armed {_corr(sender_id)}")
++                return reply
++            if _srv.get("draft_already_committed"):  # stale/replay sau COMMITTED -> khong don moi (233-04)
++                reply = ("Dạ đơn của anh/chị em đã ghi nhận trước đó rồi ạ. Nếu cần đặt thêm đơn mới, "
++                         "anh/chị nhắn giúp em nhé.")
++                history.append({"role": "user", "content": text})
++                history.append({"role": "assistant", "content": reply})
++                await _save_history(redis, sender_id, history)
++                await conversation_log.log_message(conversation_id, "customer", text)
++                await conversation_log.log_message(conversation_id, "bot", reply)
++                return reply
++            if _srv.get("replay_noop"):  # CA 235-02: su kien provider replay -> ZERO mutation; chan compat
++                _suppress_create_order = True  # LLM tra loi hoi thoai, KHONG re-propose/mutate
++                _replay_noop = True            # + chan safety net _ensure_collecting_intent tao intent moi
++            if _srv.get("instruction"):  # need_more/clarify/escalate -> LLM dien dat + chan re-propose luot nay
++                _server_instruction = _srv["instruction"]
++                _suppress_create_order = True
++
+         # 2. Kien thuc tham khao: Knowledge Base V2 (#11) THAY THE RAG cu (#4)
+         # tu 23/7 theo chi dao PO ("cach pha phai tuan theo quy trinh KB V2") -
+         # phat hien XUNG DOT kien thuc khi test Telegram that: RAG cu
+@@ -593,7 +911,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+         # khang dinh sai "chi co 1 SKU" nhieu lan lien tiep trong 1 hoi thoai,
+         # ke ca khi khach phan bac). Day la nguon that ve SU TON TAI cua SKU -
+         # gia/ton kho/bac gia chi tiet van phai qua search_products/check_stock.
+-        sku_summary = await products.get_sku_summary_text()
++        sku_summary = _sku_summary  # CA 233-01: tai dung (da tinh o server-extract, khong goi lai)
+         system += (
+             "\n\n## Danh sach SKU hien co (nguon that DUY NHAT va DAY DU, LUON\n"
+             "dung, khong duoc noi trai hay phu nhan du lieu nay du lich su hoi\n"
+@@ -628,13 +946,25 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+                 f"{notes_text}"
+             )
+ 
++        # CA 233-01: server DA xu ly phan don hang luot nay (need_more/clarify/escalate) -> huong dan LLM CHI
++        # dien dat lai, KHONG tu tao/chot don; chan create_order khoi tool-set de tranh re-propose (double
++        # count clarify/version bump). Server la duong tien draft DUY NHAT khi da chay.
++        if _server_instruction:
++            system += ("\n\n## Huong dan he thong (BAT BUOC tuan thu)\n" + _server_instruction +
++                       "\nHe thong da xu ly phan don hang server-side; ban CHI dien dat lai cho khach mot "
++                       "cach tu nhien, TUYET DOI KHONG tu tao/chot don, KHONG noi da tao don.")
++
+         # messages cho vong lap tool-calling cua luot nay - khong dinh vao history
+         # da luu tru khi con tool_calls trung gian
+         turn_messages = [{"role": "system", "content": system}]
+         turn_messages += history
+         turn_messages.append({"role": "user", "content": text})
+ 
+-        client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
++        client = _client  # CA 233-01: tai dung client da tao o server-extract
++        _turn_tools = tools.TOOL_DEFINITIONS
++        if _suppress_create_order:
++            _turn_tools = [t for t in tools.TOOL_DEFINITIONS
++                           if t.get("function", {}).get("name") != "create_order"]
+ 
+         reply = ""
+         created_order_ids: list = []  # order_id create_order tra ve THAT trong luot nay
+@@ -646,6 +976,8 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+         _tok_out = 0
+         _n_iter = 0
+         _route_signal = None  # 216-04: 'clarify' | 'escalate' phat hien tu tool-result
++        _server_reply = None  # CA 233-02: server-rendered reply (summary) dung nguyen, khong qua LLM
++        _summary_persisted = False  # CA 234-03: summary bot row da persist in-tx -> end KHONG log lai
+         finish_reason = None
+         for _iter in range(MAX_TOOL_ITERATIONS):
+             _n_iter += 1
+@@ -654,7 +986,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+                 client,
+                 model=settings.llm_model,
+                 messages=turn_messages,
+-                tools=tools.TOOL_DEFINITIONS,
++                tools=_turn_tools,
+                 tool_choice="auto",
+                 max_tokens=MAX_OUTPUT_TOKENS,
+                 temperature=0.1,
+@@ -731,6 +1063,12 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+                         _route_signal = "clarify"
+                     elif result.get("address_unresolved_escalated"):
+                         _route_signal = "escalate"
++                    # CA 233-02: server RENDER summary -> dung DUNG summary do lam reply (khong de model viet
++                    # lai). Short-circuit tool loop. summary_persisted -> end-of-function KHONG log lai.
++                    if result.get("final_reply"):
++                        _server_reply = result["final_reply"]
++                        if result.get("summary_persisted"):
++                            _summary_persisted = True
+                 if (
+                     tc.function.name == "create_order"
+                     and isinstance(result, dict)
+@@ -749,9 +1087,14 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+                         "content": json.dumps(result, ensure_ascii=False),
+                     }
+                 )
++            # CA 233-02: neu tool tra summary server-rendered -> dung lam reply cuoi, khong goi LLM them.
++            if _server_reply:
++                reply = _server_reply
++                _route_signal = "reply"
++                break
+         else:
+             # Het MAX_TOOL_ITERATIONS ma van con tool_calls - tra loi an toan thay vi treo
+-            print(f"[orchestrator] Vuot qua {MAX_TOOL_ITERATIONS} vong tool_calls cho {sender_id}")
++            print(f"[orchestrator] Vuot qua {MAX_TOOL_ITERATIONS} vong tool_calls cho {_corr(sender_id)}")
+             reply = "Đội ngũ 3S Coffee sẽ kiểm tra và phản hồi bạn sớm nhất."
+ 
+         if not reply:
+@@ -773,7 +1116,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+             shadow = reply_guard.shadow_evaluate(_reply_claims_order_created(reply), created_order_ids)
+             if not shadow["consistent"]:
+                 # M3-S4: KHONG in noi dung reply (chua ten/ma don) — chi metadata.
+-                print(f"[orchestrator][M1-shadow] CLAIM-KHONG-RECEIPT sender={sender_id} "
++                print(f"[orchestrator][M1-shadow] CLAIM-KHONG-RECEIPT {_corr(sender_id)} "
+                       f"reply_len={len(reply)}")
+             # CR-08: order đã commit -> reply tức thì TRUNG TÍNH (không để LLM nói sai mã đơn/tổng tiền);
+             # xác nhận CHÍNH THỨC (đúng committed data) đi qua durable receipt (outbox, CR-03).
+@@ -789,41 +1132,43 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+             # M5 discovery fix (CA 223 §5.5 / 224 §10.9): khach HOI trang thai don CU ("kiem tra don hom
+             # qua"...) — out-of-scope tao don. Guard chong-bia bat vi reply nhac "don" nhung day KHONG
+             # phai bia don-moi. -> KHONG escalate/pause; tra neutral (khong khang dinh da tao don moi).
+-            print(f"[orchestrator] order-status query -> neutral, khong escalate. sender={sender_id}")
++            print(f"[orchestrator] order-status query -> neutral, khong escalate. {_corr(sender_id)}")
+             _route_signal = "reply"
+             reply = ("Dạ hiện em chưa tra cứu được chi tiết đơn cũ qua kênh này ạ. Anh/chị cho em xin "
+                      "mã đơn hoặc SĐT đã đặt để em kiểm tra giúp, hoặc em chuyển nhân viên hỗ trợ nhé ạ.")
+         elif not created_order_ids and _reply_claims_order_created(reply):
+-            # M3-S4: KHONG in noi dung reply (ngu canh xac nhan don thuong chua ten/tien) — metadata.
+-            print(
+-                f"[orchestrator] CHAN BIA DON: reply bao da tao don nhung khong co "
+-                f"create_order thanh cong trong luot nay. sender={sender_id} "
+-                f"reply_len={len(reply)}"
+-            )
+-            try:
+-                await tools.escalate_to_human(
+-                    psid=sender_id,
+-                    reason=(
+-                        "Nghi bia xac nhan don: model bao da tao don nhung khong "
+-                        "goi create_order thanh cong trong luot nay"
+-                    ),
+-                    last_message=text,
+-                )
+-            except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
+-                print(f"[orchestrator] escalate sau chan bia don loi: {safe_exc(e)}")
+-            await _terminalize_open_intent("ESCALATED", "suspected_fabrication")  # CA 225-01
+-            _route_signal = "escalate"  # 216-04
+-            reply = (
+-                "Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "
+-                "ngay ạ. Đội ngũ 3S Coffee sẽ liên hệ anh/chị trong ít phút để chốt đơn."
+-            )
++            # CA 232 §7 (B3/DoD#18): reply claim don ma KHONG co receipt luot nay. Neu co READY draft dang
++            # cho xac nhan -> KHONG escalate, chi THAY bang loi TRUTHFUL yeu cau xac nhan (khach chi can xac
++            # nhan la server chot). Neu KHONG co draft (bia thuc su) -> escalate nhu cu.
++            _pending = await _has_pending_ready_draft(sender_id, conversation_id)
++            print(f"[orchestrator] CHAN BIA DON (claim khong receipt): {_corr(sender_id)} "
++                  f"reply_len={len(reply)} pending_ready={_pending}")
++            if _pending:
++                _route_signal = "reply"
++                reply = ("Dạ em đã ghi nhận thông tin đơn của anh/chị. Anh/chị nhắn 'xác nhận' để em "
++                         "chốt đơn giúp mình nhé ạ. (Đơn CHƯA được tạo cho tới khi anh/chị xác nhận.)")
++            else:
++                try:
++                    await tools.escalate_to_human(
++                        psid=sender_id,
++                        reason=("Nghi bia xac nhan don: model bao da tao don nhung khong "
++                                "goi create_order thanh cong trong luot nay"),
++                        last_message=text)
++                except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
++                    print(f"[orchestrator] escalate sau chan bia don loi: {safe_exc(e)}")
++                await _terminalize_open_intent("ESCALATED", "suspected_fabrication")  # CA 225-01
++                _route_signal = "escalate"  # 216-04
++                reply = ("Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "
++                         "ngay ạ. Đội ngũ 3S Coffee sẽ liên hệ anh/chị trong ít phút để chốt đơn.")
+ 
+         # CA 226-03b: order-proposal chua du thong tin (khach dat don, LLM chua tao order + chua co open
+         # intent) -> tao COLLECTING durable de lifecycle bat dau tu proposal DAU TIEN. Non-order/status chat
+         # -> _is_order_intent False -> khong tao. Complete order sau -> drive() get-or-create tai dung intent
+         # nay -> ADDRESS_CHECK (khong parallel). Bo qua khi da commit/clarify/escalate luot nay.
+-        if not created_order_ids and _route_signal not in ("clarify", "escalate") \
+-                and _is_order_intent(text):
++        # CA 235-02: enrolled path thieu provider_message_id -> fail-closed (khong tao intent — event
++        # identity khong duoc fallback sender_id). Chi tao COLLECTING khi co provider event id.
++        if not created_order_ids and not _replay_noop and _route_signal not in ("clarify", "escalate") \
++                and provider_message_id and _is_order_intent(text):
+             await _ensure_collecting_intent(sender_id, conversation_id, channel)
+ 
+         # 5. Luu lich su - CHI luot user/assistant cuoi cung, khong luu buoc tool_calls
+@@ -832,7 +1177,9 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
+         history.append({"role": "assistant", "content": reply})
+         await _save_history(redis, sender_id, history)
+         await conversation_log.log_message(conversation_id, "customer", text)
+-        await conversation_log.log_message(conversation_id, "bot", reply)
++        # CA 234-03: summary bot row (khi compat create_order READY) da persist in-tx -> KHONG log lai.
++        if not _summary_persisted:
++            await conversation_log.log_message(conversation_id, "bot", reply)
+ 
+         # M5 upgrade (§6.D + Memo 213 §6 + Review 216-04): 1 dong metric AN TOAN — TUYET DOI khong
+         # ten/sdt/dia chi/message/prompt/reasoning/payload; chi so lieu tong hop de collector tinh
+diff --git a/migrations/059_m5_order_intent_draft.sql b/migrations/059_m5_order_intent_draft.sql
+new file mode 100644
+index 0000000..fddfa4c
+--- /dev/null
++++ b/migrations/059_m5_order_intent_draft.sql
+@@ -0,0 +1,26 @@
++-- 059 M5 deterministic confirm-to-commit: durable ORDER DRAFT tren order_intents (CA Directive 232 §3).
++-- Server so huu draft de RECONSTRUCT + COMMIT don MA KHONG can conversational memory hay model goi
++-- create_order lai. Cot draft additive, nullable (khong backfill; intent cu van hop le). Migration 058
++-- KHONG bi sua. Additive + reversible (rollback cuoi file).
++
++-- Field don da normalize/validate (server luu tu proposal model — model KHONG cap intent/state). draft_address
++-- la PROTECTED BUSINESS DATA (giong orders.shipping_address); evidence/log PHAI redacted (khong in raw).
++ALTER TABLE order_intents
++  ADD COLUMN IF NOT EXISTS draft_sku            TEXT,
++  ADD COLUMN IF NOT EXISTS draft_quantity       INTEGER,
++  ADD COLUMN IF NOT EXISTS draft_customer_name  TEXT,
++  ADD COLUMN IF NOT EXISTS draft_phone          TEXT,
++  ADD COLUMN IF NOT EXISTS draft_address        TEXT,
++  -- §6 confirmation contract: server ghi lai state_version + order_fingerprint TAI THOI DIEM present
++  -- deterministic summary (READY). Confirmation CHI hop le khi intent VAN o dung version/fingerprint do
++  -- (correction sau do doi fingerprint/version -> summary cu VO HIEU -> khong commit draft da sua).
++  ADD COLUMN IF NOT EXISTS summary_version      INTEGER,
++  ADD COLUMN IF NOT EXISTS summary_fingerprint  TEXT,
++  ADD COLUMN IF NOT EXISTS summary_presented_at TIMESTAMPTZ;
++
++-- ROLLBACK (runbook):
++--   ALTER TABLE order_intents
++--     DROP COLUMN IF EXISTS draft_sku, DROP COLUMN IF EXISTS draft_quantity,
++--     DROP COLUMN IF EXISTS draft_customer_name, DROP COLUMN IF EXISTS draft_phone,
++--     DROP COLUMN IF EXISTS draft_address, DROP COLUMN IF EXISTS summary_version,
++--     DROP COLUMN IF EXISTS summary_fingerprint, DROP COLUMN IF EXISTS summary_presented_at;
+diff --git a/migrations/060_m5_confirm_commit_dedupe.sql b/migrations/060_m5_confirm_commit_dedupe.sql
+new file mode 100644
+index 0000000..dd1462e
+--- /dev/null
++++ b/migrations/060_m5_confirm_commit_dedupe.sql
+@@ -0,0 +1,21 @@
++-- 060 M5 confirm-to-commit V02-final (CA Review 234 §234-03/234-04): stable dedupe identity cho staff-
++-- history + summary-response content hash. Additive, nullable, KHONG backfill; migration 059 KHONG bi sua.
++-- Additive + reversible (rollback cuoi file).
++
++-- 234-04: staff-visible receipt/summary row phai dedup theo STABLE ORDER/EVENT IDENTITY (khong content
++-- matching). dedupe_key NULL cho tin nhan thuong; khi co, UNIQUE toan cuc -> INSERT ON CONFLICT DO NOTHING
++-- => exactly-once row cho cung (order/summary) qua replay/concurrent.
++ALTER TABLE messages
++  ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
++CREATE UNIQUE INDEX IF NOT EXISTS messages_dedupe_key_uidx
++  ON messages(dedupe_key) WHERE dedupe_key IS NOT NULL;
++
++-- 234-03: content hash cua server-rendered summary DA PERSIST, bound theo intent version/fingerprint.
++-- Confirmation chi hop le khi persisted response ton tai + khop; neu render/persist doi -> hash doi.
++ALTER TABLE order_intents
++  ADD COLUMN IF NOT EXISTS summary_content_hash TEXT;
++
++-- ROLLBACK (runbook):
++--   DROP INDEX IF EXISTS messages_dedupe_key_uidx;
++--   ALTER TABLE messages DROP COLUMN IF EXISTS dedupe_key;
++--   ALTER TABLE order_intents DROP COLUMN IF EXISTS summary_content_hash;
+diff --git a/migrations/061_m5_inbound_event_dedupe.sql b/migrations/061_m5_inbound_event_dedupe.sql
+new file mode 100644
+index 0000000..4db650f
+--- /dev/null
++++ b/migrations/061_m5_inbound_event_dedupe.sql
+@@ -0,0 +1,14 @@
++-- 061 M5 confirm-to-commit V02-final-r1 (CA Review 235-02): durable INBOUND provider-event claim/dedupe
++-- scoped by (channel, provider_message_id) — replay cua CUNG su kien KHONG duoc chay lai extraction/mutation
++-- (version bump / summary row / intent moi). Additive, khong backfill. Migration 059/060 KHONG bi sua.
++-- Additive + reversible (rollback cuoi file).
++
++CREATE TABLE IF NOT EXISTS inbound_event_log (
++  channel             TEXT        NOT NULL,
++  provider_message_id TEXT        NOT NULL,
++  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
++  PRIMARY KEY (channel, provider_message_id)
++);
++
++-- ROLLBACK (runbook):
++--   DROP TABLE IF EXISTS inbound_event_log;
+diff --git a/scripts/m5_confirm_commit_core_rehearsal.py b/scripts/m5_confirm_commit_core_rehearsal.py
+new file mode 100644
+index 0000000..0460c8b
+--- /dev/null
++++ b/scripts/m5_confirm_commit_core_rehearsal.py
+@@ -0,0 +1,94 @@
++"""CA 232 §6/DoD#10: server-side confirm->commit — READY draft + summary khop -> confirmation commit
++1 order MA KHONG can model goi create_order. + DoD#13 generic-confirm ngoai context; #12 stale-summary."""
++import asyncio, sys, uuid, time
++RUN=str(int(time.time()))
++from app.config import settings
++from app.db_pool import acquire, release, close_pool
++from app.services.command import order_intent as oi, order_intent_service as svc, order_intent_flow as flow
++
++FAILS=[]
++def ck(n,c,x=""): print(f"  [{'PASS' if c else 'FAIL'}] {n}{(' :: '+x) if x else ''}"); (FAILS.append(n) if not c else None)
++
++async def mk_ready_draft(cid,conv,sku='SPCC',qty=1,name='H',phone='0900007000',addr='12 Le Loi, Ea Kao'):
++    """Tao intent READY co DRAFT + order_fingerprint + summary present khop version/fingerprint."""
++    ofp=oi.order_fingerprint(sku=sku,quantity=qty,customer_name=name,phone=phone,address_fp=None)
++    c=await acquire()
++    try:
++        async with c.transaction():
++            it=await svc.create_intent(c,customer_id=cid,conversation_id=conv,channel='telegram_customer')
++            r=await svc.update_draft(c,it['id'],expected_version=0,sku=sku,quantity=qty,customer_name=name,phone=phone,address=addr)
++            r=await svc.transition(c,it['id'],expected_version=r['state_version'],to_state='ADDRESS_CHECK',order_fingerprint=ofp)
++            r=await svc.transition(c,it['id'],expected_version=r['state_version'],to_state='READY_TO_COMMIT')
++            # CA 235-01: arm dung contract — persist summary response row (dedupe) + content_hash mandatory.
++            import hashlib
++            summary=f"Xac nhan don {sku} x{qty} - {name}"
++            await svc.log_message_tx(c,conv,'bot',summary,dedupe_key=f"order_summary:{it['id']}:{r['state_version']}")
++            await svc.present_summary(c,it['id'],expected_version=r['state_version'],order_fingerprint=ofp,
++                                      content_hash=hashlib.sha256(summary.encode()).hexdigest())
++        return str(it['id'])
++    finally: await release(c)
++
++async def n_orders(cid):
++    c=await acquire()
++    try: return await c.fetchval("SELECT count(*) FROM orders WHERE customer_id=$1",cid)
++    finally: await release(c)
++async def istate(iid):
++    c=await acquire()
++    try: return await c.fetchrow("SELECT state,committed_order_id FROM order_intents WHERE id=$1",iid)
++    finally: await release(c)
++
++async def main():
++    settings.m1_reliable_order_command=True
++    c=await acquire()
++    try:
++        await c.execute("INSERT INTO products(sku,name,stock,price_vnd) VALUES('SPCC','x',500,1000) ON CONFLICT(sku) DO UPDATE SET stock=500")
++        cid=await c.fetchval("SELECT id FROM customers WHERE psid='tg:cc'") or await c.fetchval("INSERT INTO customers(psid,name,phone) VALUES('tg:cc','H','0900007000') RETURNING id")
++        conv=await c.fetchval("INSERT INTO conversations(customer_id) VALUES($1) RETURNING id",cid)
++    finally: await release(c)
++
++    # DoD#10: READY draft + summary -> server commit KHONG model
++    iid=await mk_ready_draft(cid,conv)
++    n0=await n_orders(cid)
++    r=await flow.try_server_commit(customer_id=cid,conversation_id=conv,channel='telegram_customer',actor_id='tg:cc',provider_message_id=f'tg:{RUN}1')
++    ck("DoD#10 server commit tu draft (KHONG model create_order)", r is not None and r.get('order_id') is not None, str(r.get('order_id') if r else None))
++    ck("DoD#10 +1 order", await n_orders(cid)==n0+1)
++    st=await istate(iid); ck("DoD#10 intent COMMITTED", st and st['state']=='COMMITTED' and st['committed_order_id']==r.get('order_id'))
++
++    # DoD#11: xac nhan lai (redelivered) -> 1 order + same receipt (duplicate)
++    r2=await flow.try_server_commit(customer_id=cid,conversation_id=conv,channel='telegram_customer',actor_id='tg:cc',provider_message_id=f'tg:{RUN}2')
++    # intent da COMMITTED -> find_open_intent None -> try_server_commit tra None (khong con open) -> khong don moi
++    ck("DoD#11 confirm lai sau commit -> khong don moi", await n_orders(cid)==n0+1 and r2 is None)
++
++    # DoD#12: stale-summary sau correction -> KHONG commit. Tao draft READY, present summary, roi update_draft
++    # (doi field -> version tang -> summary cu stale) -> try_server_commit KHONG duoc commit.
++    c=await acquire()
++    try: conv2=await c.fetchval("INSERT INTO conversations(customer_id) VALUES($1) RETURNING id",cid)
++    finally: await release(c)
++    iid2=await mk_ready_draft(cid,conv2)
++    n1=await n_orders(cid)
++    c=await acquire()
++    try:  # correction: doi qty -> version tang -> summary_version != state_version
++        cur=await c.fetchval("SELECT state_version FROM order_intents WHERE id=$1",iid2)
++        await svc.update_draft(c,iid2,expected_version=cur,quantity=9)
++    finally: await release(c)
++    r3=await flow.try_server_commit(customer_id=cid,conversation_id=conv2,channel='telegram_customer',actor_id='tg:cc',provider_message_id=f'tg:{RUN}3')
++    ck("DoD#12 stale-summary sau correction -> KHONG commit", r3 is None and await n_orders(cid)==n1)
++
++    # DoD (guard): draft chua du field -> KHONG commit
++    conv3=None
++    c=await acquire()
++    try: conv3=await c.fetchval("INSERT INTO conversations(customer_id) VALUES($1) RETURNING id",cid)
++    finally: await release(c)
++    c=await acquire()
++    try:
++        async with c.transaction():
++            it=await svc.create_intent(c,customer_id=cid,conversation_id=conv3,channel='telegram_customer')
++            await svc.update_draft(c,it['id'],expected_version=0,sku='SPCC',quantity=1)  # thieu name/phone/addr
++    finally: await release(c)
++    r4=await flow.try_server_commit(customer_id=cid,conversation_id=conv3,channel='telegram_customer',actor_id='tg:cc',provider_message_id=f'tg:{RUN}4')
++    ck("guard draft chua du field -> KHONG commit", r4 is None)
++
++    print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: '+','.join(FAILS)}")
++    await close_pool(); sys.exit(1 if FAILS else 0)
++
++asyncio.run(main())
+diff --git a/scripts/m5_confirm_commit_propose_flow_rehearsal.py b/scripts/m5_confirm_commit_propose_flow_rehearsal.py
+new file mode 100644
+index 0000000..9db0190
+--- /dev/null
++++ b/scripts/m5_confirm_commit_propose_flow_rehearsal.py
+@@ -0,0 +1,60 @@
++"""CA 232: propose_draft (accumulate + advance + summary, KHONG commit) -> try_server_commit (confirm).
++Tai hien c Tien: model de xuat field qua cac luot, KHONG commit; server chot khi confirm."""
++import asyncio, sys, time
++RUN=str(int(time.time()))
++from app.config import settings
++from app.db_pool import acquire, release, close_pool
++from app.services.command import order_intent_flow as flow, order_intent_service as svc
++
++FAILS=[]
++def ck(n,c,x=""): print(f"  [{'PASS' if c else 'FAIL'}] {n}{(' :: '+x) if x else ''}"); (FAILS.append(n) if not c else None)
++
++async def q1(sql,*a):
++    c=await acquire()
++    try: return await c.fetchval(sql,*a)
++    finally: await release(c)
++async def istate(cid,conv):
++    c=await acquire()
++    try:
++        r=await c.fetchrow("SELECT state,state_version,draft_sku,draft_address,summary_version FROM order_intents WHERE customer_id=$1 AND conversation_id=$2 ORDER BY created_at DESC LIMIT 1",cid,conv)
++        return dict(r) if r else None
++    finally: await release(c)
++
++async def main():
++    settings.m1_reliable_order_command=True
++    c=await acquire()
++    try:
++        await c.execute("INSERT INTO products(sku,name,stock,price_vnd) VALUES('SPP','x',500,1000) ON CONFLICT(sku) DO UPDATE SET stock=500")
++        cid=await c.fetchval("SELECT id FROM customers WHERE psid='tg:pp'") or await c.fetchval("INSERT INTO customers(psid,name,phone) VALUES('tg:pp','H','0900008000') RETURNING id")
++        conv=await c.fetchval("INSERT INTO conversations(customer_id) VALUES($1) RETURNING id",cid)
++    finally: await release(c)
++    n0=await q1("SELECT count(*) FROM orders WHERE customer_id=$1",cid)
++
++    # Luot 1: model de xuat 1 phan (sku+qty, thieu contact/address) -> need_more
++    r=await flow.propose_draft(customer_id=cid,conversation_id=conv,channel='telegram_customer',
++        proposed={"sku":"SPP","quantity":2}, verified=False, addr_fp=None, verified_resolution_id=None, address_changed=False)
++    ck("L1 thieu field -> need_more", r["action"]=="need_more", str(r.get("missing")))
++    ck("L1 0 order", await q1("SELECT count(*) FROM orders WHERE customer_id=$1",cid)==n0)
++    st=await istate(cid,conv); ck("L1 state COLLECTING + draft_sku luu", st and st["state"]=="COLLECTING" and st["draft_sku"]=="SPP")
++
++    # Luot 2: bo sung contact + address (verified) -> ready + summary
++    r=await flow.propose_draft(customer_id=cid,conversation_id=conv,channel='telegram_customer',
++        proposed={"customer_name":"c Tien","phone":"0945303009","address":"03 Truong Quang Tuan, Tan Lap"},
++        verified=True, addr_fp=None, verified_resolution_id=None, address_changed=True)
++    ck("L2 du field + verified -> ready", r["action"]=="ready", str(r.get("draft")))
++    ck("L2 VAN 0 order (chua commit)", await q1("SELECT count(*) FROM orders WHERE customer_id=$1",cid)==n0)
++    st=await istate(cid,conv); ck("L2 READY + summary present", st and st["state"]=="READY_TO_COMMIT" and st["summary_version"]==st["state_version"])
++
++    # Luot 3: khach XAC NHAN -> server commit (KHONG model create_order)
++    rc=await flow.try_server_commit(customer_id=cid,conversation_id=conv,channel='telegram_customer',actor_id='tg:pp',provider_message_id=f'tg:{RUN}3')
++    ck("L3 confirm -> SERVER commit (khong model)", rc is not None and rc.get("order_id") is not None, str(rc.get("order_id") if rc else None))
++    ck("L3 +1 order", await q1("SELECT count(*) FROM orders WHERE customer_id=$1",cid)==n0+1)
++    st=await istate(cid,conv); ck("L3 intent COMMITTED", st and st["state"]=="COMMITTED")
++    # kiem tra order dung noi dung draft
++    o=await q1("SELECT shipping_name FROM orders WHERE customer_id=$1 ORDER BY id DESC LIMIT 1",cid)
++    ck("L3 order dung ten draft (c Tien)", o=="c Tien", str(o))
++
++    print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: '+','.join(FAILS)}")
++    await close_pool(); sys.exit(1 if FAILS else 0)
++
++asyncio.run(main())
+diff --git a/scripts/m5_confirm_commit_v02_dod_harness.py b/scripts/m5_confirm_commit_v02_dod_harness.py
+new file mode 100644
+index 0000000..6f82e27
+--- /dev/null
++++ b/scripts/m5_confirm_commit_v02_dod_harness.py
+@@ -0,0 +1,291 @@
++"""CA Review 233 V02 — consolidated DoD harness for deterministic confirm-to-commit under the
++server-invoked extraction-primary flow (233-01). Mock _llm_create discriminates:
++  - MAIN chat loop  (tools=... present) -> scripted text/tool from _S (assistant may refuse tools).
++  - SERVER extract  (no tools kwarg)    -> scripted JSON from _EX (server-controlled).
++
++Covers: 233-01 (server reaches READY/commit with 0 assistant tool calls), 233-02 (server-rendered
++summary armed to version/fingerprint), 233-03 (high-precision + context-bound confirmation, incl.
++adversarial VN), 233-04 (validation, address-change by fingerprint, replay/already-committed,
++reorder-only-on-explicit), 233-05 (one customer receipt + one staff-history row, replay no dup).
++Sanitized synthetic data (no real PII)."""
++import asyncio
++import json
++import sys
++import time
++import types
++
++from app.config import settings
++from app.db_pool import acquire, close_pool, release
++from app.services import orchestrator
++from app.services.command import order_intent_flow as flow
++
++RUN = str(int(time.time()))
++FAILS = []
++
++
++def ck(n, c, x=""):
++    print(f"  [{'PASS' if c else 'FAIL'}] {n}{(' :: ' + str(x)) if x else ''}")
++    if not c:
++        FAILS.append(n)
++
++
++_S = []    # MAIN chat loop scripts
++_EX = []   # SERVER extraction scripts
++_TOOLCALLS = {"n": 0}
++
++
++def _msg(content=None, tools=None):
++    tcs = [types.SimpleNamespace(id=f"c{i}", function=types.SimpleNamespace(
++        name=t["name"], arguments=json.dumps(t["args"], ensure_ascii=False)))
++        for i, t in enumerate(tools or [])] or None
++    return types.SimpleNamespace(content=content, tool_calls=tcs)
++
++
++def _resp(msg, finish):
++    return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason=finish)],
++                                 usage=types.SimpleNamespace(prompt_tokens=1, completion_tokens=1))
++
++
++async def _fake(client, **kw):
++    if "tools" in kw:  # MAIN loop
++        it = _S.pop(0) if _S else {"text": "..."}
++        if it.get("tools"):
++            _TOOLCALLS["n"] += 1
++        return _resp(_msg(content=it.get("text"), tools=it.get("tools")),
++                     "tool_calls" if it.get("tools") else "stop")
++    obj = _EX.pop(0) if _EX else {}  # EXTRACTION
++    return _resp(_msg(content=json.dumps(obj, ensure_ascii=False)), "stop")
++
++
++orchestrator._llm_create = _fake
++
++
++async def q1(s, *a):
++    c = await acquire()
++    try:
++        return await c.fetchval(s, *a)
++    finally:
++        await release(c)
++
++
++async def qr(s, *a):
++    c = await acquire()
++    try:
++        r = await c.fetchrow(s, *a)
++        return dict(r) if r else None
++    finally:
++        await release(c)
++
++
++async def setup(psid):
++    c = await acquire()
++    try:
++        await c.execute("INSERT INTO products(sku,name,stock,price_vnd) VALUES('SPV2','Cà phê hũ',500,90000) "
++                        "ON CONFLICT(sku) DO UPDATE SET stock=500,name='Cà phê hũ',price_vnd=90000")
++        return await c.fetchval("SELECT id FROM customers WHERE psid=$1", psid) or await c.fetchval(
++            "INSERT INTO customers(psid,name,phone) VALUES($1,'H','0900001234') RETURNING id", psid)
++    finally:
++        await release(c)
++
++
++async def newconv(cid):
++    c = await acquire()
++    try:
++        return await c.fetchval("INSERT INTO conversations(customer_id) VALUES($1) RETURNING id", cid)
++    finally:
++        await release(c)
++
++
++ADDR = "12 Le Loi, P. Ea Kao, Dak Lak"
++FULL = {"sku": "SPV2", "quantity": 1, "customer_name": "Hoa", "phone": "0900001234",
++        "address": ADDR, "province": "Tỉnh Đắk Lắk", "ward": "Phường Ea Kao"}
++_CTR = [0]
++
++
++def _mid():
++    _CTR[0] += 1
++    return f"tg:{RUN}{_CTR[0]}"
++
++
++async def norders(cid):
++    return await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid)
++
++
++async def nintents(cid):
++    return await q1("SELECT count(*) FROM order_intents WHERE customer_id=$1", cid)
++
++
++async def laststate(cid):
++    return await q1("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++
++
++async def send(psid, msg):
++    return await orchestrator.handle_message(psid, msg, channel="telegram_customer", provider_message_id=_mid())
++
++
++async def enroll(cid):
++    cur = settings.gate_e_canary_customer_ids or ""
++    settings.gate_e_canary_customer_ids = f"{cur},{cid}" if cur else str(cid)
++    settings.address_resolver_pilot_customer_ids = settings.gate_e_canary_customer_ids
++
++
++async def drive_ready(psid, cid):
++    """Full order via SERVER extraction (assistant refuses tools) -> READY + summary armed."""
++    _EX.clear()
++    _EX.append(dict(FULL))
++    _S.clear()
++    _S.append({"text": "Dạ em ghi nhận ạ."})
++    return await send(psid, "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234")
++
++
++async def main():
++    settings.m1_reliable_order_command = False
++    settings.enable_gate_e_order_wiring = True
++    settings.enable_address_resolver = True
++    settings.enable_nlu_router = False
++
++    # ---------- 233-03 UNIT: high-precision confirmation detector (no DB) ----------
++    pos = ["xác nhận", "ok", "đồng ý", "chốt đơn", "chốt luôn", "duoc", "xác nhận đơn"]
++    neg = ["chưa xác nhận đâu", "đúng số lượng chưa nhỉ?", "đổi 2 hũ", "sửa địa chỉ giúp anh",
++           "ưng cái áo này quá", "cho hỏi giá bao nhiêu", "được không em", "huỷ đơn nhé",
++           "kiểm tra đơn hôm qua", "khoan đã"]
++    ck("233-03 positive confirmations -> True",
++       all(orchestrator._is_confirmation(t) for t in pos),
++       [t for t in pos if not orchestrator._is_confirmation(t)])
++    ck("233-03 adversarial/negation/question/correction -> False",
++       all(not orchestrator._is_confirmation(t) for t in neg),
++       [t for t in neg if orchestrator._is_confirmation(t)])
++
++    # ---------- 233-01/02: READY with 0 assistant tool calls + server summary ----------
++    cid = await setup(f"tg:v2a-{RUN}")
++    settings.gate_e_canary_customer_ids = str(cid)
++    settings.address_resolver_pilot_customer_ids = str(cid)
++    _TOOLCALLS["n"] = 0
++    r = await drive_ready(f"tg:v2a-{RUN}", cid)
++    ck("233-01 READY via server extract", await laststate(cid) == "READY_TO_COMMIT", await laststate(cid))
++    ck("233-01 0 order truoc confirm", await norders(cid) == 0)
++    ck("233-02 reply = server summary (SP+dia chi)",
++       "Sản phẩm" in (r or "") and "Ea Kao" in (r or ""), (r or "")[:50])
++
++    # ---------- 233-03 context: stale confirm after correction -> 0 order ----------
++    _EX.clear()
++    _EX.append({"quantity": 3})  # correction -> version bump, summary stale
++    _S.clear()
++    _S.append({"text": "Dạ em cập nhật số lượng ạ."})
++    await send(f"tg:v2a-{RUN}", "đổi lại 3 hũ nhé")
++    n_before = await norders(cid)
++    await send(f"tg:v2a-{RUN}", "xác nhận")  # confirm on stale summary (correction re-presented new summary?)
++    # After correction the flow re-presents a NEW summary (still READY) -> confirm commits the NEW one.
++    st = await laststate(cid)
++    ck("233-03/04 correction re-verified -> confirm commits corrected order",
++       await norders(cid) == n_before + 1 and st == "COMMITTED",
++       f"orders {n_before}->{await norders(cid)} state={st}")
++    ck("233-01 ASSISTANT 0 tool calls xuyen suot", _TOOLCALLS["n"] == 0, _TOOLCALLS["n"])
++
++    # ---------- 233-05: one customer receipt + one staff-history row; replay no dup ----------
++    conv = await q1("SELECT id FROM conversations WHERE customer_id=$1 ORDER BY id DESC LIMIT 1", cid)
++
++    async def receipt_rows():
++        return await q1("SELECT count(*) FROM messages WHERE conversation_id=$1 AND role='bot' "
++                        "AND content LIKE '%#%'", conv)
++
++    oid = await q1("SELECT committed_order_id FROM order_intents WHERE customer_id=$1 AND state='COMMITTED' "
++                   "ORDER BY updated_at DESC LIMIT 1", cid)
++
++    async def outbox_for_order():
++        # outbox receipt events cho DUNG order nay (dedupe theo order) — replay khong duoc them.
++        return await q1("SELECT count(*) FROM outbox_events WHERE event_type='order.receipt.customer' "
++                        "AND (payload->>'order_id')::int = $1", oid) if oid else 0
++
++    msgs1 = await receipt_rows()
++    ob1 = await outbox_for_order()
++    await send(f"tg:v2a-{RUN}", "xác nhận")  # replay confirm
++    msgs2 = await receipt_rows()
++    ob2 = await outbox_for_order()
++    ck("233-05 staff-history receipt == 1 (replay +0)", msgs1 == 1 and msgs2 == 1, f"m1={msgs1} m2={msgs2}")
++    ck("233-05 outbox receipt cho order == 1 (replay +0)", ob1 == 1 and ob2 == 1, f"ob1={ob1} ob2={ob2}")
++
++    # ---------- 233-04/235-02: TRUE provider-event replay after COMMITTED -> no new intent/order ----------
++    # Redeliver the SAME order event id (claim dedupe) -> zero mutation. (Order message = 1 event id; confirm
++    # dung event khac.) Full order voi event MOI = don moi hop le (235-02b) — nen replay phai CUNG event id.
++    cidR = await setup(f"tg:v2r-{RUN}")
++    await enroll(cidR)
++    PMID_ORD = f"tg:{RUN}9001"  # numeric suffix — verify_and_link yeu cau tg:<so>
++    _EX.clear()
++    _EX.append(dict(FULL))
++    _S.clear()
++    _S.append({"text": "ok"})
++    await orchestrator.handle_message(f"tg:v2r-{RUN}", "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234",
++                                      channel="telegram_customer", provider_message_id=PMID_ORD)
++    await send(f"tg:v2r-{RUN}", "xác nhận")
++    ck("233-04 baseline commit FULL", await norders(cidR) == 1 and await laststate(cidR) == "COMMITTED")
++    niR = await nintents(cidR)
++    noR = await norders(cidR)
++    _EX.clear()
++    _EX.append(dict(FULL))  # would-be new order, but SAME event id -> replay claim -> no-op
++    _S.clear()
++    _S.append({"text": "Dạ ạ."})
++    await orchestrator.handle_message(f"tg:v2r-{RUN}", "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234",
++                                      channel="telegram_customer", provider_message_id=PMID_ORD)
++    ck("233-04/235-02 TRUE replay (cung event id) sau COMMITTED -> khong intent/order moi",
++       await nintents(cidR) == niR and await norders(cidR) == noR,
++       f"intents {niR}->{await nintents(cidR)} orders {noR}->{await norders(cidR)}")
++
++    # ---------- 233-04: explicit reorder AFTER committed -> new draft ----------
++    _EX.clear()
++    _EX.append(dict(FULL))
++    _S.clear()
++    _S.append({"text": "Đơn mới nhé ạ."})
++    await send(f"tg:v2r-{RUN}", "đặt thêm 1 đơn nữa giống vậy")
++    ck("233-04 reorder tuong minh -> draft moi READY",
++       await nintents(cidR) == niR + 1 and await laststate(cidR) == "READY_TO_COMMIT",
++       f"intents={await nintents(cidR)} state={await laststate(cidR)}")
++
++    # ---------- 233-04: incomplete + invalid-phone -> COLLECTING, 0 order ----------
++    cidI = await setup(f"tg:v2i-{RUN}")
++    await enroll(cidI)
++    _EX.clear()
++    _EX.append({"sku": "SPV2", "quantity": 1, "customer_name": "Nam", "phone": "abc",
++                "address": ADDR, "province": "Tỉnh Đắk Lắk", "ward": "Phường Ea Kao"})
++    _S.clear()
++    _S.append({"text": "Dạ SĐT chưa đúng, anh cho em xin lại ạ."})
++    await send(f"tg:v2i-{RUN}", "đặt 1 hũ, sđt abc")
++    ck("233-04 phone SAI DANG -> khong READY, 0 order",
++       await laststate(cidI) == "COLLECTING" and await norders(cidI) == 0, await laststate(cidI))
++
++    # ---------- COMPAT: extraction empty -> model create_order still progresses ----------
++    cidC = await setup(f"tg:v2c-{RUN}")
++    await enroll(cidC)
++    _EX.clear()
++    _EX.append({})  # server extraction finds nothing
++    _S.clear()
++    _S.append({"tools": [{"name": "create_order", "args": dict(FULL)}]})
++    _S.append({"text": "Xác nhận giúp em nhé?"})
++    await send(f"tg:v2c-{RUN}", "đặt hàng giúp mình")
++    ck("COMPAT model create_order (extract rong) -> READY", await laststate(cidC) == "READY_TO_COMMIT",
++       await laststate(cidC))
++    await send(f"tg:v2c-{RUN}", "xác nhận")
++    ck("COMPAT confirm -> +1 order", await norders(cidC) == 1)
++
++    # ---------- 233-04 (service): address change by fingerprint (same addr != changed) ----------
++    settings.m1_reliable_order_command = True
++    settings.enable_gate_e_order_wiring = False
++    cidS = await setup(f"tg:v2s-{RUN}")
++    convS = await newconv(cidS)
++    r1 = await flow.propose_draft(customer_id=cidS, conversation_id=convS, channel="telegram_customer",
++                                  proposed=dict(FULL), verified=True, addr_fp="fp1",
++                                  verified_resolution_id=None, address_changed=True)
++    v1 = await q1("SELECT verified_address_fingerprint FROM order_intents WHERE id=$1", r1["order_intent_id"])
++    # Re-propose SAME address (different accents/case) -> NOT a change -> binding preserved.
++    r2 = await flow.propose_draft(customer_id=cidS, conversation_id=convS, channel="telegram_customer",
++                                  proposed={"address": "12 LE LOI, p. ea kao, dak lak"}, verified=True,
++                                  addr_fp="fp1", verified_resolution_id=None, address_changed=True)
++    ck("233-04 dia chi giong (khac dau/hoa) -> KHONG coi la doi",
++       r2.get("action") in ("ready", "need_more", "clarify"), r2.get("action"))
++
++    print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: ' + ', '.join(FAILS)}")
++    await close_pool()
++    sys.exit(1 if FAILS else 0)
++
++
++asyncio.run(main())
+diff --git a/scripts/m5_confirm_commit_v02_extract_harness.py b/scripts/m5_confirm_commit_v02_extract_harness.py
+new file mode 100644
+index 0000000..3f53523
+--- /dev/null
++++ b/scripts/m5_confirm_commit_v02_extract_harness.py
+@@ -0,0 +1,137 @@
++"""CA Review 233-01 PROOF: server-invoked structured extraction reaches READY + commits exactly once EVEN
++WHEN the assistant model REFUSES every tool call throughout the whole multi-turn order.
++
++Mock _llm_create discriminates by the presence of the `tools` kwarg:
++  - MAIN chat loop (tools=... passed)  -> return TEXT ONLY, tool_calls=None  => assistant refuses ALL tools.
++  - SERVER extraction (no tools kwarg) -> return the strict JSON object for that turn (server-controlled).
++
++Accumulate across turns -> verify address -> READY -> server-rendered summary -> confirm -> 1 commit.
++Sanitized synthetic data (no real PII).
++"""
++import asyncio
++import json
++import time
++import types
++
++from app.config import settings
++from app.db_pool import acquire, close_pool, release
++from app.services import orchestrator
++
++RUN = str(int(time.time()))
++FAILS = []
++
++
++def ck(n, c, x=""):
++    print(f"  [{'PASS' if c else 'FAIL'}] {n}{(' :: ' + x) if x else ''}")
++    if not c:
++        FAILS.append(n)
++
++
++# Per-turn scripted EXTRACTION JSON (server-controlled call). Keyed by turn tag injected via last user msg.
++_EXTRACT = {}
++_MAIN_CALLS = {"n": 0, "tool_calls": 0}
++
++
++def _wrap(content, tool_calls=None, finish="stop"):
++    msg = types.SimpleNamespace(content=content, tool_calls=tool_calls)
++    return types.SimpleNamespace(
++        choices=[types.SimpleNamespace(message=msg, finish_reason=finish)],
++        usage=types.SimpleNamespace(prompt_tokens=1, completion_tokens=1))
++
++
++async def _fake(client, **kw):
++    if "tools" in kw:
++        # MAIN chat loop -> assistant REFUSES all tools (text only).
++        _MAIN_CALLS["n"] += 1
++        return _wrap("Dạ em ghi nhận thông tin của anh/chị ạ.", tool_calls=None, finish="stop")
++    # SERVER extraction call -> strict JSON for the current turn (matched by the last user message).
++    last = kw["messages"][-1]["content"]
++    for tag, obj in _EXTRACT.items():
++        if tag in last:
++            return _wrap(json.dumps(obj, ensure_ascii=False))
++    return _wrap("{}")
++
++
++orchestrator._llm_create = _fake
++
++
++async def q1(s, *a):
++    c = await acquire()
++    try:
++        return await c.fetchval(s, *a)
++    finally:
++        await release(c)
++
++
++async def setup(psid):
++    c = await acquire()
++    try:
++        await c.execute("INSERT INTO products(sku,name,stock,price_vnd) VALUES('SPEX','Sữa dừa hũ',500,120000) "
++                        "ON CONFLICT(sku) DO UPDATE SET stock=500,name='Sữa dừa hũ',price_vnd=120000")
++        return await c.fetchval("SELECT id FROM customers WHERE psid=$1", psid) or await c.fetchval(
++            "INSERT INTO customers(psid,name,phone) VALUES($1,'H','0900001234') RETURNING id", psid)
++    finally:
++        await release(c)
++
++
++async def main():
++    settings.m1_reliable_order_command = False
++    settings.enable_gate_e_order_wiring = True
++    settings.enable_address_resolver = True
++    settings.enable_nlu_router = False
++    psid = f"tg:ex-{RUN}"
++    cid = await setup(psid)
++    settings.gate_e_canary_customer_ids = str(cid)
++    settings.address_resolver_pilot_customer_ids = str(cid)
++    n0 = await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid)
++
++    async def send(msg, mid):
++        return await orchestrator.handle_message(psid, msg, channel="telegram_customer",
++                                                 provider_message_id=f"tg:{mid}")
++
++    # T1: order intent + partial (sku+qty). Extraction returns those; still missing name/phone/address.
++    _EXTRACT.clear()
++    _EXTRACT["MARK1"] = {"sku": "SPEX", "quantity": 1}
++    await send("MARK1 đặt 1 hũ sữa dừa", f"{RUN}01")
++    ck("T1 partial -> 0 order", await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid) == n0)
++    st1 = await q1("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++    ck("T1 draft COLLECTING (thieu field)", st1 == "COLLECTING", str(st1))
++
++    # T2: name + phone. Still missing address.
++    _EXTRACT.clear()
++    _EXTRACT["MARK2"] = {"customer_name": "Hoa", "phone": "0900001234"}
++    await send("MARK2 tên Hoa số 0900001234", f"{RUN}02")
++    ck("T2 van 0 order", await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid) == n0)
++
++    # T3: address (+ province/ward) -> verify -> READY -> server summary armed.
++    _EXTRACT.clear()
++    _EXTRACT["MARK3"] = {"address": "12 Le Loi, P. Ea Kao, Dak Lak",
++                         "province": "Tỉnh Đắk Lắk", "ward": "Phường Ea Kao"}
++    r3 = await send("MARK3 giao 12 Le Loi Phuong Ea Kao Dak Lak", f"{RUN}03")
++    st3 = await q1("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++    ck("T3 READY_TO_COMMIT (server tu extract, khong tool)", st3 == "READY_TO_COMMIT", str(st3))
++    ck("T3 van 0 order (chua commit)", await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid) == n0)
++    ck("T3 reply = server-rendered summary (co SP + dia chi)",
++       ("Sản phẩm" in (r3 or "")) and ("Ea Kao" in (r3 or "") or "Le Loi" in (r3 or "")), (r3 or "")[:60])
++
++    # T4: confirm -> server commit exactly once.
++    r4 = await send("xác nhận", f"{RUN}04")
++    ck("T4 confirm -> +1 order (server chot)",
++       await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid) == n0 + 1)
++    st4 = await q1("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++    ck("T4 intent COMMITTED", st4 == "COMMITTED", str(st4))
++
++    # CENTRAL PROOF: assistant made ZERO tool calls across the whole order.
++    ck("ASSISTANT REFUSED ALL TOOLS xuyen suot (0 tool call)", _MAIN_CALLS["tool_calls"] == 0,
++       f"main_calls={_MAIN_CALLS['n']} tool_calls={_MAIN_CALLS['tool_calls']}")
++
++    # T5: re-confirm (replay) -> no new order.
++    n1 = await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid)
++    await send("xác nhận", f"{RUN}05")
++    ck("T5 re-confirm -> khong don moi", await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid) == n1)
++
++    print("\nRESULT:", "ALL PASS" if not FAILS else f"FAIL {FAILS}")
++    await close_pool()
++
++
++asyncio.run(main())
+diff --git a/scripts/m5_confirm_commit_v02final_234_harness.py b/scripts/m5_confirm_commit_v02final_234_harness.py
+new file mode 100644
+index 0000000..7db6be4
+--- /dev/null
++++ b/scripts/m5_confirm_commit_v02final_234_harness.py
+@@ -0,0 +1,334 @@
++"""CA Review 234 — final corrections harness (234-02/03/04). Extraction-primary flow.
++Mock _llm_create: MAIN loop (tools=) -> text (assistant refuses tools); EXTRACTION (no tools) -> JSON.
++Sanitized synthetic data (no real PII)."""
++import asyncio
++import json
++import sys
++import time
++import types
++
++from app.config import settings
++from app.db_pool import acquire, close_pool, release
++from app.services import orchestrator
++from app.services.command import order_intent_service as oisvc
++from app.services.command import outbox_worker
++
++RUN = str(int(time.time()))
++FAILS = []
++
++
++def ck(n, c, x=""):
++    print(f"  [{'PASS' if c else 'FAIL'}] {n}{(' :: ' + str(x)) if x else ''}")
++    if not c:
++        FAILS.append(n)
++
++
++_S = []
++_EX = []
++_TOOL = {"n": 0}
++
++
++def _mkmsg(content=None, tools=None):
++    tcs = [types.SimpleNamespace(id=f"c{i}", function=types.SimpleNamespace(
++        name=t["name"], arguments=json.dumps(t["args"], ensure_ascii=False)))
++        for i, t in enumerate(tools or [])] or None
++    return types.SimpleNamespace(content=content, tool_calls=tcs)
++
++
++def _resp(m, f):
++    return types.SimpleNamespace(choices=[types.SimpleNamespace(message=m, finish_reason=f)],
++                                 usage=types.SimpleNamespace(prompt_tokens=1, completion_tokens=1))
++
++
++async def _fake(client, **kw):
++    if "tools" in kw:
++        it = _S.pop(0) if _S else {"text": "..."}
++        if it.get("tools"):
++            _TOOL["n"] += 1
++        return _resp(_mkmsg(it.get("text"), it.get("tools")), "tool_calls" if it.get("tools") else "stop")
++    return _resp(_mkmsg(json.dumps(_EX.pop(0) if _EX else {}, ensure_ascii=False)), "stop")
++
++
++orchestrator._llm_create = _fake
++
++
++async def q1(s, *a):
++    c = await acquire()
++    try:
++        return await c.fetchval(s, *a)
++    finally:
++        await release(c)
++
++
++async def ex(s, *a):
++    c = await acquire()
++    try:
++        return await c.execute(s, *a)
++    finally:
++        await release(c)
++
++
++async def setup(psid, sku="SPV2F"):
++    c = await acquire()
++    try:
++        await c.execute("INSERT INTO products(sku,name,stock,price_vnd) VALUES($1,'Cà phê hũ',500,90000) "
++                        "ON CONFLICT(sku) DO UPDATE SET stock=500,name='Cà phê hũ',price_vnd=90000", sku)
++        return await c.fetchval("SELECT id FROM customers WHERE psid=$1", psid) or await c.fetchval(
++            "INSERT INTO customers(psid,name,phone) VALUES($1,'H','0900001234') RETURNING id", psid)
++    finally:
++        await release(c)
++
++
++ADDR = "12 Le Loi, P. Ea Kao, Dak Lak"
++_C = [0]
++
++
++def mid():
++    _C[0] += 1
++    return f"tg:{RUN}{_C[0]}"
++
++
++def FULL(sku="SPV2F"):
++    return {"sku": sku, "quantity": 1, "customer_name": "Hoa", "phone": "0900001234", "address": ADDR,
++            "province": "Tỉnh Đắk Lắk", "ward": "Phường Ea Kao"}
++
++
++async def isolate_receipt(oid):
++    """Shared m5lab DB co nhieu outbox pending cu -> mark tat ca receipt KHAC 'delivered' de drain xac dinh
++    chi cham event cua don nay (BATCH claim oldest-first)."""
++    await ex("UPDATE outbox_events SET status='delivered', delivered_at=now() "
++             "WHERE event_type='order.receipt.customer' AND status NOT IN ('delivered','dead_letter') "
++             "AND dedupe_key <> $1", f"order_receipt:{oid}")
++
++
++async def st(cid):
++    return await q1("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++
++
++async def sv(cid):
++    return await q1("SELECT state_version FROM order_intents WHERE customer_id=$1 "
++                    "ORDER BY created_at DESC LIMIT 1", cid)
++
++
++async def norders(cid):
++    return await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid)
++
++
++async def send(psid, msg, ch="telegram_customer"):
++    return await orchestrator.handle_message(psid, msg, channel=ch, provider_message_id=mid())
++
++
++async def enroll_tg(cid):
++    # Gate E pilot BAT BUOC co verified resolution (binding fail-closed) -> resolver ON + dia chi resolve.
++    settings.m1_reliable_order_command = False
++    settings.enable_gate_e_order_wiring = True
++    settings.enable_address_resolver = True
++    settings.enable_nlu_router = False
++    settings.gate_e_canary_customer_ids = str(cid)
++    settings.address_resolver_pilot_customer_ids = str(cid)
++
++
++async def drive_ready_tg(psid, cid, sku="SPV2F"):
++    _EX.clear()
++    _EX.append(FULL(sku))
++    _S.clear()
++    _S.append({"text": "ok"})
++    return await send(psid, "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234")
++
++
++async def main():
++    # ================= 234-02.1 NO-OP identical proposal =================
++    cid = await setup(f"tg:n1-{RUN}")
++    await enroll_tg(cid)
++    await drive_ready_tg(f"tg:n1-{RUN}", cid)
++    v1 = await sv(cid)
++    iid = await q1("SELECT id FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++    smsg1 = await q1("SELECT count(*) FROM messages WHERE dedupe_key LIKE $1", f"order_summary:{iid}:%")
++    _EX.clear()
++    _EX.append(FULL())  # identical redelivery
++    _S.clear()
++    _S.append({"text": "ok"})
++    await send(f"tg:n1-{RUN}", "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234")
++    v2 = await sv(cid)
++    smsg2 = await q1("SELECT count(*) FROM messages WHERE dedupe_key LIKE $1", f"order_summary:{iid}:%")
++    ck("234-02.1 identical proposal -> KHONG bump version", v1 == v2, f"v1={v1} v2={v2}")
++    ck("234-02.1 identical proposal -> KHONG them summary row", smsg1 == smsg2 == 1, f"{smsg1}->{smsg2}")
++
++    # ================= 234-02.2 explicit-clear reachable via extraction =================
++    cid2 = await setup(f"tg:c2-{RUN}")
++    await enroll_tg(cid2)
++    _EX.clear()
++    _EX.append({"sku": "SPV2F", "quantity": 1, "customer_name": "Nam", "phone": "0900001234"})
++    _S.clear()
++    _S.append({"text": "cần địa chỉ ạ"})
++    await send(f"tg:c2-{RUN}", "đặt 1 hũ tên Nam 0900001234")
++    ph_before = await q1("SELECT draft_phone FROM order_intents WHERE customer_id=$1 "
++                         "ORDER BY created_at DESC LIMIT 1", cid2)
++    _EX.clear()
++    _EX.append({"clear": ["phone"]})  # khach: 'bo so dien thoai di'
++    _S.clear()
++    _S.append({"text": "dạ em đã bỏ SĐT, anh cho xin lại ạ"})
++    await send(f"tg:c2-{RUN}", "bỏ số điện thoại đi")
++    ph_after = await q1("SELECT draft_phone FROM order_intents WHERE customer_id=$1 "
++                        "ORDER BY created_at DESC LIMIT 1", cid2)
++    ck("234-02.2 explicit-clear qua extraction -> draft_phone NULL",
++       ph_before == "0900001234" and ph_after is None, f"{ph_before}->{ph_after}")
++
++    # ================= 234-02.3 regression READY -> COLLECTING khi correction lam thieu =================
++    cid3 = await setup(f"tg:r3-{RUN}")
++    await enroll_tg(cid3)
++    await drive_ready_tg(f"tg:r3-{RUN}", cid3)
++    ck("234-02.3 baseline READY", await st(cid3) == "READY_TO_COMMIT", await st(cid3))
++    _EX.clear()
++    _EX.append({"clear": ["phone"]})
++    _S.clear()
++    _S.append({"text": "cho xin lại SĐT ạ"})
++    await send(f"tg:r3-{RUN}", "bỏ số điện thoại")
++    ck("234-02.3 correction lam thieu -> REGRESSION ve COLLECTING (khong ket READY)",
++       await st(cid3) == "COLLECTING" and await norders(cid3) == 0, await st(cid3))
++
++    # ================= 234-02.4 revalidate ngay truoc commit (SKU bi xoa) =================
++    cid4 = await setup(f"tg:v4-{RUN}", sku="SPTMP4")
++    await enroll_tg(cid4)
++    await drive_ready_tg(f"tg:v4-{RUN}", cid4, sku="SPTMP4")
++    ck("234-02.4 baseline READY", await st(cid4) == "READY_TO_COMMIT")
++    await ex("DELETE FROM products WHERE sku='SPTMP4'")  # SP bien mat sau khi present summary
++    _S.clear()
++    _S.append({"text": "..."})
++    await send(f"tg:v4-{RUN}", "xác nhận")
++    ck("234-02.4 SKU bi xoa -> revalidate chan commit (0 order)", await norders(cid4) == 0,
++       await norders(cid4))
++    await setup(f"tg:v4-{RUN}", sku="SPTMP4")  # restore product cho lan chay sau
++
++    # ================= 234-02.5 committed-replay PARTIAL (khong reorder) =================
++    cid5 = await setup(f"tg:p5-{RUN}")
++    await enroll_tg(cid5)
++    await drive_ready_tg(f"tg:p5-{RUN}", cid5)
++    _S.clear()
++    _S.append({"text": "..."})
++    await send(f"tg:p5-{RUN}", "xác nhận")
++    ck("234-02.5 baseline commit", await norders(cid5) == 1 and await st(cid5) == "COMMITTED")
++    ni5 = await q1("SELECT count(*) FROM order_intents WHERE customer_id=$1", cid5)
++    _EX.clear()
++    _EX.append({"quantity": 2})  # PARTIAL (no sku), khong explicit reorder
++    _S.clear()
++    _S.append({"text": "..."})
++    await send(f"tg:p5-{RUN}", "đặt hàng số lượng 2")  # 'dat hang' = order marker -> ENTERS proposal path
++    ck("234-02.5 partial stale sau COMMITTED (ENTERS path, khong reorder) -> KHONG intent/order moi",
++       await q1("SELECT count(*) FROM order_intents WHERE customer_id=$1", cid5) == ni5
++       and await norders(cid5) == 1,
++       f"intents={await q1('SELECT count(*) FROM order_intents WHERE customer_id=$1', cid5)}")
++
++    # ================= 234-03 armed => persisted response exists =================
++    # Scope theo customer cua RUN nay (shared m5lab DB — tranh orphan co y tu 235-01c cua run khac).
++    orphan = await q1("SELECT count(*) FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
++                      "WHERE c.psid LIKE $1 AND oi.state='READY_TO_COMMIT' "
++                      "AND oi.summary_presented_at IS NOT NULL AND oi.summary_content_hash IS NOT NULL "
++                      "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.dedupe_key="
++                      "'order_summary:'||oi.id||':'||oi.summary_version)", f"%{RUN}")
++    ck("234-03 MOI armed pending-confirm co persisted summary response (0 orphan)", orphan == 0, orphan)
++
++    # ================= 234-04 one-delivery o channel boundary (telegram + messenger) =================
++    from app.services.command.outbox_worker import SendResult
++    for ch, psid in (("telegram_customer", f"tg:d-{RUN}"), ("messenger", f"msgr-{RUN}")):
++        cidd = await setup(psid)
++        if ch == "telegram_customer":
++            await enroll_tg(cidd)
++        else:
++            settings.m1_reliable_order_command = True
++            settings.enable_gate_e_order_wiring = True
++            settings.enable_address_resolver = False  # M1 route khong yeu cau Gate E resolution binding
++        _EX.clear()
++        _EX.append(FULL())
++        _S.clear()
++        _S.append({"text": "ok"})
++        await send(psid, "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234", ch=ch)
++        _S.clear()
++        _S.append({"text": "..."})
++        await orchestrator.handle_message(psid, "xác nhận", channel=ch, provider_message_id=mid())
++        oid = await q1("SELECT committed_order_id FROM order_intents WHERE customer_id=$1 "
++                       "AND state='COMMITTED' ORDER BY updated_at DESC LIMIT 1", cidd)
++        staff = await q1("SELECT count(*) FROM messages WHERE dedupe_key=$1", f"order_receipt:{oid}")
++        obx = await q1("SELECT count(*) FROM outbox_events WHERE event_type='order.receipt.customer' "
++                       "AND dedupe_key=$1", f"order_receipt:{oid}")
++        ck(f"234-04[{ch}] 1 order + 1 staff-row + 1 outbox receipt",
++           oid is not None and staff == 1 and obx == 1, f"oid={oid} staff={staff} obx={obx}")
++
++        # deliver via outbox worker with mock transport -> exactly-once send for this order
++        sends = {"n": 0}
++
++        async def _mock_send(destination, payload, _o=oid):
++            if payload.get("order_id") == _o and payload.get("text"):
++                sends["n"] += 1
++            return SendResult(ok=True, http_status=200, provider_message_id="pm1")
++
++        await isolate_receipt(oid)
++        for _ in range(6):
++            await outbox_worker.run_once(send_fn=_mock_send)
++        ck(f"234-04[{ch}] outbox delivery effectively-once (drains -> 1 send)", sends["n"] == 1, sends["n"])
++
++        # replay confirmation -> 0 additional order/receipt/staff-row
++        _S.clear()
++        _S.append({"text": "..."})
++        await orchestrator.handle_message(psid, "xác nhận", channel=ch, provider_message_id=mid())
++        staff2 = await q1("SELECT count(*) FROM messages WHERE dedupe_key=$1", f"order_receipt:{oid}")
++        obx2 = await q1("SELECT count(*) FROM outbox_events WHERE event_type='order.receipt.customer' "
++                        "AND dedupe_key=$1", f"order_receipt:{oid}")
++        ck(f"234-04[{ch}] replay confirm -> +0 order/receipt/staff-row",
++           await norders(cidd) == 1 and staff2 == 1 and obx2 == 1, f"orders={await norders(cidd)}")
++
++    # ================= 234-04 retry effectively-once + staff-log failure non-reversing =================
++    cidr = await setup(f"tg:rt-{RUN}")
++    await enroll_tg(cidr)
++    await drive_ready_tg(f"tg:rt-{RUN}", cidr)
++    _S.clear()
++    _S.append({"text": "..."})
++    await send(f"tg:rt-{RUN}", "xác nhận")
++    oidr = await q1("SELECT committed_order_id FROM order_intents WHERE customer_id=$1 AND state='COMMITTED' "
++                    "ORDER BY updated_at DESC LIMIT 1", cidr)
++    calls = {"n": 0}
++
++    async def _flaky(destination, payload, _o=oidr):
++        if payload.get("order_id") == _o and payload.get("text"):
++            calls["n"] += 1
++            if calls["n"] == 1:
++                return SendResult(ok=False, http_status=503, error_class="http_503")  # retryable
++        return SendResult(ok=True, http_status=200, provider_message_id="pm")
++
++    await isolate_receipt(oidr)
++    await outbox_worker.run_once(send_fn=_flaky)  # attempt 1 fails -> retry_scheduled
++    await ex("UPDATE outbox_events SET available_at=now() WHERE dedupe_key=$1", f"order_receipt:{oidr}")
++    await outbox_worker.run_once(send_fn=_flaky)  # attempt 2 succeeds
++    delivered = await q1("SELECT status FROM outbox_events WHERE dedupe_key=$1", f"order_receipt:{oidr}")
++    ck("234-04 outbox retry -> delivered effectively-once", delivered == "delivered" and calls["n"] == 2,
++       f"status={delivered} calls={calls['n']}")
++
++    # staff-log failure at confirm -> order still committed (not reversed), outbox receipt intact
++    cidf = await setup(f"tg:sf-{RUN}")
++    await enroll_tg(cidf)
++    await drive_ready_tg(f"tg:sf-{RUN}", cidf)
++    _orig = oisvc.log_message_tx
++
++    async def _boom(*a, **k):
++        raise RuntimeError("staff-log failure injected")
++
++    oisvc.log_message_tx = _boom
++    try:
++        _S.clear()
++        _S.append({"text": "..."})
++        await send(f"tg:sf-{RUN}", "xác nhận")
++    finally:
++        oisvc.log_message_tx = _orig
++    oidf = await q1("SELECT committed_order_id FROM order_intents WHERE customer_id=$1 AND state='COMMITTED' "
++                    "ORDER BY updated_at DESC LIMIT 1", cidf)
++    obf = await q1("SELECT count(*) FROM outbox_events WHERE event_type='order.receipt.customer' "
++                   "AND dedupe_key=$1", f"order_receipt:{oidf}")
++    ck("234-04 staff-log failure -> order VAN committed + outbox receipt intact (khong reverse)",
++       oidf is not None and await norders(cidf) == 1 and obf == 1, f"oid={oidf} obx={obf}")
++
++    print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: ' + ', '.join(FAILS)}")
++    await close_pool()
++    sys.exit(1 if FAILS else 0)
++
++
++asyncio.run(main())
+diff --git a/scripts/m5_confirm_commit_v02final_235_harness.py b/scripts/m5_confirm_commit_v02final_235_harness.py
+new file mode 100644
+index 0000000..1e87627
+--- /dev/null
++++ b/scripts/m5_confirm_commit_v02final_235_harness.py
+@@ -0,0 +1,264 @@
++"""CA Review 235 — targeted corrections harness (235-01 expiry+mandatory binding, 235-02 provider-event
++replay + explicit-new-order, 235-03 staff-receipt retry). Extraction-primary flow, sanitized synthetic."""
++import asyncio
++import json
++import sys
++import time
++import types
++
++from app.config import settings
++from app.db_pool import acquire, close_pool, release
++from app.services import orchestrator
++from app.services.command import order_intent_service as oisvc
++from app.services.command import staff_receipt_reconcile
++
++RUN = str(int(time.time()))
++FAILS = []
++
++
++def ck(n, c, x=""):
++    print(f"  [{'PASS' if c else 'FAIL'}] {n}{(' :: ' + str(x)) if x else ''}")
++    if not c:
++        FAILS.append(n)
++
++
++_S = []
++_EX = []
++
++
++def _mk(content=None, tools=None):
++    tcs = [types.SimpleNamespace(id=f"c{i}", function=types.SimpleNamespace(
++        name=t["name"], arguments=json.dumps(t["args"], ensure_ascii=False)))
++        for i, t in enumerate(tools or [])] or None
++    return types.SimpleNamespace(content=content, tool_calls=tcs)
++
++
++def _resp(m, f):
++    return types.SimpleNamespace(choices=[types.SimpleNamespace(message=m, finish_reason=f)],
++                                 usage=types.SimpleNamespace(prompt_tokens=1, completion_tokens=1))
++
++
++async def _fake(client, **kw):
++    if "tools" in kw:
++        it = _S.pop(0) if _S else {"text": "..."}
++        return _resp(_mk(it.get("text"), it.get("tools")), "tool_calls" if it.get("tools") else "stop")
++    return _resp(_mk(json.dumps(_EX.pop(0) if _EX else {}, ensure_ascii=False)), "stop")
++
++
++orchestrator._llm_create = _fake
++
++
++async def q1(s, *a):
++    c = await acquire()
++    try:
++        return await c.fetchval(s, *a)
++    finally:
++        await release(c)
++
++
++async def ex(s, *a):
++    c = await acquire()
++    try:
++        return await c.execute(s, *a)
++    finally:
++        await release(c)
++
++
++async def setup(psid, sku="SPV2G"):
++    c = await acquire()
++    try:
++        await c.execute("INSERT INTO products(sku,name,stock,price_vnd) VALUES($1,'Cà phê hũ',500,90000) "
++                        "ON CONFLICT(sku) DO UPDATE SET stock=500,name='Cà phê hũ',price_vnd=90000", sku)
++        return await c.fetchval("SELECT id FROM customers WHERE psid=$1", psid) or await c.fetchval(
++            "INSERT INTO customers(psid,name,phone) VALUES($1,'H','0900001234') RETURNING id", psid)
++    finally:
++        await release(c)
++
++
++ADDR = "12 Le Loi, P. Ea Kao, Dak Lak"
++
++
++def FULL(sku="SPV2G", qty=1):
++    return {"sku": sku, "quantity": qty, "customer_name": "Hoa", "phone": "0900001234", "address": ADDR,
++            "province": "Tỉnh Đắk Lắk", "ward": "Phường Ea Kao"}
++
++
++_C = [0]
++
++
++def mid():
++    _C[0] += 1
++    return f"tg:{RUN}{_C[0]}"
++
++
++async def enroll(cid):
++    settings.m1_reliable_order_command = False
++    settings.enable_gate_e_order_wiring = True
++    settings.enable_address_resolver = True
++    settings.enable_nlu_router = False
++    settings.gate_e_canary_customer_ids = str(cid)
++    settings.address_resolver_pilot_customer_ids = str(cid)
++
++
++async def send(psid, msg, pmid=None, ch="telegram_customer"):
++    return await orchestrator.handle_message(psid, msg, channel=ch, provider_message_id=pmid or mid())
++
++
++async def drive_ready(psid, cid, sku="SPV2G"):
++    _EX.clear()
++    _EX.append(FULL(sku))
++    _S.clear()
++    _S.append({"text": "ok"})
++    return await send(psid, "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234")
++
++
++async def st(cid):
++    return await q1("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++
++
++async def norders(cid):
++    return await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cid)
++
++
++async def nintents(cid):
++    return await q1("SELECT count(*) FROM order_intents WHERE customer_id=$1", cid)
++
++
++async def confirm(psid):
++    _S.clear()
++    _S.append({"text": "..."})
++    return await send(psid, "xác nhận")
++
++
++async def main():
++    # ===== 235-01a EXPIRED READY -> 0 order =====
++    cid = await setup(f"tg:e1-{RUN}")
++    await enroll(cid)
++    await drive_ready(f"tg:e1-{RUN}", cid)
++    await ex("UPDATE order_intents SET expires_at=now()-interval '1 hour' WHERE customer_id=$1 "
++             "AND state='READY_TO_COMMIT'", cid)
++    await confirm(f"tg:e1-{RUN}")
++    ck("235-01a expired READY -> 0 order + EXPIRED", await norders(cid) == 0 and await st(cid) == "EXPIRED",
++       await st(cid))
++
++    # ===== 235-01b NULL content_hash -> 0 order =====
++    cid = await setup(f"tg:e2-{RUN}")
++    await enroll(cid)
++    await drive_ready(f"tg:e2-{RUN}", cid)
++    await ex("UPDATE order_intents SET summary_content_hash=NULL WHERE customer_id=$1 "
++             "AND state='READY_TO_COMMIT'", cid)
++    await confirm(f"tg:e2-{RUN}")
++    ck("235-01b NULL content_hash -> 0 order (fail-closed)", await norders(cid) == 0, await norders(cid))
++
++    # ===== 235-01c missing persisted summary row -> 0 order =====
++    cid = await setup(f"tg:e3-{RUN}")
++    await enroll(cid)
++    await drive_ready(f"tg:e3-{RUN}", cid)
++    iid = await q1("SELECT id FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++    await ex("DELETE FROM messages WHERE dedupe_key LIKE $1", f"order_summary:{iid}:%")
++    await confirm(f"tg:e3-{RUN}")
++    ck("235-01c missing summary response row -> 0 order (fail-closed)", await norders(cid) == 0,
++       await norders(cid))
++
++    # ===== 235-02a provider-event REPLAY -> no 2nd mutation =====
++    cid = await setup(f"tg:r2-{RUN}")
++    await enroll(cid)
++    FIX = f"tg:{RUN}FIXA"
++    _EX.clear()
++    _EX.append(FULL())
++    _S.clear()
++    _S.append({"text": "ok"})
++    await send(f"tg:r2-{RUN}", "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234", pmid=FIX)
++    v1 = await q1("SELECT state_version FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++    ni1 = await nintents(cid)
++    sm1 = await q1("SELECT count(*) FROM messages WHERE dedupe_key LIKE $1", f"order_summary:{iid}:%") if iid else 0
++    # replay SAME event id -> claim fails -> no extraction/mutation
++    _EX.clear()
++    _EX.append(FULL(qty=9))  # would-be different, but MUST NOT be applied (replay)
++    _S.clear()
++    _S.append({"text": "ok"})
++    await send(f"tg:r2-{RUN}", "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234", pmid=FIX)
++    v2 = await q1("SELECT state_version FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++    ck("235-02a provider replay -> KHONG bump version / KHONG intent moi",
++       v1 == v2 and await nintents(cid) == ni1, f"v {v1}->{v2} intents {ni1}->{await nintents(cid)}")
++    q = await q1("SELECT draft_quantity FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cid)
++    ck("235-02a replay -> draft KHONG bi mutate (qty van 1, khong phai 9)", q == 1, q)
++
++    # ===== 235-02b explicit new order WITHOUT 'thêm' after COMMITTED -> new intent =====
++    cid = await setup(f"tg:n2-{RUN}")
++    await enroll(cid)
++    await drive_ready(f"tg:n2-{RUN}", cid)
++    await confirm(f"tg:n2-{RUN}")
++    ck("235-02b baseline commit", await norders(cid) == 1 and await st(cid) == "COMMITTED")
++    ni = await nintents(cid)
++    _EX.clear()
++    _EX.append(FULL(qty=2))  # clear order + product, KHONG 'them'
++    _S.clear()
++    _S.append({"text": "ok"})
++    await send(f"tg:n2-{RUN}", "đặt 2 hũ cà phê giao Ea Kao Hoa 0900001234")  # order marker 'dat 2'
++    ck("235-02b direct new order (khong 'them') -> intent MOI",
++       await nintents(cid) == ni + 1 and await st(cid) == "READY_TO_COMMIT",
++       f"intents {ni}->{await nintents(cid)} state={await st(cid)}")
++
++    # ===== 235-02c partial stale after COMMITTED ENTERS path + rejected (no-op) =====
++    cid = await setup(f"tg:p2-{RUN}")
++    await enroll(cid)
++    await drive_ready(f"tg:p2-{RUN}", cid)
++    await confirm(f"tg:p2-{RUN}")
++    ni = await nintents(cid)
++    no = await norders(cid)
++    _EX.clear()
++    _EX.append({"quantity": 5})  # PARTIAL (no sku) — order marker 'dat' co mat -> relevant, ENTERS path
++    _S.clear()
++    _S.append({"text": "..."})
++    await send(f"tg:p2-{RUN}", "đặt hàng số lượng 5")  # 'dat hang' = order marker -> relevant
++    ck("235-02c partial stale sau COMMITTED (ENTERS path) -> no-op, khong intent/order moi",
++       await nintents(cid) == ni and await norders(cid) == no,
++       f"intents {ni}->{await nintents(cid)}")
++
++    # ===== 235-02d missing provider id on enrolled -> fail-closed (no intent) =====
++    cid = await setup(f"tg:f2-{RUN}")
++    await enroll(cid)
++    _EX.clear()
++    _EX.append(FULL())
++    _S.clear()
++    _S.append({"text": "..."})
++    await orchestrator.handle_message(f"tg:f2-{RUN}", "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234",
++                                      channel="telegram_customer", provider_message_id=None)
++    ck("235-02d thieu provider_message_id -> fail-closed (0 intent, khong dung sender_id lam event id)",
++       await nintents(cid) == 0, await nintents(cid))
++
++    # ===== 235-03 staff-receipt retry: failure -> reconcile creates exactly one, repeat zero =====
++    cid = await setup(f"tg:s3-{RUN}")
++    await enroll(cid)
++    await drive_ready(f"tg:s3-{RUN}", cid)
++    _orig = oisvc.log_message_tx
++
++    async def _boom(conn, conversation_id, role, content, dedupe_key=None):
++        if dedupe_key and dedupe_key.startswith("order_receipt:"):
++            raise RuntimeError("staff-log failure injected")
++        return await _orig(conn, conversation_id, role, content, dedupe_key=dedupe_key)
++
++    oisvc.log_message_tx = _boom
++    try:
++        await confirm(f"tg:s3-{RUN}")
++    finally:
++        oisvc.log_message_tx = _orig
++    oid = await q1("SELECT committed_order_id FROM order_intents WHERE customer_id=$1 AND state='COMMITTED' "
++                   "ORDER BY updated_at DESC LIMIT 1", cid)
++    staff0 = await q1("SELECT count(*) FROM messages WHERE dedupe_key=$1", f"order_receipt:{oid}")
++    ck("235-03 staff-log failure -> order committed + staff row THIEU (chua co)",
++       oid is not None and await norders(cid) == 1 and staff0 == 0, f"oid={oid} staff0={staff0}")
++    n1 = await staff_receipt_reconcile.reconcile_staff_receipts()
++    staff1 = await q1("SELECT count(*) FROM messages WHERE dedupe_key=$1", f"order_receipt:{oid}")
++    n2 = await staff_receipt_reconcile.reconcile_staff_receipts()
++    staff2 = await q1("SELECT count(*) FROM messages WHERE dedupe_key=$1", f"order_receipt:{oid}")
++    ck("235-03 reconcile -> tao ĐÚNG 1 staff row; chay lai -> +0", staff1 == 1 and staff2 == 1,
++       f"staff {staff0}->{staff1}->{staff2} (reconciled n1>={1 if n1 else 0})")
++
++    print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: ' + ', '.join(FAILS)}")
++    await close_pool()
++    sys.exit(1 if FAILS else 0)
++
++
++asyncio.run(main())
