@@ -22,6 +22,7 @@ from app.db_pool import acquire, release
 from app.services.command import retry as R
 from app.services.command.receipt import format_vnd
 from app.services.messenger import GRAPH_URL
+from app.services.safe_log import safe_exc
 
 OUTBOX_DEST_TELEGRAM_ADMIN = "telegram_admin"
 OUTBOX_DEST_MESSENGER = "messenger"
@@ -283,4 +284,10 @@ async def run_once(send_fn=None) -> dict:
             stats[outcome] += 1
     finally:
         await release(conn)
+    # CA 235-03: moi vong worker cung ghi bu staff-history receipt row con thieu (idempotent, durable retry).
+    try:
+        from app.services.command import staff_receipt_reconcile
+        stats["staff_receipt_reconciled"] = await staff_receipt_reconcile.reconcile_staff_receipts()
+    except Exception as e:  # noqa: BLE001
+        print(f"[outbox_worker] staff receipt reconcile skipped: {safe_exc(e)}")
     return stats

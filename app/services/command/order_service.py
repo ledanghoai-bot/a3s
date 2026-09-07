@@ -10,6 +10,7 @@ lan hai). Cung key + khac hash -> 409 conflict (audit). Business reject -> faile
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 
@@ -146,7 +147,9 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     if env.order_intent_id:
         intent_row = await conn.fetchrow(
             "SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
-            "verified_address_fingerprint,verified_resolution_id,committed_order_id "
+            "verified_address_fingerprint,verified_resolution_id,committed_order_id,"
+            "summary_version,summary_fingerprint,summary_content_hash,summary_presented_at,"
+            "(expires_at IS NOT NULL AND expires_at < now()) AS is_expired "
             "FROM order_intents WHERE id=$1 FOR UPDATE", env.order_intent_id)
         # (a) missing intent tren enrolled route -> zero mutation.
         if intent_row is None:
@@ -193,10 +196,39 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         if intent_row["state"] in order_intent.TERMINAL_STATES:
             return await _reject(conn, env, errors.INVALID_ENVELOPE,
                                  f"order_intent terminal state={intent_row['state']}")
+        # CA 235-01: EXPIRY race-safe — intent qua expires_at (TTL) KHONG duoc commit. Transition EXPIRED
+        # ATOMIC trong command tx (da lock FOR UPDATE) + reject zero mutation. Kiem trong tx co lock, khong
+        # phai unlocked preliminary read.
+        if intent_row.get("is_expired"):
+            await order_intent_service.transition(
+                conn, env.order_intent_id, expected_version=intent_row["state_version"],
+                to_state="EXPIRED", terminal_reason="ttl")
+            return await _reject(conn, env, errors.INVALID_ENVELOPE, "order_intent expired")
         # (f) state PHAI committable (READY_TO_COMMIT / dang COMMITTING / RETRYING).
         if intent_row["state"] not in ("READY_TO_COMMIT", "COMMITTING", "RETRYING"):
             return await _reject(conn, env, errors.INVALID_ENVELOPE,
                                  f"order_intent state={intent_row['state']} not committable")
+        # CA 235-01: MANDATORY pending-confirm binding khi claim tu READY_TO_COMMIT (khong ap cho COMMITTING/
+        # RETRYING recovery vi claim da bump version). TAT CA phai co + khop: summary_presented_at,
+        # summary_version==state_version, summary_fingerprint==order_fingerprint, summary_content_hash non-null,
+        # VA persisted summary message row (dedupe) PHAI ton tai. null/missing/mismatch -> fail-closed reject.
+        if intent_row["state"] == "READY_TO_COMMIT":
+            if (intent_row.get("summary_presented_at") is None
+                    or intent_row.get("summary_version") != intent_row["state_version"]
+                    or intent_row.get("summary_fingerprint") != intent_row["order_fingerprint"]
+                    or not intent_row.get("summary_content_hash")):
+                return await _reject(conn, env, errors.INVALID_ENVELOPE,
+                                     "order_intent summary binding missing/stale")
+            _srow = await conn.fetchval(
+                "SELECT content FROM messages WHERE dedupe_key=$1",
+                f"order_summary:{env.order_intent_id}:{intent_row['summary_version']}")
+            if _srow is None:
+                return await _reject(conn, env, errors.INVALID_ENVELOPE,
+                                     "order_intent summary response not persisted")
+            # persisted response content PHAI khop content_hash da arm (response tuong ung dung summary).
+            if hashlib.sha256(_srow.encode("utf-8")).hexdigest() != intent_row["summary_content_hash"]:
+                return await _reject(conn, env, errors.INVALID_ENVELOPE,
+                                     "order_intent summary response content mismatch")
         # (g) claim: transition -> COMMITTING (compare-and-set version) tru khi da COMMITTING (recovery).
         if intent_row["state"] != "COMMITTING":
             claimed = await order_intent_service.transition(
