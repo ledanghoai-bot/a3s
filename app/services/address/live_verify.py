@@ -153,7 +153,11 @@ async def verify_and_link(*, psid: str, channel: str | None, province_proposal, 
         return {"status": r["status"], "confidence_band": _band(r.get("confidence")),
                 "linked": linked, "customer_id": cid,
                 "resolution_id": r["id"], "may_bind": bool(eligible),
-                "province_name": pname, "ward_name": wname}
+                "province_name": pname, "ward_name": wname,
+                # M5 order-intent (223/224 §5): tra MA + dataset_version de orchestrator tinh
+                # verified_address_fingerprint (TAT DINH thay resolution-UUID ngau nhien).
+                "province_code": r.get("province_code"), "ward_code": r.get("ward_code"),
+                "dataset_version": r.get("dataset_version")}
     finally:
         await release(conn)
 
