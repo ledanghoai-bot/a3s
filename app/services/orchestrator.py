@@ -70,6 +70,17 @@ _ORDER_CLAIM_MARKERS = (
     "đặt hàng thành công",
     "lên đơn thành công",
     "đơn hàng thành công",
+    # CA 232 §7 (B3): claim ngam "don se duoc xu ly" (kieu c Tien) — model noi don da/se duoc xu ly ma
+    # CHUA co receipt -> phai chan/thay. Bat ca cum "se duoc ... xu ly/giao/lien he".
+    "đơn hàng của anh sẽ được",
+    "đơn hàng của chị sẽ được",
+    "đơn của anh sẽ được",
+    "đơn của chị sẽ được",
+    "đơn hàng sẽ được đội ngũ",
+    "đơn sẽ được đội ngũ",
+    "sẽ được đội ngũ 3s coffee xử lý",
+    "đơn hàng đã được ghi nhận",
+    "đơn đã được ghi nhận",
 )
 
 
@@ -204,6 +215,26 @@ async def _save_history(redis, sender_id: str, history: list[dict]) -> None:
     # Giu toi da MAX_HISTORY luot, TTL 24h
     trimmed = history[-(MAX_HISTORY * 2):]
     await redis.set(_redis_key(sender_id), json.dumps(trimmed, ensure_ascii=False), ex=86400)
+
+
+async def _has_pending_ready_draft(sender_id: str, conversation_id) -> bool:
+    """CA 232 §7: co READY draft dang cho khach xac nhan cho hoi thoai nay khong (de guard chan-bia thay bang
+    loi 'xin xac nhan' thay vi escalate). Best-effort; loi -> False."""
+    try:
+        from app.db_pool import acquire as _acq
+        from app.db_pool import release as _rel
+        _c = await _acq()
+        try:
+            return bool(await _c.fetchval(
+                "SELECT 1 FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
+                "WHERE c.psid=$1 AND oi.conversation_id IS NOT DISTINCT FROM $2 "
+                "AND oi.state='READY_TO_COMMIT' AND oi.summary_presented_at IS NOT NULL LIMIT 1",
+                sender_id, conversation_id))
+        finally:
+            await _rel(_c)
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] pending-ready check skipped: {safe_exc(e)}")
+        return False
 
 
 async def _log_receipt_to_messages(conversation_id, committed: dict) -> None:
@@ -871,29 +902,29 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             reply = ("Dạ hiện em chưa tra cứu được chi tiết đơn cũ qua kênh này ạ. Anh/chị cho em xin "
                      "mã đơn hoặc SĐT đã đặt để em kiểm tra giúp, hoặc em chuyển nhân viên hỗ trợ nhé ạ.")
         elif not created_order_ids and _reply_claims_order_created(reply):
-            # M3-S4: KHONG in noi dung reply (ngu canh xac nhan don thuong chua ten/tien) — metadata.
-            print(
-                f"[orchestrator] CHAN BIA DON: reply bao da tao don nhung khong co "
-                f"create_order thanh cong trong luot nay. sender={sender_id} "
-                f"reply_len={len(reply)}"
-            )
-            try:
-                await tools.escalate_to_human(
-                    psid=sender_id,
-                    reason=(
-                        "Nghi bia xac nhan don: model bao da tao don nhung khong "
-                        "goi create_order thanh cong trong luot nay"
-                    ),
-                    last_message=text,
-                )
-            except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
-                print(f"[orchestrator] escalate sau chan bia don loi: {safe_exc(e)}")
-            await _terminalize_open_intent("ESCALATED", "suspected_fabrication")  # CA 225-01
-            _route_signal = "escalate"  # 216-04
-            reply = (
-                "Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "
-                "ngay ạ. Đội ngũ 3S Coffee sẽ liên hệ anh/chị trong ít phút để chốt đơn."
-            )
+            # CA 232 §7 (B3/DoD#18): reply claim don ma KHONG co receipt luot nay. Neu co READY draft dang
+            # cho xac nhan -> KHONG escalate, chi THAY bang loi TRUTHFUL yeu cau xac nhan (khach chi can xac
+            # nhan la server chot). Neu KHONG co draft (bia thuc su) -> escalate nhu cu.
+            _pending = await _has_pending_ready_draft(sender_id, conversation_id)
+            print(f"[orchestrator] CHAN BIA DON (claim khong receipt): sender={sender_id} "
+                  f"reply_len={len(reply)} pending_ready={_pending}")
+            if _pending:
+                _route_signal = "reply"
+                reply = ("Dạ em đã ghi nhận thông tin đơn của anh/chị. Anh/chị nhắn 'xác nhận' để em "
+                         "chốt đơn giúp mình nhé ạ. (Đơn CHƯA được tạo cho tới khi anh/chị xác nhận.)")
+            else:
+                try:
+                    await tools.escalate_to_human(
+                        psid=sender_id,
+                        reason=("Nghi bia xac nhan don: model bao da tao don nhung khong "
+                                "goi create_order thanh cong trong luot nay"),
+                        last_message=text)
+                except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
+                    print(f"[orchestrator] escalate sau chan bia don loi: {safe_exc(e)}")
+                await _terminalize_open_intent("ESCALATED", "suspected_fabrication")  # CA 225-01
+                _route_signal = "escalate"  # 216-04
+                reply = ("Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "
+                         "ngay ạ. Đội ngũ 3S Coffee sẽ liên hệ anh/chị trong ít phút để chốt đơn.")
 
         # CA 226-03b: order-proposal chua du thong tin (khach dat don, LLM chua tao order + chua co open
         # intent) -> tao COLLECTING durable de lifecycle bat dau tu proposal DAU TIEN. Non-order/status chat
