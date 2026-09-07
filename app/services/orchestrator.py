@@ -80,6 +80,19 @@ def _reply_claims_order_created(reply: str) -> bool:
     return any(marker in low for marker in _ORDER_CLAIM_MARKERS)
 
 
+# M5 discovery fix (CA 223 §5.5): tin khach HOI trang thai don CU (khong phai dat don moi). Dung de
+# guard chong-bia KHONG escalate nham tren order-status query. So khop tren text da bo dau.
+_ORDER_STATUS_MARKERS = (
+    "kiem tra don", "trang thai don", "don hom qua", "don da dat", "don cua toi", "don cua minh",
+    "don cua anh", "don cua chi", "check don", "xem don", "don truoc", "tra cuu don", "don da mua",
+)
+
+
+def _is_order_status_query(text: str) -> bool:
+    t = _normalize_admin(text or "")
+    return any(m in t for m in _ORDER_STATUS_MARKERS)
+
+
 # M5 upgrade (Directive 214 §6.D + Memo 213 §6): TAT reasoning cho duong tool-calling giao dich.
 # deepseek-v4-flash la REASONING model -> reasoning_content dot max_tokens + lam cham (den phut qua
 # nhieu vong tool). Probe xac nhan extra_body={"thinking":{"type":"disabled"}} -> ~1.5s, tool-calling
@@ -599,7 +612,15 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # bia (da gap that: bot tu che "Ma don #3" ma khong goi tool -> DB khong co
         # don, khach tuong da mua). Chuyen human that su + tra loi an toan, KHONG de
         # khach tin nham la da dat hang thanh cong.
-        if not created_order_ids and _reply_claims_order_created(reply):
+        if not created_order_ids and _reply_claims_order_created(reply) and _is_order_status_query(text):
+            # M5 discovery fix (CA 223 §5.5 / 224 §10.9): khach HOI trang thai don CU ("kiem tra don hom
+            # qua"...) — out-of-scope tao don. Guard chong-bia bat vi reply nhac "don" nhung day KHONG
+            # phai bia don-moi. -> KHONG escalate/pause; tra neutral (khong khang dinh da tao don moi).
+            print(f"[orchestrator] order-status query -> neutral, khong escalate. sender={sender_id}")
+            _route_signal = "reply"
+            reply = ("Dạ hiện em chưa tra cứu được chi tiết đơn cũ qua kênh này ạ. Anh/chị cho em xin "
+                     "mã đơn hoặc SĐT đã đặt để em kiểm tra giúp, hoặc em chuyển nhân viên hỗ trợ nhé ạ.")
+        elif not created_order_ids and _reply_claims_order_created(reply):
             # M3-S4: KHONG in noi dung reply (ngu canh xac nhan don thuong chua ten/tien) — metadata.
             print(
                 f"[orchestrator] CHAN BIA DON: reply bao da tao don nhung khong co "
