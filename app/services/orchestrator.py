@@ -217,38 +217,56 @@ async def _save_history(redis, sender_id: str, history: list[dict]) -> None:
     await redis.set(_redis_key(sender_id), json.dumps(trimmed, ensure_ascii=False), ex=86400)
 
 
-async def _conversation_order_state(sender_id: str, conversation_id) -> tuple[str, int | None]:
-    """CA Directive 238 (AC-1): SERVER-truth trang thai don cua hoi thoai (customer_id + conversation_id) —
-    dung cho guard chong-bia-don server-state-aware. KHONG suy tu cau chu model / created_order_ids luot nay.
-    Tra (state, order_id): 'ready' (open READY + summary present), 'open' (COLLECTING/ADDRESS_CHECK/
-    NEEDS_CLARIFICATION), 'committed' (COMMITTED gan nhat, kem order_id), 'none'. Best-effort -> ('none', None)."""
+async def _conversation_order_state(sender_id: str, conversation_id) -> dict:
+    """CA Directive 238 (AC-1) + 239-01: SERVER-truth trang thai don + PAYLOAD do server xac dinh, scoped
+    theo (customer_id + conversation_id). KHONG suy tu cau chu model. Tra dict {state, ...payload}:
+      committed: {state:'committed', order_id}
+      ready:     {state:'ready', summary_text}                      # text summary DA persist (khong tao moi)
+      open:      {state:'open', sub, missing:[field...], address}   # sub in COLLECTING/ADDRESS_CHECK/NEEDS_CLAR
+      none:      {state:'none'}
+    Payload doc-khong-duoc -> fallback trung thuc (state van dung, field payload None). Best-effort."""
+    from app.services.command import order_intent_service as _svc
     try:
         from app.db_pool import acquire as _acq
         from app.db_pool import release as _rel
         _c = await _acq()
         try:
             open_row = await _c.fetchrow(
-                "SELECT state, summary_presented_at FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
+                "SELECT oi.id, oi.state, oi.state_version, oi.summary_version, oi.summary_presented_at, "
+                "oi.draft_sku, oi.draft_quantity, oi.draft_customer_name, oi.draft_phone, oi.draft_address "
+                "FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
                 "WHERE c.psid=$1 AND oi.conversation_id IS NOT DISTINCT FROM $2 "
                 "AND oi.state IN ('COLLECTING','ADDRESS_CHECK','NEEDS_CLARIFICATION','READY_TO_COMMIT') "
                 "ORDER BY oi.updated_at DESC LIMIT 1", sender_id, conversation_id)
             if open_row is not None:
-                if open_row["state"] == "READY_TO_COMMIT" and open_row["summary_presented_at"] is not None:
-                    return ("ready", None)
-                return ("open", None)
+                sub = open_row["state"]
+                if sub == "READY_TO_COMMIT" and open_row["summary_presented_at"] is not None:
+                    # Re-tham chieu summary DA persist (khong tao moi) — bound theo intent+summary_version.
+                    summary = await _c.fetchval(
+                        "SELECT content FROM messages WHERE dedupe_key=$1",
+                        f"order_summary:{open_row['id']}:{open_row['summary_version']}")
+                    return {"state": "ready", "summary_text": summary}
+                missing = _svc.draft_invalid_fields(dict(open_row))  # server-derived: field thieu/sai
+                return {"state": "open", "sub": sub, "missing": missing,
+                        "address": open_row["draft_address"]}
             committed = await _c.fetchval(
                 "SELECT committed_order_id FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
                 "WHERE c.psid=$1 AND oi.conversation_id IS NOT DISTINCT FROM $2 "
                 "AND oi.state='COMMITTED' AND oi.committed_order_id IS NOT NULL "
                 "ORDER BY oi.updated_at DESC LIMIT 1", sender_id, conversation_id)
             if committed is not None:
-                return ("committed", committed)
-            return ("none", None)
+                return {"state": "committed", "order_id": committed}
+            return {"state": "none"}
         finally:
             await _rel(_c)
     except Exception as e:  # noqa: BLE001
         print(f"[orchestrator] conversation order-state check skipped: {safe_exc(e)}")
-        return ("none", None)
+        return {"state": "none"}
+
+
+# CA 239-01: nhan VN cho field thieu (server-derived) — de hoi dung thong tin con thieu, khong generic.
+_FIELD_LABEL_VN = {"sku": "sản phẩm", "quantity": "số lượng", "customer_name": "tên người nhận",
+                   "phone": "số điện thoại", "address": "địa chỉ giao hàng"}
 
 
 async def _log_receipt_to_messages(conversation_id, committed: dict) -> None:
@@ -1174,24 +1192,41 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             # phan hoi tat dinh. TUYET DOI: KHONG terminalize/escalate/commit, KHONG handoff.admin_notify o
             # nhanh nay (AC-2/AC-4/DoD-10). Escalation chi tu su kien nghiep vu that (wants_human/cancel/
             # business-reject) o cho khac. Structured log de quan sat tester-phase (DoD-7).
-            _ostate, _oid = await _conversation_order_state(sender_id, conversation_id)
+            _st = await _conversation_order_state(sender_id, conversation_id)
+            _ostate = _st["state"]
             print(f"[orchestrator] claim_guard (server-state-aware): {_corr(sender_id)} "
-                  f"state={_ostate} reply_len={len(reply)}")
+                  f"state={_ostate} sub={_st.get('sub')} reply_len={len(reply)}")
             _route_signal = "reply"  # KHONG BAO GIO escalate o nhanh nay
+            _NC = " (Đơn CHƯA được tạo cho tới khi anh/chị xác nhận.)"
             if _ostate == "committed":
-                # Claim TRUNG THUC — server da chot don. Tham chieu trung tinh (receipt server-owned da gui
-                # qua outbox). Khong lo internal id/state.
+                # Claim TRUNG THUC — server da chot don. Tham chieu trung tinh (receipt server-owned da gui).
                 reply = ("Dạ đơn của anh/chị đã được ghi nhận rồi ạ. Em đã gửi xác nhận chi tiết ở trên, "
                          "anh/chị kiểm tra giúp em nhé. Cần đặt thêm thì anh/chị nhắn em ạ.")
             elif _ostate == "ready":
-                # READY draft dang cho — phat lai confirm prompt, KHONG noi da tao don.
-                reply = ("Dạ em đã ghi nhận thông tin đơn của anh/chị. Anh/chị nhắn 'xác nhận' để em chốt "
-                         "đơn giúp mình nhé ạ. (Đơn CHƯA được tạo cho tới khi anh/chị xác nhận.)")
+                # CA 239-01: phat LAI summary DA persist (khong tao moi) + moi xac nhan. Fallback trung thuc
+                # neu khong doc duoc payload (khong terminalize/escalate).
+                _s = _st.get("summary_text")
+                if _s:
+                    reply = _s.rstrip() + "\nAnh/chị nhắn 'xác nhận' để em chốt đơn giúp mình nhé ạ." + _NC
+                else:
+                    reply = ("Dạ em đã ghi nhận thông tin đơn của anh/chị. Anh/chị nhắn 'xác nhận' để em "
+                             "chốt đơn giúp mình nhé ạ." + _NC)
             elif _ostate == "open":
-                # Draft dang gom (chua READY) — GIU nguyen draft, hoi tiep, KHONG noi da tao don.
-                reply = ("Dạ em đang ghi nhận đơn cho anh/chị. Anh/chị cho em xin/hoàn tất thêm thông tin "
-                         "để em lên đơn nhé ạ. (Đơn CHƯA được tạo cho tới khi anh/chị xác nhận.)")
-            else:  # none — baseless claim, khong co don nao. Dinh chinh trung thuc, KHONG escalate.
+                # CA 239-01: hoi dung phan con thieu/can lam ro theo SERVER payload (khong generic).
+                _sub = _st.get("sub")
+                _addr = _st.get("address") or ""
+                if _sub == "ADDRESS_CHECK":
+                    reply = (f"Dạ em đang kiểm tra địa chỉ giao '{_addr}' của anh/chị, chờ em một chút ạ."
+                             + _NC)
+                elif _sub == "NEEDS_CLARIFICATION":
+                    reply = (f"Dạ địa chỉ '{_addr}' em chưa xác minh được phường/xã. Anh/chị xác nhận lại "
+                             f"hoặc cho em xin đúng TỈNH + PHƯỜNG/XÃ giúp em nhé ạ." + _NC)
+                else:  # COLLECTING (hoac open khac) — liet ke field con thieu (server-derived)
+                    _miss = [_FIELD_LABEL_VN.get(f, f) for f in (_st.get("missing") or [])]
+                    _need = (", ".join(_miss)) if _miss else "thông tin còn thiếu"
+                    reply = (f"Dạ em đang ghi nhận đơn cho anh/chị. Anh/chị cho em xin thêm: {_need} "
+                             f"để em lên đơn nhé ạ." + _NC)
+            else:  # none — baseless claim. Dinh chinh trung thuc, KHONG escalate.
                 reply = ("Dạ hiện hệ thống chưa ghi nhận đơn nào cho anh/chị ạ. Anh/chị cho em xin lại "
                          "thông tin đơn (sản phẩm, số lượng, người nhận, SĐT, địa chỉ) để em lên đơn giúp nhé.")
 

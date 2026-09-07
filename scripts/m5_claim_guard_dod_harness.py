@@ -137,13 +137,15 @@ async def main():
     psid = f"tg:g1-{RUN}"
     cid, conv = await setup(psid)
     await enroll(cid)
-    await ex("INSERT INTO order_intents(customer_id,conversation_id,channel,state,expires_at) "
-             "VALUES($1,$2,'telegram_customer','COLLECTING', now()+interval '24 hours')", cid, conv)
+    # draft co SKU/qty/ten/dia chi, THIEU phone -> reply phai hoi DUNG 'số điện thoại' (server-derived).
+    await ex("INSERT INTO order_intents(customer_id,conversation_id,channel,state,draft_sku,draft_quantity,"
+             "draft_customer_name,draft_address,expires_at) VALUES($1,$2,'telegram_customer','COLLECTING',"
+             "'SPCG',1,'Hoa','12 Le Loi Ea Kao', now()+interval '24 hours')", cid, conv)
     e0 = _ESC["n"]
     r = await claim_turn(psid)
-    ck("DoD-1 COLLECTING claim -> state giữ COLLECTING, no escalate",
-       await state_of(cid, conv) == "COLLECTING" and _ESC["n"] == e0 and "đang ghi nhận đơn" in (r or ""),
-       f"state={await state_of(cid, conv)} esc={_ESC['n']-e0}")
+    ck("DoD-1 COLLECTING claim -> giữ state, no escalate, reply HỎI ĐÚNG field thiếu (SĐT, server-derived)",
+       await state_of(cid, conv) == "COLLECTING" and _ESC["n"] == e0 and "số điện thoại" in (r or ""),
+       f"state={await state_of(cid, conv)} reply={(r or '')[:70]}")
     # continues to READY via real extraction (same intent)
     _EX.clear(); _EX.append(dict(FULL)); _S.clear(); _S.append({"text": "ok"})
     await orchestrator.handle_message(psid, "đặt 1 hũ cà phê giao Ea Kao Hoa 0900001234",
@@ -153,19 +155,24 @@ async def main():
 
     # ---- DoD-2 ADDRESS_CHECK claim: draft not lost ----
     psid = f"tg:g2-{RUN}"; cid, conv = await setup(psid); await enroll(cid)
-    await ex("INSERT INTO order_intents(customer_id,conversation_id,channel,state,expires_at) "
-             "VALUES($1,$2,'telegram_customer','ADDRESS_CHECK', now()+interval '24 hours')", cid, conv)
-    e0 = _ESC["n"]; await claim_turn(psid)
-    ck("DoD-2 ADDRESS_CHECK claim -> draft giữ (open), no escalate",
-       await state_of(cid, conv) == "ADDRESS_CHECK" and _ESC["n"] == e0, await state_of(cid, conv))
+    ADDR2 = "999 Distinctive Rd ZZZ2"  # gia tri phan biet -> chung minh reply lay tu server payload
+    await ex("INSERT INTO order_intents(customer_id,conversation_id,channel,state,draft_address,expires_at) "
+             "VALUES($1,$2,'telegram_customer','ADDRESS_CHECK',$3, now()+interval '24 hours')", cid, conv, ADDR2)
+    e0 = _ESC["n"]; r = await claim_turn(psid)
+    ck("DoD-2 ADDRESS_CHECK claim -> draft giữ, no escalate, reply tham chiếu ĐÚNG địa chỉ đang kiểm tra",
+       await state_of(cid, conv) == "ADDRESS_CHECK" and _ESC["n"] == e0 and ADDR2 in (r or ""),
+       f"state={await state_of(cid, conv)} reply={(r or '')[:70]}")
 
     # ---- DoD-3 NEEDS_CLARIFICATION claim: lifecycle preserved ----
     psid = f"tg:g3-{RUN}"; cid, conv = await setup(psid); await enroll(cid)
-    await ex("INSERT INTO order_intents(customer_id,conversation_id,channel,state,expires_at) "
-             "VALUES($1,$2,'telegram_customer','NEEDS_CLARIFICATION', now()+interval '24 hours')", cid, conv)
-    e0 = _ESC["n"]; await claim_turn(psid)
-    ck("DoD-3 NEEDS_CLARIFICATION claim -> giữ nguyên, no escalate",
-       await state_of(cid, conv) == "NEEDS_CLARIFICATION" and _ESC["n"] == e0, await state_of(cid, conv))
+    ADDR3 = "888 Clarify Ave QQQ3"
+    await ex("INSERT INTO order_intents(customer_id,conversation_id,channel,state,draft_address,expires_at) "
+             "VALUES($1,$2,'telegram_customer','NEEDS_CLARIFICATION',$3, now()+interval '24 hours')",
+             cid, conv, ADDR3)
+    e0 = _ESC["n"]; r = await claim_turn(psid)
+    ck("DoD-3 NEEDS_CLARIFICATION claim -> giữ nguyên, no escalate, reply phát lại địa chỉ cần làm rõ",
+       await state_of(cid, conv) == "NEEDS_CLARIFICATION" and _ESC["n"] == e0 and ADDR3 in (r or ""),
+       f"state={await state_of(cid, conv)} reply={(r or '')[:70]}")
 
     # ---- DoD-4 READY claim: confirm prompt, NO commit before confirm ----
     psid = f"tg:g4-{RUN}"; cid, conv = await setup(psid); await enroll(cid)
@@ -175,9 +182,10 @@ async def main():
     ck("DoD-4 setup READY", await state_of(cid, conv) == "READY_TO_COMMIT")
     n0 = await norders(cid); e0 = _ESC["n"]
     r = await claim_turn(psid)
-    ck("DoD-4 READY claim -> confirm prompt, KHÔNG commit, no escalate",
+    ck("DoD-4 READY claim -> phát LẠI summary đã lưu (chứa SP 'Cà phê hũ') + mời xác nhận, KHÔNG commit/escalate",
        await norders(cid) == n0 and await state_of(cid, conv) == "READY_TO_COMMIT" and _ESC["n"] == e0
-       and "xác nhận" in (r or ""), f"orders={await norders(cid)} state={await state_of(cid, conv)}")
+       and "xác nhận" in (r or "") and "Cà phê hũ" in (r or ""),
+       f"orders={await norders(cid)} state={await state_of(cid, conv)} reply={(r or '')[:60]}")
 
     # ---- DoD-5 after COMMITTED claim: neutral, no escalation, no extra order ----
     _S.clear(); _S.append({"text": "..."})
@@ -233,6 +241,19 @@ async def main():
     guard_seg = src.split("claim_guard (server-state-aware)")[1].split("# CA 226-03b")[0]
     ck("DoD-10 nhánh order-claim guard KHÔNG gọi escalate_to_human/terminalize",
        ("escalate_to_human" not in guard_seg) and ("_terminalize_open_intent" not in guard_seg), "")
+
+    # ---- 239-01 cross-conversation: lookup ĐÚNG conversation, không lấy nhầm ----
+    psid = f"tg:xc-{RUN}"; cidx, convA = await setup(psid); await enroll(cidx)
+    convB = await q1("INSERT INTO conversations(customer_id) VALUES($1) RETURNING id", cidx)
+    AA = "111 Alpha AAA"; BB = "222 Beta BBB"
+    await ex("INSERT INTO order_intents(customer_id,conversation_id,channel,state,draft_address,expires_at) "
+             "VALUES($1,$2,'telegram_customer','ADDRESS_CHECK',$3, now()+interval '24 hours')", cidx, convA, AA)
+    await ex("INSERT INTO order_intents(customer_id,conversation_id,channel,state,draft_address,expires_at) "
+             "VALUES($1,$2,'telegram_customer','ADDRESS_CHECK',$3, now()+interval '24 hours')", cidx, convB, BB)
+    stA = await orchestrator._conversation_order_state(psid, convA)
+    stB = await orchestrator._conversation_order_state(psid, convB)
+    ck("239-01 cross-conv: mỗi conversation trả ĐÚNG payload của nó (không lấy nhầm)",
+       stA.get("address") == AA and stB.get("address") == BB, f"A={stA.get('address')} B={stB.get('address')}")
 
     print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: ' + ', '.join(FAILS)}")
     await close_pool()
