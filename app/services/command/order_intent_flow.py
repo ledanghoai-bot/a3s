@@ -91,6 +91,88 @@ async def drive(*, customer_id: int | None, conversation_id, channel: str, order
             await release(conn)
 
 
+async def propose_draft(*, customer_id: int | None, conversation_id, channel: str, proposed: dict,
+                        verified: bool, addr_fp: str | None, verified_resolution_id: str | None,
+                        address_changed: bool, explicit_new_order: bool = False) -> dict:
+    """CA 232 §2/§3/§5: model create_order = PROPOSAL. Accumulate field vao durable draft + advance state;
+    KHONG commit (server commit khi confirm). Tra {action, order_intent_id}:
+      need_more : thieu field -> COLLECTING (caller hoi field thieu)
+      clarify   : dia chi chua verified -> NEEDS_CLARIFICATION
+      ready     : du field + verified -> READY_TO_COMMIT + summary da present (caller present summary/hoi xac nhan)
+      skip/error: khong enrolled / loi fail-closed
+    proposed = {sku,quantity,customer_name,phone,address} (None neu model khong de xuat field do)."""
+    if customer_id is None:
+        return {"action": "skip"}
+    from app.services.command import order_intent as _oi
+    conn = None
+    try:
+        conn = await acquire()
+        async with conn.transaction():
+            row = await svc.find_open_intent(conn, customer_id=customer_id,
+                                             conversation_id=conversation_id, for_update=True)
+            if row is not None and row.get("is_expired"):
+                await svc.transition(conn, row["id"], expected_version=row["state_version"],
+                                     to_state="EXPIRED", terminal_reason="ttl")
+                row = None
+            if row is None:
+                # Sau COMMITTED: don moi/reorder tuong minh -> intent moi. Neu khong tuong minh + co committed
+                # cung fingerprint thi day la stale (khong tao lai) — nhung propose luon la don-dang-gom nen tao moi.
+                new = await svc.create_intent(conn, customer_id=customer_id,
+                                              conversation_id=conversation_id, channel=channel)
+                row = await svc.get_intent(conn, new["id"], for_update=True)
+            iid = row["id"]
+            ver = row["state_version"]
+            # Address doi -> xoa binding cu truoc khi verify lai (§3/§5).
+            if address_changed:
+                r = await svc.clear_address_binding(conn, iid, expected_version=ver)
+                if r is not None:
+                    ver = r["state_version"]
+            # Accumulate field (merge; field khach cung cap moi thay the).
+            d = await svc.update_draft(
+                conn, iid, expected_version=ver, sku=proposed.get("sku"),
+                quantity=proposed.get("quantity"), customer_name=proposed.get("customer_name"),
+                phone=proposed.get("phone"), address=proposed.get("address"))
+            if d is None:
+                return {"action": "error"}
+            ver = d["state_version"]
+            # Thieu field -> giu COLLECTING.
+            if not svc.draft_complete(d):
+                if d["state"] != "COLLECTING":
+                    # dua ve COLLECTING (correction lam thieu field) — chi khi transition hop le
+                    if _oi.can_transition(d["state"], "COLLECTING"):
+                        await svc.transition(conn, iid, expected_version=ver, to_state="COLLECTING")
+                return {"action": "need_more", "order_intent_id": str(iid),
+                        "missing": [f for f in ("sku", "quantity", "customer_name", "phone", "address")
+                                    if d.get(f"draft_{f}") in (None, "")]}
+            # Du field: tinh order_fingerprint tu draft + addr_fp.
+            ofp = _oi.order_fingerprint(sku=d["draft_sku"], quantity=d["draft_quantity"],
+                                        customer_name=d["draft_customer_name"], phone=d["draft_phone"],
+                                        address_fp=addr_fp)
+            # -> ADDRESS_CHECK (set fingerprint + binding), roi phan nhanh verified.
+            ac = await _to_address_check(conn, {**d, "state": d["state"], "state_version": ver},
+                                         order_fp=ofp, addr_fp=addr_fp, resolution_id=verified_resolution_id)
+            if ac is None:
+                return {"action": "error"}
+            ver = ac["state_version"]
+            if not verified:
+                r = await svc.transition(conn, iid, expected_version=ver, to_state="NEEDS_CLARIFICATION")
+                return {"action": "clarify", "order_intent_id": str(iid)}
+            # verified -> READY_TO_COMMIT + present summary (KHONG commit).
+            r = await svc.transition(conn, iid, expected_version=ver, to_state="READY_TO_COMMIT")
+            if r is None:
+                return {"action": "error"}
+            await svc.present_summary(conn, iid, expected_version=r["state_version"], order_fingerprint=ofp)
+            return {"action": "ready", "order_intent_id": str(iid),
+                    "draft": {"sku": d["draft_sku"], "quantity": d["draft_quantity"],
+                              "customer_name": d["draft_customer_name"], "phone": d["draft_phone"]}}
+    except Exception as e:  # noqa: BLE001 — enrolled route fail-closed
+        print(f"[order_intent_flow] propose_draft error (fail-closed): {safe_exc(e)}")
+        return {"action": "error"}
+    finally:
+        if conn is not None:
+            await release(conn)
+
+
 async def try_server_commit(*, customer_id: int | None, conversation_id, channel: str, actor_id: str,
                             provider_message_id: str | None) -> dict | None:
     """CA Directive 232 §6: SERVER tu chot READY draft khi khach xac nhan TUONG MINH — KHONG doi model goi
