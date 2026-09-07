@@ -12,7 +12,16 @@ Nguyen tac an toan:
 """
 from __future__ import annotations
 
+import re
+
 from app.services.command import order_intent as oi
+
+# Sentinel: field KHONG duoc cung cap o luot nay (giu nguyen). Phan biet voi explicit-clear (None/"" tuong
+# minh -> xoa field). CA 233-04: "distinguish omitted field from explicit clear/correction".
+_UNSET: object = object()
+
+# VN phone shape (CA 233-04 validate truoc READY, khong chi non-null). Cho phep 0xxxxxxxxx / +84xxxxxxxxx.
+_PHONE_RE = re.compile(r"^(?:0|\+?84)\d{8,10}$")
 
 # TTL abandoned open intent (CA 225-01: terminalize deterministically). Chi GC/recovery, KHONG dinh nghia
 # 2 don co giong nhau khong (§7 TTL is cleanup only).
@@ -29,14 +38,180 @@ async def create_intent(conn, *, customer_id: int, conversation_id, channel: str
     return dict(row)
 
 
+# Cot draft + summary (CA 232 §3/§6). draft_address = PROTECTED business data (khong in raw ra log/evidence).
+_DRAFT_COLS = ("draft_sku,draft_quantity,draft_customer_name,draft_phone,draft_address,"
+               "summary_version,summary_fingerprint")
+_DRAFT_FIELDS = ("sku", "quantity", "customer_name", "phone", "address")
+
+
+def draft_complete(row: dict) -> bool:
+    """True neu draft du field bat buoc de commit (SKU/qty/contact/address). Chi kiem tra ton tai."""
+    return all(row.get(f"draft_{f}") not in (None, "") for f in _DRAFT_FIELDS)
+
+
+def _norm_phone(phone) -> str:
+    return re.sub(r"[ .\-()]", "", phone) if isinstance(phone, str) else ""
+
+
+def draft_valid(row: dict) -> bool:
+    """CA 233-04: VALIDATE draft (khong chi non-null) truoc READY: sku la chuoi non-empty, quantity int
+    duong, ten non-empty, phone dung dang VN, address du dai (>=6). SKU-EXISTENCE kiem o flow (can DB)."""
+    sku = row.get("draft_sku")
+    qty = row.get("draft_quantity")
+    name = row.get("draft_customer_name")
+    addr = row.get("draft_address")
+    if not (isinstance(sku, str) and sku.strip()):
+        return False
+    if not (isinstance(qty, int) and not isinstance(qty, bool) and qty > 0):
+        return False
+    if not (isinstance(name, str) and name.strip()):
+        return False
+    if not _PHONE_RE.match(_norm_phone(row.get("draft_phone"))):
+        return False
+    if not (isinstance(addr, str) and len(addr.strip()) >= 6):
+        return False
+    return True
+
+
+def draft_invalid_fields(row: dict) -> list[str]:
+    """Danh sach field THIEU hoac SAI DANG (CA 233-04) — de hoi khach bo sung/sua dung field."""
+    bad = []
+    if not (isinstance(row.get("draft_sku"), str) and row["draft_sku"].strip()):
+        bad.append("sku")
+    q = row.get("draft_quantity")
+    if not (isinstance(q, int) and not isinstance(q, bool) and q > 0):
+        bad.append("quantity")
+    if not (isinstance(row.get("draft_customer_name"), str) and row["draft_customer_name"].strip()):
+        bad.append("customer_name")
+    if not _PHONE_RE.match(_norm_phone(row.get("draft_phone"))):
+        bad.append("phone")
+    if not (isinstance(row.get("draft_address"), str) and len(row["draft_address"].strip()) >= 6):
+        bad.append("address")
+    return bad
+
+
 async def get_intent(conn, intent_id, *, for_update: bool = False) -> dict | None:
     q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
-         "verified_address_fingerprint,verified_resolution_id,committed_order_id,terminal_reason,error_code "
-         "FROM order_intents WHERE id=$1")
+         "verified_address_fingerprint,verified_resolution_id,committed_order_id,terminal_reason,error_code,"
+         f"{_DRAFT_COLS} FROM order_intents WHERE id=$1")
     if for_update:
         q += " FOR UPDATE"
     row = await conn.fetchrow(q, intent_id)
     return dict(row) if row else None
+
+
+async def update_draft(conn, intent_id, *, expected_version: int, sku=_UNSET, quantity=_UNSET,
+                       customer_name=_UNSET, phone=_UNSET, address=_UNSET) -> dict | None:
+    """CA 232 §3 + 233-04: luu/ghi de field draft server-owned. Field = _UNSET (mac dinh) -> KHONG dung
+    toi (omitted, giu nguyen). Field co gia tri -> ghi de. Field = None/'' TUONG MINH -> XOA (explicit
+    clear/correction). Optimistic version (compare-and-set). state_version TANG de bat ky readiness/summary
+    cu bi vo hieu (§3). Tra row moi hoac None (version lech / khong co field nao doi)."""
+    sets = ["state_version=state_version+1"]
+    vals: list = []
+    for col, val in (("draft_sku", sku), ("draft_quantity", quantity),
+                     ("draft_customer_name", customer_name), ("draft_phone", phone),
+                     ("draft_address", address)):
+        if val is _UNSET:
+            continue  # omitted -> giu nguyen
+        vals.append(None if val in (None, "") else val)  # None/'' tuong minh -> clear
+        sets.append(f"{col}=${len(vals) + 2}")
+    row = await conn.fetchrow(
+        f"UPDATE order_intents SET {', '.join(sets)} "
+        "WHERE id=$1 AND state_version=$2 "
+        f"RETURNING id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
+        f"verified_address_fingerprint,verified_resolution_id,committed_order_id,{_DRAFT_COLS}",
+        intent_id, expected_version, *vals)
+    return dict(row) if row else None
+
+
+async def clear_address_binding(conn, intent_id, *, expected_version: int) -> dict | None:
+    """CA 232 §3/§5: dia chi doi -> XOA verified binding/fingerprint cu truoc khi verify lai (khong bind
+    pointer cu). Optimistic version."""
+    row = await conn.fetchrow(
+        "UPDATE order_intents SET state_version=state_version+1, verified_resolution_id=NULL, "
+        "verified_address_fingerprint=NULL, summary_version=NULL, summary_fingerprint=NULL "
+        "WHERE id=$1 AND state_version=$2 RETURNING id,state,state_version",
+        intent_id, expected_version)
+    return dict(row) if row else None
+
+
+async def present_summary(conn, intent_id, *, expected_version: int, order_fingerprint: str,
+                          content_hash: str | None = None) -> dict | None:
+    """CA 232 §6 + 234-03: server VUA present deterministic summary READY -> ghi summary_version +
+    fingerprint + content_hash (cua text summary DA persist). Xac nhan sau do CHI hop le neu intent VAN o
+    dung version/fingerprint/hash nay (correction doi -> vo hieu). KHONG doi state_version."""
+    row = await conn.fetchrow(
+        "UPDATE order_intents SET summary_version=$3, summary_fingerprint=$4, summary_content_hash=$5, "
+        "summary_presented_at=now() WHERE id=$1 AND state_version=$2 AND state='READY_TO_COMMIT' "
+        "RETURNING id,state,state_version,summary_version,summary_fingerprint,summary_content_hash",
+        intent_id, expected_version, expected_version, order_fingerprint, content_hash)
+    return dict(row) if row else None
+
+
+async def log_message_tx(conn, conversation_id, role: str, content: str,
+                         dedupe_key: str | None = None) -> bool:
+    """CA 234-03/04: ghi 1 message vao messages TRONG CUNG transaction cua caller (khong pool rieng) ->
+    persist server-response + arm confirmation ATOMIC. dedupe_key (neu co) -> ON CONFLICT DO NOTHING =>
+    exactly-once row theo stable identity. Tra True neu ghi moi, False neu da ton tai (duplicate)."""
+    if role not in ("customer", "bot", "agent"):
+        role = "bot"
+    r = await conn.fetchval(
+        "INSERT INTO messages(conversation_id, role, content, dedupe_key) VALUES($1,$2,$3,$4) "
+        "ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id",
+        conversation_id, role, content, dedupe_key)
+    return r is not None
+
+
+INBOX_LEASE_SECONDS = 120
+
+
+async def claim_inbound_event(conn, *, channel: str, provider_message_id: str,
+                              lease_seconds: int = INBOX_LEASE_SECONDS) -> str:
+    """CA 235-02 + 236-01: CLAIM su kien provider theo INBOX STATE MACHINE (effective-once, khong at-most-
+    once). Chay trong transaction cua caller (FOR UPDATE serialize concurrent delivery). Tra:
+      'claimed'   -> duoc xu ly (moi HOAC retry sau transient-fail/abandoned lease); caller PHAI mark_inbound_event
+      'succeeded' -> DA xu ly xong -> replay no-op on dinh
+      'busy'      -> delivery khac dang xu ly (lease con hieu luc) -> no-op luot nay (khong double)."""
+    # Concurrency-safe: INSERT fresh ON CONFLICT DO NOTHING quyet dinh nguoi TAO (1 delivery duy nhat).
+    ins = await conn.fetchval(
+        "INSERT INTO inbound_event_log(channel, provider_message_id, status, attempt_count, lease_expires_at)"
+        " VALUES($1,$2,'processing',1, now() + ($3 * interval '1 second')) "
+        "ON CONFLICT (channel, provider_message_id) DO NOTHING RETURNING 1",
+        channel, provider_message_id, lease_seconds)
+    if ins is not None:
+        return "claimed"
+    # Row da ton tai -> LOCK + inspect (FOR UPDATE serialize concurrent re-claim).
+    row = await conn.fetchrow(
+        "SELECT status, (lease_expires_at IS NOT NULL AND lease_expires_at > now()) AS leased "
+        "FROM inbound_event_log WHERE channel=$1 AND provider_message_id=$2 FOR UPDATE",
+        channel, provider_message_id)
+    if row["status"] == "succeeded":
+        return "succeeded"
+    if row["status"] == "processing" and row["leased"]:
+        return "busy"
+    # retryable_failed HOAC processing voi lease het han (abandoned/crash) -> re-claim de retry.
+    await conn.execute(
+        "UPDATE inbound_event_log SET status='processing', attempt_count=attempt_count+1, "
+        "lease_expires_at=now() + ($3 * interval '1 second'), updated_at=now() "
+        "WHERE channel=$1 AND provider_message_id=$2", channel, provider_message_id, lease_seconds)
+    return "claimed"
+
+
+async def mark_inbound_event(conn, *, channel: str, provider_message_id: str, ok: bool) -> None:
+    """CA 236-01: chot ket qua xu ly event. ok=True -> 'succeeded' (durable outcome / stable no-op, replay
+    on dinh). ok=False -> 'retryable_failed' (loi transient truoc mutation ben vung -> redelivery retry)."""
+    await conn.execute(
+        "UPDATE inbound_event_log SET status=$3, lease_expires_at=NULL, updated_at=now() "
+        "WHERE channel=$1 AND provider_message_id=$2",
+        channel, provider_message_id, "succeeded" if ok else "retryable_failed")
+
+
+async def has_committed_intent(conn, *, customer_id: int, conversation_id) -> bool:
+    """CA 234-02.5: hoi thoai nay DA co intent COMMITTED chua (bat ke fingerprint)? -> sau COMMITTED, de
+    xuat KHONG explicit reorder (ke ca partial/stale) KHONG duoc tao draft moi."""
+    return bool(await conn.fetchval(
+        "SELECT 1 FROM order_intents WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 "
+        "AND state='COMMITTED' LIMIT 1", customer_id, conversation_id))
 
 
 async def find_open_intent(conn, *, customer_id: int, conversation_id,
@@ -44,8 +219,9 @@ async def find_open_intent(conn, *, customer_id: int, conversation_id,
     """Tim intent OPEN HIEN TAI cho (customer, conversation) — "prospective order dang mo" (CA 225-01).
     Correction cap nhat CHINH intent nay. Unique index oi_one_open_per_conversation bao dam <=1 open."""
     q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
-         "verified_address_fingerprint,verified_resolution_id,committed_order_id,"
-         "(expires_at IS NOT NULL AND expires_at < now()) AS is_expired FROM order_intents "
+         "verified_address_fingerprint,verified_resolution_id,committed_order_id,summary_presented_at,"
+         "summary_content_hash,"
+         f"{_DRAFT_COLS},(expires_at IS NOT NULL AND expires_at < now()) AS is_expired FROM order_intents "
          "WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 "
          "AND state = ANY($3::text[]) ORDER BY created_at DESC LIMIT 1")
     if for_update:
