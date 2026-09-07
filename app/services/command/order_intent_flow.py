@@ -16,7 +16,6 @@ restart/TTL khong doi order semantics). Tren enrolled order-intent route, loi ->
 from __future__ import annotations
 
 from app.db_pool import acquire, release
-from app.services.command import order_intent as oi
 from app.services.command import order_intent_service as svc
 from app.services.safe_log import safe_exc
 

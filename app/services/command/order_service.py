@@ -19,9 +19,7 @@ from app.config import settings
 from app.db_pool import acquire, release
 from app.services import audit_service
 from app.services.address import order_binding
-from app.services.command import errors
-from app.services.command import order_intent
-from app.services.command import order_intent_service
+from app.services.command import errors, order_intent, order_intent_service
 from app.services.command import receipt as receipt_mod
 from app.services.command import repository as repo
 from app.services.command.envelope import CommandEnvelope

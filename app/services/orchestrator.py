@@ -259,9 +259,10 @@ async def _ensure_collecting_intent(sender_id: str, conversation_id, channel: st
     commit/chua co open intent. Message sau tai dung (get-or-create) -> progress cung intent. Chi cho
     enrolled-eligible (m1 HOAC Gate E pilot). Best-effort, khong vo reply."""
     try:
+        from app.db_pool import acquire as _acq
+        from app.db_pool import release as _rel
         from app.services.command import order_gateway as _ogw
         from app.services.command import order_intent_service as _svc
-        from app.db_pool import acquire as _acq, release as _rel
         cmd_ctx = {"channel": channel}
         eligible = _ogw.can_route(channel) and (
             settings.m1_reliable_order_command or await tools._gate_e_pilot_route(sender_id, cmd_ctx))
@@ -340,9 +341,10 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                     vr = None
             # --- INTENT CONTROL PLANE (CA 225-01): tren enrolled route, intent DRIVE lifecycle + la truth ---
             if _enrolled and command_ctx is not None:
+                from app.db_pool import acquire as _acq
+                from app.db_pool import release as _rel
                 from app.services.command import order_intent as _oi
                 from app.services.command import order_intent_flow as _oif
-                from app.db_pool import acquire as _acq, release as _rel
                 _cid = None
                 try:
                     _c = await _acq()
@@ -431,8 +433,9 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # customer_id server-side de terminalize open intent hien tai (best-effort, khong vo reply).
         async def _terminalize_open_intent(to_state: str, reason: str) -> None:
             try:
+                from app.db_pool import acquire as _acq
+                from app.db_pool import release as _rel
                 from app.services.command import order_intent_flow as _oif
-                from app.db_pool import acquire as _acq, release as _rel
                 _c = await _acq()
                 try:
                     _cid = await _c.fetchval("SELECT id FROM customers WHERE psid=$1", sender_id)

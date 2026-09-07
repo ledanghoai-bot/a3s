@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from app.services.command import order_intent as oi
 
-
 # TTL abandoned open intent (CA 225-01: terminalize deterministically). Chi GC/recovery, KHONG dinh nghia
 # 2 don co giong nhau khong (§7 TTL is cleanup only).
 OPEN_INTENT_TTL_SECONDS = 24 * 3600
