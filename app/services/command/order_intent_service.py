@@ -1,0 +1,84 @@
+"""M5 order-intent SERVICE — DB primitives cho durable state machine (CA Directive 223 + Amendment 224).
+
+Server SO HUU intent: tao, transition (compare-and-set theo state_version), commit atomic. LLM/tool KHONG
+duoc chon intent/state/order-id (chi orchestrator server-side goi cac ham nay voi ngu canh trusted).
+
+Nguyen tac an toan:
+- Moi transition BAT BUOC dung expected_version (optimistic concurrency) -> tra False khi version lech
+  (co worker khac da doi) -> caller xu ly (re-read/retry) thay vi ghi de mu.
+- Transition phai hop le theo order_intent.can_transition (fail-closed).
+- Commit atomic: dat COMMITTED + committed_order_id trong CUNG cau UPDATE co dieu kien
+  (state='COMMITTING' AND state_version=expected) -> DB dam bao at-most-once (khong chi Redis).
+"""
+from __future__ import annotations
+
+from app.services.command import order_intent as oi
+
+
+async def create_intent(conn, *, customer_id: int, conversation_id, channel: str) -> dict:
+    """Tao intent moi o COLLECTING. Tra row dict (co id, state, state_version=0)."""
+    row = await conn.fetchrow(
+        "INSERT INTO order_intents(customer_id,conversation_id,channel,state) "
+        "VALUES($1,$2,$3,'COLLECTING') RETURNING id,state,state_version",
+        customer_id, conversation_id, channel)
+    return dict(row)
+
+
+async def get_intent(conn, intent_id, *, for_update: bool = False) -> dict | None:
+    q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
+         "verified_address_fingerprint,verified_resolution_id,committed_order_id,terminal_reason,error_code "
+         "FROM order_intents WHERE id=$1")
+    if for_update:
+        q += " FOR UPDATE"
+    row = await conn.fetchrow(q, intent_id)
+    return dict(row) if row else None
+
+
+async def find_open_intent(conn, *, customer_id: int, conversation_id, order_fingerprint: str,
+                           for_update: bool = False) -> dict | None:
+    """Tim intent OPEN cung fingerprint cho (customer, conversation) — de dinh tuyen luot xac nhan/retry
+    ve DUNG intent dang mo (khong tao intent trung). CHI open states (unique index bao dam <=1)."""
+    q = ("SELECT id,state,state_version,committed_order_id FROM order_intents "
+         "WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 AND order_fingerprint=$3 "
+         "AND state = ANY($4::text[]) ORDER BY created_at DESC LIMIT 1")
+    if for_update:
+        q += " FOR UPDATE"
+    row = await conn.fetchrow(q, customer_id, conversation_id, order_fingerprint, list(oi.OPEN_STATES))
+    return dict(row) if row else None
+
+
+async def transition(conn, intent_id, *, expected_version: int, to_state: str,
+                     order_fingerprint: str | None = None, verified_address_fingerprint: str | None = None,
+                     verified_resolution_id=None, terminal_reason: str | None = None,
+                     error_code: str | None = None) -> dict | None:
+    """Compare-and-set transition. Doc state hien tai (FOR UPDATE), kiem tra hop le + version, roi UPDATE.
+    Tra row moi (dict) neu thanh cong; None neu version lech / transition khong hop le (fail-closed)."""
+    cur = await conn.fetchrow(
+        "SELECT state,state_version FROM order_intents WHERE id=$1 FOR UPDATE", intent_id)
+    if cur is None or cur["state_version"] != expected_version:
+        return None  # version lech (concurrency) hoac khong ton tai
+    if not oi.can_transition(cur["state"], to_state):
+        return None  # transition khong hop le -> fail-closed
+    row = await conn.fetchrow(
+        "UPDATE order_intents SET state=$2, state_version=state_version+1, "
+        "order_fingerprint=COALESCE($3,order_fingerprint), "
+        "verified_address_fingerprint=COALESCE($4,verified_address_fingerprint), "
+        "verified_resolution_id=COALESCE($5,verified_resolution_id), "
+        "terminal_reason=$6, error_code=$7 "
+        "WHERE id=$1 AND state_version=$8 "
+        "RETURNING id,state,state_version,order_fingerprint,verified_address_fingerprint,"
+        "verified_resolution_id,committed_order_id",
+        intent_id, to_state, order_fingerprint, verified_address_fingerprint, verified_resolution_id,
+        terminal_reason, error_code, expected_version)
+    return dict(row) if row else None
+
+
+async def mark_committed(conn, intent_id, *, expected_version: int, order_id: int) -> dict | None:
+    """COMMITTING -> COMMITTED + committed_order_id, ATOMIC co dieu kien (state='COMMITTING' AND version).
+    DB dam bao at-most-once (unique oi_one_committed_order + compare-and-set). None neu khong claim duoc."""
+    row = await conn.fetchrow(
+        "UPDATE order_intents SET state='COMMITTED', committed_order_id=$2, state_version=state_version+1 "
+        "WHERE id=$1 AND state='COMMITTING' AND state_version=$3 "
+        "RETURNING id,state,state_version,committed_order_id",
+        intent_id, order_id, expected_version)
+    return dict(row) if row else None
