@@ -153,27 +153,23 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         # (a) missing intent tren enrolled route -> zero mutation.
         if intent_row is None:
             return await _reject(conn, env, errors.INVALID_ENVELOPE, "order_intent missing (enrolled route)")
-        # (b) da COMMITTED -> duplicate receipt (zero mutation, finalize replay row 225-03).
-        if intent_row["state"] == "COMMITTED" and intent_row["committed_order_id"]:
-            return await _intent_duplicate_receipt(conn, env, intent_row["committed_order_id"])
-        # (c) terminal khac COMMITTED -> reject.
-        if intent_row["state"] in order_intent.TERMINAL_STATES:
-            return await _reject(conn, env, errors.INVALID_ENVELOPE,
-                                 f"order_intent terminal state={intent_row['state']}")
-        # (d) ownership: customer (server-resolve tu psid) + channel + conversation PHAI khop intent.
+        # CA 226-01: VALIDATE ownership + semantic identity TRUOC ca mutation LAN committed-replay response.
+        # order_intent_id sai/stale KHONG duoc lo receipt don khac (disclosure) — moi check fail -> reject,
+        # KHONG tiet lo. Ap DU intent da COMMITTED (stale-confirm hop le co owner+fingerprint khop).
+        # (b) ownership: customer (server-resolve tu psid trusted) + channel + conversation PHAI khop.
         owner = await conn.fetchval("SELECT id FROM customers WHERE psid=$1", env.actor.id)
         if owner is None or owner != intent_row["customer_id"]:
             return await _reject(conn, env, errors.INVALID_ENVELOPE, "order_intent owner mismatch")
         if intent_row["channel"] != env.channel:
             return await _reject(conn, env, errors.INVALID_ENVELOPE, "order_intent channel mismatch")
-        if env.conversation_id is not None and intent_row["conversation_id"] != env.conversation_id:
+        # conversation: fail-closed khi lech HOAC null bat thuong tren chat route (telegram/messenger co conv).
+        if env.channel in ("telegram_customer", "messenger"):
+            if env.conversation_id is None or intent_row["conversation_id"] is None or \
+                    intent_row["conversation_id"] != env.conversation_id:
+                return await _reject(conn, env, errors.INVALID_ENVELOPE, "order_intent conversation mismatch")
+        elif env.conversation_id is not None and intent_row["conversation_id"] != env.conversation_id:
             return await _reject(conn, env, errors.INVALID_ENVELOPE, "order_intent conversation mismatch")
-        # (e) state PHAI committable (READY_TO_COMMIT / dang COMMITTING / RETRYING) — KHONG cho COLLECTING/
-        #     ADDRESS_CHECK/NEEDS_CLARIFICATION tao order.
-        if intent_row["state"] not in ("READY_TO_COMMIT", "COMMITTING", "RETRYING"):
-            return await _reject(conn, env, errors.INVALID_ENVELOPE,
-                                 f"order_intent state={intent_row['state']} not committable")
-        # (f) fingerprint/resolution PHAI khop (chong commit nham noi dung/dia chi khac).
+        # (c) fingerprint/resolution PHAI khop (chong commit/replay nham noi dung/dia chi khac).
         _recomputed = order_intent.order_fingerprint(
             sku=sku, quantity=qty, customer_name=p.get("customer_name", ""),
             phone=p.get("phone", ""), address_fp=env.verified_address_fingerprint)
@@ -187,6 +183,22 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
                 (str(_ir) if _ir else None) != (str(env.verified_resolution_id)
                                                 if env.verified_resolution_id else None)):
             return await _reject(conn, env, errors.INVALID_ENVELOPE, "order_intent resolution mismatch")
+        # (d) SAU khi qua toan bo guard: da COMMITTED -> duplicate receipt (zero mutation, finalize replay
+        #     225-03). Them: committed order PHAI thuoc CUNG customer da validate (khong lo don khach khac).
+        if intent_row["state"] == "COMMITTED" and intent_row["committed_order_id"]:
+            _oc = await conn.fetchval("SELECT customer_id FROM orders WHERE id=$1",
+                                      intent_row["committed_order_id"])
+            if _oc != owner:
+                return await _reject(conn, env, errors.INVALID_ENVELOPE, "committed order owner mismatch")
+            return await _intent_duplicate_receipt(conn, env, intent_row["committed_order_id"])
+        # (e) terminal khac COMMITTED -> reject.
+        if intent_row["state"] in order_intent.TERMINAL_STATES:
+            return await _reject(conn, env, errors.INVALID_ENVELOPE,
+                                 f"order_intent terminal state={intent_row['state']}")
+        # (f) state PHAI committable (READY_TO_COMMIT / dang COMMITTING / RETRYING).
+        if intent_row["state"] not in ("READY_TO_COMMIT", "COMMITTING", "RETRYING"):
+            return await _reject(conn, env, errors.INVALID_ENVELOPE,
+                                 f"order_intent state={intent_row['state']} not committable")
         # (g) claim: transition -> COMMITTING (compare-and-set version) tru khi da COMMITTING (recovery).
         if intent_row["state"] != "COMMITTING":
             claimed = await order_intent_service.transition(
@@ -202,7 +214,8 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
         "SELECT id, price_vnd, stock FROM products WHERE sku = $1 FOR UPDATE", sku
     )
     if product is None:
-        return await _reject(conn, env, errors.PRODUCT_NOT_FOUND, f"sku khong ton tai: {sku}")
+        return await _reject_with_intent(conn, env, errors.PRODUCT_NOT_FOUND,
+                                         f"sku khong ton tai: {sku}", intent_commit_version)
     # --- Availability authority (AC-M2-13, CA M2-S1-F05) ---
     # Phase A/B: legacy products.stock là authority. Phase C (m2_balance_authority ON): đọc
     # availability TỪ balance (default location); products.stock chỉ còn mirror. Chống split-brain:
@@ -214,8 +227,8 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     else:
         available = product["stock"]
     if available < qty:
-        return await _reject(conn, env, errors.INSUFFICIENT_STOCK,
-                             f"con {available}, can {qty}")
+        return await _reject_with_intent(conn, env, errors.INSUFFICIENT_STOCK,
+                                         f"con {available}, can {qty}", intent_commit_version)
 
     # --- Pricing: staff-priced (manual) vs system-priced (AI/bot) ---
     if "unit_price_vnd" in p:
@@ -235,8 +248,9 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
                 if consumed_id is not None:
                     override_price = override_row["unit_price_vnd"]
         if qty > MAX_AUTO_QUANTITY and override_price is None:
-            return await _reject(conn, env, errors.QUANTITY_EXCEEDS_AUTO_LIMIT,
-                                 f"qty {qty} > {MAX_AUTO_QUANTITY} khong co override")
+            return await _reject_with_intent(conn, env, errors.QUANTITY_EXCEEDS_AUTO_LIMIT,
+                                             f"qty {qty} > {MAX_AUTO_QUANTITY} khong co override",
+                                             intent_commit_version)
         if override_price is not None:
             unit_price = override_price
         else:
@@ -401,6 +415,18 @@ async def _maybe_bind_gate_e(conn, env: CommandEnvelope, order_id: int, customer
     await order_binding.bind_in_order_tx(
         conn, order_id=order_id, resolution_id=str(rid), actor=(aref or "system"),
         reason="gate-e-order-wiring", ticket=f"GATEE:{env.command_id}")
+
+
+async def _reject_with_intent(conn, env: CommandEnvelope, code: str, detail: str,
+                              intent_commit_version) -> receipt_mod.CommandReceipt:
+    """CA 226-02: business rejection SAU khi da claim COMMITTING -> transition COMMITTING->REJECTED trong
+    CUNG tx voi command failed_terminal -> KHONG de intent treo COMMITTING (bi coi retryable/committable).
+    intent_commit_version None => chua claim (guard pre-claim) -> chi reject command, KHONG mutate intent."""
+    if env.order_intent_id and intent_commit_version is not None:
+        await order_intent_service.transition(
+            conn, env.order_intent_id, expected_version=intent_commit_version,
+            to_state="REJECTED", terminal_reason="business_rejection", error_code=code)
+    return await _reject(conn, env, code, detail)
 
 
 async def _reject(conn, env: CommandEnvelope, code: str, detail: str

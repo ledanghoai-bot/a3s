@@ -134,6 +134,41 @@ async def main():
     ck("S9 old-province -> NEEDS_CLARIFICATION|ESCALATED (khong crash)",st9 and st9["state"] in ("NEEDS_CLARIFICATION","ESCALATED"),str(dict(st9) if st9 else None))
     ck("S9 reply KHONG phai 'loi he thong'",bool(s9) and "lỗi" not in s9.lower(),repr(s9)[:80])
 
+    # ===== V03 (CA 226) =====
+    allids=lambda *xs: ",".join(str(x) for x in xs)
+    # T1 (226-03a) cancel SHORT-CIRCUIT: luot cancel, mock LLM co create_order -> KHONG duoc chay -> 0 order
+    cidT1=await setup(f"tg:t1-{RUN}")
+    settings.gate_e_canary_customer_ids=allids(cid,cid3,cid6,cid7,cid9,cidT1); settings.address_resolver_pilot_customer_ids=settings.gate_e_canary_customer_ids
+    _SCRIPT.clear(); _SCRIPT+=[{"tools":[{"name":"create_order","args":GOOD}]},{"text":"Đã tạo đơn."}]  # SE khong duoc dung
+    rr=await orchestrator.handle_message(f"tg:t1-{RUN}","thoi huy don nhe",channel="telegram_customer",provider_message_id=f"tg:{RUN}t1")
+    ck("T1 cancel short-circuit -> 0 order (create_order khong chay) (226-03a)",await q1("SELECT count(*) FROM orders WHERE customer_id=$1",cidT1)==0)
+    ck("T1 mock LLM KHONG bi tieu thu (script con nguyen)",len(_SCRIPT)==2,f"remaining={len(_SCRIPT)}")
+
+    # T2-T4 (226-03b) COLLECTING draft: incomplete -> COLLECTING durable; complete -> CUNG intent -> COMMITTED
+    cidT2=await setup(f"tg:t2-{RUN}")
+    settings.gate_e_canary_customer_ids=allids(cid,cid3,cid6,cid7,cid9,cidT1,cidT2); settings.address_resolver_pilot_customer_ids=settings.gate_e_canary_customer_ids
+    _SCRIPT.clear(); _SCRIPT+=[{"text":"Dạ anh/chị cho em xin địa chỉ và SĐT giao ạ."}]  # LLM hoi, KHONG create_order
+    await orchestrator.handle_message(f"tg:t2-{RUN}","mình muốn đặt hàng 1 gói",channel="telegram_customer",provider_message_id=f"tg:{RUN}t2")
+    st=await qr("SELECT id,state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1",cidT2)
+    ck("T2 incomplete order -> COLLECTING durable, 0 order (226-03b)",st and st["state"]=="COLLECTING" and await q1("SELECT count(*) FROM orders WHERE customer_id=$1",cidT2)==0,str(dict(st) if st else None))
+    id_collect=str(st["id"]) if st else None
+    _SCRIPT.clear(); _SCRIPT+=[{"text":"Vâng em cần thêm tên người nhận ạ."}]  # van gathering
+    await orchestrator.handle_message(f"tg:t2-{RUN}","đặt cho mình nhé",channel="telegram_customer",provider_message_id=f"tg:{RUN}t3")
+    cnt=await q1("SELECT count(*) FROM order_intents WHERE customer_id=$1",cidT2)
+    ck("T3 message sau -> CUNG 1 intent (khong parallel)",cnt==1,f"intents={cnt}")
+    _SCRIPT.clear(); _SCRIPT+=[{"tools":[{"name":"create_order","args":GOOD}]},{"text":"Đã tạo đơn."}]  # complete
+    await orchestrator.handle_message(f"tg:t2-{RUN}","địa chỉ Ea Kao Đắk Lắk, Hoa 0900002000",channel="telegram_customer",provider_message_id=f"tg:{RUN}4")
+    st4=await qr("SELECT id,state,committed_order_id FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1",cidT2)
+    ck("T4 complete -> CUNG intent progress -> COMMITTED (226-03b)",st4 and str(st4["id"])==id_collect and st4["state"]=="COMMITTED",f"collect={id_collect} final={st4['id'] if st4 else None} state={st4['state'] if st4 else None}")
+    ck("T4 chi 1 intent (COLLECTING progress, khong parallel)",await q1("SELECT count(*) FROM order_intents WHERE customer_id=$1",cidT2)==1)
+
+    # T5 (226-03b) non-order chat -> KHONG tao intent
+    cidT5=await setup(f"tg:t5-{RUN}")
+    settings.gate_e_canary_customer_ids=allids(cid,cid3,cid6,cid7,cid9,cidT1,cidT2,cidT5); settings.address_resolver_pilot_customer_ids=settings.gate_e_canary_customer_ids
+    _SCRIPT.clear(); _SCRIPT+=[{"text":"Dạ cà phê này pha bằng phin hoặc máy đều ngon ạ."}]
+    await orchestrator.handle_message(f"tg:t5-{RUN}","cho hỏi cà phê này pha sao ạ",channel="telegram_customer",provider_message_id=f"tg:{RUN}t5")
+    ck("T5 non-order chat -> 0 intent (226-03b)",await q1("SELECT count(*) FROM order_intents WHERE customer_id=$1",cidT5)==0)
+
     print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: '+','.join(FAILS)}")
     await close_pool(); sys.exit(1 if FAILS else 0)
 

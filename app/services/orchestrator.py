@@ -235,6 +235,55 @@ def _is_explicit_cancel(text: str) -> bool:
     return any(m in t for m in _CANCEL_MARKERS)
 
 
+# CA 226-03: nhan dien SO KHOI "order proposal" (server-owned draft recognition) de tao COLLECTING intent
+# durable khi khach bat dau dat don NHUNG chua du thong tin (LLM chua goi create_order). KHONG phai NLU
+# platform — chi marker dat-hang do dac hieu, LOAI TRU order-status. Sai duong tinh -> COLLECTING vo hai
+# (het han 24h, 0 don); sai am tinh -> COLLECTING tao khi create_order (drive) — van dung.
+_ORDER_INTENT_MARKERS = (
+    "dat hang", "dat mua", "dat 1", "dat mot", "dat 2", "dat goi", "dat ly", "dat hop", "dat don",
+    "mua goi", "mua 1", "mua mot", "lay goi", "cho minh 1", "cho minh mot", "cho toi 1", "cho toi mot",
+    "cho minh dat", "cho toi dat", "minh muon dat", "toi muon dat", "muon dat", "order",
+)
+
+
+def _is_order_intent(text: str) -> bool:
+    """True neu tin nhan la YEU CAU DAT DON (khoi tao/dang gom), KHONG phai order-status/chat thuong."""
+    if _is_order_status_query(text):
+        return False
+    t = _normalize_admin(text or "")
+    return any(m in t for m in _ORDER_INTENT_MARKERS)
+
+
+async def _ensure_collecting_intent(sender_id: str, conversation_id, channel: str) -> None:
+    """CA 226-03b: dam bao co MOT open intent (COLLECTING) cho hoi thoai khi khach dang dat don ma chua
+    commit/chua co open intent. Message sau tai dung (get-or-create) -> progress cung intent. Chi cho
+    enrolled-eligible (m1 HOAC Gate E pilot). Best-effort, khong vo reply."""
+    try:
+        from app.services.command import order_gateway as _ogw
+        from app.services.command import order_intent_service as _svc
+        from app.db_pool import acquire as _acq, release as _rel
+        cmd_ctx = {"channel": channel}
+        eligible = _ogw.can_route(channel) and (
+            settings.m1_reliable_order_command or await tools._gate_e_pilot_route(sender_id, cmd_ctx))
+        if not eligible:
+            return
+        _c = await _acq()
+        try:
+            cid = await _c.fetchval("SELECT id FROM customers WHERE psid=$1", sender_id)
+            if cid is None:
+                return
+            async with _c.transaction():
+                open_row = await _svc.find_open_intent(
+                    _c, customer_id=cid, conversation_id=conversation_id, for_update=True)
+                if open_row is None:
+                    await _svc.create_intent(_c, customer_id=cid, conversation_id=conversation_id,
+                                             channel=channel)  # COLLECTING durable, 0 order
+        finally:
+            await _rel(_c)
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] ensure COLLECTING intent skipped: {safe_exc(e)}")
+
+
 async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str,
                         command_ctx: dict | None = None) -> dict:
     """Dispatch 1 tool call toi ham that trong app/services/tools.py.
@@ -395,10 +444,20 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             except Exception as e:  # noqa: BLE001
                 print(f"[orchestrator] terminalize open intent skipped: {safe_exc(e)}")
 
-        # Khach TUONG MINH huy don -> transition open intent CANCELLED (durable). Khong short-circuit LLM
-        # (khach co the huy roi hoi tiep) — chi dong intent dang mo.
+        # CA 226-03: khach TUONG MINH huy don -> transition open intent CANCELLED (durable) + SHORT-CIRCUIT
+        # luot nay (KHONG vao LLM loop -> KHONG the goi create_order tao intent/don moi undo cancel). Tra
+        # phan hoi huy tat dinh.
         if _is_explicit_cancel(text):
             await _terminalize_open_intent("CANCELLED", "customer_cancel")
+            reply = ("Dạ em đã huỷ yêu cầu đặt hàng đang xử lý cho anh/chị rồi ạ. "
+                     "Khi nào cần đặt lại, anh/chị nhắn em nhé.")
+            history = await _get_history(redis, sender_id)
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": reply})
+            await _save_history(redis, sender_id, history)
+            await conversation_log.log_message(conversation_id, "customer", text)
+            await conversation_log.log_message(conversation_id, "bot", reply)
+            return reply
 
         if handoff.wants_human(text):
             await _terminalize_open_intent("ESCALATED", "customer_wants_human")
@@ -755,6 +814,14 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 "Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "
                 "ngay ạ. Đội ngũ 3S Coffee sẽ liên hệ anh/chị trong ít phút để chốt đơn."
             )
+
+        # CA 226-03b: order-proposal chua du thong tin (khach dat don, LLM chua tao order + chua co open
+        # intent) -> tao COLLECTING durable de lifecycle bat dau tu proposal DAU TIEN. Non-order/status chat
+        # -> _is_order_intent False -> khong tao. Complete order sau -> drive() get-or-create tai dung intent
+        # nay -> ADDRESS_CHECK (khong parallel). Bo qua khi da commit/clarify/escalate luot nay.
+        if not created_order_ids and _route_signal not in ("clarify", "escalate") \
+                and _is_order_intent(text):
+            await _ensure_collecting_intent(sender_id, conversation_id, channel)
 
         # 5. Luu lich su - CHI luot user/assistant cuoi cung, khong luu buoc tool_calls
         # trung gian (giu Redis gon nhe, dung format cu tuong thich nguoc)
