@@ -12,7 +12,16 @@ Nguyen tac an toan:
 """
 from __future__ import annotations
 
+import re
+
 from app.services.command import order_intent as oi
+
+# Sentinel: field KHONG duoc cung cap o luot nay (giu nguyen). Phan biet voi explicit-clear (None/"" tuong
+# minh -> xoa field). CA 233-04: "distinguish omitted field from explicit clear/correction".
+_UNSET: object = object()
+
+# VN phone shape (CA 233-04 validate truoc READY, khong chi non-null). Cho phep 0xxxxxxxxx / +84xxxxxxxxx.
+_PHONE_RE = re.compile(r"^(?:0|\+?84)\d{8,10}$")
 
 # TTL abandoned open intent (CA 225-01: terminalize deterministically). Chi GC/recovery, KHONG dinh nghia
 # 2 don co giong nhau khong (§7 TTL is cleanup only).
@@ -40,6 +49,47 @@ def draft_complete(row: dict) -> bool:
     return all(row.get(f"draft_{f}") not in (None, "") for f in _DRAFT_FIELDS)
 
 
+def _norm_phone(phone) -> str:
+    return re.sub(r"[ .\-()]", "", phone) if isinstance(phone, str) else ""
+
+
+def draft_valid(row: dict) -> bool:
+    """CA 233-04: VALIDATE draft (khong chi non-null) truoc READY: sku la chuoi non-empty, quantity int
+    duong, ten non-empty, phone dung dang VN, address du dai (>=6). SKU-EXISTENCE kiem o flow (can DB)."""
+    sku = row.get("draft_sku")
+    qty = row.get("draft_quantity")
+    name = row.get("draft_customer_name")
+    addr = row.get("draft_address")
+    if not (isinstance(sku, str) and sku.strip()):
+        return False
+    if not (isinstance(qty, int) and not isinstance(qty, bool) and qty > 0):
+        return False
+    if not (isinstance(name, str) and name.strip()):
+        return False
+    if not _PHONE_RE.match(_norm_phone(row.get("draft_phone"))):
+        return False
+    if not (isinstance(addr, str) and len(addr.strip()) >= 6):
+        return False
+    return True
+
+
+def draft_invalid_fields(row: dict) -> list[str]:
+    """Danh sach field THIEU hoac SAI DANG (CA 233-04) — de hoi khach bo sung/sua dung field."""
+    bad = []
+    if not (isinstance(row.get("draft_sku"), str) and row["draft_sku"].strip()):
+        bad.append("sku")
+    q = row.get("draft_quantity")
+    if not (isinstance(q, int) and not isinstance(q, bool) and q > 0):
+        bad.append("quantity")
+    if not (isinstance(row.get("draft_customer_name"), str) and row["draft_customer_name"].strip()):
+        bad.append("customer_name")
+    if not _PHONE_RE.match(_norm_phone(row.get("draft_phone"))):
+        bad.append("phone")
+    if not (isinstance(row.get("draft_address"), str) and len(row["draft_address"].strip()) >= 6):
+        bad.append("address")
+    return bad
+
+
 async def get_intent(conn, intent_id, *, for_update: bool = False) -> dict | None:
     q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
          "verified_address_fingerprint,verified_resolution_id,committed_order_id,terminal_reason,error_code,"
@@ -50,20 +100,27 @@ async def get_intent(conn, intent_id, *, for_update: bool = False) -> dict | Non
     return dict(row) if row else None
 
 
-async def update_draft(conn, intent_id, *, expected_version: int, sku=None, quantity=None,
-                       customer_name=None, phone=None, address=None) -> dict | None:
-    """CA 232 §3: luu/ghi de field draft server-owned (COALESCE: chi doi field co gia tri moi; field khach
-    cung cap moi thay the field cu). Optimistic version (compare-and-set). Tra row moi hoac None (version
-    lech). state_version TANG de bat ky readiness/summary cu bi vo hieu (§3)."""
+async def update_draft(conn, intent_id, *, expected_version: int, sku=_UNSET, quantity=_UNSET,
+                       customer_name=_UNSET, phone=_UNSET, address=_UNSET) -> dict | None:
+    """CA 232 §3 + 233-04: luu/ghi de field draft server-owned. Field = _UNSET (mac dinh) -> KHONG dung
+    toi (omitted, giu nguyen). Field co gia tri -> ghi de. Field = None/'' TUONG MINH -> XOA (explicit
+    clear/correction). Optimistic version (compare-and-set). state_version TANG de bat ky readiness/summary
+    cu bi vo hieu (§3). Tra row moi hoac None (version lech / khong co field nao doi)."""
+    sets = ["state_version=state_version+1"]
+    vals: list = []
+    for col, val in (("draft_sku", sku), ("draft_quantity", quantity),
+                     ("draft_customer_name", customer_name), ("draft_phone", phone),
+                     ("draft_address", address)):
+        if val is _UNSET:
+            continue  # omitted -> giu nguyen
+        vals.append(None if val in (None, "") else val)  # None/'' tuong minh -> clear
+        sets.append(f"{col}=${len(vals) + 2}")
     row = await conn.fetchrow(
-        "UPDATE order_intents SET state_version=state_version+1, "
-        "draft_sku=COALESCE($3,draft_sku), draft_quantity=COALESCE($4,draft_quantity), "
-        "draft_customer_name=COALESCE($5,draft_customer_name), draft_phone=COALESCE($6,draft_phone), "
-        "draft_address=COALESCE($7,draft_address) "
+        f"UPDATE order_intents SET {', '.join(sets)} "
         "WHERE id=$1 AND state_version=$2 "
         f"RETURNING id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
         f"verified_address_fingerprint,verified_resolution_id,committed_order_id,{_DRAFT_COLS}",
-        intent_id, expected_version, sku, quantity, customer_name, phone, address)
+        intent_id, expected_version, *vals)
     return dict(row) if row else None
 
 

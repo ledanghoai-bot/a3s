@@ -20,6 +20,15 @@ from app.services.command import order_intent_service as svc
 from app.services.safe_log import safe_exc
 
 
+def _norm_addr(s) -> str:
+    """CA 233-04: normalize dia chi free-text de PHAT HIEN THAY DOI theo fingerprint chuan hoa (khong phai
+    bool(address) — dia chi lap lai giong het KHONG tinh la doi). Bo dau/hoa/space NHAT QUAN 2 phia."""
+    import unicodedata
+    s = unicodedata.normalize("NFD", (s if isinstance(s, str) else "").lower())
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return " ".join(s.split())
+
+
 async def _render_confirmation_summary(conn, draft: dict) -> str:
     """CA 233-02: server RENDER tom tat xac nhan tu DRAFT (khong de model viet lai). Customer-safe: ten SP,
     so luong, don gia, tong, nguoi nhan, SDT, dia chi giao. Dung lam reply THAT gui khach."""
@@ -134,23 +143,47 @@ async def propose_draft(*, customer_id: int | None, conversation_id, channel: st
                                      to_state="EXPIRED", terminal_reason="ttl")
                 row = None
             if row is None:
-                # Sau COMMITTED: don moi/reorder tuong minh -> intent moi. Neu khong tuong minh + co committed
-                # cung fingerprint thi day la stale (khong tao lai) — nhung propose luon la don-dang-gom nen tao moi.
+                # CA 233-04: sau COMMITTED chi tao intent MOI khi TUONG MINH reorder. Neu KHONG explicit +
+                # de xuat nay TRUNG committed gan nhat (stale/replay proposal) -> tra outcome cu, KHONG tao
+                # draft moi (khong mutation). Chi check khi du field dinh danh don (co the tinh fingerprint).
+                if not explicit_new_order and all(
+                        proposed.get(f) not in (None, "") for f in ("sku", "quantity", "customer_name", "phone")):
+                    ofp_guess = _oi.order_fingerprint(
+                        sku=proposed["sku"], quantity=proposed["quantity"],
+                        customer_name=proposed["customer_name"], phone=proposed["phone"], address_fp=addr_fp)
+                    prior = await svc.find_recent_committed(
+                        conn, customer_id=customer_id, conversation_id=conversation_id,
+                        order_fingerprint=ofp_guess)
+                    if prior is not None:
+                        return {"action": "already_committed", "order_intent_id": str(prior["id"]),
+                                "order_id": prior["committed_order_id"]}
                 new = await svc.create_intent(conn, customer_id=customer_id,
                                               conversation_id=conversation_id, channel=channel)
                 row = await svc.get_intent(conn, new["id"], for_update=True)
             iid = row["id"]
             ver = row["state_version"]
-            # Address doi -> xoa binding cu truoc khi verify lai (§3/§5).
-            if address_changed:
+            # CA 233-04: dia chi DOI theo fingerprint chuan hoa (khong phai bool(address)) -> xoa binding cu
+            # + summary (atomic trong clear_address_binding) truoc khi verify lai (§3/§5). Dia chi lap lai
+            # giong het KHONG tinh doi -> giu binding/summary.
+            _new_addr = proposed.get("address")
+            _addr_changed = bool(_new_addr) and _norm_addr(_new_addr) != _norm_addr(row.get("draft_address"))
+            if _addr_changed:
                 r = await svc.clear_address_binding(conn, iid, expected_version=ver)
                 if r is not None:
                     ver = r["state_version"]
-            # Accumulate field (merge; field khach cung cap moi thay the).
-            d = await svc.update_draft(
-                conn, iid, expected_version=ver, sku=proposed.get("sku"),
-                quantity=proposed.get("quantity"), customer_name=proposed.get("customer_name"),
-                phone=proposed.get("phone"), address=proposed.get("address"))
+            else:
+                # CA 233-04: dia chi KHONG doi -> GIU verified binding cu (correction field khac nhu so luong
+                # KHONG duoc lam address re-verify tu dau roi tut ve NEEDS_CLARIFICATION). Neu draft da co
+                # binding verified truoc do, coi nhu van verified (dung binding cu neu luot nay khong mang).
+                if not verified and row.get("verified_resolution_id") and row.get("verified_address_fingerprint"):
+                    verified = True
+                    addr_fp = addr_fp or row.get("verified_address_fingerprint")
+                    verified_resolution_id = verified_resolution_id or row.get("verified_resolution_id")
+            # Accumulate field (merge; field khach cung cap moi thay the). None = KHONG de xuat (_UNSET, giu
+            # nguyen) — KHONG phai explicit-clear.
+            _da = {k: proposed[k] for k in ("sku", "quantity", "customer_name", "phone", "address")
+                   if proposed.get(k) is not None}
+            d = await svc.update_draft(conn, iid, expected_version=ver, **_da)
             if d is None:
                 return {"action": "error"}
             ver = d["state_version"]
@@ -163,6 +196,16 @@ async def propose_draft(*, customer_id: int | None, conversation_id, channel: st
                 return {"action": "need_more", "order_intent_id": str(iid),
                         "missing": [f for f in ("sku", "quantity", "customer_name", "phone", "address")
                                     if d.get(f"draft_{f}") in (None, "")]}
+            # CA 233-04: du field non-null -> VALIDATE (dang/ton tai) truoc READY. SKU phai TON TAI trong
+            # products; phone dung dang; qty int duong; address du dai. Sai -> ve COLLECTING + need_more.
+            _prod_ok = await conn.fetchval("SELECT 1 FROM products WHERE sku=$1", d["draft_sku"])
+            if not _prod_ok or not svc.draft_valid(d):
+                bad = svc.draft_invalid_fields(d)
+                if not _prod_ok and "sku" not in bad:
+                    bad.append("sku")
+                if d["state"] != "COLLECTING" and _oi.can_transition(d["state"], "COLLECTING"):
+                    await svc.transition(conn, iid, expected_version=ver, to_state="COLLECTING")
+                return {"action": "need_more", "order_intent_id": str(iid), "missing": bad, "invalid": True}
             # Du field: tinh order_fingerprint tu draft + addr_fp.
             ofp = _oi.order_fingerprint(sku=d["draft_sku"], quantity=d["draft_quantity"],
                                         customer_name=d["draft_customer_name"], phone=d["draft_phone"],

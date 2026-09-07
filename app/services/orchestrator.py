@@ -364,6 +364,121 @@ async def _ensure_collecting_intent(sender_id: str, conversation_id, channel: st
         print(f"[orchestrator] ensure COLLECTING intent skipped: {safe_exc(e)}")
 
 
+def _corr(sender_id: str) -> str:
+    """CA Review 233 §3: correlation an toan thay cho raw sender_id/provider id trong log — deterministic
+    (cung sender -> cung corr, trace duoc) nhung KHONG dao nguoc ra danh tinh that. KHONG log raw psid/PII."""
+    return "cid:" + hashlib.sha256((sender_id or "").encode("utf-8")).hexdigest()[:12]
+
+
+# CA 233-01: SERVER-invoked structured proposal-EXTRACTION. Server (KHONG phai model tu chon tool) chu dong
+# goi model voi schema JSON chat che de TRICH field don tu hoi thoai, roi accumulate qua propose_draft. Nho
+# vay draft van tien toi READY NGAY CA KHI model TU CHOI moi tool call (sua goc reliability class Directive
+# 232). create_order tool (model chon) van la input tuong thich — KHONG con la duong tien duy nhat.
+_EXTRACT_SYS = (
+    "Ban la bo TRICH XUAT thong tin don hang. Doc hoi thoai + tin nhan moi nhat cua khach, tra ve DUY NHAT "
+    "mot JSON object (khong giai thich, khong markdown, khong text ngoai JSON) voi cac khoa:\n"
+    "  sku: ma san pham NEU khach neu ro (map ten san pham -> SKU dung trong danh sach duoi), nguoc lai null\n"
+    "  quantity: so nguyen duong hoac null\n"
+    "  customer_name: ten nguoi nhan hoac null\n"
+    "  phone: so dien thoai hoac null\n"
+    "  address: dia chi giao (free-text) hoac null\n"
+    "  province: ten tinh/thanh neu suy ra duoc hoac null\n"
+    "  ward: ten phuong/xa neu suy ra duoc hoac null\n"
+    "CHI trich thong tin khach THUC SU cung cap trong hoi thoai; KHONG bia/suy dien. Neu khong co thong tin "
+    "don hang nao, tra JSON rong {}."
+)
+
+
+def _parse_json_object(raw: str) -> dict:
+    """Parse 1 JSON object tu output model (strip code-fence/text quanh). Loi -> {} (fail-safe)."""
+    if not raw:
+        return {}
+    s = raw.strip()
+    a, b = s.find("{"), s.rfind("}")
+    if a < 0 or b < 0 or b < a:
+        return {}
+    try:
+        obj = json.loads(s[a:b + 1])
+        return obj if isinstance(obj, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+async def _has_open_intent(sender_id: str, conversation_id) -> bool:
+    """CA 233-01: co open intent (COLLECTING/ADDRESS_CHECK/NEEDS_CLARIFICATION/READY) cho hoi thoai nay? ->
+    follow-up cung cap field van duoc extract du tin nay khong co order-marker. Best-effort; loi -> False."""
+    try:
+        from app.db_pool import acquire as _acq
+        from app.db_pool import release as _rel
+        _c = await _acq()
+        try:
+            return bool(await _c.fetchval(
+                "SELECT 1 FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
+                "WHERE c.psid=$1 AND oi.conversation_id IS NOT DISTINCT FROM $2 AND oi.state IN "
+                "('COLLECTING','ADDRESS_CHECK','NEEDS_CLARIFICATION','READY_TO_COMMIT') LIMIT 1",
+                sender_id, conversation_id))
+        finally:
+            await _rel(_c)
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] open-intent check skipped {_corr(sender_id)}: {safe_exc(e)}")
+        return False
+
+
+async def _server_extract_order_fields(client, sender_id: str, text: str, history: list[dict],
+                                       sku_summary: str) -> dict:
+    """CA 233-01: SERVER goi model (KHONG truyen tools) voi schema chat -> JSON field don. Server-controlled
+    (khong phu thuoc model chon tool). Fail -> {} (khong vo reply)."""
+    try:
+        msgs = [{"role": "system", "content": _EXTRACT_SYS + "\n\n## Danh sach SKU\n" + (sku_summary or "")}]
+        msgs += history[-8:]
+        msgs.append({"role": "user", "content": text})
+        resp = await _llm_create(client, model=settings.llm_model, messages=msgs,
+                                 max_tokens=300, temperature=0.0)
+        return _parse_json_object(resp.choices[0].message.content or "")
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] server extract skipped {_corr(sender_id)}: {safe_exc(e)}")
+        return {}
+
+
+async def _server_propose_turn(sender_id: str, text: str, channel: str, conversation_id,
+                               provider_message_id: str | None, history: list[dict], client,
+                               sku_summary: str) -> dict | None:
+    """CA 233-01: SERVER-controlled proposal path. Chay khi enrolled + turn lien quan don (order-intent text
+    HOAC reorder tuong minh HOAC co open draft). Server TRICH field -> _execute_tool(create_order) =
+    propose_draft (accumulate/verify/READY/summary). Tra tool-result dict; None = khong ap dung (flow thuong)."""
+    try:
+        from app.services.command import order_gateway as _ogw
+        enrolled = _ogw.can_route(channel) and (
+            settings.m1_reliable_order_command
+            or await tools._gate_e_pilot_route(sender_id, {"channel": channel}))
+        if not enrolled:
+            return None
+        relevant = _is_order_intent(text) or _is_explicit_reorder(text) or \
+            await _has_open_intent(sender_id, conversation_id)
+        if not relevant:
+            return None
+        fields = await _server_extract_order_fields(client, sender_id, text, history, sku_summary)
+        args = {k: fields.get(k) for k in ("sku", "quantity", "customer_name", "phone", "address",
+                                           "province", "ward") if fields.get(k) not in (None, "")}
+        # Coerce quantity numeric -> int (JSON co the tra float/string).
+        _q = args.get("quantity")
+        if isinstance(_q, float) and _q.is_integer():
+            args["quantity"] = int(_q)
+        elif isinstance(_q, str) and _q.strip().isdigit():
+            args["quantity"] = int(_q.strip())
+        # KHONG trich duoc field nao -> KHONG lam gi (tranh hijack chat thuong/tao COLLECTING rong). Confirm
+        # da co early-hook rieng; re-arm summary READY khong can o day.
+        if not args:
+            return None
+        pmid = provider_message_id or sender_id
+        cmd_ctx = {"channel": channel, "actor_type": "customer", "actor_id": sender_id,
+                   "conversation_id": conversation_id, "causation_id": pmid, "provider_message_id": pmid}
+        return await _execute_tool("create_order", args, sender_id, text, command_ctx=cmd_ctx)
+    except Exception as e:  # noqa: BLE001 — server path fail KHONG vo reply (fall through LLM)
+        print(f"[orchestrator] server propose turn skipped {_corr(sender_id)}: {safe_exc(e)}")
+        return None
+
+
 async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str,
                         command_ctx: dict | None = None) -> dict:
     """Dispatch 1 tool call toi ham that trong app/services/tools.py.
@@ -450,10 +565,18 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                     # viet lai/bo sot). Draft READY + pending-confirm armed cho version/fingerprint nay.
                     # Khach xac nhan -> confirmation hook chot.
                     return {"draft_ready": True, "final_reply": prop.get("summary")}
+                if _act == "already_committed":
+                    # CA 233-04: de xuat stale/replay sau COMMITTED (khong reorder tuong minh) -> khong tao
+                    # draft moi. Bao khach don DA duoc ghi nhan (truthful), KHONG bia don moi.
+                    return {"draft_already_committed": True, "order_id": prop.get("order_id"),
+                            "instruction": ("Don nay DA duoc ghi nhan truoc do. Bao khach don da tiep nhan "
+                                            "roi, KHONG tao don moi, KHONG bao loi.")}
                 if _act == "need_more":
+                    _inv = " (co field SAI DANG: SDT/so luong/san pham — xin lai cho dung)" if prop.get(
+                        "invalid") else ""
                     return {"draft_need_more": True, "missing": prop.get("missing"),
                             "instruction": ("Hoi khach cung cap cac thong tin CON THIEU de dat don (san pham/"
-                                            "so luong/ten nguoi nhan/SDT/dia chi). KHONG noi da tao don.")}
+                                            f"so luong/ten nguoi nhan/SDT/dia chi){_inv}. KHONG noi da tao don.")}
                 if _act == "clarify":
                     clarify = await _address_clarify(sender_id, vr, prov_prop, ward_prop) if vr else None
                     if clarify is not None:
@@ -469,7 +592,7 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                             "instruction": ("Da chuyen nhan vien ho tro xac minh dia chi. Bao khach doi "
                                             "phan hoi trong it phut. KHONG noi da tao don.")}
                 if _act == "error":
-                    print(f"[orchestrator] order-intent propose FAIL-CLOSED sender={sender_id}")
+                    print(f"[orchestrator] order-intent propose FAIL-CLOSED {_corr(sender_id)}")
                     return {"error": "He thong dang ban, em chua ghi nhan duoc don. Anh/chi thu lai giup em a.",
                             "intent_fail_closed": True}
                 # _act == 'skip' -> customer_id None -> khong enrolled thuc su -> roi xuong legacy commit.
@@ -576,7 +699,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                         await _save_history(redis, sender_id, history)
                         await conversation_log.log_message(conversation_id, "customer", text)
                         await conversation_log.log_message(conversation_id, "bot", reply)
-                        print(f"[orchestrator] server confirm->commit order_committed sender={sender_id}")
+                        print(f"[orchestrator] server confirm->commit order_committed {_corr(sender_id)}")
                         return reply
             except Exception as e:  # noqa: BLE001 — khong vo reply, fall through LLM
                 print(f"[orchestrator] server confirm->commit skipped: {safe_exc(e)}")
@@ -648,6 +771,37 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         else:
             profile = await get_user_profile(redis, sender_id)
 
+        # CA 233-01: SERVER-invoked extraction+propose CHAY TRUOC main LLM turn — draft tien toi READY
+        # NGAY CA KHI model tu choi moi tool. Client + sku_summary tai dung ben duoi (khong goi lai 2 lan).
+        _client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+        _sku_summary = await products.get_sku_summary_text()
+        _server_instruction = None       # need_more/clarify/escalate -> huong dan LLM dien dat
+        _suppress_create_order = False    # chan model re-propose (double-count) sau khi server da xu ly luot nay
+        _srv = await _server_propose_turn(sender_id, text, channel, conversation_id,
+                                          provider_message_id, history, _client, _sku_summary)
+        if isinstance(_srv, dict):
+            if _srv.get("final_reply"):  # READY -> server-rendered summary = reply THAT, short-circuit
+                reply = _srv["final_reply"]
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": reply})
+                await _save_history(redis, sender_id, history)
+                await conversation_log.log_message(conversation_id, "customer", text)
+                await conversation_log.log_message(conversation_id, "bot", reply)
+                print(f"[orchestrator] server-extract READY -> summary armed {_corr(sender_id)}")
+                return reply
+            if _srv.get("draft_already_committed"):  # stale/replay sau COMMITTED -> khong don moi (233-04)
+                reply = ("Dạ đơn của anh/chị em đã ghi nhận trước đó rồi ạ. Nếu cần đặt thêm đơn mới, "
+                         "anh/chị nhắn giúp em nhé.")
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": reply})
+                await _save_history(redis, sender_id, history)
+                await conversation_log.log_message(conversation_id, "customer", text)
+                await conversation_log.log_message(conversation_id, "bot", reply)
+                return reply
+            if _srv.get("instruction"):  # need_more/clarify/escalate -> LLM dien dat + chan re-propose luot nay
+                _server_instruction = _srv["instruction"]
+                _suppress_create_order = True
+
         # 2. Kien thuc tham khao: Knowledge Base V2 (#11) THAY THE RAG cu (#4)
         # tu 23/7 theo chi dao PO ("cach pha phai tuan theo quy trinh KB V2") -
         # phat hien XUNG DOT kien thuc khi test Telegram that: RAG cu
@@ -712,7 +866,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # khang dinh sai "chi co 1 SKU" nhieu lan lien tiep trong 1 hoi thoai,
         # ke ca khi khach phan bac). Day la nguon that ve SU TON TAI cua SKU -
         # gia/ton kho/bac gia chi tiet van phai qua search_products/check_stock.
-        sku_summary = await products.get_sku_summary_text()
+        sku_summary = _sku_summary  # CA 233-01: tai dung (da tinh o server-extract, khong goi lai)
         system += (
             "\n\n## Danh sach SKU hien co (nguon that DUY NHAT va DAY DU, LUON\n"
             "dung, khong duoc noi trai hay phu nhan du lieu nay du lich su hoi\n"
@@ -747,13 +901,25 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 f"{notes_text}"
             )
 
+        # CA 233-01: server DA xu ly phan don hang luot nay (need_more/clarify/escalate) -> huong dan LLM CHI
+        # dien dat lai, KHONG tu tao/chot don; chan create_order khoi tool-set de tranh re-propose (double
+        # count clarify/version bump). Server la duong tien draft DUY NHAT khi da chay.
+        if _server_instruction:
+            system += ("\n\n## Huong dan he thong (BAT BUOC tuan thu)\n" + _server_instruction +
+                       "\nHe thong da xu ly phan don hang server-side; ban CHI dien dat lai cho khach mot "
+                       "cach tu nhien, TUYET DOI KHONG tu tao/chot don, KHONG noi da tao don.")
+
         # messages cho vong lap tool-calling cua luot nay - khong dinh vao history
         # da luu tru khi con tool_calls trung gian
         turn_messages = [{"role": "system", "content": system}]
         turn_messages += history
         turn_messages.append({"role": "user", "content": text})
 
-        client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+        client = _client  # CA 233-01: tai dung client da tao o server-extract
+        _turn_tools = tools.TOOL_DEFINITIONS
+        if _suppress_create_order:
+            _turn_tools = [t for t in tools.TOOL_DEFINITIONS
+                           if t.get("function", {}).get("name") != "create_order"]
 
         reply = ""
         created_order_ids: list = []  # order_id create_order tra ve THAT trong luot nay
@@ -774,7 +940,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 client,
                 model=settings.llm_model,
                 messages=turn_messages,
-                tools=tools.TOOL_DEFINITIONS,
+                tools=_turn_tools,
                 tool_choice="auto",
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.1,
@@ -880,7 +1046,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 break
         else:
             # Het MAX_TOOL_ITERATIONS ma van con tool_calls - tra loi an toan thay vi treo
-            print(f"[orchestrator] Vuot qua {MAX_TOOL_ITERATIONS} vong tool_calls cho {sender_id}")
+            print(f"[orchestrator] Vuot qua {MAX_TOOL_ITERATIONS} vong tool_calls cho {_corr(sender_id)}")
             reply = "Đội ngũ 3S Coffee sẽ kiểm tra và phản hồi bạn sớm nhất."
 
         if not reply:
@@ -902,7 +1068,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             shadow = reply_guard.shadow_evaluate(_reply_claims_order_created(reply), created_order_ids)
             if not shadow["consistent"]:
                 # M3-S4: KHONG in noi dung reply (chua ten/ma don) — chi metadata.
-                print(f"[orchestrator][M1-shadow] CLAIM-KHONG-RECEIPT sender={sender_id} "
+                print(f"[orchestrator][M1-shadow] CLAIM-KHONG-RECEIPT {_corr(sender_id)} "
                       f"reply_len={len(reply)}")
             # CR-08: order đã commit -> reply tức thì TRUNG TÍNH (không để LLM nói sai mã đơn/tổng tiền);
             # xác nhận CHÍNH THỨC (đúng committed data) đi qua durable receipt (outbox, CR-03).
@@ -918,7 +1084,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             # M5 discovery fix (CA 223 §5.5 / 224 §10.9): khach HOI trang thai don CU ("kiem tra don hom
             # qua"...) — out-of-scope tao don. Guard chong-bia bat vi reply nhac "don" nhung day KHONG
             # phai bia don-moi. -> KHONG escalate/pause; tra neutral (khong khang dinh da tao don moi).
-            print(f"[orchestrator] order-status query -> neutral, khong escalate. sender={sender_id}")
+            print(f"[orchestrator] order-status query -> neutral, khong escalate. {_corr(sender_id)}")
             _route_signal = "reply"
             reply = ("Dạ hiện em chưa tra cứu được chi tiết đơn cũ qua kênh này ạ. Anh/chị cho em xin "
                      "mã đơn hoặc SĐT đã đặt để em kiểm tra giúp, hoặc em chuyển nhân viên hỗ trợ nhé ạ.")
@@ -927,7 +1093,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             # cho xac nhan -> KHONG escalate, chi THAY bang loi TRUTHFUL yeu cau xac nhan (khach chi can xac
             # nhan la server chot). Neu KHONG co draft (bia thuc su) -> escalate nhu cu.
             _pending = await _has_pending_ready_draft(sender_id, conversation_id)
-            print(f"[orchestrator] CHAN BIA DON (claim khong receipt): sender={sender_id} "
+            print(f"[orchestrator] CHAN BIA DON (claim khong receipt): {_corr(sender_id)} "
                   f"reply_len={len(reply)} pending_ready={_pending}")
             if _pending:
                 _route_signal = "reply"
