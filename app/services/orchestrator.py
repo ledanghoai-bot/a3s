@@ -692,13 +692,15 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                     if _committed is not None and _committed.get("order_id") and not _committed.get("error"):
                         from app.services.command import reply_guard
                         reply = reply_guard.finalize_customer_reply("", True)  # receipt deterministic (outbox)
-                        await _log_receipt_to_messages(conversation_id, _committed)  # §7 staff-visible
+                        # CA 233-05: staff-history nhan DUNG 1 receipt row (qua _log_receipt_to_messages,
+                        # dedupe theo committed/duplicate) — KHONG log them neutral-ack thanh "second bot
+                        # reply". Neutral ack chi la reply tra ve kenh (giao khach 1 lan), khong ghi rieng.
+                        await _log_receipt_to_messages(conversation_id, _committed)  # §7 staff-visible (1 lan)
                         history = await _get_history(redis, sender_id)
                         history.append({"role": "user", "content": text})
                         history.append({"role": "assistant", "content": reply})
                         await _save_history(redis, sender_id, history)
                         await conversation_log.log_message(conversation_id, "customer", text)
-                        await conversation_log.log_message(conversation_id, "bot", reply)
                         print(f"[orchestrator] server confirm->commit order_committed {_corr(sender_id)}")
                         return reply
             except Exception as e:  # noqa: BLE001 — khong vo reply, fall through LLM

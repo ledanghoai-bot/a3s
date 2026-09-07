@@ -184,16 +184,26 @@ async def main():
 
     # ---------- 233-05: one customer receipt + one staff-history row; replay no dup ----------
     conv = await q1("SELECT id FROM conversations WHERE customer_id=$1 ORDER BY id DESC LIMIT 1", cid)
-    msgs1 = await q1("SELECT count(*) FROM messages WHERE conversation_id=$1 AND role='bot' "
-                     "AND content LIKE '%#%'", conv)
-    ob1 = await q1("SELECT count(*) FROM outbox_events WHERE event_type='order.receipt.customer' "
-                   "AND created_at > now()-interval '5 min'")
+
+    async def receipt_rows():
+        return await q1("SELECT count(*) FROM messages WHERE conversation_id=$1 AND role='bot' "
+                        "AND content LIKE '%#%'", conv)
+
+    oid = await q1("SELECT committed_order_id FROM order_intents WHERE customer_id=$1 AND state='COMMITTED' "
+                   "ORDER BY updated_at DESC LIMIT 1", cid)
+
+    async def outbox_for_order():
+        # outbox receipt events cho DUNG order nay (dedupe theo order) — replay khong duoc them.
+        return await q1("SELECT count(*) FROM outbox_events WHERE event_type='order.receipt.customer' "
+                        "AND (payload->>'order_id')::int = $1", oid) if oid else 0
+
+    msgs1 = await receipt_rows()
+    ob1 = await outbox_for_order()
     await send(f"tg:v2a-{RUN}", "xác nhận")  # replay confirm
-    msgs2 = await q1("SELECT count(*) FROM messages WHERE conversation_id=$1 AND role='bot' "
-                     "AND content LIKE '%#%'", conv)
-    ck("233-05 staff-history receipt == 1 (replay khong them)", msgs1 == 1 and msgs2 == 1,
-       f"m1={msgs1} m2={msgs2}")
-    ck("233-05 outbox receipt >= 1", ob1 >= 1, ob1)
+    msgs2 = await receipt_rows()
+    ob2 = await outbox_for_order()
+    ck("233-05 staff-history receipt == 1 (replay +0)", msgs1 == 1 and msgs2 == 1, f"m1={msgs1} m2={msgs2}")
+    ck("233-05 outbox receipt cho order == 1 (replay +0)", ob1 == 1 and ob2 == 1, f"ob1={ob1} ob2={ob2}")
 
     # ---------- 233-04: replay proposal after COMMITTED (not reorder) -> no new intent/order ----------
     # Fresh customer: commit FULL cleanly, then redeliver the SAME proposal (same fingerprint) -> guard.
