@@ -35,8 +35,8 @@ async def _worker(intent_id, cid):
 async def main():
     conn = await acquire()
     try:
-        cid = await conn.fetchval("SELECT id FROM customers WHERE psid='tg:intsvc'") \
-            or await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES('tg:intcommit','I','0900000000') RETURNING id")
+        await conn.execute("INSERT INTO customers(psid,name,phone) VALUES('tg:intcommit','I','0900000000') ON CONFLICT(psid) DO NOTHING")
+        cid = await conn.fetchval("SELECT id FROM customers WHERE psid='tg:intcommit'")
         # --- Sequential idempotency: cung intent, commit 2 lan -> 1 don ---
         async with conn.transaction():
             iid = await _mk_ready_intent(conn, cid, 'FP-SEQ')
