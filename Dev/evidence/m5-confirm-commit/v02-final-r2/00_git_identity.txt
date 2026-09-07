@@ -1,0 +1,8 @@
+base (origin/main): 0d6d578f1ad699ea14ef1806146307abce8764c8
+merge-base: 0d6d578f1ad699ea14ef1806146307abce8764c8
+candidate head (=tip): 8872c496b62ded1c4c97d5ad7a2952a8f42cd0bd
+candidate tree: 91afb98699fbd6e80ec51fbd7ec057a09b1d02f4
+branch: feat/m5-confirm-commit-final-r2
+migration cao nhat: 061_m5_inbound_event_dedupe.sql
+note: code-only (khong Dev/evidence), tip==head. R1 evidence (v02-final-r1, MANIFEST 42f7e5d6) tai dung bang hash cho cac finding frozen 233-235; R2 chung minh 236-01/02 + rerun ruff/pytest/migration tren head cuoi.
+generated: 2026-09-07T21:47:18Z

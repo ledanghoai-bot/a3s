@@ -1,0 +1,18 @@
+### fresh apply 001..061 ###
+Applied 61 migration(s).
+  validation OK: scripts/operational_seed_validation.sql
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+
+### idempotent re-run ###
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+ inbox status col + msg.dedupe + summary_hash: 1/1/1
+
+### rollback 061+060+059 ###
+DROP TABLE
+DROP INDEX
+ALTER TABLE
+ALTER TABLE
+ remaining m5 objects: 0
+

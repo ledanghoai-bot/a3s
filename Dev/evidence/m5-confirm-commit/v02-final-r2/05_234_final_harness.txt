@@ -1,0 +1,48 @@
+[orchestrator] server-extract READY -> summary armed cid:21f0e4dcedac
+[orchestrator] server-extract READY -> summary armed cid:21f0e4dcedac
+  [PASS] 234-02.1 identical proposal -> KHONG bump version :: v1=4 v2=4
+  [PASS] 234-02.1 identical proposal -> KHONG them summary row :: 1->1
+[latency] event=chat channel=telegram_customer route=reply ms_total=95 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+[latency] event=chat channel=telegram_customer route=reply ms_total=64 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 234-02.2 explicit-clear qua extraction -> draft_phone NULL :: 0900001234->None
+[orchestrator] server-extract READY -> summary armed cid:5b459e38f36f
+  [PASS] 234-02.3 baseline READY :: READY_TO_COMMIT
+[latency] event=chat channel=telegram_customer route=reply ms_total=64 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 234-02.3 correction lam thieu -> REGRESSION ve COLLECTING (khong ket READY) :: COLLECTING
+[orchestrator] server-extract READY -> summary armed cid:e485940489de
+  [PASS] 234-02.4 baseline READY
+[latency] event=chat channel=telegram_customer route=reply ms_total=62 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 234-02.4 SKU bi xoa -> revalidate chan commit (0 order)
+[orchestrator] server-extract READY -> summary armed cid:7cd59bf1d419
+[cmd] {"event": "order.create.succeeded", "command_id": "3202191a-f96d-493b-a9ea-4f1c98568983", "correlation_id": "669dfeb6-43b6-4a50-853e-b28c0571098c", "causation_id": null, "channel": "telegram_customer", "resource_id": 364}
+[orchestrator] server confirm->commit order_committed cid:7cd59bf1d419
+  [PASS] 234-02.5 baseline commit
+  [PASS] 234-02.5 partial stale sau COMMITTED (ENTERS path, khong reorder) -> KHONG intent/order moi :: intents=1
+  [PASS] 234-03 MOI armed pending-confirm co persisted summary response (0 orphan)
+[orchestrator] server-extract READY -> summary armed cid:140deea2d263
+[cmd] {"event": "order.create.succeeded", "command_id": "215e2620-acc4-4b9a-894d-2dd8a241d9d8", "correlation_id": "03f435a4-3ed8-440e-b5b9-8f2850f53bc8", "causation_id": null, "channel": "telegram_customer", "resource_id": 365}
+[orchestrator] server confirm->commit order_committed cid:140deea2d263
+  [PASS] 234-04[telegram_customer] 1 order + 1 staff-row + 1 outbox receipt :: oid=365 staff=1 obx=1
+  [PASS] 234-04[telegram_customer] outbox delivery effectively-once (drains -> 1 send) :: 1
+[latency] event=chat channel=telegram_customer route=reply ms_total=69 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 234-04[telegram_customer] replay confirm -> +0 order/receipt/staff-row :: orders=1
+[messenger_profile] Khong lay duoc profile …7480: HTTPStatusError: Client error '400 Bad Request' for url 'https://graph.facebook.com/v19.0/msgr-1788817480?fields=first_name,last_name&access_token=<REDACTED>'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400
+[orchestrator] server-extract READY -> summary armed cid:3bd6a7d8daa1
+[cmd] {"event": "order.create.succeeded", "command_id": "e5c06488-606c-4ec9-8714-962ecdbc79dd", "correlation_id": "e4a97a8c-61e3-42cf-b4f8-72d8cfc9973a", "causation_id": null, "channel": "messenger", "resource_id": 366}
+[orchestrator] server confirm->commit order_committed cid:3bd6a7d8daa1
+  [PASS] 234-04[messenger] 1 order + 1 staff-row + 1 outbox receipt :: oid=366 staff=1 obx=1
+  [PASS] 234-04[messenger] outbox delivery effectively-once (drains -> 1 send) :: 1
+[latency] event=chat channel=messenger route=reply ms_total=41 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 234-04[messenger] replay confirm -> +0 order/receipt/staff-row :: orders=1
+[orchestrator] server-extract READY -> summary armed cid:cf334e984343
+[cmd] {"event": "order.create.succeeded", "command_id": "a4ef2df8-5216-419a-af7f-a3ebb7e50761", "correlation_id": "b11eebd0-b35f-42a5-90ed-41fd902129d1", "causation_id": null, "channel": "telegram_customer", "resource_id": 367}
+[orchestrator] server confirm->commit order_committed cid:cf334e984343
+  [PASS] 234-04 outbox retry -> delivered effectively-once :: status=delivered calls=2
+[orchestrator] server-extract READY -> summary armed cid:69cb3f4beab6
+[cmd] {"event": "order.create.succeeded", "command_id": "35497948-a93d-4642-ad63-c33ad94cf967", "correlation_id": "a9445367-f37c-4a27-8bdf-50579630f31b", "causation_id": null, "channel": "telegram_customer", "resource_id": 368}
+[orchestrator] log receipt to messages skipped (retryable): RuntimeError: staff-log failure injected
+[orchestrator] server confirm->commit order_committed cid:69cb3f4beab6
+  [PASS] 234-04 staff-log failure -> order VAN committed + outbox receipt intact (khong reverse) :: oid=368 obx=1
+
+RESULT: ALL PASS

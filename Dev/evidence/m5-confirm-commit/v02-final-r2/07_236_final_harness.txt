@@ -1,0 +1,23 @@
+  [PASS] 236-01 state machine: claimed/busy/succeeded/claimed/retry->claimed :: ('claimed', 'busy', 'succeeded', 'claimed', 'claimed')
+[orchestrator] server propose turn skipped cid:7023ace479da: RuntimeError: extraction failure injected
+[latency] event=chat channel=telegram_customer route=reply ms_total=330 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+[orchestrator] server-extract READY -> summary armed cid:7023ace479da
+  [PASS] 236-01b extraction fail -> event GIU (retryable), redelivery -> READY (1 mutation, khong mat don) :: ni_fail=1 ni=1 st=READY_TO_COMMIT
+[orchestrator] Tool 'create_order' loi: RuntimeError: proposal persistence failure injected
+[latency] event=chat channel=telegram_customer route=reply ms_total=548 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+[orchestrator] server-extract READY -> summary armed cid:9b2819f71580
+  [PASS] 236-01c proposal fail -> retryable, redelivery -> READY (khong mat don, khong duplicate) :: ni=1 st=READY_TO_COMMIT
+[latency] event=chat channel=telegram_customer route=reply ms_total=167 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+[orchestrator] server-extract READY -> summary armed cid:7fa98b8b09f1
+  [PASS] 236-01d concurrent same-event -> 1 intent (1 draft mutation) :: 1
+[orchestrator] server-extract READY -> summary armed cid:c987889d950b
+[cmd] {"event": "order.create.succeeded", "command_id": "d3d9e7c2-ab5d-4ac1-80c4-62efb519c766", "correlation_id": "8f7f4328-1972-4c5c-a264-8f59c6e5f3b8", "causation_id": null, "channel": "telegram_customer", "resource_id": 372}
+[orchestrator] log receipt to messages skipped (retryable): RuntimeError: staff-log failure injected
+[orchestrator] server confirm->commit order_committed cid:c987889d950b
+  [PASS] 236-02 setup: src_conv < new_conv (2 conversations 1 khach) :: src=563 new=564
+  [PASS] 236-02 receipt restored in SOURCE conversation exactly once :: 1
+  [PASS] 236-02 ZERO receipt in newer/wrong conversation
+  [PASS] 236-02 repeat reconcile -> +0 (tong 1) :: 1
+  [PASS] 236-02 customer outbox unchanged (khong resend) :: 1->1
+
+RESULT: ALL PASS
