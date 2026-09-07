@@ -274,6 +274,10 @@ _ORDER_INTENT_MARKERS = (
     "dat hang", "dat mua", "dat 1", "dat mot", "dat 2", "dat goi", "dat ly", "dat hop", "dat don",
     "mua goi", "mua 1", "mua mot", "lay goi", "cho minh 1", "cho minh mot", "cho toi 1", "cho toi mot",
     "cho minh dat", "cho toi dat", "minh muon dat", "toi muon dat", "muon dat", "order",
+    # CA 232 §4 (B2a): reorder cung la order-proposal -> vao/tai dung COLLECTING. Truoc day thieu 'dat them'
+    # -> don "dat them" (c Tien) khong tao draft. Gom tu _REORDER_MARKERS.
+    "dat them", "them mot don", "them 1 don", "mot don nua", "1 don nua", "them don", "don nua",
+    "mua them", "order them", "dat mot don nua", "dat 1 don nua", "lam them",
 )
 
 
