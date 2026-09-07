@@ -20,6 +20,25 @@ from app.services.command import order_intent_service as svc
 from app.services.safe_log import safe_exc
 
 
+async def _render_confirmation_summary(conn, draft: dict) -> str:
+    """CA 233-02: server RENDER tom tat xac nhan tu DRAFT (khong de model viet lai). Customer-safe: ten SP,
+    so luong, don gia, tong, nguoi nhan, SDT, dia chi giao. Dung lam reply THAT gui khach."""
+    sku = draft.get("draft_sku")
+    qty = draft.get("draft_quantity") or 0
+    prod = await conn.fetchrow("SELECT name, price_vnd FROM products WHERE sku=$1", sku)
+    pname = prod["name"] if prod else sku
+    unit = prod["price_vnd"] if prod else 0
+    total = unit * qty
+    return (
+        "Dạ em xác nhận lại đơn của anh/chị:\n"
+        f"- Sản phẩm: {pname} — {qty} x {unit:,}đ = {total:,}đ\n"
+        f"- Người nhận: {draft.get('draft_customer_name')}\n"
+        f"- SĐT: {draft.get('draft_phone')}\n"
+        f"- Địa chỉ giao: {draft.get('draft_address')}\n"
+        "Anh/chị nhắn \"xác nhận\" để em chốt đơn giúp mình nhé ạ."
+    ).replace(",", ".")
+
+
 async def _to_address_check(conn, intent: dict, *, order_fp, addr_fp, resolution_id) -> dict | None:
     """Dua open intent ve ADDRESS_CHECK (tu COLLECTING/NEEDS_CLARIFICATION/READY_TO_COMMIT = correction) +
     cap nhat fingerprint/resolution. Tra row moi hoac None neu version lech."""
@@ -157,14 +176,14 @@ async def propose_draft(*, customer_id: int | None, conversation_id, channel: st
             if not verified:
                 r = await svc.transition(conn, iid, expected_version=ver, to_state="NEEDS_CLARIFICATION")
                 return {"action": "clarify", "order_intent_id": str(iid)}
-            # verified -> READY_TO_COMMIT + present summary (KHONG commit).
+            # verified -> READY_TO_COMMIT + RENDER summary server-side (CA 233-02) + present.
             r = await svc.transition(conn, iid, expected_version=ver, to_state="READY_TO_COMMIT")
             if r is None:
                 return {"action": "error"}
+            summary = await _render_confirmation_summary(conn, d)
+            # arm pending-confirm CHI cho dung version/fingerprint cua summary DUOC render (233-02).
             await svc.present_summary(conn, iid, expected_version=r["state_version"], order_fingerprint=ofp)
-            return {"action": "ready", "order_intent_id": str(iid),
-                    "draft": {"sku": d["draft_sku"], "quantity": d["draft_quantity"],
-                              "customer_name": d["draft_customer_name"], "phone": d["draft_phone"]}}
+            return {"action": "ready", "order_intent_id": str(iid), "summary": summary}
     except Exception as e:  # noqa: BLE001 — enrolled route fail-closed
         print(f"[order_intent_flow] propose_draft error (fail-closed): {safe_exc(e)}")
         return {"action": "error"}

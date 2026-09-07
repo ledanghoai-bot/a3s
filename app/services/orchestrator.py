@@ -280,21 +280,34 @@ def _is_explicit_cancel(text: str) -> bool:
     return any(m in t for m in _CANCEL_MARKERS)
 
 
-# CA 232 §6: confirmation detector. CHI la tin hieu — commit CHI xay ra khi try_server_commit thay READY
-# intent + summary DA present khop version/fingerprint hien tai (pending-confirm context). 'ok/xac nhan'
-# NGOAI context do -> try_server_commit tra None -> khong commit (DoD#13). Nen detector nay an toan de rong.
-_CONFIRM_MARKERS = ("xac nhan", "dong y", "chot don", "chot luon", "dat luon", "dung roi", "dung vay",
-                    "ok chot", "oke chot", "ok dat", "xac nhan dung", "xac nhan don", "ok em", "ung",
-                    "dat di", "lam don di")
+# CA 233-03: confirmation detector HIGH-PRECISION + anchored (BO 'ung'/'ok em' substring rong). Commit chi
+# xay ra khi try_server_commit thay READY intent + summary present khop DUNG version/fingerprint hien tai
+# (pending-confirm context) -> confirm cho summary CU/superseded/ngoai context KHONG commit.
+# Cum xac nhan da dac hieu (khong nhap nhang 'dung'=dung/dừng, 'co'=co/cỏ).
+_CONFIRM_PHRASES = ("xac nhan", "dong y", "chot don", "chot luon", "chot di", "dat luon", "dat di",
+                    "dung roi", "dung vay", "ok chot", "ok dat", "xac nhan dung", "xac nhan don",
+                    "len don di", "chot don di")
+# Tin nhan NGAN dung nguyen cum (whole-utterance) — tranh substring nham.
+_CONFIRM_WHOLE = frozenset({"ok", "oke", "okie", "okay", "chot", "yes", "duoc", "dat", "uh dat"})
+# Negation/question/correction -> KHONG phai confirm (§233-03: 'chua xac nhan'/'co dung khong'/doi so luong).
+_NONCONFIRM_MARKERS = ("khong", "chua", "dung lai", "sai", "phai khong", "dung khong", "?", "doi",
+                       "sua", "thay", "nham", "lai di")
 
 
 def _is_confirmation(text: str) -> bool:
-    """True neu tin nhan la XAC NHAN dat don (server-side). Loai tru cancel/status. Context (summary da
-    present) do try_server_commit kiem — day chi la entry hint."""
+    """CA 233-03: XAC NHAN chot don — high-precision, anchored. Loai cancel/status/negation/question/
+    correction. Context (summary hien tai) do try_server_commit kiem (chi commit khi pending-confirm khop)."""
     if _is_explicit_cancel(text) or _is_order_status_query(text):
         return False
     t = _normalize_admin(text or "")
-    return any(m in t for m in _CONFIRM_MARKERS)
+    if not t:
+        return False
+    if any(n in t for n in _NONCONFIRM_MARKERS):  # phu dinh/hoi/correction -> khong confirm
+        return False
+    if t in _CONFIRM_WHOLE:  # whole-utterance ngan
+        return True
+    words = t.split()
+    return len(words) <= 6 and any(ph in t for ph in _CONFIRM_PHRASES)
 
 
 # CA 226-03: nhan dien SO KHOI "order proposal" (server-owned draft recognition) de tao COLLECTING intent
@@ -433,12 +446,10 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                     explicit_new_order=_is_explicit_reorder(last_message))
                 _act = prop.get("action")
                 if _act == "ready":
-                    # Draft READY + summary da present. LLM trinh bay tom tat + HOI xac nhan. KHONG commit,
-                    # KHONG noi da tao don. Khach xac nhan -> confirmation hook chot.
-                    return {"draft_ready": True,
-                            "instruction": ("Trinh bay lai tom tat don (san pham, so luong, nguoi nhan, SDT, "
-                                            "dia chi) va HOI khach xac nhan de len don. TUYET DOI KHONG noi "
-                                            "da tao/da len don — chi khi khach xac nhan he thong moi chot.")}
+                    # CA 233-02: server RENDER summary + tra DUNG summary do lam reply THAT (khong de model
+                    # viet lai/bo sot). Draft READY + pending-confirm armed cho version/fingerprint nay.
+                    # Khach xac nhan -> confirmation hook chot.
+                    return {"draft_ready": True, "final_reply": prop.get("summary")}
                 if _act == "need_more":
                     return {"draft_need_more": True, "missing": prop.get("missing"),
                             "instruction": ("Hoi khach cung cap cac thong tin CON THIEU de dat don (san pham/"
@@ -754,6 +765,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         _tok_out = 0
         _n_iter = 0
         _route_signal = None  # 216-04: 'clarify' | 'escalate' phat hien tu tool-result
+        _server_reply = None  # CA 233-02: server-rendered reply (summary) dung nguyen, khong qua LLM
         finish_reason = None
         for _iter in range(MAX_TOOL_ITERATIONS):
             _n_iter += 1
@@ -839,6 +851,10 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                         _route_signal = "clarify"
                     elif result.get("address_unresolved_escalated"):
                         _route_signal = "escalate"
+                    # CA 233-02: server RENDER summary -> dung DUNG summary do lam reply (khong de model viet
+                    # lai). Short-circuit tool loop.
+                    if result.get("final_reply"):
+                        _server_reply = result["final_reply"]
                 if (
                     tc.function.name == "create_order"
                     and isinstance(result, dict)
@@ -857,6 +873,11 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )
+            # CA 233-02: neu tool tra summary server-rendered -> dung lam reply cuoi, khong goi LLM them.
+            if _server_reply:
+                reply = _server_reply
+                _route_signal = "reply"
+                break
         else:
             # Het MAX_TOOL_ITERATIONS ma van con tool_calls - tra loi an toan thay vi treo
             print(f"[orchestrator] Vuot qua {MAX_TOOL_ITERATIONS} vong tool_calls cho {sender_id}")
