@@ -206,6 +206,35 @@ async def _save_history(redis, sender_id: str, history: list[dict]) -> None:
     await redis.set(_redis_key(sender_id), json.dumps(trimmed, ensure_ascii=False), ex=86400)
 
 
+# CA 225-05: tin hieu "don moi tuong minh" SERVER-OWNED (orchestrator tinh tu raw text khach, LLM KHONG
+# duoc cap). CHI dung de PHAN BIET giua stale-confirmation vs dat-them SAU khi da co committed intent cung
+# fingerprint (drive() ap explicit_new_order o nhanh nay). Cum tu re-order do dac hieu (dat them/don nua/
+# mua them) — KHONG phai xac nhan tran ("ok"/"dung"/"xac nhan") -> false-positive tren stale-confirm rat
+# thap. KHONG keyword-alone: chi co hieu luc khi durable committed intent cung fingerprint ton tai.
+_REORDER_MARKERS = (
+    "dat them", "them mot don", "them 1 don", "mot don nua", "1 don nua", "them don",
+    "don nua", "mua them", "order them", "dat mot don nua", "dat 1 don nua", "lam them",
+)
+
+
+def _is_explicit_reorder(text: str) -> bool:
+    """True neu khach TUONG MINH muon dat THEM 1 don (khong phai xac nhan don vua roi). Server-side,
+    bo dau 2 phia (marker da bo dau)."""
+    t = _normalize_admin(text or "")
+    return any(m in t for m in _REORDER_MARKERS)
+
+
+_CANCEL_MARKERS = ("huy don", "huy bo don", "khong dat nua", "khong mua nua", "khong lay nua",
+                   "thoi khong mua", "bo don", "huy don hang")
+
+
+def _is_explicit_cancel(text: str) -> bool:
+    """True neu khach TUONG MINH huy don dang dat (CA 225-01 cancel transition). Server-side, high-precision
+    (khong bat 'khong' tran)."""
+    t = _normalize_admin(text or "")
+    return any(m in t for m in _CANCEL_MARKERS)
+
+
 async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str,
                         command_ctx: dict | None = None) -> dict:
     """Dispatch 1 tool call toi ham that trong app/services/tools.py.
@@ -283,7 +312,7 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                     channel=command_ctx["channel"], order_fp=_ofp,
                     addr_fp=command_ctx.get("verified_address_fingerprint"),
                     verified_resolution_id=command_ctx.get("verified_resolution_id"),
-                    verified=_verified, explicit_new_order=False)
+                    verified=_verified, explicit_new_order=_is_explicit_reorder(last_message))
                 _act = drive.get("action")
                 if _act in ("ready", "duplicate"):
                     # ready -> intent READY_TO_COMMIT (commit ben duoi); duplicate -> intent COMMITTED
@@ -349,7 +378,30 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # 0. Luoi an toan deterministic: khach CHU DONG doi gap nguoi that ->
         # escalate ngay, KHONG di qua LLM (khong phu thuoc LLM co nho goi tool
         # dung luc hay khong - xem ghi chu "rui ro cao nhat" o ISSUES.md #7).
+        # CA 225-01: cancel/escalate transition INTENT that (durable), khong chi Redis/UX. Resolve
+        # customer_id server-side de terminalize open intent hien tai (best-effort, khong vo reply).
+        async def _terminalize_open_intent(to_state: str, reason: str) -> None:
+            try:
+                from app.services.command import order_intent_flow as _oif
+                from app.db_pool import acquire as _acq, release as _rel
+                _c = await _acq()
+                try:
+                    _cid = await _c.fetchval("SELECT id FROM customers WHERE psid=$1", sender_id)
+                finally:
+                    await _rel(_c)
+                if _cid is not None:
+                    await _oif.terminalize(customer_id=_cid, conversation_id=conversation_id,
+                                           to_state=to_state, reason=reason)
+            except Exception as e:  # noqa: BLE001
+                print(f"[orchestrator] terminalize open intent skipped: {safe_exc(e)}")
+
+        # Khach TUONG MINH huy don -> transition open intent CANCELLED (durable). Khong short-circuit LLM
+        # (khach co the huy roi hoi tiep) — chi dong intent dang mo.
+        if _is_explicit_cancel(text):
+            await _terminalize_open_intent("CANCELLED", "customer_cancel")
+
         if handoff.wants_human(text):
+            await _terminalize_open_intent("ESCALATED", "customer_wants_human")
             await tools.escalate_to_human(
                 psid=sender_id,
                 reason="Khach chu dong yeu cau gap nhan vien",
@@ -524,6 +576,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
 
         reply = ""
         created_order_ids: list = []  # order_id create_order tra ve THAT trong luot nay
+        _committed_via_bus = False    # CA 225-07: co order di qua command bus (co receipt) trong luot nay
         # M5 upgrade (Directive 214 §6.D + Memo 213 §6): do latency + token (SAFE — khong payload).
         _llm_ms = 0.0
         _tool_ms = 0.0
@@ -623,6 +676,10 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                     and not result.get("error")
                 ):
                     created_order_ids.append(result["order_id"])
+                    # CA 225-07: order di qua COMMAND BUS (co "receipt") -> receipt finalization phai ap
+                    # DU global m1=False (Gate E pilot route). Deterministic reply dua tren ket qua thuc te.
+                    if result.get("receipt") is not None:
+                        _committed_via_bus = True
                 turn_messages.append(
                     {
                         "role": "tool",
@@ -649,7 +706,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # I-B M1 (Slice 6): bom dong xac nhan DETERMINISTIC tu committed receipt (order#/tong khong
         # de LLM viet lai) + shadow evaluate (buoc rollout marker->structured guard §10.4). Chi khi
         # flag BAT — flag TAT giu nguyen hanh vi legacy ben duoi (marker guard van chay).
-        if settings.m1_reliable_order_command:
+        if settings.m1_reliable_order_command or _committed_via_bus:
             from app.services.command import reply_guard
             shadow = reply_guard.shadow_evaluate(_reply_claims_order_created(reply), created_order_ids)
             if not shadow["consistent"]:
@@ -692,6 +749,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 )
             except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
                 print(f"[orchestrator] escalate sau chan bia don loi: {safe_exc(e)}")
+            await _terminalize_open_intent("ESCALATED", "suspected_fabrication")  # CA 225-01
             _route_signal = "escalate"  # 216-04
             reply = (
                 "Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "

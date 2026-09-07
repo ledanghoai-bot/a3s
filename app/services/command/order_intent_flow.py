@@ -48,6 +48,12 @@ async def drive(*, customer_id: int | None, conversation_id, channel: str, order
         async with conn.transaction():
             open_row = await svc.find_open_intent(
                 conn, customer_id=customer_id, conversation_id=conversation_id, for_update=True)
+            # Lazy-expiry (CA 225-01): open intent qua TTL -> terminalize EXPIRED deterministic, coi nhu
+            # khong con open (request sau tao intent MOI — case 13).
+            if open_row is not None and open_row.get("is_expired"):
+                await svc.transition(conn, open_row["id"], expected_version=open_row["state_version"],
+                                     to_state="EXPIRED", terminal_reason="ttl")
+                open_row = None
             if open_row is None:
                 # Khong con open intent. Stale-confirm (DB-authoritative) neu co COMMITTED cung fingerprint
                 # va KHONG phai don moi tuong minh (225-04/§7.4). Nguoc lai -> intent MOI (225-05 case 15).

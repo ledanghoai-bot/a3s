@@ -15,11 +15,17 @@ from __future__ import annotations
 from app.services.command import order_intent as oi
 
 
+# TTL abandoned open intent (CA 225-01: terminalize deterministically). Chi GC/recovery, KHONG dinh nghia
+# 2 don co giong nhau khong (§7 TTL is cleanup only).
+OPEN_INTENT_TTL_SECONDS = 24 * 3600
+
+
 async def create_intent(conn, *, customer_id: int, conversation_id, channel: str) -> dict:
-    """Tao intent moi o COLLECTING. Tra row dict (co id, state, state_version=0)."""
+    """Tao intent moi o COLLECTING + expires_at (TTL GC abandoned). Tra row dict (id, state, state_version=0)."""
     row = await conn.fetchrow(
-        "INSERT INTO order_intents(customer_id,conversation_id,channel,state) "
-        "VALUES($1,$2,$3,'COLLECTING') RETURNING id,state,state_version",
+        "INSERT INTO order_intents(customer_id,conversation_id,channel,state,expires_at) "
+        f"VALUES($1,$2,$3,'COLLECTING', now() + interval '{OPEN_INTENT_TTL_SECONDS} seconds') "
+        "RETURNING id,state,state_version",
         customer_id, conversation_id, channel)
     return dict(row)
 
@@ -39,7 +45,8 @@ async def find_open_intent(conn, *, customer_id: int, conversation_id,
     """Tim intent OPEN HIEN TAI cho (customer, conversation) — "prospective order dang mo" (CA 225-01).
     Correction cap nhat CHINH intent nay. Unique index oi_one_open_per_conversation bao dam <=1 open."""
     q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
-         "verified_address_fingerprint,verified_resolution_id,committed_order_id FROM order_intents "
+         "verified_address_fingerprint,verified_resolution_id,committed_order_id,"
+         "(expires_at IS NOT NULL AND expires_at < now()) AS is_expired FROM order_intents "
          "WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 "
          "AND state = ANY($3::text[]) ORDER BY created_at DESC LIMIT 1")
     if for_update:
