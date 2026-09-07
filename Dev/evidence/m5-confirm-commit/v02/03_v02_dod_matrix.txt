@@ -1,0 +1,33 @@
+### V02 DoD matrix (233-01..05 + compat) ###
+  [PASS] 233-03 positive confirmations -> True
+  [PASS] 233-03 adversarial/negation/question/correction -> False
+[orchestrator] server-extract READY -> summary armed cid:642c7454fdc9
+  [PASS] 233-01 READY via server extract :: READY_TO_COMMIT
+  [PASS] 233-01 0 order truoc confirm
+  [PASS] 233-02 reply = server summary (SP+dia chi) :: Dạ em xác nhận lại đơn của anh/chị:
+- Sản phẩm: Cà
+[orchestrator] server-extract READY -> summary armed cid:642c7454fdc9
+[cmd] {"event": "order.create.succeeded", "command_id": "45cd8f75-a69b-49d1-b07a-347915257f86", "correlation_id": "a5c96c8b-2ca1-475d-a828-e05975fde508", "causation_id": null, "channel": "telegram_customer", "resource_id": 202}
+[orchestrator] server confirm->commit order_committed cid:642c7454fdc9
+  [PASS] 233-03/04 correction re-verified -> confirm commits corrected order :: orders 0->1 state=COMMITTED
+  [PASS] 233-01 ASSISTANT 0 tool calls xuyen suot
+[latency] event=chat channel=telegram_customer route=reply ms_total=58 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 233-05 staff-history receipt == 1 (replay khong them) :: m1=1 m2=1
+  [PASS] 233-05 outbox receipt >= 1 :: 4
+[orchestrator] server-extract READY -> summary armed cid:4e3510457c6b
+[cmd] {"event": "order.create.succeeded", "command_id": "26145df4-c5d5-4ec0-b03f-06e2500ee9e9", "correlation_id": "b57c605e-903a-4e73-9a26-2bf1acc7cd13", "causation_id": null, "channel": "telegram_customer", "resource_id": 203}
+[orchestrator] server confirm->commit order_committed cid:4e3510457c6b
+  [PASS] 233-04 baseline commit FULL
+  [PASS] 233-04 replay sau COMMITTED (khong reorder) -> khong intent/order moi :: intents 1->1 orders 1->1
+[orchestrator] server-extract READY -> summary armed cid:4e3510457c6b
+  [PASS] 233-04 reorder tuong minh -> draft moi READY :: intents=2 state=READY_TO_COMMIT
+[latency] event=chat channel=telegram_customer route=reply ms_total=479 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] 233-04 phone SAI DANG -> khong READY, 0 order :: COLLECTING
+[latency] event=chat channel=telegram_customer route=reply ms_total=1096 ms_llm=0 ms_tool=901 iters=1 tok_in=1 tok_out=1 finish=tool_calls think_off=True
+  [PASS] COMPAT model create_order (extract rong) -> READY :: READY_TO_COMMIT
+[cmd] {"event": "order.create.succeeded", "command_id": "1f7a9511-edfa-43f0-8d3a-5b8b4211305e", "correlation_id": "6f90a0f3-1ce7-4c4c-aafd-bf898af6e591", "causation_id": null, "channel": "telegram_customer", "resource_id": 204}
+[orchestrator] server confirm->commit order_committed cid:f2b5f6417de1
+  [PASS] COMPAT confirm -> +1 order
+  [PASS] 233-04 dia chi giong (khac dau/hoa) -> KHONG coi la doi :: ready
+
+RESULT: ALL PASS

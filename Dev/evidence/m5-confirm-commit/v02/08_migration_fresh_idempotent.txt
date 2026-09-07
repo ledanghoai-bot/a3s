@@ -1,0 +1,26 @@
+### fresh apply 001..059 ###
+Applying 059_m5_order_intent_draft (transactional=True) ...
+  OK 059_m5_order_intent_draft
+Applied 59 migration(s).
+  validation OK: scripts/operational_seed_validation.sql
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+
+### re-run (idempotent) ###
+Khong co migration pending.
+  validation OK: scripts/operational_seed_validation.sql
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+
+### status ###
+055_m5_order_snapshot_wiring             applied
+056_m5_dataset_rbac_provisioning         applied
+057_m5_gatec_channel_ops                 applied
+058_m5_order_intents                     applied
+059_m5_order_intent_draft                applied
+ draft/summary cols on order_intents: 8
+
+### rollback 059 (drop 8 cols) ###
+ALTER TABLE
+ remaining draft/summary cols after rollback: 0
+
