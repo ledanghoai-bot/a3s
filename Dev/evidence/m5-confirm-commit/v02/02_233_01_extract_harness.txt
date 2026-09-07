@@ -1,20 +1,20 @@
 ### 233-01 server-invoked extraction (assistant refuses ALL tools) ###
-[latency] event=chat channel=telegram_customer route=reply ms_total=762 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+[latency] event=chat channel=telegram_customer route=reply ms_total=710 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
   [PASS] T1 partial -> 0 order
   [PASS] T1 draft COLLECTING (thieu field) :: COLLECTING
-[latency] event=chat channel=telegram_customer route=reply ms_total=63 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+[latency] event=chat channel=telegram_customer route=reply ms_total=79 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
   [PASS] T2 van 0 order
-[orchestrator] server-extract READY -> summary armed cid:603a8dd0432a
+[orchestrator] server-extract READY -> summary armed cid:2c76c9b2e716
   [PASS] T3 READY_TO_COMMIT (server tu extract, khong tool) :: READY_TO_COMMIT
   [PASS] T3 van 0 order (chua commit)
   [PASS] T3 reply = server-rendered summary (co SP + dia chi) :: Dạ em xác nhận lại đơn của anh/chị:
 - Sản phẩm: Sữa dừa hũ —
-[cmd] {"event": "order.create.succeeded", "command_id": "d8e5424e-78a2-4927-b824-a53f2f0184d4", "correlation_id": "b9a31644-3e81-41bd-9547-3b74624e7714", "causation_id": null, "channel": "telegram_customer", "resource_id": 201}
-[orchestrator] server confirm->commit order_committed cid:603a8dd0432a
+[cmd] {"event": "order.create.succeeded", "command_id": "1b089b29-4589-4316-9930-5e8b9d7f062d", "correlation_id": "5d3d7fb7-0569-403e-abd6-19497994155e", "causation_id": null, "channel": "telegram_customer", "resource_id": 212}
+[orchestrator] server confirm->commit order_committed cid:2c76c9b2e716
   [PASS] T4 confirm -> +1 order (server chot)
   [PASS] T4 intent COMMITTED :: COMMITTED
   [PASS] ASSISTANT REFUSED ALL TOOLS xuyen suot (0 tool call) :: main_calls=2 tool_calls=0
-[latency] event=chat channel=telegram_customer route=reply ms_total=68 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+[latency] event=chat channel=telegram_customer route=reply ms_total=49 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
   [PASS] T5 re-confirm -> khong don moi
 
 RESULT: ALL PASS

@@ -1,6 +1,6 @@
 base (origin/main): 0d6d578f1ad699ea14ef1806146307abce8764c8
-head: 315f05a3537e85c762c2e9a1af5b1ac9bf43a8b8
-tree: a3023ba74d0f2a4c4f5ab9a019094614cdcabcad
+head: 5139594ef3e0e741f1f6e2e42d25b4f7d560f836
+tree: a93a8cf049f9533cfa08a27833eddb5f34759db5
 branch: feat/m5-confirm-commit
 migration cao nhat: 059_m5_order_intent_draft.sql
-generated: 2026-09-07T11:43:09Z
+generated: 2026-09-07T11:59:42Z
