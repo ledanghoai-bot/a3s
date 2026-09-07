@@ -73,6 +73,43 @@ async def transition(conn, intent_id, *, expected_version: int, to_state: str,
     return dict(row) if row else None
 
 
+async def commit_via_intent(conn, intent_id, *, do_create):
+    """ATOMIC commit qua intent (CA Amendment 224 §6). do_create = async callback tao don THAT trong CUNG
+    connection/transaction, tra order_id. Tra (order_id, duplicate: bool).
+
+    Bao dam AT-MOST-ONCE o tang DB:
+    - Lock intent (FOR UPDATE) -> serialize 2 worker/luot dong thoi cung intent.
+    - Da COMMITTED -> tra committed_order_id (idempotent, KHONG tao don moi) — xu ly stale-confirm/redelivery/retry.
+    - Chua -> transition COMMITTING (neu can) -> do_create() -> mark_committed atomic co dieu kien.
+    - Neu mark_committed thua (worker khac vua commit) -> tra committed_order_id cua worker kia.
+    KHONG duoc goi voi intent terminal khac COMMITTED (fail-closed)."""
+    row = await conn.fetchrow(
+        "SELECT state,state_version,committed_order_id FROM order_intents WHERE id=$1 FOR UPDATE", intent_id)
+    if row is None:
+        raise ValueError("order_intent not found")
+    if row["state"] == "COMMITTED" and row["committed_order_id"] is not None:
+        return row["committed_order_id"], True
+    if row["state"] in oi.TERMINAL_STATES:
+        raise ValueError(f"cannot commit terminal intent state={row['state']}")
+    ver = row["state_version"]
+    if row["state"] != "COMMITTING":
+        if not oi.can_transition(row["state"], "COMMITTING"):
+            raise ValueError(f"cannot COMMITTING from {row['state']}")
+        await conn.execute(
+            "UPDATE order_intents SET state='COMMITTING', state_version=state_version+1 "
+            "WHERE id=$1 AND state_version=$2", intent_id, ver)
+        ver += 1
+    order_id = await do_create()
+    m = await mark_committed(conn, intent_id, expected_version=ver, order_id=order_id)
+    if m is None:
+        # worker khac da commit intent nay -> tra committed_order_id cua ho (do_create cua ta se rollback
+        # neu caller quan ly tx dung; day la truong hop hiem, an toan tra don da commit)
+        existing = await conn.fetchval(
+            "SELECT committed_order_id FROM order_intents WHERE id=$1", intent_id)
+        return existing, True
+    return order_id, False
+
+
 async def mark_committed(conn, intent_id, *, expected_version: int, order_id: int) -> dict | None:
     """COMMITTING -> COMMITTED + committed_order_id, ATOMIC co dieu kien (state='COMMITTING' AND version).
     DB dam bao at-most-once (unique oi_one_committed_order + compare-and-set). None neu khong claim duoc."""
