@@ -262,6 +262,11 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
     reply_markup = {
         "inline_keyboard": [[{"text": "\u25b6\ufe0f Resume bot ngay", "callback_data": f"resume:{psid}"}]]
     }
+    # M5 discovery fix (CA Directive 223 §5.6): BO parse_mode="Markdown". last_message (tin khach nguyen
+    # van) chua ky tu Markdown (_ * [ ] ` ( )) rat hay -> Telegram tra 400 "can't parse entities" -> thong
+    # bao escalate MAT (khong retry). Gui PLAIN TEXT -> khong con 400. (order-created di qua outbox durable
+    # nen day du; escalate truoc day gui truc tiep + Markdown nen chap chon.) Backtick trong text bo di.
+    text = text.replace("`", "")
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
@@ -269,7 +274,6 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
                 json={
                     "chat_id": settings.telegram_admin_chat_id,
                     "text": text,
-                    "parse_mode": "Markdown",
                     "reply_markup": reply_markup,
                 },
             )
