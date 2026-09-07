@@ -267,6 +267,10 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
     # bao escalate MAT (khong retry). Gui PLAIN TEXT -> khong con 400. (order-created di qua outbox durable
     # nen day du; escalate truoc day gui truc tiep + Markdown nen chap chon.) Backtick trong text bo di.
     text = text.replace("`", "")
+    # CA 225-07: thong bao admin la BEST-EFFORT. Bang chung ESCALATION DURABLE = bot_paused (DB, do
+    # escalate_to_human ghi TRUOC khi goi day) + conversation log -> KHONG mat du Telegram loi/non-2xx.
+    # Non-2xx phai OBSERVABLE (structured log co status) va KHONG raise (khong vo luong, khong lap mutation
+    # don — day chi la notify, khong cham orders). Redelivery notify khong tao don (mutation o command bus).
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
@@ -277,10 +281,16 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
                     "reply_markup": reply_markup,
                 },
             )
-            resp.raise_for_status()
+        if resp.status_code < 200 or resp.status_code >= 300:
+            # OBSERVABLE non-2xx: log co ma trang thai (khong in noi dung tin — co the chua PII).
+            print(f"[handoff][admin_notify] event=send_failed status={resp.status_code} "
+                  f"(escalation record DURABLE qua bot_paused, khong mat)")
+        else:
+            print("[handoff][admin_notify] event=sent status=2xx")
     except Exception as e:
-        # Loi gui thong bao KHONG duoc lam sap luong tra loi khach - chi log.
-        print(f"[handoff] Gui Telegram that bai: {safe_exc(e)}")
+        # Loi mang/timeout: KHONG raise (escalation da durable). Observable qua log.
+        print(f"[handoff][admin_notify] event=send_error err={safe_exc(e)} "
+              f"(escalation record DURABLE qua bot_paused, khong mat)")
 
 
 def _fmt_vnd(n: object) -> str:

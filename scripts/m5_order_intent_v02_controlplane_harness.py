@@ -122,6 +122,18 @@ async def main():
     st7=await qr("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1",cid7)
     ck("S7 wants_human -> intent ESCALATED (case 12)",st7 and st7["state"]=="ESCALATED",str(dict(st7) if st7 else None))
 
+    # S9 legacy province (CA 225-07): 'Phu Yen'/'Tuy Hoa' KHONG co trong v2 -> clarify/escalate GRACEFUL,
+    # KHONG 'loi he thong', 0 order (khong bia).
+    cid9=await setup(f"tg:v9-{RUN}")
+    settings.gate_e_canary_customer_ids=f"{cid},{cid3},{cid6},{cid7},{cid9}"; settings.address_resolver_pilot_customer_ids=f"{cid},{cid3},{cid6},{cid7},{cid9}"
+    OLD=dict(GOOD,address="1 Tran Hung Dao, Tuy Hoa, Phu Yen",province="Tỉnh Phú Yên",ward="Phường Tuy Hòa")
+    _SCRIPT.clear(); _SCRIPT+=[{"tools":[{"name":"create_order","args":OLD}]},{"text":"Cho em xin lai phuong/tinh hien tai a."}]
+    s9=await orchestrator.handle_message(f"tg:v9-{RUN}","giao Tuy Hoa Phu Yen",channel="telegram_customer",provider_message_id=f"tg:{RUN}09b")
+    ck("S9 old-province 0 order",await q1("SELECT count(*) FROM orders WHERE customer_id=$1",cid9)==0)
+    st9=await qr("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1",cid9)
+    ck("S9 old-province -> NEEDS_CLARIFICATION|ESCALATED (khong crash)",st9 and st9["state"] in ("NEEDS_CLARIFICATION","ESCALATED"),str(dict(st9) if st9 else None))
+    ck("S9 reply KHONG phai 'loi he thong'",bool(s9) and "lỗi" not in s9.lower(),repr(s9)[:80])
+
     print(f"\nRESULT: {'ALL PASS' if not FAILS else 'FAIL: '+','.join(FAILS)}")
     await close_pool(); sys.exit(1 if FAILS else 0)
 
