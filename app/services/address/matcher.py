@@ -38,6 +38,13 @@ _ADMIN_ABBREV = {
 _ADMIN_PREFIXES = ("thanh pho", "thi tran", "thi xa", "tinh", "phuong", "quan", "huyen", "xa")
 _ABBREV_RE = re.compile(r"^([a-z]{1,2})\.?\s+(.+)$")
 
+# CA 232 §5 (B1): regression-alias cho bien the chinh ta tester phat hien (vd phu-am-cuoi k/c). BOUNDED —
+# map TUONG MINH (khong fuzzy dai tra: KHONG tu doi k<->c moi noi). Ap dong nhat 2 phia qua _match_keys ->
+# input bien the sinh THEM key canonical -> khop dataset. Ambiguous van clarify (khong ep chon nham phuong).
+_REGRESSION_VARIANTS = {
+    "ea knuek": "ea knuec",  # tester 07/09: "Xa Ea Knuek" -> canonical "Xa Ea Knuếc" (24505, Dak Lak)
+}
+
 
 def _match_keys(name: str) -> list[str]:
     """Sinh key khop theo THU TU UU TIEN: [dang-day-du-da-mo-viet-tat, dang-tran-bo-tien-to].
@@ -62,6 +69,11 @@ def _match_keys(name: str) -> list[str]:
             if bare and bare not in keys:
                 keys.append(bare)
             break
+    # CA 232 §5 (B1): sinh THEM key canonical cho bien the chinh ta da biet (bounded map, khong fuzzy).
+    for k in list(keys):
+        canon = _REGRESSION_VARIANTS.get(k)
+        if canon and canon not in keys:
+            keys.append(canon)
     return keys
 
 
