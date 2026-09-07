@@ -1,6 +1,11 @@
 FROM python:3.12-slim
 WORKDIR /srv
 
+# CA 232 §8 (B4): log ung dung KHONG buffer (structured log flush ngay) — BAKED vao image nen song qua
+# viec .env bi go PYTHONUNBUFFERED (bai hoc reconciliation: log prod bi buffer -> khong debug realtime duoc).
+# KHONG ghi raw PII (cac dong log da redacted: [latency]/[cmd]/[orchestrator] chi metadata).
+ENV PYTHONUNBUFFERED=1
+
 # Cai torch CPU-only truoc (nhe hon ~800MB so voi full torch)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
