@@ -239,6 +239,14 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                     if vr.get("may_bind") and vr.get("resolution_id"):
                         if command_ctx is not None:
                             command_ctx["verified_resolution_id"] = vr["resolution_id"]
+                            # M5 order-intent (224 §5): tinh verified_address_fingerprint TAT DINH tu MA
+                            # (dataset+province+ward+hash detail) — semantic address identity thay UUID trong
+                            # request_hash + input cua order_fingerprint. Chi khi may_bind (dia chi request nay
+                            # da auto_verified) moi co du ma.
+                            from app.services.command import order_intent as _oi
+                            command_ctx["verified_address_fingerprint"] = _oi.verified_address_fingerprint(
+                                vr.get("dataset_version"), vr.get("province_code"), vr.get("ward_code"),
+                                args.get("address"))
                         await _address_clarify_reset(sender_id, prov_prop, ward_prop)
                     elif settings.enable_gate_e_order_wiring and "status" in vr:
                         # §6.B (Q2 + Memo 213): dia chi CHUA verified nhung Gate E se bind -> CLARIFY truoc
@@ -258,7 +266,54 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                                                 "doi phan hoi trong it phut. KHONG noi da tao don.")}
                 except Exception as e:  # noqa: BLE001 — never break the customer reply/order
                     print(f"[orchestrator] M5 live address verify skipped: {safe_exc(e)}")
-            return await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
+            # M5 order-intent Layer B (224 §5/§7): server-owned intent lam ANCHOR cho MOT don qua nhieu luot
+            # (clarify/confirm/retry/redelivery) -> at-most-once commit (Layer C). CHI khi create_order se di
+            # command bus (m1 global HOAC Gate E pilot route) — legacy path bo qua (order_intent_id None).
+            # Loi KHONG BAO GIO lam vo reply/order (bao boc try/except); intent thieu -> giu idempotency cu.
+            _oi_ctx = None
+            if command_ctx is not None:
+                try:
+                    from app.services.command import order_gateway as _ogw
+                    from app.services.command import order_intent as _oi
+                    from app.services.command import order_intent_flow as _oif
+                    from app.db_pool import acquire as _acq, release as _rel
+                    _route = _ogw.can_route(command_ctx.get("channel", "")) and (
+                        settings.m1_reliable_order_command
+                        or await tools._gate_e_pilot_route(sender_id, command_ctx))
+                    if _route:
+                        _c = await _acq()
+                        try:
+                            _cid = await _c.fetchval("SELECT id FROM customers WHERE psid=$1", sender_id)
+                        finally:
+                            await _rel(_c)
+                        _ofp = _oi.order_fingerprint(
+                            sku=args.get("sku", ""), quantity=args.get("quantity"),
+                            customer_name=args.get("customer_name", ""), phone=args.get("phone", ""),
+                            address_fp=command_ctx.get("verified_address_fingerprint"))
+                        _flow = await _oif.resolve_or_create(
+                            customer_id=_cid, conversation_id=command_ctx.get("conversation_id"),
+                            channel=command_ctx["channel"], order_fp=_ofp,
+                            addr_fp=command_ctx.get("verified_address_fingerprint"),
+                            verified_resolution_id=command_ctx.get("verified_resolution_id"))
+                        if _flow.get("order_intent_id"):
+                            command_ctx["order_intent_id"] = _flow["order_intent_id"]
+                            _oi_ctx = {"intent_id": _flow["order_intent_id"], "order_fp": _ofp,
+                                       "conversation_id": command_ctx.get("conversation_id")}
+                except Exception as e:  # noqa: BLE001
+                    print(f"[orchestrator] M5 order-intent resolve skipped: {safe_exc(e)}")
+            result = await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
+            # Post-commit pointer (§7.4/§9): don commit thanh cong -> ghi committed-pointer de stale-confirm
+            # sau nay tra receipt cu (zero mutation). Best-effort.
+            if _oi_ctx is not None and isinstance(result, dict) and result.get("order_id") \
+                    and not result.get("error"):
+                try:
+                    from app.services.command import order_intent_flow as _oif
+                    await _oif.mark_committed_pointer(
+                        conversation_id=_oi_ctx["conversation_id"], intent_id=_oi_ctx["intent_id"],
+                        order_fp=_oi_ctx["order_fp"], order_id=result["order_id"])
+                except Exception as e:  # noqa: BLE001
+                    print(f"[orchestrator] M5 order-intent pointer skipped: {safe_exc(e)}")
+            return result
         if name == "escalate_to_human":
             return await tools.escalate_to_human(psid=sender_id, last_message=last_message, **args)
         return {"error": f"Tool khong ton tai: {name}"}
