@@ -13,6 +13,7 @@ Luong:
 6. Tra ve cau tra loi cuoi cung
 """
 
+import hashlib
 import json
 from pathlib import Path
 from time import perf_counter
@@ -23,6 +24,7 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.services import conversation_log, data_deletion, handoff, products, tools
 from app.services.address import live_verify as address_live_verify
+from app.services.address.acceptance_gate import normalize as _normalize_admin
 from app.services.messenger_profile import get_user_profile
 from app.services.nlu_hint import get_nlu_hint
 from app.services.pii import shadow as pii_shadow
@@ -118,10 +120,27 @@ async def _llm_create(client, **kwargs):
 _ADDRESS_CLARIFY_MAX = 2
 
 
+def _proposal_fp(prov_prop, ward_prop) -> str:
+    """Fingerprint XAC DINH cua de xuat dia chi hanh chinh (CA Review 216-02): normalize (bo dau/hoa/space
+    NHAT QUAN) -> sha256 rut gon. Cung proposal (khac dau/cach viet) -> cung fp -> tiep tuc attempt; doi
+    tinh/phuong thuc chat -> fp khac -> attempt moi (dem lai)."""
+    # Normalize TUNG phan rieng (moi phan tu strip khoang trang cua no) roi noi — tranh khoang trang
+    # quanh dau phan cach lam lech fingerprint giua cac bien the cung proposal.
+    p = _normalize_admin(prov_prop if isinstance(prov_prop, str) else "")
+    w = _normalize_admin(ward_prop if isinstance(ward_prop, str) else "")
+    return hashlib.sha256(f"{p}|{w}".encode("utf-8")).hexdigest()[:16]
+
+
+def _clarify_key(sender_id: str, prov_prop, ward_prop) -> str:
+    # State thuoc (tester identity + proposal hien tai), KHONG chi tester -> dia chi moi khong ke thua
+    # count cu (216-02). sender_id la danh tinh server-side.
+    return f"addr_clarify:{sender_id}:{_proposal_fp(prov_prop, ward_prop)}"
+
+
 async def _address_clarify(sender_id: str, vr: dict, prov_prop, ward_prop) -> dict | None:
     """Tra tool-result huong dan LLM HOI khach xac nhan dia chi (server-owned). None = da het <=2 luot
-    (caller escalate). Dem luot keyed theo sender (attempt hien tai), TTL 30 phut."""
-    key = f"addr_clarify:{sender_id}"
+    (caller escalate). Dem luot keyed theo (sender + fingerprint proposal HIEN TAI), TTL 30 phut."""
+    key = _clarify_key(sender_id, prov_prop, ward_prop)
     r = await aioredis.from_url(settings.redis_url, decode_responses=True)
     try:
         n = await r.incr(key)
@@ -147,11 +166,12 @@ async def _address_clarify(sender_id: str, vr: dict, prov_prop, ward_prop) -> di
     }
 
 
-async def _address_clarify_reset(sender_id: str) -> None:
-    """Xoa bo dem clarify (khi dia chi da verified/tao don thanh cong)."""
+async def _address_clarify_reset(sender_id: str, prov_prop=None, ward_prop=None) -> None:
+    """Ket thuc attempt clarify (khi dia chi verified/tao don thanh cong hoac escalate). Xoa dung key
+    cua proposal hien tai."""
     r = await aioredis.from_url(settings.redis_url, decode_responses=True)
     try:
-        await r.delete(f"addr_clarify:{sender_id}")
+        await r.delete(_clarify_key(sender_id, prov_prop, ward_prop))
     finally:
         await r.aclose()
 
@@ -206,7 +226,7 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                     if vr.get("may_bind") and vr.get("resolution_id"):
                         if command_ctx is not None:
                             command_ctx["verified_resolution_id"] = vr["resolution_id"]
-                        await _address_clarify_reset(sender_id)
+                        await _address_clarify_reset(sender_id, prov_prop, ward_prop)
                     elif settings.enable_gate_e_order_wiring and "status" in vr:
                         # §6.B (Q2 + Memo 213): dia chi CHUA verified nhung Gate E se bind -> CLARIFY truoc
                         # khi tao don (khong tao don sai/khong bind pointer cu). Server dem <=2 luot, giu bot
@@ -219,7 +239,7 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                             psid=sender_id,
                             reason="Dia chi khong xac minh duoc sau 2 luot lam ro",
                             last_message=last_message)
-                        await _address_clarify_reset(sender_id)
+                        await _address_clarify_reset(sender_id, prov_prop, ward_prop)
                         return {"address_unresolved_escalated": True,
                                 "instruction": ("Da chuyen nhan vien ho tro xac minh dia chi. Bao khach "
                                                 "doi phan hoi trong it phut. KHONG noi da tao don.")}
@@ -443,6 +463,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         _tok_in = 0
         _tok_out = 0
         _n_iter = 0
+        _route_signal = None  # 216-04: 'clarify' | 'escalate' phat hien tu tool-result
         finish_reason = None
         for _iter in range(MAX_TOOL_ITERATIONS):
             _n_iter += 1
@@ -523,6 +544,11 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 result = await _execute_tool(tc.function.name, args, sender_id, text,
                                              command_ctx=cmd_ctx)
                 _tool_ms += (perf_counter() - _t_tool) * 1000.0
+                if isinstance(result, dict):  # 216-04: nhan dien route clarify/escalate tu tool-result
+                    if result.get("address_needs_clarification"):
+                        _route_signal = "clarify"
+                    elif result.get("address_unresolved_escalated"):
+                        _route_signal = "escalate"
                 if (
                     tc.function.name == "create_order"
                     and isinstance(result, dict)
@@ -591,6 +617,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 )
             except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
                 print(f"[orchestrator] escalate sau chan bia don loi: {safe_exc(e)}")
+            _route_signal = "escalate"  # 216-04
             reply = (
                 "Dạ để em kiểm tra lại cho chắc chắn rồi xác nhận đơn với anh/chị "
                 "ngay ạ. Đội ngũ 3S Coffee sẽ liên hệ anh/chị trong ít phút để chốt đơn."
@@ -604,10 +631,11 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         await conversation_log.log_message(conversation_id, "customer", text)
         await conversation_log.log_message(conversation_id, "bot", reply)
 
-        # M5 upgrade (§6.D + Memo 213 §6): 1 dong metric AN TOAN — TUYET DOI khong ten/sdt/dia chi/
-        # message/prompt/reasoning/payload; chi so lieu tong hop de collector tinh p50/p95/max theo
-        # kenh/route. route: order (co create_order thanh cong) | clarify (B) | reply.
-        _route = "order" if created_order_ids else "reply"
+        # M5 upgrade (§6.D + Memo 213 §6 + Review 216-04): 1 dong metric AN TOAN — TUYET DOI khong
+        # ten/sdt/dia chi/message/prompt/reasoning/payload; chi so lieu tong hop de collector tinh
+        # p50/p95/max theo kenh/route. route: order (co create_order thanh cong) | clarify | escalate |
+        # reply — 4 nhan phan biet (clarify KHONG con bi ghi thanh reply).
+        _route = "order" if created_order_ids else (_route_signal or "reply")
         print(f"[latency] event=chat channel={channel} route={_route} "
               f"ms_total={int((perf_counter() - _t_start) * 1000)} ms_llm={int(_llm_ms)} "
               f"ms_tool={int(_tool_ms)} iters={_n_iter} tok_in={_tok_in} tok_out={_tok_out} "

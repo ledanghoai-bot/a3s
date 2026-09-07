@@ -120,10 +120,18 @@ def build_order_create_envelope(
 
     normalized = registry.validate_order_create_payload(raw_payload)
     hash_input = registry.order_create_hash_input(normalized)
+    # M5 upgrade (CA Review 216-01): binding context PHAI vao request_hash de duplicate/conflict detection
+    # phan biet cung order nhung resolution KHAC. verified_resolution_id la UUID (KHONG PII). Duoc them
+    # vao hash_input (khong vao idempotency KEY — key giu on dinh de cung key + resolution khac -> CONFLICT
+    # thay vi tra receipt cu nham). Cung persist vao stored_payload (audit/replay, khong dia chi raw).
+    if verified_resolution_id:
+        hash_input = {**hash_input, "verified_resolution_id": verified_resolution_id}
     request_hash = registry.compute_request_hash(
         registry.ORDER_CREATE, registry.ORDER_CREATE_VERSION, hash_input
     )
     stored = registry.order_create_stored_payload(normalized)
+    if verified_resolution_id:
+        stored = {**stored, "verified_resolution_id": verified_resolution_id}
     scope = idempotency.build_scope(registry.ORDER_CREATE, channel, actor.id)
 
     env = CommandEnvelope(
