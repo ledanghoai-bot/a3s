@@ -600,48 +600,19 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # don, khach tuong da mua). Chuyen human that su + tra loi an toan, KHONG de
         # khach tin nham la da dat hang thanh cong.
         if not created_order_ids and _reply_claims_order_created(reply):
-            # M5 discovery fix: model bao "da tao don" nhung KHONG goi create_order (bia). Thay vi
-            # escalate+pause ngay -> RETRY 1 lan voi tool_choice='required' EP model goi tool THAT
-            # (probe xac nhan hieu qua). Neu tao duoc order_id THAT -> bien bia thanh don that (invariant
-            # chong-bia van giu: reply chi bao thanh cong khi co order_id that). Neu khong (vd order-status,
-            # thieu thong tin -> create_order tra error) -> moi escalate that su.
-            print(f"[orchestrator] CHAN BIA DON -> retry ep create_order (tool_choice=required). "
-                  f"sender={sender_id} reply_len={len(reply)}")
-            try:
-                forced = await _llm_create(
-                    client, model=settings.llm_model, messages=turn_messages,
-                    tools=tools.TOOL_DEFINITIONS, tool_choice="required",
-                    max_tokens=MAX_OUTPUT_TOKENS, temperature=0.1)
-                for tc in (forced.choices[0].message.tool_calls or []):
-                    if tc.function.name != "create_order":
-                        continue
-                    try:
-                        fargs = json.loads(tc.function.arguments or "{}")
-                    except json.JSONDecodeError:
-                        break
-                    pmid = provider_message_id or sender_id
-                    fctx = {"channel": channel, "actor_type": "customer", "actor_id": sender_id,
-                            "conversation_id": conversation_id, "causation_id": pmid,
-                            "provider_message_id": pmid}
-                    fres = await _execute_tool("create_order", fargs, sender_id, text, command_ctx=fctx)
-                    if isinstance(fres, dict) and fres.get("order_id") and not fres.get("error"):
-                        created_order_ids.append(fres["order_id"])
-                        reply = (f"Dạ đơn của anh/chị đã được tạo thành công ạ! "
-                                 f"Mã đơn: #{fres['order_id']}. Em cảm ơn anh/chị ☕")
-                        _route_signal = "order"
-                    break
-            except Exception as e:  # noqa: BLE001 - retry loi khong duoc lam sap luong
-                print(f"[orchestrator] force create_order loi: {safe_exc(e)}")
-
-        if not created_order_ids and _reply_claims_order_created(reply):
-            # Retry van khong tao duoc don that -> escalate that su + tra loi an toan (KHONG de khach
-            # tin nham da dat hang thanh cong). (vd order-status / thieu thong tin / dia chi fail-closed)
-            print(f"[orchestrator] CHAN BIA DON (retry that bai) -> escalate. sender={sender_id} "
-                  f"reply_len={len(reply)}")
+            # M3-S4: KHONG in noi dung reply (ngu canh xac nhan don thuong chua ten/tien) — metadata.
+            print(
+                f"[orchestrator] CHAN BIA DON: reply bao da tao don nhung khong co "
+                f"create_order thanh cong trong luot nay. sender={sender_id} "
+                f"reply_len={len(reply)}"
+            )
             try:
                 await tools.escalate_to_human(
                     psid=sender_id,
-                    reason="Nghi bia xac nhan don: retry ep create_order van khong tao duoc don that",
+                    reason=(
+                        "Nghi bia xac nhan don: model bao da tao don nhung khong "
+                        "goi create_order thanh cong trong luot nay"
+                    ),
                     last_message=text,
                 )
             except Exception as e:  # noqa: BLE001 - escalate loi khong duoc lam sap luong
