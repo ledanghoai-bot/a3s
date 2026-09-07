@@ -1,0 +1,19 @@
+[latency] event=chat channel=telegram_customer route=reply ms_total=805 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] T1 partial -> 0 order
+  [PASS] T1 draft COLLECTING (thieu field) :: COLLECTING
+[latency] event=chat channel=telegram_customer route=reply ms_total=83 ms_llm=3 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] T2 van 0 order
+[orchestrator] server-extract READY -> summary armed cid:0d210efdbb11
+  [PASS] T3 READY_TO_COMMIT (server tu extract, khong tool) :: READY_TO_COMMIT
+  [PASS] T3 van 0 order (chua commit)
+  [PASS] T3 reply = server-rendered summary (co SP + dia chi) :: Dạ em xác nhận lại đơn của anh/chị:
+- Sản phẩm: Sữa dừa hũ —
+[cmd] {"event": "order.create.succeeded", "command_id": "ad39ab9f-8d29-4482-aa4a-dfa10303ab35", "correlation_id": "45cacd51-cb48-431d-a8af-1476ecc82105", "causation_id": null, "channel": "telegram_customer", "resource_id": 242}
+[orchestrator] server confirm->commit order_committed cid:0d210efdbb11
+  [PASS] T4 confirm -> +1 order (server chot)
+  [PASS] T4 intent COMMITTED :: COMMITTED
+  [PASS] ASSISTANT REFUSED ALL TOOLS xuyen suot (0 tool call) :: main_calls=2 tool_calls=0
+[latency] event=chat channel=telegram_customer route=reply ms_total=63 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] T5 re-confirm -> khong don moi
+
+RESULT: ALL PASS

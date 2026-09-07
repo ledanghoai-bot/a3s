@@ -1,0 +1,28 @@
+### fresh apply 001..060 ###
+  OK 060_m5_confirm_commit_dedupe
+Applied 60 migration(s).
+  validation OK: scripts/operational_seed_validation.sql
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+
+### idempotent re-run ###
+  validation OK: scripts/operational_seed_validation.sql
+  validation OK: scripts/m3_contract_validation.sql
+Post-migration validations pass (2 file).
+
+### status tail ###
+058_m5_order_intents                     applied
+059_m5_order_intent_draft                applied
+060_m5_confirm_commit_dedupe             applied
+ messages.dedupe_key + idx: 1 + 1
+
+ order_intents.summary_content_hash: 1
+
+### rollback 060 + 059 ###
+DROP INDEX
+ALTER TABLE
+NOTICE:  column "summary_content_hash" of relation "order_intents" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+ remaining draft/summary/dedupe cols: 0
+

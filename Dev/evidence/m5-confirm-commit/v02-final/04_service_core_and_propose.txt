@@ -1,0 +1,23 @@
+[cmd] {"event": "order.create.succeeded", "command_id": "aca6fcbb-fbea-48fc-ae71-8cdce0e151f9", "correlation_id": "3b3e0906-f0b7-4dd5-8b34-048e86793443", "causation_id": null, "channel": "telegram_customer", "resource_id": 253}
+  [PASS] DoD#10 server commit tu draft (KHONG model create_order) :: 253
+  [PASS] DoD#10 +1 order
+  [PASS] DoD#10 intent COMMITTED
+  [PASS] DoD#11 confirm lai sau commit -> khong don moi
+  [PASS] DoD#12 stale-summary sau correction -> KHONG commit
+  [PASS] guard draft chua du field -> KHONG commit
+
+RESULT: ALL PASS
+
+  [PASS] L1 thieu field -> need_more :: ['customer_name', 'phone', 'address']
+  [PASS] L1 0 order
+  [PASS] L1 state COLLECTING + draft_sku luu
+  [PASS] L2 du field + verified -> ready :: None
+  [PASS] L2 VAN 0 order (chua commit)
+  [PASS] L2 READY + summary present
+[cmd] {"event": "order.create.succeeded", "command_id": "ba22e260-24b1-4c1f-9da1-a009ec841123", "correlation_id": "7ee5ced5-bd86-4cd6-8fd0-24130151af25", "causation_id": null, "channel": "telegram_customer", "resource_id": 254}
+  [PASS] L3 confirm -> SERVER commit (khong model) :: 254
+  [PASS] L3 +1 order
+  [PASS] L3 intent COMMITTED
+  [PASS] L3 order dung ten draft (c Tien) :: c Tien
+
+RESULT: ALL PASS
