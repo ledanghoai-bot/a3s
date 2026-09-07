@@ -38,12 +38,13 @@ CREATE TABLE IF NOT EXISTS order_intents (
 CREATE UNIQUE INDEX IF NOT EXISTS oi_one_committed_order
   ON order_intents(committed_order_id) WHERE committed_order_id IS NOT NULL;
 
--- Tra cuu intent OPEN cho routing/redelivery: 1 open intent moi (customer,conversation,order_fingerprint).
--- Open = chua terminal + da co fingerprint. Ngan tao 2 intent trung cho cung don dang mo.
-CREATE UNIQUE INDEX IF NOT EXISTS oi_one_open_per_fingerprint
-  ON order_intents(customer_id, conversation_id, order_fingerprint)
-  WHERE order_fingerprint IS NOT NULL
-    AND state IN ('COLLECTING','ADDRESS_CHECK','NEEDS_CLARIFICATION','READY_TO_COMMIT','COMMITTING','RETRYING');
+-- 1 open intent moi (customer, conversation) = "prospective order HIEN TAI" cua hoi thoai (CA 225-01).
+-- Correction (doi dia chi/so luong) CAP NHAT CHINH intent nay (re-enter ADDRESS_CHECK, tang version) —
+-- KHONG tao intent song song. Don moi that su SAU commit -> intent moi (cai cu da COMMITTED, khong con open).
+-- Ngan 2 open intent song song cho cung hoi thoai (control plane don nhat).
+CREATE UNIQUE INDEX IF NOT EXISTS oi_one_open_per_conversation
+  ON order_intents(customer_id, conversation_id)
+  WHERE state IN ('COLLECTING','ADDRESS_CHECK','NEEDS_CLARIFICATION','READY_TO_COMMIT','COMMITTING','RETRYING');
 
 -- Lookup theo owner + state (routing, GC expired).
 CREATE INDEX IF NOT EXISTS oi_owner_state ON order_intents(customer_id, channel, state);

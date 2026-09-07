@@ -34,16 +34,31 @@ async def get_intent(conn, intent_id, *, for_update: bool = False) -> dict | Non
     return dict(row) if row else None
 
 
-async def find_open_intent(conn, *, customer_id: int, conversation_id, order_fingerprint: str,
+async def find_open_intent(conn, *, customer_id: int, conversation_id,
                            for_update: bool = False) -> dict | None:
-    """Tim intent OPEN cung fingerprint cho (customer, conversation) — de dinh tuyen luot xac nhan/retry
-    ve DUNG intent dang mo (khong tao intent trung). CHI open states (unique index bao dam <=1)."""
-    q = ("SELECT id,state,state_version,committed_order_id FROM order_intents "
-         "WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 AND order_fingerprint=$3 "
-         "AND state = ANY($4::text[]) ORDER BY created_at DESC LIMIT 1")
+    """Tim intent OPEN HIEN TAI cho (customer, conversation) — "prospective order dang mo" (CA 225-01).
+    Correction cap nhat CHINH intent nay. Unique index oi_one_open_per_conversation bao dam <=1 open."""
+    q = ("SELECT id,customer_id,conversation_id,channel,state,state_version,order_fingerprint,"
+         "verified_address_fingerprint,verified_resolution_id,committed_order_id FROM order_intents "
+         "WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 "
+         "AND state = ANY($3::text[]) ORDER BY created_at DESC LIMIT 1")
     if for_update:
         q += " FOR UPDATE"
-    row = await conn.fetchrow(q, customer_id, conversation_id, order_fingerprint, list(oi.OPEN_STATES))
+    row = await conn.fetchrow(q, customer_id, conversation_id, list(oi.OPEN_STATES))
+    return dict(row) if row else None
+
+
+async def find_recent_committed(conn, *, customer_id: int, conversation_id,
+                                order_fingerprint: str) -> dict | None:
+    """DB-AUTHORITATIVE stale-confirm (CA 225-04): intent COMMITTED gan nhat cho (customer,conversation)
+    cung order_fingerprint. Dung de tra receipt cu cho xac nhan lai/redelivery MA KHONG phu thuoc Redis
+    (Redis flush/restart/TTL khong doi semantic). None neu khong co."""
+    row = await conn.fetchrow(
+        "SELECT id,state,committed_order_id,order_fingerprint FROM order_intents "
+        "WHERE customer_id=$1 AND conversation_id IS NOT DISTINCT FROM $2 AND state='COMMITTED' "
+        "AND committed_order_id IS NOT NULL AND order_fingerprint=$3 "
+        "ORDER BY updated_at DESC LIMIT 1",
+        customer_id, conversation_id, order_fingerprint)
     return dict(row) if row else None
 
 

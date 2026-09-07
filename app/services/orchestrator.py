@@ -227,97 +227,91 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
             # C1: verify + auto-link chay TRUOC create_order -> khi Gate E bat, pointer verified da san sang
             # cho create_order (khong deadlock). Flag default OFF; loi KHONG BAO GIO lam vo reply/don (§3.11,
             # bat NGOAI transaction verify). C3: KHONG fallback sender_id — thieu event id that thi verify skip.
+            # --- Enrolled route? (command bus se xu ly: m1 global HOAC Gate E pilot) ---
+            _enrolled = False
+            if command_ctx is not None:
+                try:
+                    from app.services.command import order_gateway as _ogw
+                    _enrolled = _ogw.can_route(command_ctx.get("channel", "")) and (
+                        settings.m1_reliable_order_command
+                        or await tools._gate_e_pilot_route(sender_id, command_ctx))
+                except Exception as e:  # noqa: BLE001
+                    print(f"[orchestrator] enrolled-route check loi: {safe_exc(e)}")
+                    _enrolled = False
+            # --- Verify dia chi (§6.C sua F2) -> verified + fingerprint canonical (225-06) ---
+            vr = None
+            _verified = not settings.enable_address_resolver  # resolver OFF: khong co address gate
             if settings.enable_address_resolver:
                 try:
                     vr = await address_live_verify.verify_and_link(
                         psid=sender_id, channel=(command_ctx or {}).get("channel"),
                         province_proposal=prov_prop, ward_proposal=ward_prop,
                         event_id=(command_ctx or {}).get("provider_message_id"))
-                    # §6.C (sua F2): CHI khi server verify dia chi cua CHINH request nay auto_verified
-                    # (may_bind) moi truyen resolution REQUEST-SCOPED xuong Gate E de bind. LLM khong the
-                    # tu cap resolution id (chi lay tu ket qua server-side).
                     if vr.get("may_bind") and vr.get("resolution_id"):
+                        _verified = True
                         if command_ctx is not None:
                             command_ctx["verified_resolution_id"] = vr["resolution_id"]
-                            # M5 order-intent (224 §5): tinh verified_address_fingerprint TAT DINH tu MA
-                            # (dataset+province+ward+hash detail) — semantic address identity thay UUID trong
-                            # request_hash + input cua order_fingerprint. Chi khi may_bind (dia chi request nay
-                            # da auto_verified) moi co du ma.
                             from app.services.command import order_intent as _oi
-                            # CA 225-06: canonical delivery-detail (bo thanh phan hanh chinh da resolve) —
-                            # KHONG hash raw address (con chua province/ward text) -> 'P. Ea Kao' == 'Phuong
-                            # Ea Kao' sau verify -> cung fingerprint (case 17). Ten canonical tu vr (server).
                             _detail = _oi.canonical_delivery_detail(
                                 args.get("address"), vr.get("province_name"), vr.get("ward_name"))
                             command_ctx["verified_address_fingerprint"] = _oi.verified_address_fingerprint(
-                                vr.get("dataset_version"), vr.get("province_code"), vr.get("ward_code"),
-                                _detail)
+                                vr.get("dataset_version"), vr.get("province_code"), vr.get("ward_code"), _detail)
                         await _address_clarify_reset(sender_id, prov_prop, ward_prop)
-                    elif settings.enable_gate_e_order_wiring and "status" in vr:
-                        # §6.B (Q2 + Memo 213): dia chi CHUA verified nhung Gate E se bind -> CLARIFY truoc
-                        # khi tao don (khong tao don sai/khong bind pointer cu). Server dem <=2 luot, giu bot
-                        # active; het luot moi escalate. Order CHUA duoc tao o nhanh nay.
-                        clarify = await _address_clarify(sender_id, vr, prov_prop, ward_prop)
-                        if clarify is not None:
-                            return clarify  # LLM dien dat cau hoi xac nhan; order CHUA tao
-                        # Het <=2 luot khong giai duoc -> escalate that su (bounded sequence)
-                        await tools.escalate_to_human(
-                            psid=sender_id,
-                            reason="Dia chi khong xac minh duoc sau 2 luot lam ro",
-                            last_message=last_message)
-                        await _address_clarify_reset(sender_id, prov_prop, ward_prop)
-                        return {"address_unresolved_escalated": True,
-                                "instruction": ("Da chuyen nhan vien ho tro xac minh dia chi. Bao khach "
-                                                "doi phan hoi trong it phut. KHONG noi da tao don.")}
                 except Exception as e:  # noqa: BLE001 — never break the customer reply/order
                     print(f"[orchestrator] M5 live address verify skipped: {safe_exc(e)}")
-            # M5 order-intent Layer B (224 §5/§7): server-owned intent lam ANCHOR cho MOT don qua nhieu luot
-            # (clarify/confirm/retry/redelivery) -> at-most-once commit (Layer C). CHI khi create_order se di
-            # command bus (m1 global HOAC Gate E pilot route) — legacy path bo qua (order_intent_id None).
-            # Loi KHONG BAO GIO lam vo reply/order (bao boc try/except); intent thieu -> giu idempotency cu.
-            _oi_ctx = None
-            if command_ctx is not None:
+                    vr = None
+            # --- INTENT CONTROL PLANE (CA 225-01): tren enrolled route, intent DRIVE lifecycle + la truth ---
+            if _enrolled and command_ctx is not None:
+                from app.services.command import order_intent as _oi
+                from app.services.command import order_intent_flow as _oif
+                from app.db_pool import acquire as _acq, release as _rel
+                _cid = None
                 try:
-                    from app.services.command import order_gateway as _ogw
-                    from app.services.command import order_intent as _oi
-                    from app.services.command import order_intent_flow as _oif
-                    from app.db_pool import acquire as _acq, release as _rel
-                    _route = _ogw.can_route(command_ctx.get("channel", "")) and (
-                        settings.m1_reliable_order_command
-                        or await tools._gate_e_pilot_route(sender_id, command_ctx))
-                    if _route:
-                        _c = await _acq()
-                        try:
-                            _cid = await _c.fetchval("SELECT id FROM customers WHERE psid=$1", sender_id)
-                        finally:
-                            await _rel(_c)
-                        _ofp = _oi.order_fingerprint(
-                            sku=args.get("sku", ""), quantity=args.get("quantity"),
-                            customer_name=args.get("customer_name", ""), phone=args.get("phone", ""),
-                            address_fp=command_ctx.get("verified_address_fingerprint"))
-                        _flow = await _oif.resolve_or_create(
-                            customer_id=_cid, conversation_id=command_ctx.get("conversation_id"),
-                            channel=command_ctx["channel"], order_fp=_ofp,
-                            addr_fp=command_ctx.get("verified_address_fingerprint"),
-                            verified_resolution_id=command_ctx.get("verified_resolution_id"))
-                        if _flow.get("order_intent_id"):
-                            command_ctx["order_intent_id"] = _flow["order_intent_id"]
-                            _oi_ctx = {"intent_id": _flow["order_intent_id"], "order_fp": _ofp,
-                                       "conversation_id": command_ctx.get("conversation_id")}
+                    _c = await _acq()
+                    try:
+                        _cid = await _c.fetchval("SELECT id FROM customers WHERE psid=$1", sender_id)
+                    finally:
+                        await _rel(_c)
                 except Exception as e:  # noqa: BLE001
-                    print(f"[orchestrator] M5 order-intent resolve skipped: {safe_exc(e)}")
+                    print(f"[orchestrator] intent customer resolve loi: {safe_exc(e)}")
+                _ofp = _oi.order_fingerprint(
+                    sku=args.get("sku", ""), quantity=args.get("quantity"),
+                    customer_name=args.get("customer_name", ""), phone=args.get("phone", ""),
+                    address_fp=command_ctx.get("verified_address_fingerprint"))
+                drive = await _oif.drive(
+                    customer_id=_cid, conversation_id=command_ctx.get("conversation_id"),
+                    channel=command_ctx["channel"], order_fp=_ofp,
+                    addr_fp=command_ctx.get("verified_address_fingerprint"),
+                    verified_resolution_id=command_ctx.get("verified_resolution_id"),
+                    verified=_verified, explicit_new_order=False)
+                _act = drive.get("action")
+                if _act in ("ready", "duplicate"):
+                    # ready -> intent READY_TO_COMMIT (commit ben duoi); duplicate -> intent COMMITTED
+                    # (stale-confirm, _run_winner tra receipt cu ZERO mutation + finalize replay row 225-03).
+                    command_ctx["order_intent_id"] = drive["order_intent_id"]
+                elif _act == "clarify":
+                    # 225-01: intent da o NEEDS_CLARIFICATION (durable) TRUOC khi hoi. UX <=2 luot; het -> escalate.
+                    clarify = await _address_clarify(sender_id, vr, prov_prop, ward_prop) if vr else None
+                    if clarify is not None:
+                        return clarify
+                    await tools.escalate_to_human(
+                        psid=sender_id, reason="Dia chi khong xac minh duoc sau 2 luot lam ro",
+                        last_message=last_message)
+                    await _oif.terminalize(customer_id=_cid,
+                                           conversation_id=command_ctx.get("conversation_id"),
+                                           to_state="ESCALATED", reason="address_unresolved")
+                    await _address_clarify_reset(sender_id, prov_prop, ward_prop)
+                    return {"address_unresolved_escalated": True,
+                            "instruction": ("Da chuyen nhan vien ho tro xac minh dia chi. Bao khach doi "
+                                            "phan hoi trong it phut. KHONG noi da tao don.")}
+                elif _act == "error":
+                    # FAIL-CLOSED (225-04): khong thiet lap/validate duoc intent tren enrolled route -> KHONG
+                    # tao don (zero mutation), tra loi an toan (khong khang dinh da dat hang).
+                    print(f"[orchestrator] order-intent FAIL-CLOSED sender={sender_id}")
+                    return {"error": "He thong dang ban, em chua chot duoc don. Anh/chi thu lai giup em sau it phut a.",
+                            "intent_fail_closed": True}
+                # _act == 'skip' -> khong enrolled thuc su -> legacy (order_intent_id None)
             result = await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
-            # Post-commit pointer (§7.4/§9): don commit thanh cong -> ghi committed-pointer de stale-confirm
-            # sau nay tra receipt cu (zero mutation). Best-effort.
-            if _oi_ctx is not None and isinstance(result, dict) and result.get("order_id") \
-                    and not result.get("error"):
-                try:
-                    from app.services.command import order_intent_flow as _oif
-                    await _oif.mark_committed_pointer(
-                        conversation_id=_oi_ctx["conversation_id"], intent_id=_oi_ctx["intent_id"],
-                        order_fp=_oi_ctx["order_fp"], order_id=result["order_id"])
-                except Exception as e:  # noqa: BLE001
-                    print(f"[orchestrator] M5 order-intent pointer skipped: {safe_exc(e)}")
             return result
         if name == "escalate_to_human":
             return await tools.escalate_to_human(psid=sender_id, last_message=last_message, **args)
