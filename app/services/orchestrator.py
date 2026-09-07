@@ -206,6 +206,20 @@ async def _save_history(redis, sender_id: str, history: list[dict]) -> None:
     await redis.set(_redis_key(sender_id), json.dumps(trimmed, ensure_ascii=False), ex=86400)
 
 
+async def _log_receipt_to_messages(conversation_id, committed: dict) -> None:
+    """CA 232 §7: bien nhan don (receipt) — vua giao khach qua outbox — PHAI duoc ghi 1 lan vao messages/
+    conversation history de STAFF thay tren dashboard (truoc day chi outbox, dashboard khong hien). Idempotent:
+    chi ghi khi commit MOI (khong phai duplicate/replay) -> khong ghi 2 lan. KHONG gui lai cho khach (chi DB)."""
+    try:
+        if committed.get("duplicate"):
+            return  # da ghi o lan commit dau
+        msg = committed.get("customer_message") or (
+            f"Đơn #{committed.get('order_id')} đã được ghi nhận.")
+        await conversation_log.log_message(conversation_id, "bot", msg)
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] log receipt to messages skipped: {safe_exc(e)}")
+
+
 # CA 225-05: tin hieu "don moi tuong minh" SERVER-OWNED (orchestrator tinh tu raw text khach, LLM KHONG
 # duoc cap). CHI dung de PHAN BIET giua stale-confirmation vs dat-them SAU khi da co committed intent cung
 # fingerprint (drive() ap explicit_new_order o nhanh nay). Cum tu re-order do dac hieu (dat them/don nua/
@@ -233,6 +247,23 @@ def _is_explicit_cancel(text: str) -> bool:
     (khong bat 'khong' tran)."""
     t = _normalize_admin(text or "")
     return any(m in t for m in _CANCEL_MARKERS)
+
+
+# CA 232 §6: confirmation detector. CHI la tin hieu — commit CHI xay ra khi try_server_commit thay READY
+# intent + summary DA present khop version/fingerprint hien tai (pending-confirm context). 'ok/xac nhan'
+# NGOAI context do -> try_server_commit tra None -> khong commit (DoD#13). Nen detector nay an toan de rong.
+_CONFIRM_MARKERS = ("xac nhan", "dong y", "chot don", "chot luon", "dat luon", "dung roi", "dung vay",
+                    "ok chot", "oke chot", "ok dat", "xac nhan dung", "xac nhan don", "ok em", "ung",
+                    "dat di", "lam don di")
+
+
+def _is_confirmation(text: str) -> bool:
+    """True neu tin nhan la XAC NHAN dat don (server-side). Loai tru cancel/status. Context (summary da
+    present) do try_server_commit kiem — day chi la entry hint."""
+    if _is_explicit_cancel(text) or _is_order_status_query(text):
+        return False
+    t = _normalize_admin(text or "")
+    return any(m in t for m in _CONFIRM_MARKERS)
 
 
 # CA 226-03: nhan dien SO KHOI "order proposal" (server-owned draft recognition) de tao COLLECTING intent
@@ -339,11 +370,12 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                 except Exception as e:  # noqa: BLE001 — never break the customer reply/order
                     print(f"[orchestrator] M5 live address verify skipped: {safe_exc(e)}")
                     vr = None
-            # --- INTENT CONTROL PLANE (CA 225-01): tren enrolled route, intent DRIVE lifecycle + la truth ---
+            # --- CA 232 §2/§3: tren enrolled route, create_order = PROPOSAL (khong commit). Server accumulate
+            # draft + advance + present summary; COMMIT xay ra khi khach XAC NHAN (confirmation hook dau
+            # handle_message). Sua goc c Tien: khong con phu thuoc model goi create_order dung luc chot. ---
             if _enrolled and command_ctx is not None:
                 from app.db_pool import acquire as _acq
                 from app.db_pool import release as _rel
-                from app.services.command import order_intent as _oi
                 from app.services.command import order_intent_flow as _oif
                 _cid = None
                 try:
@@ -354,23 +386,29 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                         await _rel(_c)
                 except Exception as e:  # noqa: BLE001
                     print(f"[orchestrator] intent customer resolve loi: {safe_exc(e)}")
-                _ofp = _oi.order_fingerprint(
-                    sku=args.get("sku", ""), quantity=args.get("quantity"),
-                    customer_name=args.get("customer_name", ""), phone=args.get("phone", ""),
-                    address_fp=command_ctx.get("verified_address_fingerprint"))
-                drive = await _oif.drive(
+                _proposed = {"sku": args.get("sku"), "quantity": args.get("quantity"),
+                             "customer_name": args.get("customer_name"), "phone": args.get("phone"),
+                             "address": args.get("address")}
+                prop = await _oif.propose_draft(
                     customer_id=_cid, conversation_id=command_ctx.get("conversation_id"),
-                    channel=command_ctx["channel"], order_fp=_ofp,
+                    channel=command_ctx["channel"], proposed=_proposed, verified=_verified,
                     addr_fp=command_ctx.get("verified_address_fingerprint"),
                     verified_resolution_id=command_ctx.get("verified_resolution_id"),
-                    verified=_verified, explicit_new_order=_is_explicit_reorder(last_message))
-                _act = drive.get("action")
-                if _act in ("ready", "duplicate"):
-                    # ready -> intent READY_TO_COMMIT (commit ben duoi); duplicate -> intent COMMITTED
-                    # (stale-confirm, _run_winner tra receipt cu ZERO mutation + finalize replay row 225-03).
-                    command_ctx["order_intent_id"] = drive["order_intent_id"]
-                elif _act == "clarify":
-                    # 225-01: intent da o NEEDS_CLARIFICATION (durable) TRUOC khi hoi. UX <=2 luot; het -> escalate.
+                    address_changed=bool(args.get("address")),
+                    explicit_new_order=_is_explicit_reorder(last_message))
+                _act = prop.get("action")
+                if _act == "ready":
+                    # Draft READY + summary da present. LLM trinh bay tom tat + HOI xac nhan. KHONG commit,
+                    # KHONG noi da tao don. Khach xac nhan -> confirmation hook chot.
+                    return {"draft_ready": True,
+                            "instruction": ("Trinh bay lai tom tat don (san pham, so luong, nguoi nhan, SDT, "
+                                            "dia chi) va HOI khach xac nhan de len don. TUYET DOI KHONG noi "
+                                            "da tao/da len don — chi khi khach xac nhan he thong moi chot.")}
+                if _act == "need_more":
+                    return {"draft_need_more": True, "missing": prop.get("missing"),
+                            "instruction": ("Hoi khach cung cap cac thong tin CON THIEU de dat don (san pham/"
+                                            "so luong/ten nguoi nhan/SDT/dia chi). KHONG noi da tao don.")}
+                if _act == "clarify":
                     clarify = await _address_clarify(sender_id, vr, prov_prop, ward_prop) if vr else None
                     if clarify is not None:
                         return clarify
@@ -384,13 +422,12 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                     return {"address_unresolved_escalated": True,
                             "instruction": ("Da chuyen nhan vien ho tro xac minh dia chi. Bao khach doi "
                                             "phan hoi trong it phut. KHONG noi da tao don.")}
-                elif _act == "error":
-                    # FAIL-CLOSED (225-04): khong thiet lap/validate duoc intent tren enrolled route -> KHONG
-                    # tao don (zero mutation), tra loi an toan (khong khang dinh da dat hang).
-                    print(f"[orchestrator] order-intent FAIL-CLOSED sender={sender_id}")
-                    return {"error": "He thong dang ban, em chua chot duoc don. Anh/chi thu lai giup em sau it phut a.",
+                if _act == "error":
+                    print(f"[orchestrator] order-intent propose FAIL-CLOSED sender={sender_id}")
+                    return {"error": "He thong dang ban, em chua ghi nhan duoc don. Anh/chi thu lai giup em a.",
                             "intent_fail_closed": True}
-                # _act == 'skip' -> khong enrolled thuc su -> legacy (order_intent_id None)
+                # _act == 'skip' -> customer_id None -> khong enrolled thuc su -> roi xuong legacy commit.
+            # Legacy (khong enrolled): giu hanh vi commit truc tiep (backward-compat, khong tester pilot).
             result = await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
             return result
         if name == "escalate_to_human":
@@ -461,6 +498,42 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             await conversation_log.log_message(conversation_id, "customer", text)
             await conversation_log.log_message(conversation_id, "bot", reply)
             return reply
+
+        # CA 232 §6: khach XAC NHAN + co READY draft (summary da present khop version/fingerprint) -> SERVER
+        # tu chot don tu DRAFT (KHONG doi model goi create_order — sua goc c Tien). Chi enrolled route.
+        # try_server_commit tra None neu khong du context (generic 'xac nhan' ngoai pending-confirm -> LLM lo).
+        if _is_confirmation(text):
+            try:
+                from app.db_pool import acquire as _acq
+                from app.db_pool import release as _rel
+                from app.services.command import order_gateway as _ogw
+                from app.services.command import order_intent_flow as _oif
+                _enr = _ogw.can_route(channel) and (
+                    settings.m1_reliable_order_command
+                    or await tools._gate_e_pilot_route(sender_id, {"channel": channel}))
+                if _enr:
+                    _c = await _acq()
+                    try:
+                        _cid = await _c.fetchval("SELECT id FROM customers WHERE psid=$1", sender_id)
+                    finally:
+                        await _rel(_c)
+                    _committed = await _oif.try_server_commit(
+                        customer_id=_cid, conversation_id=conversation_id, channel=channel,
+                        actor_id=sender_id, provider_message_id=(provider_message_id or sender_id))
+                    if _committed is not None and _committed.get("order_id") and not _committed.get("error"):
+                        from app.services.command import reply_guard
+                        reply = reply_guard.finalize_customer_reply("", True)  # receipt deterministic (outbox)
+                        await _log_receipt_to_messages(conversation_id, _committed)  # §7 staff-visible
+                        history = await _get_history(redis, sender_id)
+                        history.append({"role": "user", "content": text})
+                        history.append({"role": "assistant", "content": reply})
+                        await _save_history(redis, sender_id, history)
+                        await conversation_log.log_message(conversation_id, "customer", text)
+                        await conversation_log.log_message(conversation_id, "bot", reply)
+                        print(f"[orchestrator] server confirm->commit order_committed sender={sender_id}")
+                        return reply
+            except Exception as e:  # noqa: BLE001 — khong vo reply, fall through LLM
+                print(f"[orchestrator] server confirm->commit skipped: {safe_exc(e)}")
 
         if handoff.wants_human(text):
             await _terminalize_open_intent("ESCALATED", "customer_wants_human")
