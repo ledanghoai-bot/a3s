@@ -13,7 +13,7 @@ from app.config import settings
 from app.services import conversation_log
 from app.services.command import outbox_worker
 from app.services.handoff import is_bot_paused
-from app.services.messenger import send_text
+from app.services.messenger import send_text, try_take_thread_control
 from app.services.orchestrator import handle_message
 from app.services.safe_log import safe_exc
 
@@ -104,6 +104,12 @@ async def _process_message_inner(event: dict) -> None:
         await conversation_log.log_message(conversation_id, "customer", text)
         print(f"[worker] Bot dang paused cho {sender_id}, chi log, khong tra loi (nhan vien dang xu ly).")
         return
+
+    # Handover Protocol: giu quyen so huu thread truoc Page Inbox mac dinh cua Meta, de bot nhan
+    # duoc MOI tin trong hoi thoai (khong bi Page Inbox gianh sau tin dau -> "1 tin roi chan").
+    # Best-effort: KHONG lam vo luong tra loi neu handover loi. Chi khi bot se tu tra loi (khong
+    # paused) -> luc paused (nhan vien tiep quan) da return o tren, khong gianh control.
+    await try_take_thread_control(sender_id)
 
     # CR-04: truyền provider message id (Messenger mid) thật vào command idempotency/causation.
     reply = await handle_message(sender_id, text, channel="messenger",
