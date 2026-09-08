@@ -13,6 +13,7 @@ import json
 import os
 import socket
 import time
+import uuid
 from dataclasses import dataclass
 
 import httpx
@@ -64,6 +65,28 @@ class SendResult:
 # --------------------------------------------------------------------------
 
 def _telegram_admin_text(p: dict) -> str:
+    if p.get("kind") == "escalation":
+        # CA 251 §3.D + 252-02: admin-notify khi ESCALATED. has_intent=True -> escalation gan order-intent
+        # (don chua chot); has_intent=False -> handoff conversation-scoped (khong gan don).
+        head = (
+            "\U0001F198 3S Coffee - CAN HO TRO (ESCALATION)\n"
+            f"Ly do: {p.get('reason_code') or '(khong ro)'}\n"
+            f"Kenh: {p.get('channel') or '-'}\n"
+            f"Khach: {p.get('customer_name') or '(chua co ten)'} - SDT {p.get('phone_masked') or '***'}\n"
+        )
+        if p.get("has_intent"):
+            return head + (
+                f"San pham: {p.get('sku') or '-'} x {p.get('quantity') or '-'}\n"
+                f"Dia chi (tam): {(p.get('address') or '-')[:80]}\n"
+                f"Intent: {p.get('intent_id')} - Conv: {p.get('conversation_id')}\n"
+                "(Don CHUA duoc chot. Xem dashboard theo intent/conversation de xu ly.)"
+            )
+        return head + (
+            f"Chi tiet: {(p.get('reason_detail') or '-')[:120]}\n"
+            f"Tin gan nhat: {(p.get('last_message') or '-')[:120]}\n"
+            f"Conv: {p.get('conversation_id')} (KHONG gan don)\n"
+            "(Xem dashboard theo conversation de ho tro khach.)"
+        )
     return (
         "\U0001F6D2 3S Coffee - DON HANG MOI (M1)\n"
         f"Ma don: #{p.get('order_id')}\n"
@@ -217,9 +240,13 @@ async def _send_and_record(conn, ev, send_fn) -> str:
         payload = json.loads(payload)
     attempt_no = ev["attempt_count"]
     corr = payload.get("correlation_id")
-    if corr is None:
+    if corr is None and ev.get("command_id") is not None:
         corr = await conn.fetchval("SELECT correlation_id FROM command_executions WHERE id=$1",
                                    ev["command_id"])
+    if corr is None:
+        # CA 253-01.3: event khong command-backed (escalation) va payload thieu correlation_id ->
+        # fallback UUID (delivery_attempts.correlation_id NOT NULL) — worker KHONG duoc crash.
+        corr = str(uuid.uuid4())
 
     t0 = time.monotonic()
     sr = await send_fn(ev["destination"], payload)

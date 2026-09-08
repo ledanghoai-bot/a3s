@@ -87,11 +87,24 @@ def test_as_of_effective_range():
     assert r_in["province_code"] == "P09"
 
 
-def test_legacy_alias_canonical_collision_ambiguous():
-    # CA Review 126: alias(P02) trung canonical cua P01 -> GIU CA HAI -> one_to_many -> needs_staff_review
-    # (canonical KHONG am tham thang, khong auto-select, khong ha xuong customer confirmation).
+def test_current_canonical_beats_legacy_alias_collision():
+    # CA Directive 251 §3.A (thay the Review 126 theo live finding "Tan Lap"): ten HIEN HANH (canonical) cua
+    # P01 THANG mot trung-ten qua LEGACY alias cua unit KHAC (P02, ten cu). Khach go ten HIEN HANH -> y chi
+    # don vi hien hanh -> auto_verified P01, KHONG mo ho voi ten legacy da doi. (Tuong tu 24121 "Phuong Tan
+    # Lap" thang legacy-alias "Xa Tan Lap" cua 24316.)
     u, a = _ds()
     a.append({"unit_code": "P02", "alias_name": "Cà Mau", "alias_kind": "legacy"})
+    r = m.resolve(u, a, province="Cà Mau", district=None, ward=None)
+    assert r["status"] == "auto_verified"
+    assert r["province_code"] == "P01"
+    assert any(x.startswith("current_over_legacy") for x in r["rules_applied"])
+
+
+def test_two_current_canonical_same_name_still_ambiguous():
+    # CA Directive 251 §3.A: >=2 don vi HIEN HANH (canonical) cung ten trong scope -> mo ho THAT ->
+    # needs_staff_review/clarify (KHONG ep chon giua hai don vi hien hanh, khong tang confidence gia).
+    u, a = _ds()
+    u.append({"level": "province", "code": "P99", "name": "Cà Mau", "parent_code": None})
     r = m.resolve(u, a, province="Cà Mau", district=None, ward=None)
     assert r["status"] == "needs_staff_review"
     assert any(x.startswith("one_to_many") for x in r["rules_applied"])

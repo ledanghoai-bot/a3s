@@ -165,10 +165,21 @@ def resolve(units, aliases, *, province, district, ward, as_of=None) -> dict:
         for c, k in m:
             candidates.append({"level": level, "code": c, "kind": k})
         if len(m) > 1:
-            rules.append(f"one_to_many:{level}")
-            prev_codes = {c for c, _ in m}
-            # one-to-many chan auto -> staff review
-            return _fail("needs_staff_review", rules, candidates, chosen)
+            # CA Directive 251 §3.A: TEN HIEN HANH (canonical) thang mot trung-ten LEGACY-alias.
+            # Vd "Tan Lap" trong Dak Lak khop 24121 (canonical "Phuong Tan Lap") + 24316 (legacy alias
+            # "Xa Tan Lap" cua "Xa Pong Drang" — ten CU da sap nhap). Khach go TEN HIEN HANH => y chi
+            # don vi hien hanh. Sau khi loc theo scope, neu con DUNG MOT candidate kind hien hanh
+            # (canonical/accentless) => chon no (khong con mo ho that). Neu >=2 hien hanh => mo ho THAT
+            # -> clarify. KHONG tang confidence gia, KHONG auto chon giua nhieu don vi hien hanh.
+            current = [(c, k) for c, k in m if k not in _LEGACY_KINDS]
+            if len(current) == 1:
+                rules.append(f"current_over_legacy:{level}")
+                m = current
+            else:
+                rules.append(f"one_to_many:{level}")
+                prev_codes = {c for c, _ in m}
+                # one-to-many that (>=2 hien hanh, hoac chi toan legacy) -> staff/clarify
+                return _fail("needs_staff_review", rules, candidates, chosen)
         code, kind = m[0]
         chosen[level] = code
         scores.append(_KIND_SCORE[kind])

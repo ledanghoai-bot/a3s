@@ -36,7 +36,8 @@ _VR = {"status": "needs_customer_confirmation",
        "province_name": "Tỉnh Đắk Lắk", "ward_name": "Phường Ea Kao"}
 
 
-def test_clarify_bounded_two_then_escalate(monkeypatch):
+def test_clarify_bounded_three_then_escalate(monkeypatch):
+    # CA Directive 251 §3.C: toi da 3 luot hoi co muc tieu -> luot thu 4 moi escalate (clarification_exhausted).
     store = {}
     _patch(monkeypatch, store)
     r1 = asyncio.run(orchestrator._address_clarify("tg:1", _VR, "Dak Lak", "Ea Kao"))
@@ -45,7 +46,9 @@ def test_clarify_bounded_two_then_escalate(monkeypatch):
     r2 = asyncio.run(orchestrator._address_clarify("tg:1", _VR, "Dak Lak", "Ea Kao"))
     assert r2 is not None  # luot 2 van hoi
     r3 = asyncio.run(orchestrator._address_clarify("tg:1", _VR, "Dak Lak", "Ea Kao"))
-    assert r3 is None  # het <=2 luot -> caller escalate
+    assert r3 is not None  # luot 3 van hoi (Directive 251: toi da 3)
+    r4 = asyncio.run(orchestrator._address_clarify("tg:1", _VR, "Dak Lak", "Ea Kao"))
+    assert r4 is None  # het 3 luot -> caller escalate (clarification_exhausted)
 
 
 def test_clarify_reset_restarts_counter(monkeypatch):
@@ -62,11 +65,12 @@ def test_clarify_new_proposal_fresh_count(monkeypatch):
     # CA Review 216-02: doi sang dia chi MOI khong ke thua count cu -> khong bi escalate oan.
     store = {}
     _patch(monkeypatch, store)
-    # 2 luot proposal A -> luot 3 se escalate
+    # 3 luot proposal A -> luot 4 se escalate (Directive 251 §3.C: toi da 3 luot)
     asyncio.run(orchestrator._address_clarify("tg:9", _VR, "Dak Lak", "Ea Kao"))
     asyncio.run(orchestrator._address_clarify("tg:9", _VR, "Dak Lak", "Ea Kao"))
-    a3 = asyncio.run(orchestrator._address_clarify("tg:9", _VR, "Dak Lak", "Ea Kao"))
-    assert a3 is None  # proposal A het luot
+    asyncio.run(orchestrator._address_clarify("tg:9", _VR, "Dak Lak", "Ea Kao"))
+    a4 = asyncio.run(orchestrator._address_clarify("tg:9", _VR, "Dak Lak", "Ea Kao"))
+    assert a4 is None  # proposal A het luot
     # khach SUA sang dia chi MOI -> attempt moi, van hoi (khong bi escalate do count A)
     b1 = asyncio.run(orchestrator._address_clarify("tg:9", _VR, "Ca Mau", "Tan Thanh"))
     assert b1 is not None
@@ -78,8 +82,10 @@ def test_clarify_same_proposal_diacritic_variant_same_attempt(monkeypatch):
     _patch(monkeypatch, store)
     asyncio.run(orchestrator._address_clarify("tg:8", _VR, "Đắk Lắk", "Ea Kao"))
     asyncio.run(orchestrator._address_clarify("tg:8", _VR, "dak lak", "  Ea   Kao "))
-    r3 = asyncio.run(orchestrator._address_clarify("tg:8", _VR, "DAK LAK", "ea kao"))
-    assert r3 is None  # 3 lan cung 1 proposal (khac dau/hoa/space) -> chung count -> het luot
+    asyncio.run(orchestrator._address_clarify("tg:8", _VR, "DAK LAK", "ea kao"))
+    r4 = asyncio.run(orchestrator._address_clarify("tg:8", _VR, "Dak  Lak", "EA KAO"))
+    # 4 lan cung 1 proposal (khac dau/hoa/space) -> CHUNG count -> het 3 luot (Directive 251) -> escalate
+    assert r4 is None
 
 
 def test_clarify_no_prediction_asks_province_ward(monkeypatch):
