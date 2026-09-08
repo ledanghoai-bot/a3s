@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_FILE = ".env"
@@ -80,6 +81,28 @@ class Settings(BaseSettings):
     # Pilot allowlist (customer_id CSV) cho live verify — MAC DINH RONG = KHONG khach nao eligible.
     # Chi khach trong danh sach nay + tren kenh Telegram khach moi chay resolver (Directive 196 Review 197 C2).
     address_resolver_pilot_customer_ids: str = ""
+
+    # CA Directive 243 (Gate F full production activation): FULL-SCOPE per-channel (public/customer-wide).
+    # MAC DINH OFF (fail-closed). ON cho channel nao => MOI customer identity hop le cua channel do enrolled
+    # (khong phu thuoc allowlist canary/pilot). gate_e_kill_switch uu tien cao nhat (chan ca full-scope lan
+    # allowlist). Telegram va Messenger bat/tat DOC LAP. Body/sender/LLM KHONG duoc tu chon scope.
+    gate_e_fullscope_telegram_customer: bool = False
+    gate_e_fullscope_messenger: bool = False
+    address_resolver_fullscope_telegram_customer: bool = False
+    address_resolver_fullscope_messenger: bool = False
+
+    @field_validator(
+        "gate_e_fullscope_telegram_customer", "gate_e_fullscope_messenger",
+        "address_resolver_fullscope_telegram_customer", "address_resolver_fullscope_messenger",
+        "gate_e_kill_switch", "enable_gate_e_order_wiring", "enable_address_resolver",
+        mode="before")
+    @classmethod
+    def _failclosed_bool(cls, v):
+        """CA 243 AC-12: fail-closed — CHI True khi token truthy tuong minh; moi gia tri khac/parse loi -> False.
+        (Default OFF o fresh config; config sai -> OFF, khong crash, khong bat scope ngoai y muon.)"""
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("true", "1", "yes", "on")
 
     # Session TTL (I-B M0.5, CA-REVIEW-M0-DEV-003 §8): giam tu 7 ngay -> 48h cho auth/session
     # temporary exception (localStorage). Cau hinh duoc de production dat <=48h.

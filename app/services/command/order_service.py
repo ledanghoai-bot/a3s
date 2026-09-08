@@ -430,8 +430,12 @@ async def _maybe_bind_gate_e(conn, env: CommandEnvelope, order_id: int, customer
         return  # OFF (default): hanh vi legacy y het, KHONG snapshot, KHONG coi free-text la verified (§4.8)
     if settings.gate_e_kill_switch:
         return  # kill switch engaged: chan MOI bind moi o request boundary ke tiep (§4.9)
-    if customer_id is None or customer_id not in _gate_e_scope():
-        return  # ngoai canary scope -> hanh vi legacy (§4.8)
+    if customer_id is None:
+        return
+    # CA 243 (Gate F): full-scope channel => moi customer identity binding; nguoc lai giu canary allowlist.
+    from app.services import m5_scope
+    if not (m5_scope.gate_e_fullscope(getattr(env, "channel", None)) or customer_id in _gate_e_scope()):
+        return  # ngoai scope -> hanh vi legacy (§4.8)
     rid = env.verified_resolution_id  # request-scoped (Q3), KHONG phai pointer cu cua khach
     if not rid:
         # Trong canary scope (selector ON, kill OFF) NHUNG request KHONG co verified resolution scope

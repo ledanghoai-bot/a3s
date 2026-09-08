@@ -170,19 +170,29 @@ _M5_TESTER_CHANNELS = frozenset({"telegram_customer", "messenger"})
 
 
 async def _gate_e_pilot_route(psid: str, command_ctx: dict) -> bool:
-    """CA Directive 202 + 214 §6.E: request co phai Gate E pilot path khong (server-side, KHONG tin body/LLM).
-    True khi: enable_gate_e_order_wiring BAT + channel la kenh khach ho tro (telegram_customer|messenger) +
-    customer resolve tu psid da xac thuc nam trong gate_e_canary_customer_ids. Short-circuit khi Gate E OFF."""
+    """CA Directive 202 + 214 §6.E + 243 (Gate F): request co duoc enroll vao M5 order route khong
+    (server-side, KHONG tin body/LLM). True khi: kill switch OFF + enable_gate_e_order_wiring BAT + channel
+    la kenh khach ho tro + (FULL-SCOPE channel do BAT  HOAC  customer resolve tu psid nam trong canary
+    allowlist). Full-scope ON => moi customer identity hop le cua channel enrolled. Kill switch uu tien cao
+    nhat (243 §2.2)."""
+    if settings.gate_e_kill_switch:
+        return False  # 243 §2.2: kill uu tien cao nhat, chan ca full-scope lan allowlist
     if not settings.enable_gate_e_order_wiring:
         return False
-    if command_ctx.get("channel") not in _M5_TESTER_CHANNELS:
+    channel = command_ctx.get("channel")
+    if channel not in _M5_TESTER_CHANNELS:
         return False
     conn = await acquire()
     try:
         cid = await conn.fetchval("SELECT id FROM customers WHERE psid=$1", psid)
     finally:
         await release(conn)
-    return cid is not None and cid in _gate_e_scope_ids()
+    if cid is None:
+        return False
+    from app.services import m5_scope
+    if m5_scope.gate_e_fullscope(channel):
+        return True  # 243: full-scope -> moi customer identity hop le cua channel enrolled
+    return cid in _gate_e_scope_ids()
 
 
 async def create_order(

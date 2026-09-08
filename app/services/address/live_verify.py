@@ -105,7 +105,9 @@ async def verify_and_link(*, psid: str, channel: str | None, province_proposal, 
         cid = await conn.fetchval("SELECT id FROM customers WHERE psid=$1", psid)
         if cid is None:
             return {"skipped": "no_customer"}  # server-side identity
-        if cid not in _pilot_scope():  # C2: pilot allowlist (rong = khong ai)
+        # CA 243 (Gate F): full-scope channel => moi customer chay resolver; nguoc lai giu pilot allowlist.
+        from app.services import m5_scope
+        if not (m5_scope.resolver_fullscope(channel) or cid in _pilot_scope()):
             return {"skipped": "out_of_pilot_scope"}
         idem = f"lv:{psid}:{event_id}"
         linked = False
