@@ -46,6 +46,18 @@ async def _fake(client, **kw):
 
 orchestrator._llm_create = _fake
 
+# CA 244-01: dem escalate/admin-notify de assert AC-5/AC-7 KHONG escalate som.
+_ESC = {"n": 0}
+_orig_escalate = tools.escalate_to_human
+
+
+async def _counting_escalate(*a, **k):
+    _ESC["n"] += 1
+    return {"escalated": True}
+
+
+tools.escalate_to_human = _counting_escalate
+
 
 async def q1(s, *a):
     c = await acquire()
@@ -192,32 +204,37 @@ async def main():
 
     # ================= AC-5 address unclear -> server clarification (out-of-allowlist, full-scope) =================
     cidA = await mkcust(f"tg:gfa-{RUN}")
-    # address ĐỦ DÀI nhưng tỉnh/phường KHÔNG resolve -> ADDRESS_CHECK -> NEEDS_CLARIFICATION (không tự áp sai).
+    _e0 = _ESC["n"]
+    # (1) address ĐỦ DÀI nhưng tỉnh/phường KHÔNG resolve -> NEEDS_CLARIFICATION (không tự áp sai, không escalate).
     _EX.clear(); _EX.append({"sku": "SPGF", "quantity": 1, "customer_name": "Nam", "phone": "0900001234",
                              "address": "123 Duong Khong Ro Rang", "province": "Tinh Khong Co Thuc",
                              "ward": "Phuong Khong Co Thuc"})
     _S.clear(); _S.append({"text": "cho em xin lại tỉnh/phường ạ"})
     await orchestrator.handle_message(f"tg:gfa-{RUN}", "đặt 1 hũ giao 123 Duong Khong Ro Rang",
                                       channel="telegram_customer", provider_message_id=mid())
-    ck("AC-5 địa chỉ không rõ (full-scope) -> clarify (NEEDS_CLARIFICATION), 0 order (không tự áp sai)",
-       await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cidA) == 0
+    st5 = await q1("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cidA)
+    ck("AC-5a địa chỉ không rõ -> ĐÚNG NEEDS_CLARIFICATION, 0 order, 0 escalation (không tự áp sai/không escalate sớm)",
+       st5 == "NEEDS_CLARIFICATION"
+       and await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cidA) == 0 and _ESC["n"] == _e0,
+       f"state={st5} esc={_ESC['n']-_e0}")
+    # (2) model claim trong NEEDS_CLARIFICATION -> reply SERVER-DERIVED clarification (chứa ĐÚNG địa chỉ), no escalate.
+    _EX.clear(); _S.clear()
+    _S.append({"text": "Dạ mã đơn của anh đã được tạo, đơn đã được ghi nhận ạ."})  # claim -> guard
+    r5 = await orchestrator.handle_message(f"tg:gfa-{RUN}", "vâng ạ",
+                                           channel="telegram_customer", provider_message_id=mid())
+    ck("AC-5b clarification reply là SERVER-DERIVED (chứa đúng địa chỉ intent), state giữ, 0 order/escalation",
+       "123 Duong Khong Ro Rang" in (r5 or "") and _ESC["n"] == _e0
        and await q1("SELECT state FROM order_intents WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1", cidA)
-       in ("NEEDS_CLARIFICATION", "ESCALATED"))
+       == "NEEDS_CLARIFICATION" and await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cidA) == 0,
+       f"reply={(r5 or '')[:55]}")
 
     # ================= AC-7 model claim (full-scope, out-of-allowlist) -> no escalate/terminalize =================
-    orig_esc = tools.escalate_to_human
-    esc = {"n": 0}
-    async def _cnt(*a, **k):
-        esc["n"] += 1; return {"escalated": True}
-    tools.escalate_to_human = _cnt
-    try:
-        cidC = await mkcust(f"tg:gfc-{RUN}")
-        _EX.clear(); _S.clear(); _S.append({"text": "Dạ đơn đã được ghi nhận, mã đơn của anh đã được tạo ạ."})
-        await orchestrator.handle_message(f"tg:gfc-{RUN}", "vâng ạ", channel="telegram_customer", provider_message_id=mid())
-        ck("AC-7 model claim (full-scope) -> no escalate/terminalize",
-           esc["n"] == 0 and await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cidC) == 0)
-    finally:
-        tools.escalate_to_human = orig_esc
+    cidC = await mkcust(f"tg:gfc-{RUN}")
+    _e0 = _ESC["n"]
+    _EX.clear(); _S.clear(); _S.append({"text": "Dạ đơn đã được ghi nhận, mã đơn của anh đã được tạo ạ."})
+    await orchestrator.handle_message(f"tg:gfc-{RUN}", "vâng ạ", channel="telegram_customer", provider_message_id=mid())
+    ck("AC-7 model claim (full-scope) -> no escalate/terminalize",
+       _ESC["n"] == _e0 and await q1("SELECT count(*) FROM orders WHERE customer_id=$1", cidC) == 0)
 
     # ================= AC-9 kill switch end-to-end: ON chặn, OFF khôi phục không dup =================
     base_flags(); settings.gate_e_fullscope_telegram_customer = True
