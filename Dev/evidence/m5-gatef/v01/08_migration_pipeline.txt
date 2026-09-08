@@ -1,0 +1,4 @@
+### fresh 001..061 (migrations UNCHANGED, Gate F = code/config only) ###
+Applied 61 migration(s).
+Post-migration validations pass (2 file).
+Khong co migration pending.

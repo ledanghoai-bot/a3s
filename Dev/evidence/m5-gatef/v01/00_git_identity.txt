@@ -1,0 +1,7 @@
+directive: CA 243 (Gate F full production activation)
+base/merge-base (deployed): 7c2885d87b1276af1f295fb2e4dcb527f11ea31f
+candidate head (=tip): cdcb9abcf8381c255766971d863a70356b3bf0a0
+candidate tree: 8b50ecf27a7a1b8a2ab8c7ae3973106a669def37
+branch: feat/m5-gatef-fullscope
+delta vs deployed: 7 files (config.py, m5_scope.py, tools.py, order_service.py, live_verify.py, m5_scope_readback.py, m5_gatef_fullscope_harness.py); NO migration change (059-061 unchanged)
+generated: 2026-09-08T03:32:32Z

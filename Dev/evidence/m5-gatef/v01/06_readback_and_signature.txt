@@ -1,0 +1,22 @@
+### readback config matrix (default OFF + one full-scope example) ###
+{
+  "address_resolver_fullscope": {
+    "messenger": false,
+    "telegram_customer": false
+  },
+  "address_resolver_pilot_customer_ids": "",
+  "deployed_commit": "(unavailable)",
+  "deployed_tree": "(unavailable)",
+  "enable_address_resolver": false,
+  "enable_gate_e_order_wiring": false,
+  "gate_e_canary_customer_ids": "",
+  "gate_e_fullscope": {
+    "messenger": false,
+    "telegram_customer": false
+  },
+  "gate_e_kill_switch": false,
+  "m1_reliable_order_command": false
+}
+### webhook signature pass/reject (synthetic secret, no real secret) ###
+valid signature accepted: True
+tampered signature rejected: True
