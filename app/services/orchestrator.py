@@ -81,6 +81,15 @@ _ORDER_CLAIM_MARKERS = (
     "sẽ được đội ngũ 3s coffee xử lý",
     "đơn hàng đã được ghi nhận",
     "đơn đã được ghi nhận",
+    # CA 251 §3.B: bat rong bien the "cua anh/chi" (reply that: "don CUA ANH/CHI da duoc ghi nhan")
+    # va cac cum khang dinh don da tao/ghi nhan/chot ma cac marker cu bo sot -> server-truth se dinh
+    # chinh dung state. Rong-mot-chut an toan: fail toward server-truth (Directive 251 model khong
+    # override server state).
+    "đã được ghi nhận",
+    "đã được tạo",
+    "đã được chốt",
+    "đã lên đơn",
+    "đơn đã được lên",
 )
 
 
@@ -139,9 +148,12 @@ async def _llm_create(client, **kwargs):
 
 
 # M5 upgrade (Directive 214 §6.B + Q2 + Memo 213 §4-5): clarify-before-escalate. SERVER lam chu outcome
-# + dem luot; LLM chi DIEN DAT cau hoi. <=2 luot hoi lam ro/dia chi chua verify, giu bot ACTIVE; het luot
-# moi escalate. may_bind CHI tu server (auto_verified) — LLM khong the tu nang status/chon resolution.
-_ADDRESS_CLARIFY_MAX = 2
+# + dem luot; LLM chi DIEN DAT cau hoi. Giu bot ACTIVE trong khi hoi lam ro; het luot moi escalate.
+# may_bind CHI tu server (auto_verified) — LLM khong the tu nang status/chon resolution.
+# CA Directive 251 §3.C: toi da 3 luot hoi co muc tieu (clarification) truoc khi escalate = clarification_exhausted.
+_ADDRESS_CLARIFY_MAX = 3  # CA Directive 251 §3.C: toi da 3 luot clarify truoc khi clarification_exhausted.
+# Reason-code allowlist da chuyen sang order_intent.ESCALATION_REASONS (dung chung; CA 252-01 enforce o
+# tools.escalate_to_human + order_intent_flow.terminalize).
 
 
 def _proposal_fp(prov_prop, ward_prop) -> str:
@@ -231,31 +243,36 @@ async def _conversation_order_state(sender_id: str, conversation_id) -> dict:
         from app.db_pool import release as _rel
         _c = await _acq()
         try:
-            open_row = await _c.fetchrow(
+            # CA Review 254-01: LAY INTENT MOI NHAT (thu tu XAC DINH on dinh) roi dien giai state cua CHINH
+            # no — KHONG uu tien mot committed intent CU chi vi no ton tai. Tranh stale: cung conversation
+            # co committed cu + escalated moi -> phai tra 'escalated' (khong noi don da ghi nhan).
+            latest = await _c.fetchrow(
                 "SELECT oi.id, oi.state, oi.state_version, oi.summary_version, oi.summary_presented_at, "
+                "oi.committed_order_id, oi.terminal_reason, oi.error_code, "
                 "oi.draft_sku, oi.draft_quantity, oi.draft_customer_name, oi.draft_phone, oi.draft_address "
                 "FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
                 "WHERE c.psid=$1 AND oi.conversation_id IS NOT DISTINCT FROM $2 "
-                "AND oi.state IN ('COLLECTING','ADDRESS_CHECK','NEEDS_CLARIFICATION','READY_TO_COMMIT') "
-                "ORDER BY oi.updated_at DESC LIMIT 1", sender_id, conversation_id)
-            if open_row is not None:
-                sub = open_row["state"]
-                if sub == "READY_TO_COMMIT" and open_row["summary_presented_at"] is not None:
-                    # Re-tham chieu summary DA persist (khong tao moi) — bound theo intent+summary_version.
-                    summary = await _c.fetchval(
-                        "SELECT content FROM messages WHERE dedupe_key=$1",
-                        f"order_summary:{open_row['id']}:{open_row['summary_version']}")
-                    return {"state": "ready", "summary_text": summary}
-                missing = _svc.draft_invalid_fields(dict(open_row))  # server-derived: field thieu/sai
-                return {"state": "open", "sub": sub, "missing": missing,
-                        "address": open_row["draft_address"]}
-            committed = await _c.fetchval(
-                "SELECT committed_order_id FROM order_intents oi JOIN customers c ON c.id=oi.customer_id "
-                "WHERE c.psid=$1 AND oi.conversation_id IS NOT DISTINCT FROM $2 "
-                "AND oi.state='COMMITTED' AND oi.committed_order_id IS NOT NULL "
-                "ORDER BY oi.updated_at DESC LIMIT 1", sender_id, conversation_id)
-            if committed is not None:
-                return {"state": "committed", "order_id": committed}
+                "ORDER BY oi.updated_at DESC, oi.created_at DESC, oi.id DESC LIMIT 1",
+                sender_id, conversation_id)
+            if latest is None:
+                return {"state": "none"}
+            _st = latest["state"]
+            if _st == "COMMITTED":
+                return {"state": "committed", "order_id": latest["committed_order_id"]}
+            if _st == "READY_TO_COMMIT" and latest["summary_presented_at"] is not None:
+                summary = await _c.fetchval(
+                    "SELECT content FROM messages WHERE dedupe_key=$1",
+                    f"order_summary:{latest['id']}:{latest['summary_version']}")
+                return {"state": "ready", "summary_text": summary}
+            if _st in ("COLLECTING", "ADDRESS_CHECK", "NEEDS_CLARIFICATION", "READY_TO_COMMIT",
+                       "COMMITTING", "RETRYING"):
+                missing = _svc.draft_invalid_fields(dict(latest))  # server-derived: field thieu/sai
+                return {"state": "open", "sub": _st, "missing": missing, "address": latest["draft_address"]}
+            _tmap = {"ESCALATED": "escalated", "CANCELLED": "cancelled",
+                     "EXPIRED": "expired", "REJECTED": "rejected"}
+            if _st in _tmap:  # terminal non-committed -> guard phat message TRUNG THUC (khong claim ghi nhan)
+                return {"state": _tmap[_st], "reason": latest["terminal_reason"],
+                        "error_code": latest["error_code"]}
             return {"state": "none"}
         finally:
             await _rel(_c)
@@ -667,12 +684,13 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
                     clarify = await _address_clarify(sender_id, vr, prov_prop, ward_prop) if vr else None
                     if clarify is not None:
                         return clarify
+                    # CA 251 §3.C: chi escalate SAU khi het toi da 3 luot clarify -> reason code allowlist
+                    # 'clarification_exhausted'. escalate_to_human HOP NHAT lo bot_paused + durable notify
+                    # (intent-scoped qua terminalize) — CA 252-02, KHONG goi terminalize rieng (tranh double).
                     await tools.escalate_to_human(
-                        psid=sender_id, reason="Dia chi khong xac minh duoc sau 2 luot lam ro",
-                        last_message=last_message)
-                    await _oif.terminalize(customer_id=_cid,
-                                           conversation_id=command_ctx.get("conversation_id"),
-                                           to_state="ESCALATED", reason="address_unresolved")
+                        psid=sender_id, reason="dia chi chua xac minh sau 3 luot lam ro",
+                        reason_code="clarification_exhausted", last_message=last_message,
+                        channel=command_ctx.get("channel"))
                     await _address_clarify_reset(sender_id, prov_prop, ward_prop)
                     return {"address_unresolved_escalated": True,
                             "instruction": ("Da chuyen nhan vien ho tro xac minh dia chi. Bao khach doi "
@@ -686,7 +704,11 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
             result = await tools.create_order(psid=sender_id, command_ctx=command_ctx, **args)
             return result
         if name == "escalate_to_human":
-            return await tools.escalate_to_human(psid=sender_id, last_message=last_message, **args)
+            # CA 252-01: LLM-invoked handoff -> reason_code='business_policy_handoff' (path nghiep vu da dinh
+            # nghia); model KHONG the tu dat auto-reason ngoai allowlist. `reason` (free-text) lam context.
+            return await tools.escalate_to_human(
+                psid=sender_id, reason_code="business_policy_handoff", last_message=last_message,
+                channel=command_ctx.get("channel"), **args)
         return {"error": f"Tool khong ton tai: {name}"}
     except TypeError as e:
         # Model truyen sai/thieu tham so so voi schema
@@ -724,6 +746,8 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # CA 225-01: cancel/escalate transition INTENT that (durable), khong chi Redis/UX. Resolve
         # customer_id server-side de terminalize open intent hien tai (best-effort, khong vo reply).
         async def _terminalize_open_intent(to_state: str, reason: str) -> None:
+            # CA 252-01: KHONG coerce reason ESCALATED nua — terminalize() tu enforce allowlist (reason
+            # ngoai allowlist -> tu choi transition). Ham nay dung cho CANCELLED (customer_cancel) la chinh.
             try:
                 from app.db_pool import acquire as _acq
                 from app.db_pool import release as _rel
@@ -793,11 +817,15 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 print(f"[orchestrator] server confirm->commit skipped: {safe_exc(e)}")
 
         if handoff.wants_human(text):
-            await _terminalize_open_intent("ESCALATED", "customer_wants_human")
+            # CA 252-02: escalate_to_human HOP NHAT lo bot_paused + durable notify (intent-scoped neu co open
+            # intent, conversation-scoped neu khong) — KHONG mat notify du khong co don. KHONG goi terminalize
+            # rieng (tranh double notify).
             await tools.escalate_to_human(
                 psid=sender_id,
                 reason="Khach chu dong yeu cau gap nhan vien",
+                reason_code="customer_wants_human",
                 last_message=text,
+                channel=channel,
             )
             reply = (
                 "Dạ, em đã chuyển yêu cầu này cho nhân viên hỗ trợ rồi ạ, "
@@ -1226,6 +1254,26 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                     _need = (", ".join(_miss)) if _miss else "thông tin còn thiếu"
                     reply = (f"Dạ em đang ghi nhận đơn cho anh/chị. Anh/chị cho em xin thêm: {_need} "
                              f"để em lên đơn nhé ạ." + _NC)
+            elif _ostate == "escalated":
+                # CA 251 §3.B/§5.6: ESCALATED != committed. Noi dung TRUNG THUC: don CHUA chot, dang chuyen
+                # ho tro. KHONG noi "da ghi nhan". Neu ly do la dia chi (clarification_exhausted) -> moi khach
+                # bo sung tinh+phuong/xa.
+                _rsn = _st.get("reason") or ""
+                if _rsn == "clarification_exhausted" or _rsn.startswith("address"):
+                    reply = ("Dạ đơn của anh/chị em CHƯA chốt được vì địa chỉ chưa xác minh xong ạ. Em đã "
+                             "chuyển bộ phận hỗ trợ; anh/chị cho em xin đúng TỈNH + PHƯỜNG/XÃ để em xác minh "
+                             "và lên đơn giúp mình nhé ạ.")
+                else:
+                    reply = ("Dạ đơn của anh/chị CHƯA được chốt ạ. Em đang chuyển bộ phận hỗ trợ tiếp nhận "
+                             "giúp mình, anh/chị chờ em chút nhé ạ.")
+            elif _ostate == "cancelled":
+                reply = ("Dạ đơn của anh/chị đã được hủy ạ. Khi nào cần đặt lại anh/chị nhắn em nhé.")
+            elif _ostate == "expired":
+                reply = ("Dạ yêu cầu đặt đơn trước đó đã hết hạn nên chưa được chốt ạ. Anh/chị nhắn lại "
+                         "thông tin để em lên đơn mới giúp mình nhé.")
+            elif _ostate == "rejected":
+                reply = ("Dạ đơn của anh/chị chưa lên được do chưa đủ điều kiện xử lý ạ. Anh/chị cho em kiểm "
+                         "tra lại thông tin (sản phẩm, số lượng, địa chỉ) để em hỗ trợ tiếp nhé.")
             else:  # none — baseless claim. Dinh chinh trung thuc, KHONG escalate.
                 reply = ("Dạ hiện hệ thống chưa ghi nhận đơn nào cho anh/chị ạ. Anh/chị cho em xin lại "
                          "thông tin đơn (sản phẩm, số lượng, người nhận, SĐT, địa chỉ) để em lên đơn giúp nhé.")

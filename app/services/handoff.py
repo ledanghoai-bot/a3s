@@ -193,6 +193,45 @@ async def log_escalation(conversation_id: int, reason: str) -> None:
         await release(conn)
 
 
+def _mask_phone(phone) -> str:
+    """Mask SDT cho admin-notify (giu 3 so cuoi) — CA 251 §3.D PII bounded."""
+    s = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    return ("***" + s[-3:]) if len(s) >= 3 else (s or "***")
+
+
+async def enqueue_conversation_escalation_notify(conversation_id, *, channel, reason_code,
+                                                 reason_detail, last_message) -> None:
+    """CA Review 252-02: DURABLE admin-notify cho escalation KHONG-gan order-intent (conversation-scoped).
+    Dedupe theo conversation + reason_code (idempotent, khong duplicate). Payload has_intent=False, SDT
+    masked, bounded context. Enqueue vao outbox_events (worker dispatch nhu order.escalated.notify)."""
+    import uuid as _uuid
+
+    from app.services.command import repository as _repo
+    conn = await acquire()
+    try:
+        row = await conn.fetchrow(
+            "SELECT c.name, c.phone FROM conversations conv JOIN customers c ON c.id = conv.customer_id "
+            "WHERE conv.id = $1", conversation_id)
+        await _repo.insert_outbox(
+            conn, command_id=None, event_type="handoff.escalated.notify", event_version=1,
+            destination="telegram_admin",
+            dedupe_key=f"handoff_escalated:{conversation_id}:{reason_code}",
+            payload={
+                # CA 253-01.3: correlation_id (UUID) cho worker delivery_attempts (khong co command_id).
+                "correlation_id": str(_uuid.uuid4()),
+                "kind": "escalation", "has_intent": False, "reason_code": reason_code,
+                "reason_detail": (reason_detail or "")[:120], "channel": channel,
+                "conversation_id": conversation_id,
+                "customer_name": (row["name"] if row else None),
+                "phone_masked": _mask_phone(row["phone"] if row else None),
+                "last_message": (last_message or "")[:200],
+            }, max_attempts=8)
+    except Exception as e:  # noqa: BLE001 — notify loi khong duoc lam vo escalation
+        print(f"[handoff] enqueue conversation escalation notify skipped: {safe_exc(e)}")
+    finally:
+        await release(conn)
+
+
 async def list_paused_conversations() -> list[dict]:
     """Liet ke tat ca hoi thoai dang bot_paused=TRUE, kem ten/sdt khach, ma khach
     hang ngan (customer_id) va ly do escalate gan nhat - dung cho trang admin UI

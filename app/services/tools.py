@@ -358,56 +358,59 @@ async def create_order(
         await release(conn)
 
 
-async def escalate_to_human(psid: str, reason: str, last_message: str = "") -> dict:
-    """Chuyen hoi thoai cho nhan vien: danh dau bot_paused=TRUE tren conversation
-    hien tai cua khach de bot ngung tu dong tra loi, log ly do vao bang
-    escalations, va gui thong bao Telegram cho admin.
+async def escalate_to_human(psid: str, reason: str, reason_code: str = "business_policy_handoff",
+                            last_message: str = "", channel: str | None = None) -> dict:
+    """Escalation HOP NHAT (CA Directive 251 §3.C/§3.D + Review 252-01/02): bot_paused + log + DURABLE
+    admin-notify DUNG MOT LAN.
 
-    `last_message` KHONG nam trong tool schema expose cho LLM - orchestrator tu
-    bom vao (tin nhan hien tai cua khach) de admin co ngu canh ngay trong thong bao.
-    """
+    - CA 252-01: `reason_code` PHAI thuoc allowlist order_intent.ESCALATION_REASONS. Ngoai allowlist ->
+      TU CHOI hoan toan (KHONG pause/transition/notify). LLM-invoked mac dinh 'business_policy_handoff'.
+    - CA 252-02: notify khong bao gio mat: co open order-intent -> intent-scoped (terminalize enqueue in-tx,
+      dedupe intent+version); KHONG co intent -> conversation-scoped (dedupe conversation+reason_code).
+    `reason` = mo ta free-text (context/log); `reason_code` = ma phan loai (allowlist). `last_message`
+    KHONG trong tool schema — orchestrator bom vao lam bounded context."""
+    from app.services.command import order_intent as _oi
+    if reason_code not in _oi.ESCALATION_REASONS:
+        # CA 252-01: reason ngoai allowlist -> khong auto-escalate (khong pause/transition/notify).
+        print(f"[tools] escalate REFUSED: reason_code ngoai allowlist ('{reason_code}') — khong pause/notify.")
+        return {"escalated": False, "refused": "unknown_reason", "reason_code": reason_code}
     conn = await acquire()
     try:
         customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
         if customer is None:
             customer_id = await conn.fetchval(
-                "INSERT INTO customers (psid) VALUES ($1) RETURNING id", psid
-            )
+                "INSERT INTO customers (psid) VALUES ($1) RETURNING id", psid)
         else:
             customer_id = customer["id"]
-
         conversation = await conn.fetchrow(
-            "SELECT id FROM conversations WHERE customer_id = $1 "
-            "ORDER BY created_at DESC LIMIT 1",
-            customer_id,
-        )
+            "SELECT id FROM conversations WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 1", customer_id)
         if conversation is None:
             conversation_id = await conn.fetchval(
-                "INSERT INTO conversations (customer_id, bot_paused) "
-                "VALUES ($1, TRUE) RETURNING id",
-                customer_id,
-            )
+                "INSERT INTO conversations (customer_id, bot_paused) VALUES ($1, TRUE) RETURNING id", customer_id)
         else:
             conversation_id = conversation["id"]
-            await conn.execute(
-                "UPDATE conversations SET bot_paused = TRUE WHERE id = $1", conversation_id
-            )
+            await conn.execute("UPDATE conversations SET bot_paused = TRUE WHERE id = $1", conversation_id)
     finally:
         await release(conn)
 
-    # Log + notify ngoai transaction chinh - loi o day (vd Telegram down) khong
-    # duoc lam rollback viec danh dau bot_paused, vi do moi la phan quan trong nhat.
     try:
-        await handoff.log_escalation(conversation_id, reason)
+        await handoff.log_escalation(conversation_id, f"{reason_code}: {reason}"[:500])
     except Exception as e:
         print(f"[tools] Ghi log escalation that bai: {safe_exc(e)}")
-    await handoff.notify_admin(psid, reason, last_message)
 
+    # CA 252-02: DURABLE admin-notify DUNG MOT LAN. Uu tien intent-scoped (terminalize enqueue in-tx).
+    from app.services.command import order_intent_flow as _oif
+    intent_notified = await _oif.terminalize(
+        customer_id=customer_id, conversation_id=conversation_id, to_state="ESCALATED", reason=reason_code)
+    scope = "intent"
+    if not intent_notified:
+        scope = "conversation"  # khong co open order-intent -> conversation-scoped durable notify
+        await handoff.enqueue_conversation_escalation_notify(
+            conversation_id, channel=channel, reason_code=reason_code, reason_detail=reason,
+            last_message=last_message)
     return {
-        "escalated": True,
-        "conversation_id": conversation_id,
-        "reason": reason,
-        "note": "Da danh dau bot_paused=TRUE cho hoi thoai nay va bao admin.",
+        "escalated": True, "conversation_id": conversation_id, "reason_code": reason_code, "scope": scope,
+        "note": "bot_paused=TRUE + durable admin-notify (1 lan).",
     }
 
 

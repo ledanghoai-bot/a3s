@@ -24,6 +24,12 @@ from app.services.safe_log import safe_exc
 _FIELDS = ("sku", "quantity", "customer_name", "phone", "address")
 
 
+def _mask_phone(phone) -> str:
+    """Mask SDT cho admin-notify: giu 3 so cuoi (CA 251 §3.D: PII bounded, khong lo so day du)."""
+    s = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    return ("***" + s[-3:]) if len(s) >= 3 else (s or "***")
+
+
 def _summary_hash(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
@@ -339,6 +345,12 @@ async def terminalize(*, customer_id: int | None, conversation_id, to_state: str
     reply). DB-authoritative."""
     if customer_id is None or to_state not in ("CANCELLED", "ESCALATED", "EXPIRED"):
         return False
+    # CA 252-01: ESCALATED CHI voi reason code allowlist. Reason ngoai allowlist -> TU CHOI transition
+    # (khong coerce, khong mutate, khong notify) -> caller giu intent o state hien tai.
+    from app.services.command import order_intent as _oi
+    if to_state == "ESCALATED" and reason not in _oi.ESCALATION_REASONS:
+        print(f"[order_intent_flow] terminalize REFUSED: ESCALATED reason ngoai allowlist ('{reason}')")
+        return False
     conn = None
     try:
         conn = await acquire()
@@ -349,6 +361,32 @@ async def terminalize(*, customer_id: int | None, conversation_id, to_state: str
                 return False
             r = await svc.transition(conn, open_row["id"], expected_version=open_row["state_version"],
                                      to_state=to_state, terminal_reason=reason)
+            if r is not None and to_state == "ESCALATED":
+                # CA 251 §3.D: DURABLE admin-notify trong CUNG transaction voi transition ESCALATED.
+                # dedupe theo intent+version (idempotent, retry khong gui trung). Payload bounded, SDT
+                # masked; dia chi/ten cho staff channel (authorized). command_id=None (migration 062).
+                from app.services.command import repository as _repo
+                await _repo.insert_outbox(
+                    conn, command_id=None, event_type="order.escalated.notify", event_version=1,
+                    destination="telegram_admin",
+                    dedupe_key=f"order_escalated:{open_row['id']}:{r['state_version']}",
+                    payload={
+                        "kind": "escalation",
+                        "has_intent": True,
+                        # CA 253-01.3: worker ghi delivery_attempts.correlation_id (NOT NULL). Escalation
+                        # khong co command -> dung intent_id (UUID) lam correlation (stable qua retry).
+                        "correlation_id": str(open_row["id"]),
+                        "reason_code": reason or "unknown",
+                        "channel": open_row.get("channel"),
+                        "intent_id": str(open_row["id"]),
+                        "conversation_id": open_row.get("conversation_id"),
+                        "customer_name": open_row.get("draft_customer_name"),
+                        "phone_masked": _mask_phone(open_row.get("draft_phone")),
+                        "address": open_row.get("draft_address"),
+                        "sku": open_row.get("draft_sku"),
+                        "quantity": open_row.get("draft_quantity"),
+                    },
+                    max_attempts=8)
             return r is not None
     except Exception as e:  # noqa: BLE001
         print(f"[order_intent_flow] terminalize skipped: {safe_exc(e)}")

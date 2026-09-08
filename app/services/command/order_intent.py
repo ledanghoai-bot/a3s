@@ -22,6 +22,16 @@ OPEN_STATES = frozenset({"COLLECTING", "ADDRESS_CHECK", "NEEDS_CLARIFICATION", "
                          "COMMITTING", "RETRYING"})
 TERMINAL_STATES = frozenset({"COMMITTED", "REJECTED", "CANCELLED", "ESCALATED", "EXPIRED"})
 
+# CA Directive 251 §3.C: DANH SACH HUU HAN reason code duoc phep AUTO-escalate (ESCALATED). Reason NGOAI
+# allowlist -> KHONG transition/pause/notify (CA 252-01: khong coerce). business_policy_handoff chi hop le
+# khi caller CHU DONG truyen tu mot business-policy path da dinh nghia.
+ESCALATION_REASONS = frozenset({
+    "customer_wants_human",        # khach chu dong yeu cau nguoi
+    "clarification_exhausted",     # cung van de chua giai quyet sau toi da 3 luot hoi co muc tieu
+    "system_failure_after_retry",  # loi he thong that su sau mot retry an toan that bai
+    "business_policy_handoff",     # yeu cau ngoai pham vi nghiep vu da dinh nghia (caller chu dong)
+})
+
 # Transition hop le (Amendment 224 §4): (from -> {to,...}). Ngoai bang = fail-closed.
 ALLOWED_TRANSITIONS = {
     # CA 234-02.3: correction lam draft thieu/sai field NGOAI COLLECTING -> regression ve COLLECTING hop le
