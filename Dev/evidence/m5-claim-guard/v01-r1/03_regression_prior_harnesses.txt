@@ -1,0 +1,7 @@
+### regression (no-regression AC-6) ###
+extract: RESULT: ALL PASS
+dod: RESULT: ALL PASS
+234: RESULT: ALL PASS
+235: RESULT: ALL PASS
+236: RESULT: ALL PASS
+core: RESULT: ALL PASS

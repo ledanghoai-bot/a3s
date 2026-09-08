@@ -1,0 +1,40 @@
+[orchestrator] claim_guard (server-state-aware): cid:f257edcc2e0b state=open sub=COLLECTING reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=1246 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-1 COLLECTING claim -> giữ state, no escalate, reply HỎI ĐÚNG field thiếu (SĐT, server-derived) :: state=COLLECTING reply=Dạ em đang ghi nhận đơn cho anh/chị. Anh/chị cho em xin thêm: số điện 
+[orchestrator] server-extract READY -> summary armed cid:f257edcc2e0b
+  [PASS] DoD-1 cùng intent tiếp tục -> READY :: READY_TO_COMMIT
+[orchestrator] claim_guard (server-state-aware): cid:1986da277752 state=open sub=ADDRESS_CHECK reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=54 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-2 ADDRESS_CHECK claim -> draft giữ, no escalate, reply tham chiếu ĐÚNG địa chỉ đang kiểm tra :: state=ADDRESS_CHECK reply=Dạ em đang kiểm tra địa chỉ giao '999 Distinctive Rd ZZZ2' của anh/chị
+[orchestrator] claim_guard (server-state-aware): cid:43b32447f103 state=open sub=NEEDS_CLARIFICATION reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=50 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-3 NEEDS_CLARIFICATION claim -> giữ nguyên, no escalate, reply phát lại địa chỉ cần làm rõ :: state=NEEDS_CLARIFICATION reply=Dạ địa chỉ '888 Clarify Ave QQQ3' em chưa xác minh được phường/xã. Anh
+[orchestrator] server-extract READY -> summary armed cid:180d75ece246
+  [PASS] DoD-4 setup READY
+[orchestrator] claim_guard (server-state-aware): cid:180d75ece246 state=ready sub=None reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=73 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-4 READY claim -> phát LẠI summary đã lưu (chứa SP 'Cà phê hũ') + mời xác nhận, KHÔNG commit/escalate :: orders=0 state=READY_TO_COMMIT reply=Dạ em xác nhận lại đơn của anh/chị:
+- Sản phẩm: Cà phê hũ — 
+[cmd] {"event": "order.create.succeeded", "command_id": "33a7fced-2848-422c-b1f1-2e8251363424", "correlation_id": "3346897a-b8dc-429e-8d13-547ccb4b19ad", "causation_id": null, "channel": "telegram_customer", "resource_id": 424}
+[orchestrator] server confirm->commit order_committed cid:180d75ece246
+  [PASS] DoD-5 setup COMMITTED
+[orchestrator] claim_guard (server-state-aware): cid:180d75ece246 state=committed sub=None reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=47 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-5 post-COMMITTED claim -> neutral, no escalate, no extra order :: orders=1 esc=0
+[orchestrator] claim_guard (server-state-aware): cid:970de4172599 state=none sub=None reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=60 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-6 baseless claim -> correction, no order/intent/escalation :: intents=0 esc=0
+[orchestrator] claim_guard (server-state-aware): cid:970de4172599 state=none sub=None reply_len=65
+[latency] event=chat channel=telegram_customer route=reply ms_total=37 ms_llm=0 ms_tool=0 iters=1 tok_in=1 tok_out=1 finish=stop think_off=True
+  [PASS] DoD-7 baseless claim lần 2 -> vẫn KHÔNG admin notify (structured log để quan sát) :: esc=0
+  [PASS] DoD-8 wants_human -> escalate ĐÚNG 1 lần :: esc=1
+[orchestrator] server-extract READY -> summary armed cid:964035a2b055
+  [PASS] DoD-9a cancel -> CANCELLED :: CANCELLED
+[orchestrator] server-extract READY -> summary armed cid:964035a2b055
+[cmd] {"event": "order.create.succeeded", "command_id": "aa02575e-8bb5-4265-b4a6-e2c14446f945", "correlation_id": "d9b09bef-ff38-49dc-a21c-c2e8d882f02e", "causation_id": null, "channel": "telegram_customer", "resource_id": 425}
+[orchestrator] server confirm->commit order_committed cid:964035a2b055
+  [PASS] DoD-9b valid confirm -> commit ĐÚNG 1 order :: 1
+  [PASS] DoD-10 nhánh order-claim guard KHÔNG gọi escalate_to_human/terminalize
+  [PASS] 239-01 cross-conv: mỗi conversation trả ĐÚNG payload của nó (không lấy nhầm) :: A=111 Alpha AAA B=222 Beta BBB
+
+RESULT: ALL PASS

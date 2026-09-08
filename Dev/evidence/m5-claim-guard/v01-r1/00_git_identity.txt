@@ -1,0 +1,7 @@
+directive: CA 238 + Review 239 (blocker 239-01)
+base/merge-base (deployed): 778002d7b135e74d67dae49e47452f84e96aa415
+candidate head (=tip): 60a49c6c98dbd22db6ea1aa0bbdc8d29f421cc39
+candidate tree: 7b00317f186d13186a7de5092fc49ac5f3882064
+branch: feat/m5-claim-guard-server-state
+delta vs deployed: 3 files (orchestrator.py, system_prompt.md, m5_claim_guard_dod_harness.py); NO migration change (AC-6)
+generated: 2026-09-07T23:56:24Z
