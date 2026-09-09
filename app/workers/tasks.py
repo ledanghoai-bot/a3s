@@ -21,24 +21,28 @@ DEDUP_TTL_SECONDS = 24 * 60 * 60  # 24h - du lon hon cua so retry cua Meta
 DEAD_LETTER_KEY = "dead_letter:messages"
 
 
-async def process_message(ctx: dict, event: dict) -> None:
+async def process_message(ctx: dict, event: dict, source: str = "messaging") -> None:
     """Wrapper ben ngoai: dedupe + bat exception de ghi dead-letter o lan thu
     cuoi cung truoc khi de arq bao that bai that su (van raise lai, KHONG nuot
-    loi - arq can biet job that bai de tinh dung so lan retry/metric)."""
+    loi - arq can biet job that bai de tinh dung so lan retry/metric).
+
+    CA Directive 264: `source` (server-derived tu container webhook: 'messaging' | 'standby') — cung mot
+    canonical path, dedupe theo `mid` XUYEN CA HAI nguon (effective-once §3.4). Default 'messaging' de tuong
+    thich nguoc (job cu enqueue truoc khi deploy khong co arg source)."""
     message = event.get("message") or {}
     mid = message.get("mid")
     if mid:
         redis = ctx["redis"]
         # SET ... NX EX: chi thanh cong (tra ve True) neu KEY CHUA TUNG TON TAI -
-        # tuc la lan dau gap mid nay. Meta gui trung se bi chan ngay o day,
-        # tranh tao 2 cau tra loi cho cung 1 tin nhan khach.
+        # tuc la lan dau gap mid nay. Meta gui trung (hoac cung mid xuat hien o CA messaging LAN standby)
+        # se bi chan ngay o day, tranh tao 2 cau tra loi cho cung 1 tin nhan khach (§3.4).
         is_first_time = await redis.set(f"dedup:mid:{mid}", "1", nx=True, ex=DEDUP_TTL_SECONDS)
         if not is_first_time:
-            print(f"[worker] Bo qua tin nhan trung (mid={mid} da xu ly truoc do).")
+            print(f"[worker] Bo qua tin nhan trung (source={source}, mid deduped).", flush=True)
             return
 
     try:
-        await _process_message_inner(event)
+        await _process_message_inner(event, source)
     except Exception:
         job_try = ctx.get("job_try", 1)
         max_tries = ctx.get("max_tries", 3)
@@ -59,7 +63,7 @@ async def process_message(ctx: dict, event: dict) -> None:
         raise
 
 
-async def _process_message_inner(event: dict) -> None:
+async def _process_message_inner(event: dict, source: str = "messaging") -> None:
     message = event.get("message") or {}
     text = message.get("text")
     if not text:
@@ -100,15 +104,19 @@ async def _process_message_inner(event: dict) -> None:
     # len nhan vien. NHUNG van ghi log tin khach de khong mat doan hoi thoai
     # trong dashboard (issue #8 - nang cap hien thi day du luc handover).
     if await is_bot_paused(sender_id):
+        # CA 264 §3.3: paused (nhan vien tiep quan) -> KHONG take thread control, KHONG orchestrator, KHONG
+        # bot reply; chi log de giu lien tuc hoi thoai. Ap dung cho CA messaging LAN standby.
         conversation_id = await conversation_log.ensure_conversation(sender_id)
         await conversation_log.log_message(conversation_id, "customer", text)
-        print(f"[worker] Bot dang paused cho {sender_id}, chi log, khong tra loi (nhan vien dang xu ly).")
+        print(f"[worker] paused -> ignored (source={source}), chi log, khong tra loi (nhan vien dang xu ly).",
+              flush=True)
         return
 
     # Handover Protocol: giu quyen so huu thread truoc Page Inbox mac dinh cua Meta, de bot nhan
     # duoc MOI tin trong hoi thoai (khong bi Page Inbox gianh sau tin dau -> "1 tin roi chan").
-    # Best-effort: KHONG lam vo luong tra loi neu handover loi. Chi khi bot se tu tra loi (khong
-    # paused) -> luc paused (nhan vien tiep quan) da return o tren, khong gianh control.
+    # CA 264 §3.3: voi source='standby' (app la secondary receiver) buoc PHAI take control moi tra loi duoc;
+    # voi 'messaging' la giu control. Cung mot loi goi best-effort: KHONG lam vo luong tra loi neu handover
+    # loi (khong crash/khong mat job). Da qua guard paused o tren nen khong cuop thread cua nhan vien.
     await try_take_thread_control(sender_id)
 
     # CR-04: truyền provider message id (Messenger mid) thật vào command idempotency/causation.

@@ -47,6 +47,20 @@ def _valid_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature.removeprefix("sha256="))
 
 
+# CA Directive 264 §3.1: cac container su kien inbound co the chua tin nhan. `messaging` = app la primary
+# receiver; `standby` = app la SECONDARY receiver (Page Inbox/Business Suite dang giu thread) — tin van co
+# noi dung, worker se try_take_thread_control roi xu ly (khi khong paused). Source marker SERVER-DERIVED tu
+# ten container, KHONG tin field tuy y trong payload.
+_INBOUND_CONTAINERS = ("messaging", "standby")
+
+
+def _has_message(event: object) -> bool:
+    """Chi enqueue su kien co object `message` (tin that hoac echo). delivery/read/handover metadata KHONG
+    co `message` -> khong bien thanh customer message (CA 264 §3.1). Echo van enqueue: worker phan biet
+    is_echo va KHONG coi la customer message."""
+    return isinstance(event, dict) and isinstance(event.get("message"), dict)
+
+
 @router.post("/webhook")
 async def receive(request: Request) -> dict:
     payload = await request.body()
@@ -54,9 +68,29 @@ async def receive(request: Request) -> dict:
     if not _valid_signature(payload, signature):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    data = json.loads(payload)
+    try:
+        data = json.loads(payload)
+    except (ValueError, TypeError):
+        # CA 264 §3.1: malformed payload KHONG lam endpoint crash, KHONG log noi dung nhay cam.
+        print("[webhook] payload khong phai JSON hop le — bo qua", flush=True)
+        return {"status": "ignored", "reason": "malformed_json"}
+
     redis = await _get_redis()
-    for entry in data.get("entry", []):
-        for event in entry.get("messaging", []):
-            await redis.enqueue_job("process_message", event)
+    counts = {"messaging": 0, "standby": 0}
+    enqueued = 0
+    n_entry = 0
+    for entry in (data.get("entry") or []):
+        n_entry += 1
+        for source in _INBOUND_CONTAINERS:
+            events = entry.get(source) or []
+            counts[source] += len(events)
+            for event in events:
+                if _has_message(event):
+                    # Source truyen tuong minh -> worker biet day la standby de handover dung cach.
+                    await redis.enqueue_job("process_message", event, source)
+                    enqueued += 1
+    # CA 264 §3.2: structured metadata-only log (KHONG text/psid/token/signature/raw payload). flush=True de
+    # doc duoc du api chay --no-access-log.
+    print(f"[webhook] entries={n_entry} messaging={counts['messaging']} standby={counts['standby']} "
+          f"enqueued={enqueued} ignored={counts['messaging'] + counts['standby'] - enqueued}", flush=True)
     return {"status": "received"}
