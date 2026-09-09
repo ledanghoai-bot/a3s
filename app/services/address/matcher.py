@@ -19,8 +19,15 @@ import re
 from app.services.address.acceptance_gate import normalize
 
 # base score theo kind match
-_KIND_SCORE = {"canonical": 1.00, "accentless": 0.97, "legacy": 0.90, "abbrev": 0.85, "other": 0.80}
+# CA Amendment 260: 'orthographic_kc_v1' = augment bien the chinh ta k/c (KHONG phai accentless). Score o
+# AUTO-VERIFY tier (>=0.95) NHUNG < current canonical (1.00) -> auto khi DUY NHAT, method='current' (khong
+# phai legacy). Nhan rieng de audit phan biet canonical/accentless/orthographic_kc.
+_KIND_SCORE = {"canonical": 1.00, "accentless": 0.97, "orthographic_kc_v1": 0.96,
+               "legacy": 0.90, "abbrev": 0.85, "other": 0.80}
 _LEGACY_KINDS = {"legacy", "abbrev", "other"}
+# Augment kinds: auto-verify khi duy nhat, NHUNG YIELD cho current canonical/accentless khi collision cung
+# scope (§3.2 — canonical luon thang augment).
+_AUGMENT_KINDS = {"orthographic_kc_v1"}
 _LEVEL_ORDER = ("province", "district", "ward")
 
 # --- M5 upgrade (Directive 214 §6.A + Memo 213 §4): khop nhan-biet TIEN TO hanh chinh + VIET TAT ---
@@ -176,11 +183,22 @@ def resolve(units, aliases, *, province, district, ward, as_of=None) -> dict:
                 rules.append(f"current_over_legacy:{level}")
                 m = current
             else:
-                rules.append(f"one_to_many:{level}")
-                prev_codes = {c for c, _ in m}
-                # one-to-many that (>=2 hien hanh, hoac chi toan legacy) -> staff/clarify
-                return _fail("needs_staff_review", rules, candidates, chosen)
+                # CA Amendment 260 §3.2: neu tie co ca true-canonical (canonical/accentless) VA augment k/c
+                # -> canonical THANG (augment KHONG lan at). Chi con >=2 true-current (ambiguity that giua
+                # current candidates) hoac >=2 augment intra-ambiguous -> staff/clarify.
+                true_current = [(c, k) for c, k in current if k not in _AUGMENT_KINDS]
+                if len(true_current) == 1:
+                    rules.append(f"current_over_variant:{level}")
+                    m = true_current
+                else:
+                    rules.append(f"one_to_many:{level}")
+                    prev_codes = {c for c, _ in m}
+                    # one-to-many that (>=2 hien hanh, hoac chi toan legacy/augment) -> staff/clarify
+                    return _fail("needs_staff_review", rules, candidates, chosen)
         code, kind = m[0]
+        if kind in _AUGMENT_KINDS:
+            # CA Amendment 260 §3.3: audit attribution — ghi ro da ap augment k/c (phan biet canonical/accentless).
+            rules.append(f"orthographic_kc:{level}")
         chosen[level] = code
         scores.append(_KIND_SCORE[kind])
         kinds.append(kind)

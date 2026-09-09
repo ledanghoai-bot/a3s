@@ -58,6 +58,11 @@ async def resolve(
         dsv)]
     aliases = [dict(r) for r in await conn.fetch(
         "SELECT unit_code,alias_name,alias_kind FROM admin_unit_alias WHERE dataset_version=$1", dsv)]
+    # CA Amendment 259 (Option 3): hop nhat OPERATIONAL alias augmentation store — CHI cua dung dataset_version
+    # dang dung (dsv = active_version cho luong binh thuong; version cu tu het hieu luc, KHONG cross-version).
+    # Doc-only (runtime role SELECT). Matcher xu ly nhu alias thuong -> current-over-legacy/ambiguity giu nguyen.
+    aliases += [dict(r) for r in await conn.fetch(
+        "SELECT unit_code,alias_name,alias_kind FROM admin_unit_alias_augment WHERE dataset_version=$1", dsv)]
 
     res = matcher.resolve(units, aliases, province=province, district=district, ward=ward, as_of=as_of)
 
