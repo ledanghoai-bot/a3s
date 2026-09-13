@@ -19,6 +19,19 @@ MAX_ATTEMPTS = 8
 _CUSTOMER_DEST = {"telegram_customer", "messenger"}
 
 
+def handover_text(order_id: int, *, carrier: str | None, tracking_text: str | None,
+                  eta_text: str | None) -> str:
+    """Template bàn giao (thuần) — worker re-render lúc dispatch để carrier/tracking KHÔNG stale (CA 268-01)."""
+    bits = []
+    if carrier:
+        bits.append(f"đơn vị {carrier}")
+    if tracking_text:
+        bits.append(f"mã {tracking_text}")
+    extra = (" (" + ", ".join(bits) + ")") if bits else ""
+    eta = f" Dự kiến: {eta_text}." if eta_text else ""
+    return f"Dạ đơn #{order_id} của anh/chị đang được giao{extra}.{eta}"
+
+
 async def _customer(conn, order_id: int):
     """Tra (destination_channel, psid) neu order co kenh khach bot; None neu khong (skip notify)."""
     row = await conn.fetchrow(
@@ -51,18 +64,11 @@ async def notify_shipment(conn, order_id: int, *, to_status: str, sh: dict, vers
     sc = {"kind": "shipment", "order_id": order_id, "to_status": to_status, "version": version}
     ident = f"{order_id}:{version}"
     if to_status == "in_transit":
-        extra = ""
-        bits = []
-        if sh.get("carrier"):
-            bits.append(f"đơn vị {sh['carrier']}")
-        if sh.get("tracking_text"):
-            bits.append(f"mã {sh['tracking_text']}")
-        if bits:
-            extra = " (" + ", ".join(bits) + ")"
-        eta = f" Dự kiến: {sh['eta_text']}." if sh.get("eta_text") else ""
         await _enqueue(conn, order_id, event_type="shipment.handover.notify",
                        dedupe_key=f"shipment_handover:{ident}",
-                       text=f"Dạ đơn #{order_id} của anh/chị đang được giao{extra}.{eta}", stale_check=sc)
+                       text=handover_text(order_id, carrier=sh.get("carrier"),
+                                          tracking_text=sh.get("tracking_text"), eta_text=sh.get("eta_text")),
+                       stale_check=sc)
     elif to_status == "delivered":
         await _enqueue(conn, order_id, event_type="shipment.delivered.notify",
                        dedupe_key=f"shipment_delivered:{ident}",

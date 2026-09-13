@@ -209,15 +209,16 @@ async def main():
         sc = (_json.loads(pl) if isinstance(pl, str) else pl).get("stale_check")
         ck("G8 payload mang stale_check{kind,version,to_status}", sc and sc["kind"] == "shipment"
            and sc["version"] is not None and sc["to_status"] == "delivered", sc)
-        # stale-check: version cu -> stale ; version hien tai + dung status -> gui
+        # stale-check (CA 268-01): theo SEMANTIC STATUS — status khac status notify mo ta -> stale ; trung -> gui
         from app.services.command import outbox_worker as ow
-        cur_ver = await conn.fetchval("SELECT version FROM shipments WHERE order_id=$1", oid_prov)
-        is_stale_old = await ow._is_stale(conn, {"kind": "shipment", "order_id": oid_prov, "version": cur_ver - 3,
-                                                 "to_status": "in_transit"})
-        is_stale_cur = await ow._is_stale(conn, {"kind": "shipment", "order_id": oid_prov, "version": cur_ver,
-                                                 "to_status": "delivered"})
-        ck("G8 stale-check: version cu -> stale(bo qua), version hien tai -> gui",
-           is_stale_old is True and is_stale_cur is False, f"old={is_stale_old} cur={is_stale_cur}")
+        # oid_prov hien la 'delivered'
+        is_stale_mismatch = await ow._is_stale(conn, {"kind": "shipment", "order_id": oid_prov,
+                                                      "to_status": "in_transit"})
+        is_stale_match = await ow._is_stale(conn, {"kind": "shipment", "order_id": oid_prov,
+                                                   "to_status": "delivered"})
+        ck("G8 stale-check theo status: status khac -> stale(bo qua), status trung -> gui",
+           is_stale_mismatch is True and is_stale_match is False,
+           f"mismatch={is_stale_mismatch} match={is_stale_match}")
 
         # G9: version CAS
         oid_c = await _mk_order(conn, ward="99999", weight=300, qty=2, total=200000)

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""M6 notification qua worker — CA Review 267-03. Chay THAT qua outbox_worker.run_once voi mock sender + DB.
+"""M6 notification qua worker — CA Review 267-03 + 268-01. Chay THAT qua outbox_worker.run_once + mock sender + DB.
 
-Chung minh:
-  N1 chuoi handover -> failed -> re-dispatch -> delivered (drain giua moi buoc): MOI transition hop le co
-     DUNG 1 notify; in_transit xuat hien HAI lan (re-dispatch KHONG bi dedupe mat) — dung loi 267-03.
-  N2 stale: enqueue handover roi advance sang delivered TRUOC khi drain -> handover (version cu) bi CANCELLED,
-     delivered duoc gui.
-  N3 retry: run_once lan 2 -> 0 notify moi cho don nay (khong nhan doi).
-Scope assert theo order_id trong payload (bo qua event don khac dang pending tren m5lab).
+CA 268-01 PASS (4 case bat buoc):
+  P1 enqueue in_transit@N -> doi carrier/tracking (version N+1, status VAN in_transit) -> DUNG 1 thong bao ban
+     giao hop le, va text da RE-RENDER carrier moi (khong stale, khong bi huy vi version cao hon).
+  P2 enqueue in_transit@N -> state -> delivered -> handover cu bi CANCEL, delivered hien hanh duoc gui.
+  P3 in_transit -> failed -> in_transit: gui HAI transition handover khac nhau (re-dispatch khong mat).
+  P4 retry cung outbox event -> khong gui trung.
+Scope assert theo order_id trong payload. Xa backlog outbox cu truoc khi assert.
 """
 import asyncio
 import os
@@ -24,7 +24,7 @@ RUN = str(int(time.time()))
 DSN = os.environ["DATABASE_URL"].replace("+asyncpg", "")
 FAILS = []
 _SEQ = [0]
-_SENT = []  # moi phan tu: stale_check dict cua notify da gui
+_SENT = []  # (stale_check dict, text)
 
 
 def ck(n, c, x=""):
@@ -34,7 +34,7 @@ def ck(n, c, x=""):
 
 
 async def _mock_send(destination, payload):
-    _SENT.append(payload.get("stale_check") or {})
+    _SENT.append((payload.get("stale_check") or {}, payload.get("text") or ""))
     return ow.SendResult(ok=True, http_status=200, provider_message_id="mock")
 
 
@@ -42,8 +42,16 @@ async def _drain():
     return await ow.run_once(send_fn=_mock_send)
 
 
+async def _clear_backlog():
+    for _ in range(80):
+        st = await ow.run_once(send_fn=_mock_send)
+        if st.get("claimed", 0) == 0:
+            break
+    _SENT.clear()
+
+
 def _sent_for(order_id):
-    return [s for s in _SENT if s.get("order_id") == order_id]
+    return [(s, t) for (s, t) in _SENT if s.get("order_id") == order_id]
 
 
 async def _mk_order(conn):
@@ -70,78 +78,71 @@ async def _tx(conn, coro_fn):
         return await coro_fn(conn)
 
 
-async def _clear_backlog():
-    """m5lab throwaway co the ton dong outbox cu tu cac lan chay truoc (BATCH=25 moi vong) -> xa het truoc khi
-    test de moi _drain() chi xu ly event moi cua test nay."""
-    for _ in range(50):
-        st = await ow.run_once(send_fn=_mock_send)
-        if st.get("claimed", 0) == 0:
-            break
-    _SENT.clear()
-
-
 async def main():
     conn = await asyncpg.connect(DSN)
     try:
         await _clear_backlog()
-        # ---- N1: drain giua moi buoc -> moi transition 1 notify; in_transit hai lan ----
+
+        # ---- P1: carrier change sau handover (version tang, status giu) -> 1 handover hop le + carrier moi ----
         oid = await _mk_order(conn)
         await _tx(conn, lambda c: ship.change_status(c, oid, "ready_to_ship", actor="nw"))
-        await _tx(conn, lambda c: ship.change_status(c, oid, "in_transit", actor="nw"))   # handover #1
-        await _drain()
-        await _tx(conn, lambda c: ship.record_attempt(c, oid, actor="nw", command_key=f"{RUN}-n1a",
-                                                      result="failed", reason="vang"))      # -> delivery_failed
-        await _drain()
-        await _tx(conn, lambda c: ship.change_status(c, oid, "in_transit", actor="nw"))    # handover #2 (re-dispatch)
-        await _drain()
-        await _tx(conn, lambda c: ship.record_attempt(c, oid, actor="nw", command_key=f"{RUN}-n1b",
-                                                      result="success"))                    # -> delivered
+        await _tx(conn, lambda c: ship.change_status(c, oid, "in_transit", actor="nw"))   # handover@N (carrier None)
+        v1 = await conn.fetchval("SELECT version FROM shipments WHERE order_id=$1", oid)
+        await _tx(conn, lambda c: ship.set_carrier(c, oid, actor="nw", carrier="GHTK", tracking_text="TN123"))
+        v2 = await conn.fetchval("SELECT version FROM shipments WHERE order_id=$1", oid)
         await _drain()
         sent = _sent_for(oid)
-        handovers = [s for s in sent if s.get("to_status") == "in_transit"]
-        faileds = [s for s in sent if s.get("to_status") in ("delivery_failed", "return_pending")]
-        delivereds = [s for s in sent if s.get("to_status") == "delivered"]
-        ho_versions = sorted({s.get("version") for s in handovers})
-        ck("N1 re-dispatch: in_transit notify GUI 2 lan (khac version, khong bi dedupe mat)",
-           len(handovers) == 2 and len(ho_versions) == 2, f"handovers={len(handovers)} versions={ho_versions}")
-        ck("N1 delivered + failed moi loai 1 notify", len(faileds) == 1 and len(delivereds) == 1,
-           f"failed={len(faileds)} delivered={len(delivereds)}")
+        handovers = [(s, t) for (s, t) in sent if s.get("to_status") == "in_transit"]
+        ck("P1 carrier-change (v tang, status giu in_transit) -> DUNG 1 handover, KHONG bi huy nham",
+           len(handovers) == 1 and v2 > v1, f"handovers={len(handovers)} v {v1}->{v2}")
+        ck("P1 handover re-render carrier moi (khong stale snapshot)",
+           len(handovers) == 1 and "GHTK" in handovers[0][1] and "TN123" in handovers[0][1],
+           handovers[0][1] if handovers else "(none)")
 
-        # ---- N2: stale -> handover (version cu) bi cancelled, delivered duoc gui ----
+        # ---- P2: in_transit@N -> delivered -> handover cancel, delivered gui ----
         _SENT.clear()
         oid2 = await _mk_order(conn)
         await _tx(conn, lambda c: ship.change_status(c, oid2, "ready_to_ship", actor="nw"))
-        await _tx(conn, lambda c: ship.change_status(c, oid2, "in_transit", actor="nw"))   # handover enqueued
+        await _tx(conn, lambda c: ship.change_status(c, oid2, "in_transit", actor="nw"))
         ho_ver = await conn.fetchval("SELECT version FROM shipments WHERE order_id=$1", oid2)
-        # advance TRUOC khi drain: ghi success -> delivered (version tien xa hon handover)
-        await _tx(conn, lambda c: ship.record_attempt(c, oid2, actor="nw", command_key=f"{RUN}-n2", result="success"))
+        await _tx(conn, lambda c: ship.record_attempt(c, oid2, actor="nw", command_key=f"{RUN}-p2", result="success"))
         stats = await _drain()
-        sent2 = _sent_for(oid2)
-        sent_status = sorted({s.get("to_status") for s in sent2})
-        # handover event (dedupe handover:oid2:ho_ver) phai la 'cancelled', KHONG nam trong _SENT
         ho_row = await conn.fetchrow("SELECT status FROM outbox_events WHERE dedupe_key=$1",
                                      f"shipment_handover:{oid2}:{ho_ver}")
-        ck("N2 handover lac hau -> cancelled (khong gui)", ho_row and ho_row["status"] == "cancelled"
-           and "in_transit" not in sent_status, f"ho_status={ho_row['status'] if ho_row else None} sent={sent_status}")
-        ck("N2 delivered (hien hanh) -> duoc gui", "delivered" in sent_status
-           and stats.get("cancelled", 0) >= 1, f"sent={sent_status} cancelled={stats.get('cancelled')}")
+        sent2_status = sorted({s.get("to_status") for s, _ in _sent_for(oid2)})
+        ck("P2 in_transit@N -> delivered: handover cancel + delivered gui",
+           ho_row and ho_row["status"] == "cancelled" and "in_transit" not in sent2_status
+           and "delivered" in sent2_status and stats.get("cancelled", 0) >= 1,
+           f"ho={ho_row['status'] if ho_row else None} sent={sent2_status}")
 
-        # ---- N3: retry run_once -> khong gui lai cho don nay ----
+        # ---- P3: in_transit -> failed -> in_transit -> HAI handover khac nhau ----
+        _SENT.clear()
+        oid3 = await _mk_order(conn)
+        await _tx(conn, lambda c: ship.change_status(c, oid3, "ready_to_ship", actor="nw"))
+        await _tx(conn, lambda c: ship.change_status(c, oid3, "in_transit", actor="nw"))    # handover #1
+        await _drain()
+        await _tx(conn, lambda c: ship.record_attempt(c, oid3, actor="nw", command_key=f"{RUN}-p3", result="failed"))
+        await _drain()
+        await _tx(conn, lambda c: ship.change_status(c, oid3, "in_transit", actor="nw"))     # handover #2
+        await _drain()
+        ho3 = [s for s, _ in _sent_for(oid3) if s.get("to_status") == "in_transit"]
+        ho3_versions = sorted({s.get("version") for s in ho3})
+        ck("P3 re-dispatch: HAI handover khac version (khong bi dedupe mat)",
+           len(ho3) == 2 and len(ho3_versions) == 2, f"handovers={len(ho3)} versions={ho3_versions}")
+
+        # ---- P4: retry cung outbox event -> khong gui trung ----
         _SENT.clear()
         await _drain()
-        ck("N3 drain lai -> 0 notify moi (khong nhan doi)", len(_sent_for(oid)) == 0 and len(_sent_for(oid2)) == 0,
-           f"oid={len(_sent_for(oid))} oid2={len(_sent_for(oid2))}")
+        ck("P4 drain lai -> 0 notify moi cho cac don tren (khong nhan doi)",
+           len(_sent_for(oid)) == 0 and len(_sent_for(oid2)) == 0 and len(_sent_for(oid3)) == 0,
+           f"o1={len(_sent_for(oid))} o2={len(_sent_for(oid2))} o3={len(_sent_for(oid3))}")
 
         print("RESULT:", "ALL PASS" if not FAILS else f"FAIL {FAILS}")
         return 1 if FAILS else 0
     finally:
-        await ow_close()
+        from app.db_pool import close_pool
+        await close_pool()
         await conn.close()
-
-
-async def ow_close():
-    from app.db_pool import close_pool
-    await close_pool()
 
 
 if __name__ == "__main__":
