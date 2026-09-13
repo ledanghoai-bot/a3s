@@ -44,9 +44,12 @@ async def _enqueue(conn, order_id: int, *, event_type: str, dedupe_key: str, tex
 
 
 async def notify_shipment(conn, order_id: int, *, to_status: str, sh: dict, version: int | None = None) -> None:
-    """Thong bao khach khi shipment doi trang thai (handover/delivered/failed). dedupe theo (order, status).
-    CA 266-06: bind (to_status, version) -> stale_check shipment."""
+    """Thong bao khach khi shipment doi trang thai (handover/delivered/failed).
+    CA 267-03: dedupe theo TRANSITION IDENTITY (order + version) -> chuoi in_transit->failed->in_transit KHONG bi
+    dedupe mat (moi transition 1 event); retry cung transition (cung version) van 1 event. stale_check bind
+    (to_status, version) de worker huy notify lac hau."""
     sc = {"kind": "shipment", "order_id": order_id, "to_status": to_status, "version": version}
+    ident = f"{order_id}:{version}"
     if to_status == "in_transit":
         extra = ""
         bits = []
@@ -58,16 +61,16 @@ async def notify_shipment(conn, order_id: int, *, to_status: str, sh: dict, vers
             extra = " (" + ", ".join(bits) + ")"
         eta = f" Dự kiến: {sh['eta_text']}." if sh.get("eta_text") else ""
         await _enqueue(conn, order_id, event_type="shipment.handover.notify",
-                       dedupe_key=f"shipment_handover:{order_id}",
+                       dedupe_key=f"shipment_handover:{ident}",
                        text=f"Dạ đơn #{order_id} của anh/chị đang được giao{extra}.{eta}", stale_check=sc)
     elif to_status == "delivered":
         await _enqueue(conn, order_id, event_type="shipment.delivered.notify",
-                       dedupe_key=f"shipment_delivered:{order_id}",
+                       dedupe_key=f"shipment_delivered:{ident}",
                        text=f"Dạ đơn #{order_id} đã giao thành công. Cảm ơn anh/chị đã tin dùng 3S Coffee ạ!",
                        stale_check=sc)
     elif to_status in ("delivery_failed", "return_pending"):
         await _enqueue(conn, order_id, event_type="shipment.failed.notify",
-                       dedupe_key=f"shipment_failed:{order_id}:{to_status}",
+                       dedupe_key=f"shipment_failed:{ident}:{to_status}",
                        text=(f"Dạ đơn #{order_id} giao chưa thành công, bộ phận giao hàng sẽ liên hệ lại "
                              "với anh/chị ạ."), stale_check=sc)
 
@@ -75,18 +78,19 @@ async def notify_shipment(conn, order_id: int, *, to_status: str, sh: dict, vers
 async def notify_payment(conn, order_id: int, *, kind: str, new_status: str,
                          version: int | None = None) -> None:
     """Thong bao khach khi payment tien trien. check_request (khach bao chuyen khoan -> ack shop kiem tra);
-    confirmed (transfer confirmed / COD reconciled -> shop da nhan tien). CA 266-06: bind (new_status, version).
+    confirmed (transfer confirmed / COD reconciled -> shop da nhan tien). CA 267-03: dedupe theo (order, version).
     KHONG thong bao khi discrepancy (cho staff xu ly, tranh hua sai voi khach)."""
     sc = {"kind": "payment", "order_id": order_id, "new_status": new_status, "version": version}
+    ident = f"{order_id}:{version}"
     if kind == "customer_reported":
         await _enqueue(conn, order_id, event_type="payment.check_request.notify",
-                       dedupe_key=f"payment_check:{order_id}",
+                       dedupe_key=f"payment_check:{ident}",
                        text=(f"Dạ shop đã nhận thông tin chuyển khoản đơn #{order_id} (nội dung "
                              f"{transfer_content(order_id)}), đang kiểm tra và sẽ xác nhận với anh/chị ạ."),
                        stale_check=sc)
     elif ((kind == "shop_confirmed_received" and new_status == "confirmed") or
           (kind == "reconciled" and new_status == "reconciled")):
         await _enqueue(conn, order_id, event_type="payment.confirmed.notify",
-                       dedupe_key=f"payment_confirmed:{order_id}",
+                       dedupe_key=f"payment_confirmed:{ident}",
                        text=f"Dạ shop đã xác nhận nhận thanh toán đơn #{order_id}. Cảm ơn anh/chị ạ!",
                        stale_check=sc)

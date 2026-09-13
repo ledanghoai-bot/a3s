@@ -192,28 +192,30 @@ async def main():
         except ship.ShipmentError:
             ck("G7 transition sai bi reject", True)
 
-        # G8: notify tao + dedupe + stale-check o worker
-        n_handover = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE dedupe_key=$1",
-                                         f"shipment_handover:{oid_prov}")
-        n_delivered = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE dedupe_key=$1",
-                                          f"shipment_delivered:{oid_prov}")
-        n_payconf = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE dedupe_key=$1",
-                                        f"payment_confirmed:{oid_bmt}")
+        # G8: notify tao theo TRANSITION IDENTITY (order:version) + stale-check (chi tiet qua worker o test rieng)
+        n_handover = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE dedupe_key LIKE $1",
+                                         f"shipment_handover:{oid_prov}:%")
+        n_delivered = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE dedupe_key LIKE $1",
+                                          f"shipment_delivered:{oid_prov}:%")
+        n_payconf = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE dedupe_key LIKE $1",
+                                        f"payment_confirmed:{oid_bmt}:%")
         ck("G8 notify handover+delivered+confirmed tao (1 moi loai)",
            n_handover == 1 and n_delivered == 1 and n_payconf == 1,
            f"h{n_handover} d{n_delivered} pf{n_payconf}")
-        # payload mang stale_check (transition+version) de worker doi chieu
-        pl = await conn.fetchval("SELECT payload FROM outbox_events WHERE dedupe_key=$1",
-                                 f"shipment_delivered:{oid_prov}")
+        # payload mang stale_check (transition+version+to_status) de worker doi chieu
+        pl = await conn.fetchval("SELECT payload FROM outbox_events WHERE dedupe_key LIKE $1",
+                                 f"shipment_delivered:{oid_prov}:%")
         import json as _json
         sc = (_json.loads(pl) if isinstance(pl, str) else pl).get("stale_check")
-        ck("G8 payload mang stale_check{kind,version}", sc and sc["kind"] == "shipment"
-           and sc["version"] is not None, sc)
-        # stale-check logic: version luc enqueue < version hien tai -> stale (bo qua); == hoac moi hon -> gui
+        ck("G8 payload mang stale_check{kind,version,to_status}", sc and sc["kind"] == "shipment"
+           and sc["version"] is not None and sc["to_status"] == "delivered", sc)
+        # stale-check: version cu -> stale ; version hien tai + dung status -> gui
         from app.services.command import outbox_worker as ow
         cur_ver = await conn.fetchval("SELECT version FROM shipments WHERE order_id=$1", oid_prov)
-        is_stale_old = await ow._is_stale(conn, {"kind": "shipment", "order_id": oid_prov, "version": cur_ver - 3})
-        is_stale_cur = await ow._is_stale(conn, {"kind": "shipment", "order_id": oid_prov, "version": cur_ver})
+        is_stale_old = await ow._is_stale(conn, {"kind": "shipment", "order_id": oid_prov, "version": cur_ver - 3,
+                                                 "to_status": "in_transit"})
+        is_stale_cur = await ow._is_stale(conn, {"kind": "shipment", "order_id": oid_prov, "version": cur_ver,
+                                                 "to_status": "delivered"})
         ck("G8 stale-check: version cu -> stale(bo qua), version hien tai -> gui",
            is_stale_old is True and is_stale_cur is False, f"old={is_stale_old} cur={is_stale_cur}")
 

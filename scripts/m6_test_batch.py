@@ -38,11 +38,22 @@ def _bank_holder(batch: str) -> str:
     return f"ROBANME TEST [M6TEST:{batch}]"
 
 
-async def create(conn, batch: str, n: int) -> list[int]:
-    # CA 266-07: bank fixture TEST-SCOPED, tag theo batch. KHONG phai prod (m5lab throwaway). Cleanup se
-    # xoa bank test cua batch + reactivate account non-test gan nhat (khoi phuc cau hinh that).
-    await pay.set_bank_account(conn, bank="TEST BANK — KHONG CHUYEN TIEN", account_number="00000000",
-                               holder_name=_bank_holder(batch), actor=f"m6batch:{batch}", is_test=True)
+def _throwaway_ok() -> bool:
+    """CA 267-04: chi cho tao bank fixture khi operator KHANG DINH day la DB test/throwaway (M6_TEST_DB=1).
+    Mac dinh KHONG bao gio dung toi -> chay nham tren production khong the thay account active dung chung."""
+    return os.environ.get("M6_TEST_DB") == "1"
+
+
+async def create(conn, batch: str, n: int, *, bank_fixture: bool = False) -> list[int]:
+    # CA 267-04: MAC DINH KHONG dong vao bank account dung chung. Don transfer dung account active PO da nhap;
+    # neu chua co active -> BO QUA instruction (khong tu tao fixture lam inactive account that).
+    # Chi khi --bank-fixture + M6_TEST_DB=1 (khang dinh throwaway) moi tao bank test tag theo batch.
+    if bank_fixture:
+        if not _throwaway_ok():
+            raise SystemExit("--bank-fixture chi cho phep khi M6_TEST_DB=1 (xac nhan DB throwaway/test)")
+        await pay.set_bank_account(conn, bank="TEST BANK — KHONG CHUYEN TIEN", account_number="00000000",
+                                   holder_name=_bank_holder(batch), actor=f"m6batch:{batch}", is_test=True)
+    has_active_bank = bool(await conn.fetchval("SELECT 1 FROM bank_accounts WHERE active"))
     order_ids = []
     for seq in range(1, n + 1):
         psid = f"{_prefix(batch)}{seq}"
@@ -68,6 +79,9 @@ async def create(conn, batch: str, n: int) -> list[int]:
             method = "BANK_TRANSFER"
         await pay.ensure_payment(conn, oid, method=method, actor=f"m6batch:{batch}")
         await pay.sync_amount_due_if_unsettled(conn, oid, actor=f"m6batch:{batch}")
+        # transfer order: chi phat instruction khi DA co account active (khong tu tao/thay account dung chung)
+        if method == "BANK_TRANSFER" and has_active_bank:
+            await pay.generate_instruction(conn, oid, actor=f"m6batch:{batch}")
         order_ids.append(oid)
     return order_ids
 
@@ -144,12 +158,15 @@ async def main():
     ap.add_argument("--n", type=int, default=3)
     ap.add_argument("--batch", default=None)
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--bank-fixture", action="store_true",
+                    help="(chi throwaway, can M6_TEST_DB=1) tao bank test tag theo batch; mac dinh KHONG dong vao "
+                         "bank account dung chung")
     args = ap.parse_args()
     conn = await asyncpg.connect(DSN)
     try:
         if args.cmd == "create":
             batch = args.batch or str(int(time.time()))
-            oids = await create(conn, batch, args.n)
+            oids = await create(conn, batch, args.n, bank_fixture=args.bank_fixture)
             print(f"BATCH {batch} created: orders={oids}  (cleanup: --batch {batch})")
         elif args.cmd == "list":
             for b in await list_batches(conn):
@@ -163,4 +180,5 @@ async def main():
         await conn.close()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

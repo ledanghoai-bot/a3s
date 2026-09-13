@@ -132,13 +132,20 @@ async def detail(order_id: int) -> dict:
                 "FROM shipment_delivery_attempts WHERE shipment_id=$1 ORDER BY attempt_no", sh["id"])]
         p = await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1", order_id)
         events = []
+        instruction = None
         if p:
+            # CA 267-05: tra id + corrects_event_id de UI cho chon event goc khi correction (khong bat PO doan id)
             events = [dict(r) for r in await conn.fetch(
-                "SELECT kind, amount_vnd, occurred_at, recorded_by, reference, note FROM payment_events "
-                "WHERE payment_id=$1 ORDER BY occurred_at", p["id"])]
+                "SELECT id, kind, amount_vnd, occurred_at, recorded_by, reference, note, corrects_event_id "
+                "FROM payment_events WHERE payment_id=$1 ORDER BY occurred_at, id", p["id"])]
+            # instruction moi nhat (neu co) — UI hien lai snapshot + copy sau reload
+            instruction = await conn.fetchrow(
+                "SELECT bank_snapshot, account_number_snapshot, holder_snapshot, transfer_content, amount_vnd, "
+                "is_test, created_at FROM payment_instructions WHERE payment_id=$1 ORDER BY id DESC LIMIT 1", p["id"])
         return {"order": dict(order), "address_snapshot": dict(snap) if snap else None,
                 "shipment": dict(sh) if sh else None, "attempts": attempts,
-                "payment": dict(p) if p else None, "payment_events": events}
+                "payment": dict(p) if p else None, "payment_events": events,
+                "payment_instruction": dict(instruction) if instruction else None}
     finally:
         await conn.close()
 

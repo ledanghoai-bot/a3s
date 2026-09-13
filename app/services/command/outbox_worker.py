@@ -235,25 +235,35 @@ def _classify(sr: SendResult) -> tuple[str, str]:
 
 
 async def _is_stale(conn, sc: dict) -> bool:
-    """CA 266-06: notify M6 mang stale_check {kind, order_id, version, ...}. Truoc khi gui, doi chieu state
-    hien tai: neu version hien tai > version luc enqueue -> state da tien xa hon -> notify LAC HAU, bo qua.
-    Fail-open (gui) neu thieu du lieu de khong chan nham thong bao hop le."""
+    """CA 266-06/267-03: notify M6 mang stale_check {kind, order_id, version, to_status|new_status}. Truoc khi gui,
+    doi chieu state hien tai (version PER-DOMAIN chi tang khi domain do doi):
+    - current_version > event_version -> da co transition moi hon -> notify LAC HAU -> huy (cancelled).
+    - current_version == event_version nhung status hien tai KHAC status ma notify mo ta -> cung lac hau -> huy.
+    - con lai -> gui. Fail-open (gui) khi thieu du lieu de khong chan nham notify hop le."""
     if not sc:
         return False
     ver = sc.get("version")
     if ver is None:
         return False
     kind, order_id = sc.get("kind"), sc.get("order_id")
+    expected = sc.get("to_status") if kind == "shipment" else sc.get("new_status")
     try:
         if kind == "shipment":
-            cur = await conn.fetchval("SELECT version FROM shipments WHERE order_id=$1", order_id)
+            row = await conn.fetchrow("SELECT version, status FROM shipments WHERE order_id=$1", order_id)
         elif kind == "payment":
-            cur = await conn.fetchval("SELECT version FROM payments WHERE order_id=$1", order_id)
+            row = await conn.fetchrow("SELECT version, status FROM payments WHERE order_id=$1", order_id)
         else:
             return False
     except Exception:  # noqa: BLE001
         return False
-    return cur is not None and int(cur) > int(ver)
+    if row is None:
+        return False
+    cur_ver, cur_status = int(row["version"]), row["status"]
+    if cur_ver > int(ver):
+        return True
+    if cur_ver == int(ver) and expected is not None and cur_status != expected:
+        return True
+    return False
 
 
 async def _send_and_record(conn, ev, send_fn) -> str:

@@ -13,10 +13,18 @@ Transitions:
 """
 from __future__ import annotations
 
+import hashlib
+
 from app.services import audit_service
 
 METHODS = ("COD", "BANK_TRANSFER")
 _SETTLED = {"confirmed", "reconciled"}
+
+
+def _fingerprint(*parts) -> str:
+    """CA 267-02: fingerprint on-dinh cua payload -> phat hien cung command_key nhung KHAC payload."""
+    raw = "|".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 class PaymentError(Exception):
@@ -118,31 +126,44 @@ _ADVANCE = {
 }
 
 
+def _ev_fp(kind, amount_vnd, reference, corrects_event_id) -> str:
+    return _fingerprint("ev", kind, amount_vnd, reference, corrects_event_id)
+
+
+def _replay(pay, ev_row, new_fp: str, cur: str) -> dict:
+    """CA 267-02: replay cung command_key -> so fingerprint. Khac payload -> reject (khong tra nham ket qua cu)."""
+    stored = ev_row["command_fingerprint"]
+    if stored is not None and stored != new_fp:
+        raise PaymentError("command_key da dung cho payload khac — tu choi (idempotency mismatch)")
+    return {"payment": dict(pay), "event_id": str(ev_row["id"]), "duplicate": True,
+            "status": cur, "discrepancy": _disc(pay)}
+
+
 async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | None, recorded_by: str,
                           command_key: str, reference: str | None = None, note: str | None = None,
                           attachment_ref: str | None = None, corrects_event_id: int | None = None) -> dict:
-    """CA 266-03: command_key idempotent. CA 266-05: settle theo cumulative received; excess/thieu -> discrepancy."""
+    """CA 266-03/267-02: command_key idempotent + fingerprint + DB lock serialize. 266-05: cumulative received."""
     if not command_key:
         raise PaymentError("thieu command_key (idempotency)")
-    pay = await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1", order_id)
+    # CA 267-02: khoa aggregate payment -> cac request tren cung payment SERIALIZE (khong dua count/insert).
+    pay = await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1 FOR UPDATE", order_id)
     if not pay:
         raise PaymentError(f"payment cho order {order_id} chua ton tai")
     method, cur = pay["method"], pay["status"]
+    fp = _ev_fp(kind, amount_vnd, reference, corrects_event_id)
 
-    # idempotency 1: command_key (DB-atomic)
+    # idempotency 1: command_key (DB-atomic) + fingerprint compare (reject mismatch)
     dup = await conn.fetchrow("SELECT * FROM payment_events WHERE payment_id=$1 AND command_key=$2",
                               pay["id"], command_key)
     if dup:
-        return {"payment": dict(pay), "event_id": str(dup["id"]), "duplicate": True,
-                "status": cur, "discrepancy": _disc(pay)}
-    # idempotency 2 (business): cung reference cho cung kind -> khong cong lai chung tu
+        return _replay(pay, dup, fp, cur)
+    # idempotency 2 (business): cung reference cho cung kind -> khong cong lai chung tu (DB uq_pe_kind_reference)
     if reference:
         rdup = await conn.fetchrow(
-            "SELECT id FROM payment_events WHERE payment_id=$1 AND kind=$2 AND reference=$3",
+            "SELECT * FROM payment_events WHERE payment_id=$1 AND kind=$2 AND reference=$3",
             pay["id"], kind, reference)
         if rdup:
-            return {"payment": dict(pay), "event_id": str(rdup["id"]), "duplicate": True,
-                    "status": cur, "discrepancy": _disc(pay)}
+            return _replay(pay, rdup, fp, cur)
 
     if kind == "correction":
         if not note:
@@ -155,7 +176,11 @@ async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | N
             raise PaymentError("corrects_event_id khong thuoc payment nay")
         delta = int(amount_vnd or 0)     # dieu chinh received (co the am)
         ev = await _insert(conn, pay["id"], kind, amount_vnd, recorded_by, reference, note, attachment_ref,
-                           command_key, corrects_event_id)
+                           command_key, corrects_event_id, fp)
+        if ev is None:  # race: cung command_key vao truoc -> replay
+            ev = await conn.fetchrow("SELECT * FROM payment_events WHERE payment_id=$1 AND command_key=$2",
+                                     pay["id"], command_key)
+            return _replay(pay, ev, fp, cur)
         new_received = max(0, pay["amount_received_vnd"] + delta)
         new_status = _reconcile_status(method, new_received, pay["amount_due_vnd"], cur)
         pay = await _update_payment(conn, pay, received=new_received, status=new_status)
@@ -173,7 +198,11 @@ async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | N
         raise PaymentError(f"sai thu tu: {method} status={cur} khong the ghi '{kind}'")
 
     ev = await _insert(conn, pay["id"], kind, amount_vnd, recorded_by, reference, note, attachment_ref,
-                       command_key, None)
+                       command_key, None, fp)
+    if ev is None:  # race cung command_key -> replay
+        ev = await conn.fetchrow("SELECT * FROM payment_events WHERE payment_id=$1 AND command_key=$2",
+                                 pay["id"], command_key)
+        return _replay(pay, ev, fp, cur)
 
     if to_status == "settle":
         # cong vao TONG shop thuc nhan roi so voi due (== -> settled ; != -> discrepancy)
@@ -222,12 +251,13 @@ async def _update_payment(conn, pay, *, received: int, status: str) -> dict:
 
 
 async def _insert(conn, payment_id, kind, amount_vnd, recorded_by, reference, note, attachment_ref,
-                  command_key, corrects_event_id):
+                  command_key, corrects_event_id, fingerprint):
     return await conn.fetchrow(
         "INSERT INTO payment_events (payment_id, kind, amount_vnd, recorded_by, reference, note, attachment_ref, "
-        "command_key, corrects_event_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) "
+        "command_key, corrects_event_id, command_fingerprint) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) "
         "ON CONFLICT (payment_id, command_key) DO NOTHING RETURNING *",
-        payment_id, kind, amount_vnd, recorded_by, reference, note, attachment_ref, command_key, corrects_event_id)
+        payment_id, kind, amount_vnd, recorded_by, reference, note, attachment_ref, command_key, corrects_event_id,
+        fingerprint)
 
 
 # ---------------- Bank account config + instruction ----------------

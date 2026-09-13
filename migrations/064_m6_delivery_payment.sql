@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS shipment_delivery_attempts (
     next_contact_at TIMESTAMPTZ,
     recorded_by     TEXT NOT NULL,
     command_key     TEXT NOT NULL,                   -- CA 266-03: client idempotency key (retry cung key = 1 attempt)
+    command_fingerprint TEXT,                        -- CA 267-02: hash payload -> reject cung key KHAC payload
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_attempt_no UNIQUE (shipment_id, attempt_no),
     CONSTRAINT uq_attempt_cmd UNIQUE (shipment_id, command_key)  -- DB-atomic: replay khong tao attempt moi
@@ -155,11 +156,16 @@ CREATE TABLE IF NOT EXISTS payment_events (
     note           TEXT,
     attachment_ref TEXT,
     command_key    TEXT NOT NULL,                    -- CA 266-03: client idempotency key (replay cung key = 1 event)
+    command_fingerprint TEXT,                         -- CA 267-02: hash payload -> reject cung key KHAC payload
     corrects_event_id BIGINT REFERENCES payment_events (id),  -- CA 266-05: correction tro ve event goc bi sua
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_pe_cmd UNIQUE (payment_id, command_key)      -- DB-atomic: replay khong tao event moi
 );
 CREATE INDEX IF NOT EXISTS idx_payment_events_payment ON payment_events (payment_id, occurred_at);
+-- CA 267-02: atomic uniqueness cho business reference (cung payment+kind+reference khong the insert 2 lan, ke ca
+-- khi khac command_key dua nhau). Partial: chi ap khi co reference.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pe_kind_reference ON payment_events (payment_id, kind, reference)
+    WHERE reference IS NOT NULL;
 
 -- Payment instruction (chuyen khoan): snapshot account version + noi dung deterministic tu ma don.
 CREATE TABLE IF NOT EXISTS payment_instructions (

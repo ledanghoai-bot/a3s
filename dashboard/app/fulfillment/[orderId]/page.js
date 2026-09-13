@@ -1,9 +1,12 @@
 "use client";
 
-// M6 Giao & Thu tiền — chi tiết 1 đơn + thao tác (CA Directive 265 §4 + Review 266-01).
-// Quote (auto/thủ công), hãng/tracking, chuyển trạng thái giao, ghi lần giao; tạo payment, hướng dẫn CK,
-// ghi evidence (khách báo / COD thu / shop xác nhận / đối soát / điều chỉnh), cấu hình tài khoản nhận.
-// Mọi mutation ghi evidence/lần-giao gửi kèm command_key (idempotency — 266-03) sinh phía client mỗi lần bấm.
+// M6 Giao & Thu tiền — chi tiết 1 đơn + thao tác (CA Directive 265 + Review 266/267).
+// Quote (auto/thủ công), hãng/tracking, chuyển trạng thái giao, ghi lần giao; tạo payment, hướng dẫn CK
+// (render + copy), ghi evidence, điều chỉnh discrepancy (chọn event gốc từ lịch sử), cấu hình TK nhận.
+//
+// CA 267-01: idempotency key ỔN ĐỊNH qua retry/reload — key sinh theo (action, payload fingerprint), lưu
+// sessionStorage, RETRY cùng payload DÙNG LẠI key, chỉ consume sau khi SUCCESS. Đổi payload → key mới.
+// Backend từ chối cùng key khác payload (fingerprint mismatch) nên double-submit/ambiguous-retry an toàn.
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { apiFetch } from "../../../lib/api";
@@ -12,9 +15,67 @@ import { useAuthGuard } from "../../../lib/useAuthGuard";
 function vnd(n) {
   return n == null ? "—" : n.toLocaleString("vi-VN") + "đ";
 }
-function newKey() {
+function newUuid() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   return "k-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+}
+function hashStr(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+// CA 267-01: key ổn định theo (sig, payload). Lưu sessionStorage → retry/reload cùng payload tái dùng key.
+function opKey(sig, payload) {
+  const store = `m6op:${sig}:${hashStr(JSON.stringify(payload))}`;
+  let k = null;
+  try {
+    k = sessionStorage.getItem(store);
+  } catch {
+    /* private mode */
+  }
+  if (!k) {
+    k = newUuid();
+    try {
+      sessionStorage.setItem(store, k);
+    } catch {
+      /* ignore */
+    }
+  }
+  return {
+    key: k,
+    consume: () => {
+      try {
+        sessionStorage.removeItem(store);
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
+async function copyText(t) {
+  // Async Clipboard API (cần secure context + focus). Fallback execCommand cho môi trường chặn API.
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(t);
+      return true;
+    }
+  } catch {
+    /* rơi xuống fallback */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
 }
 const SHIP_TRANSITIONS = {
   pending_prep: ["ready_to_ship"],
@@ -54,7 +115,6 @@ export default function FulfillmentDetail() {
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  // form state
   const [mq, setMq] = useState({ zone: "", weight_g: "", fee_vnd: "", eta_text: "" });
   const [carrier, setCarrier] = useState({ carrier: "", tracking_text: "" });
   const [method, setMethod] = useState("COD");
@@ -76,12 +136,14 @@ export default function FulfillmentDetail() {
       setError(err.message);
     }
   }
-  async function act(fn, okMsg) {
+  // CA 267-01: consume chỉ chạy sau success → retry (network/timeout) tái dùng key; 4xx dứt khoát không reload.
+  async function act(fn, okMsg, consume) {
     setBusy(true);
     setMsg(null);
     setError(null);
     try {
       await fn();
+      if (consume) consume();
       setMsg(okMsg || "Đã cập nhật");
       await load();
     } catch (err) {
@@ -99,6 +161,7 @@ export default function FulfillmentDetail() {
 
   const sh = d.shipment;
   const p = d.payment;
+  const instr = d.payment_instruction;
   const transitions = sh ? SHIP_TRANSITIONS[sh.status] || [] : [];
 
   return (
@@ -174,11 +237,15 @@ export default function FulfillmentDetail() {
             </select>
             <input placeholder="lý do" value={att.reason} onChange={(e) => setAtt({ ...att, reason: e.target.value })} />
             <input type="datetime-local" value={att.next_contact_at} onChange={(e) => setAtt({ ...att, next_contact_at: e.target.value })} />
-            <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/shipment/attempt`, {
-              result: att.result, reason: att.reason || null, note: att.note || null,
-              next_contact_at: att.next_contact_at ? new Date(att.next_contact_at).toISOString() : null,
-              command_key: newKey(),
-            }), "Đã ghi lần giao")}>Ghi nhận</button>
+            <button disabled={busy} onClick={() => {
+              const payload = {
+                result: att.result, reason: att.reason || null, note: att.note || null,
+                next_contact_at: att.next_contact_at ? new Date(att.next_contact_at).toISOString() : null,
+              };
+              const { key, consume } = opKey(`attempt:${orderId}`, payload);
+              act(() => post(`/orders/${orderId}/shipment/attempt`, { ...payload, command_key: key }),
+                "Đã ghi lần giao", consume);
+            }}>Ghi nhận</button>
           </Row>
         )}
         {d.attempts && d.attempts.length > 0 && (
@@ -215,6 +282,28 @@ export default function FulfillmentDetail() {
             <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/payment/instruction`), "Đã tạo hướng dẫn chuyển khoản")}>Tạo nội dung CK</button>
           </Row>
         )}
+        {/* CA 267-05: render snapshot instruction + copy từng trường */}
+        {instr && (
+          <div style={{ marginTop: 8, padding: 12, background: "#f6f8fa", borderRadius: 6, fontSize: 14 }}>
+            <div style={{ marginBottom: 6 }}>
+              <b>Hướng dẫn chuyển khoản</b>{instr.is_test ? <span style={{ color: "#b71c1c", marginLeft: 8 }}>[TEST — KHÔNG CHUYỂN TIỀN]</span> : null}
+            </div>
+            {[["Ngân hàng", instr.bank_snapshot], ["Số TK", instr.account_number_snapshot],
+              ["Chủ TK", instr.holder_snapshot], ["Số tiền", vnd(instr.amount_vnd)],
+              ["Nội dung", instr.transfer_content]].map(([k, v]) => (
+              <div key={k} style={{ display: "flex", gap: 8, alignItems: "center", margin: "3px 0" }}>
+                <span style={{ minWidth: 90, color: "#555" }}>{k}:</span>
+                <code>{v}</code>
+                <button onClick={async () => { (await copyText(String(v))) ? setMsg(`Đã copy ${k}`) : setError("Không copy được"); }}>Copy</button>
+              </div>
+            ))}
+            <button style={{ marginTop: 6 }} onClick={async () => {
+              const block = `Ngân hàng: ${instr.bank_snapshot}\nSố TK: ${instr.account_number_snapshot}\n`
+                + `Chủ TK: ${instr.holder_snapshot}\nSố tiền: ${vnd(instr.amount_vnd)}\nNội dung: ${instr.transfer_content}`;
+              (await copyText(block)) ? setMsg("Đã copy toàn bộ hướng dẫn") : setError("Không copy được");
+            }}>Copy toàn bộ</button>
+          </div>
+        )}
         <Row label="Ghi evidence">
           <select value={ev.kind} onChange={(e) => setEv({ ...ev, kind: e.target.value })}>
             <option value="customer_reported">Khách báo đã CK</option>
@@ -225,29 +314,45 @@ export default function FulfillmentDetail() {
           <input placeholder="số tiền VNĐ" value={ev.amount_vnd} onChange={(e) => setEv({ ...ev, amount_vnd: e.target.value })} style={{ width: 110 }} />
           <input placeholder="mã GD (nếu có)" value={ev.reference} onChange={(e) => setEv({ ...ev, reference: e.target.value })} />
           <input placeholder="ghi chú" value={ev.note} onChange={(e) => setEv({ ...ev, note: e.target.value })} />
-          <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/payment/evidence`, {
-            kind: ev.kind,
-            amount_vnd: ev.amount_vnd === "" ? null : Number(ev.amount_vnd),
-            reference: ev.reference || null, note: ev.note || null, command_key: newKey(),
-          }), "Đã ghi evidence")}>Ghi nhận</button>
+          <button disabled={busy} onClick={() => {
+            const payload = {
+              kind: ev.kind, amount_vnd: ev.amount_vnd === "" ? null : Number(ev.amount_vnd),
+              reference: ev.reference || null, note: ev.note || null,
+            };
+            const { key, consume } = opKey(`evidence:${orderId}`, payload);
+            act(() => post(`/orders/${orderId}/payment/evidence`, { ...payload, command_key: key }),
+              "Đã ghi evidence", consume);
+          }}>Ghi nhận</button>
         </Row>
         {p && p.status === "discrepancy" && (
           <Row label="Điều chỉnh (±)">
             <input placeholder="delta VNĐ (±)" value={corr.amount_vnd} onChange={(e) => setCorr({ ...corr, amount_vnd: e.target.value })} style={{ width: 120 }} />
-            <input placeholder="event gốc (id)" value={corr.corrects_event_id} onChange={(e) => setCorr({ ...corr, corrects_event_id: e.target.value })} style={{ width: 110 }} />
+            {/* CA 267-05: chọn event gốc từ lịch sử, không bắt PO đoán id */}
+            <select value={corr.corrects_event_id} onChange={(e) => setCorr({ ...corr, corrects_event_id: e.target.value })}>
+              <option value="">— chọn event gốc —</option>
+              {(d.payment_events || []).filter((e) => e.kind !== "correction").map((e) => (
+                <option key={e.id} value={e.id}>#{e.id} {e.kind} {vnd(e.amount_vnd)}{e.reference ? ` · ${e.reference}` : ""}</option>
+              ))}
+            </select>
             <input placeholder="lý do (bắt buộc)" value={corr.note} onChange={(e) => setCorr({ ...corr, note: e.target.value })} />
-            <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/payment/evidence`, {
-              kind: "correction", amount_vnd: corr.amount_vnd === "" ? null : Number(corr.amount_vnd),
-              corrects_event_id: corr.corrects_event_id === "" ? null : Number(corr.corrects_event_id),
-              note: corr.note || null, command_key: newKey(),
-            }), "Đã điều chỉnh")}>Điều chỉnh</button>
+            <button disabled={busy} onClick={() => {
+              const payload = {
+                kind: "correction", amount_vnd: corr.amount_vnd === "" ? null : Number(corr.amount_vnd),
+                corrects_event_id: corr.corrects_event_id === "" ? null : Number(corr.corrects_event_id),
+                note: corr.note || null,
+              };
+              const { key, consume } = opKey(`correction:${orderId}`, payload);
+              act(() => post(`/orders/${orderId}/payment/evidence`, { ...payload, command_key: key }),
+                "Đã điều chỉnh", consume);
+            }}>Điều chỉnh</button>
           </Row>
         )}
         {d.payment_events && d.payment_events.length > 0 && (
           <div style={{ marginTop: 8, fontSize: 13 }}>
             <b>Lịch sử thu tiền:</b>
-            <ul>{d.payment_events.map((e, i) => (
-              <li key={i}>{e.kind} — {vnd(e.amount_vnd)}{e.reference ? ` · ${e.reference}` : ""}{e.note ? ` · ${e.note}` : ""} · {e.recorded_by}</li>
+            <ul>{d.payment_events.map((e) => (
+              <li key={e.id}>#{e.id} {e.kind} — {vnd(e.amount_vnd)}{e.reference ? ` · ${e.reference}` : ""}
+                {e.corrects_event_id ? ` · sửa #${e.corrects_event_id}` : ""}{e.note ? ` · ${e.note}` : ""} · {e.recorded_by}</li>
             ))}</ul>
           </div>
         )}

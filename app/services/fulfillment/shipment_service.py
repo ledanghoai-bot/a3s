@@ -11,10 +11,27 @@ KHONG tu cong ton kho khi giao that bai/hoan.
 """
 from __future__ import annotations
 
+import hashlib
+
 from app.services import audit_service
 from app.services.fulfillment import quote as _q
 
 POLICY_VERSION = "robanme-giao-nhan-2026-09"
+
+
+def _fingerprint(*parts) -> str:
+    """CA 267-02: fingerprint on-dinh cua payload -> cung command_key khac payload bi tu choi."""
+    raw = "|".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+async def _attempt_replay(conn, sh, ex, new_fp: str) -> dict:
+    """CA 267-02: replay cung command_key -> so fingerprint; khac payload -> reject (khong tra nham ket qua cu)."""
+    stored = ex["command_fingerprint"]
+    if stored is not None and stored != new_fp:
+        raise ShipmentError("command_key da dung cho attempt payload khac — tu choi (idempotency mismatch)")
+    used = await conn.fetchval("SELECT count(*) FROM shipment_delivery_attempts WHERE shipment_id=$1", sh["id"])
+    return {"attempt": dict(ex), "shipment_status": sh["status"], "attempts_used": used, "duplicate": True}
 
 ALLOWED = {
     "pending_prep": {"ready_to_ship"},
@@ -211,17 +228,17 @@ async def record_attempt(conn, order_id: int, *, actor: str, command_key: str, r
         raise ShipmentError("thieu command_key (idempotency)")
     if result not in ("success", "failed", "no_contact", "rescheduled"):
         raise ShipmentError("result khong hop le")
-    sh = await conn.fetchrow("SELECT * FROM shipments WHERE order_id=$1", order_id)
+    # CA 267-02: khoa aggregate shipment -> hai attempt khac command_key SERIALIZE (khong cung doc count/attempt_no
+    # -> khong con loi DB uq_attempt_no; request sau thay state moi roi xu ly dung theo state hien hanh).
+    sh = await conn.fetchrow("SELECT * FROM shipments WHERE order_id=$1 FOR UPDATE", order_id)
     if not sh:
         raise ShipmentError(f"shipment cho order {order_id} chua ton tai")
-    # replay idempotent theo command_key
+    fp = _fingerprint("att", result, reason, note, next_contact_at)
+    # replay idempotent theo command_key (+ fingerprint: cung key khac payload -> reject)
     ex = await conn.fetchrow(
         "SELECT * FROM shipment_delivery_attempts WHERE shipment_id=$1 AND command_key=$2", sh["id"], command_key)
     if ex:
-        return {"attempt": dict(ex), "shipment_status": sh["status"],
-                "attempts_used": await conn.fetchval(
-                    "SELECT count(*) FROM shipment_delivery_attempts WHERE shipment_id=$1", sh["id"]),
-                "duplicate": True}
+        return await _attempt_replay(conn, sh, ex, fp)
     if sh["status"] != "in_transit":
         raise ShipmentError(f"chi ghi attempt khi shipment 'in_transit' (dang la '{sh['status']}')")
     used = await conn.fetchval("SELECT count(*) FROM shipment_delivery_attempts WHERE shipment_id=$1", sh["id"])
@@ -230,13 +247,13 @@ async def record_attempt(conn, order_id: int, *, actor: str, command_key: str, r
     attempt_no = used + 1
     att = await conn.fetchrow(
         "INSERT INTO shipment_delivery_attempts (shipment_id, attempt_no, result, reason, note, "
-        "next_contact_at, recorded_by, command_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) "
+        "next_contact_at, recorded_by, command_key, command_fingerprint) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) "
         "ON CONFLICT (shipment_id, command_key) DO NOTHING RETURNING *",
-        sh["id"], attempt_no, result, reason, note, next_contact_at, actor, command_key)
+        sh["id"], attempt_no, result, reason, note, next_contact_at, actor, command_key, fp)
     if att is None:  # race: cung command_key vao truoc -> replay
         ex = await conn.fetchrow(
             "SELECT * FROM shipment_delivery_attempts WHERE shipment_id=$1 AND command_key=$2", sh["id"], command_key)
-        return {"attempt": dict(ex), "shipment_status": sh["status"], "attempts_used": used, "duplicate": True}
+        return await _attempt_replay(conn, sh, ex, fp)
     # cap nhat status tu trang thai HIEN TAI (in_transit) — khong dung hang so
     if result == "success":
         new_status = "delivered"
