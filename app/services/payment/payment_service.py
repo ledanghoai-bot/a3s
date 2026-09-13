@@ -149,6 +149,10 @@ async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | N
                                entity_type="payments", entity_id=str(pay["id"]),
                                before={"status": cur}, after={"kind": kind, "status": new_status,
                                                               "discrepancy": discrepancy})
+    from app.services.fulfillment import (
+        notify as _n,  # CA 265 §4.4: notify khach (lazy: tranh circular)
+    )
+    await _n.notify_payment(conn, order_id, kind=kind, new_status=new_status)
     return {"payment": dict(pay), "event_id": str(ev["id"]), "duplicate": False,
             "status": new_status, "discrepancy": discrepancy}
 

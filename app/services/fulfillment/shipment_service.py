@@ -137,6 +137,10 @@ async def change_status(conn, order_id: int, to_status: str, *, actor: str,
     await audit_service.record(conn, actor_type="cli", action="shipment.status", actor_ref=actor,
                                entity_type="shipments", entity_id=str(sh["id"]),
                                before={"status": frm}, after={"status": to_status})
+    from app.services.fulfillment import (
+        notify as _n,  # CA 265 §4.4: notify khach (atomic voi state)
+    )
+    await _n.notify_shipment(conn, order_id, to_status=to_status, sh=dict(row))
     return dict(row)
 
 
@@ -169,6 +173,10 @@ async def record_attempt(conn, order_id: int, *, actor: str, result: str, reason
     if new_status and new_status != sh["status"]:
         await conn.execute("UPDATE shipments SET status=$2, version=version+1, updated_at=now() WHERE id=$1",
                            sh["id"], new_status)
+        from app.services.fulfillment import (
+            notify as _n,  # CA 265 §4.4: notify delivered/failed
+        )
+        await _n.notify_shipment(conn, order_id, to_status=new_status, sh=dict(sh))
     await audit_service.record(conn, actor_type="cli", action="shipment.attempt", actor_ref=actor,
                                entity_type="shipments", entity_id=str(sh["id"]),
                                after={"attempt_no": attempt_no, "result": result, "status": new_status or sh["status"]})

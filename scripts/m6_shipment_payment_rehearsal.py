@@ -34,8 +34,9 @@ async def _mk_order(conn, *, ward, weight, qty, total):
     pid = await conn.fetchval(
         "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g) VALUES($1,'CF',$2,999,$3) "
         "ON CONFLICT(sku) DO UPDATE SET shipping_weight_g=$3 RETURNING id", f"M6-{tag}", total, weight)
-    oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd) VALUES($1,'confirmed',$2) RETURNING id",
-                              cid, total)
+    oid = await conn.fetchval(
+        "INSERT INTO orders(customer_id,status,total_vnd,origin_channel) VALUES($1,'confirmed',$2,"
+        "'telegram_customer') RETURNING id", cid, total)
     await conn.execute("INSERT INTO order_items(order_id,product_id,quantity,unit_price_vnd) VALUES($1,$2,$3,$4)",
                        oid, pid, qty, total)
     rid = await conn.fetchval(
@@ -132,12 +133,44 @@ async def main():
         except ship.ShipmentError:
             ck("G6 attempt thu 4 bi tu choi (max 3)", True)
 
+        # G8: outbox notify (CA 265 §4.4) — event tao dung + dedupe (retry khong tao trung)
+        n_handover = await conn.fetchval(
+            "SELECT count(*) FROM outbox_events WHERE dedupe_key=$1", f"shipment_handover:{oid_prov}")
+        n_delivered = await conn.fetchval(
+            "SELECT count(*) FROM outbox_events WHERE dedupe_key=$1", f"shipment_delivered:{oid_prov}")
+        n_paycheck = await conn.fetchval(
+            "SELECT count(*) FROM outbox_events WHERE dedupe_key=$1", f"payment_check:{oid_bmt}")
+        n_payconf = await conn.fetchval(
+            "SELECT count(*) FROM outbox_events WHERE dedupe_key=$1", f"payment_confirmed:{oid_bmt}")
+        ck("G8 notify handover+delivered+paycheck+confirmed tao (1 moi loai)",
+           n_handover == 1 and n_delivered == 1 and n_paycheck == 1 and n_payconf == 1,
+           f"h{n_handover} d{n_delivered} pc{n_paycheck} pf{n_payconf}")
+        # dedupe: re-notify cung status khong tao them (test qua record_evidence idempotent reference da co;
+        # kiem them transition lap qua notify truc tiep)
+        from app.services.fulfillment import notify as _nf
+        await _nf.notify_shipment(conn, oid_prov, to_status="delivered",
+                                  sh={"carrier": None, "tracking_text": None, "eta_text": None})
+        n_delivered2 = await conn.fetchval(
+            "SELECT count(*) FROM outbox_events WHERE dedupe_key=$1", f"shipment_delivered:{oid_prov}")
+        ck("G8 re-notify cung status -> dedupe (khong tao trung)", n_delivered2 == 1, n_delivered2)
+
         # G7: wrong transition
         try:
             await ship.change_status(conn, oid_prov, "in_transit", actor="staff1")  # dang delivered
             ck("G7 delivered->in_transit reject", False, "khong raise")
         except ship.ShipmentError:
             ck("G7 transition sai bi reject", True)
+
+        # G9: version CAS (concurrency) — stale expected_version bi reject (khong ghi de mat lich su)
+        oid_c = await _mk_order(conn, ward="99999", weight=300, qty=2, total=200000)
+        sh0 = await ship.ensure_shipment(conn, oid_c, actor="staff1")
+        v0 = sh0["version"]
+        await ship.change_status(conn, oid_c, "ready_to_ship", actor="staff1", expected_version=v0)  # bump version
+        try:
+            await ship.change_status(conn, oid_c, "in_transit", actor="staff1", expected_version=v0)  # stale
+            ck("G9 stale version bi reject", False, "khong raise")
+        except ship.ShipmentError:
+            ck("G9 stale expected_version (concurrency) bi reject", True)
 
         print("RESULT:", "ALL PASS" if not FAILS else f"FAIL {FAILS}")
         sys.exit(1 if FAILS else 0)

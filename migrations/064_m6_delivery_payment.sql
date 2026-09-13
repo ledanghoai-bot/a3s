@@ -166,6 +166,11 @@ CREATE INDEX IF NOT EXISTS idx_payment_instr_order ON payment_instructions (orde
 -- ============================ Immutability (append-only evidence) ============================
 CREATE OR REPLACE FUNCTION m6_forbid_mutate() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    -- Cho phep DELETE khi session dat tuong minh `SET LOCAL m6.cleanup='on'` (chi script cleanup test batch
+    -- lam vay; runtime app KHONG BAO GIO dat -> immutability giu nguyen cho du lieu that). UPDATE luon cam.
+    IF TG_OP = 'DELETE' AND current_setting('m6.cleanup', true) = 'on' THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION '% la ho so bat bien (append-only) — khong duoc %', TG_TABLE_NAME, TG_OP;
 END;
 $$;
