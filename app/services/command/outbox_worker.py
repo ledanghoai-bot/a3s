@@ -234,10 +234,66 @@ def _classify(sr: SendResult) -> tuple[str, str]:
     return "retryable_error", "retry"  # network error khong status -> retryable
 
 
+async def _is_stale(conn, sc: dict) -> bool:
+    """CA 268-01: stale theo SEMANTIC STATE, KHONG theo aggregate version.
+    Notify mo ta 1 status muc tieu (to_status/new_status). Truoc khi gui, doi chieu status hien tai:
+    - status hien tai == status notify mo ta -> notify VAN DUNG (du version cao hon do sua carrier/tracking/
+      metadata) -> GUI.
+    - status hien tai da chuyen sang trang thai lam noi dung SAI -> huy (cancelled).
+    Re-dispatch transition moi co dedupe_key rieng (order:version) nen van 1 event/transition; retry cung outbox
+    event van effective-once. Fail-open (gui) khi thieu du lieu de khong chan nham notify hop le."""
+    if not sc:
+        return False
+    kind, order_id = sc.get("kind"), sc.get("order_id")
+    expected = sc.get("to_status") if kind == "shipment" else sc.get("new_status")
+    if expected is None:
+        return False
+    try:
+        if kind == "shipment":
+            cur = await conn.fetchval("SELECT status FROM shipments WHERE order_id=$1", order_id)
+        elif kind == "payment":
+            cur = await conn.fetchval("SELECT status FROM payments WHERE order_id=$1", order_id)
+        else:
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    if cur is None:
+        return False
+    return cur != expected
+
+
+async def _refresh_dynamic_text(conn, payload: dict, sc: dict) -> None:
+    """CA 268-01 ('chi gui phan khong stale'): handover mang carrier/tracking/eta -> re-render tu state HIEN TAI
+    luc dispatch de khong gui snapshot cu neu carrier/tracking bi sua sau khi enqueue."""
+    if sc.get("kind") != "shipment" or sc.get("to_status") != "in_transit":
+        return
+    try:
+        row = await conn.fetchrow("SELECT carrier, tracking_text, eta_text FROM shipments WHERE order_id=$1",
+                                  sc.get("order_id"))
+        if row is None:
+            return
+        from app.services.fulfillment import notify as _n
+        payload["text"] = _n.handover_text(sc.get("order_id"), carrier=row["carrier"],
+                                           tracking_text=row["tracking_text"], eta_text=row["eta_text"])
+    except Exception:  # noqa: BLE001
+        return  # giu text cu neu refresh loi (khong chan gui)
+
+
 async def _send_and_record(conn, ev, send_fn) -> str:
     payload = ev["payload"]
     if isinstance(payload, str):
         payload = json.loads(payload)
+    # CA 268-01: bo qua thong bao M6 lac hau theo SEMANTIC STATE (status doi lam noi dung sai) -> cancelled.
+    sc = payload.get("stale_check") if isinstance(payload, dict) else None
+    if sc and await _is_stale(conn, sc):
+        await conn.execute(
+            "UPDATE outbox_events SET status='cancelled', cancelled_at=now(), last_error_code='superseded_stale', "
+            "lease_owner=NULL, lease_expires_at=NULL WHERE id=$1 AND status='delivering' AND lease_owner=$2",
+            ev["id"], WORKER_ID)
+        return "cancelled"
+    # CA 268-01: re-render carrier/tracking/eta cua handover tu state hien tai (khong gui snapshot cu).
+    if sc:
+        await _refresh_dynamic_text(conn, payload, sc)
     attempt_no = ev["attempt_count"]
     corr = payload.get("correlation_id")
     if corr is None and ev.get("command_id") is not None:
@@ -301,7 +357,7 @@ async def run_once(send_fn=None) -> dict:
     """Mot vong drain: reclaim stale -> claim batch -> send+record tung event. Tra stats."""
     send_fn = send_fn or deliver
     conn = await acquire()
-    stats = {"reclaimed": 0, "delivered": 0, "retried": 0, "dead": 0, "claimed": 0}
+    stats = {"reclaimed": 0, "delivered": 0, "retried": 0, "dead": 0, "claimed": 0, "cancelled": 0}
     try:
         stats["reclaimed"] = await reclaim_stale(conn)
         events = await conn.fetch(_CLAIM_SQL, BATCH, WORKER_ID, LEASE_SECONDS)

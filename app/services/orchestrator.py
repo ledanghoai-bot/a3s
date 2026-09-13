@@ -778,6 +778,25 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             await conversation_log.log_message(conversation_id, "bot", reply)
             return reply
 
+        # M6 (Directive 265 §4.1/§4.4): khach HOI trang thai don -> doc COMMITTED shipment/payment, tra reply
+        # TAT DINH (khong de model tu nhan "da thanh toan"). None (chua co don M6-tracked) -> fall through
+        # hanh vi cu (LLM/handoff). Read-only, khong lam vo luong.
+        if _is_order_status_query(text):
+            try:
+                from app.services.fulfillment import status_reply as _sr
+                _m6_status = await _sr.order_status_reply(sender_id)
+            except Exception as e:  # noqa: BLE001
+                print(f"[orchestrator] M6 status reply skipped: {safe_exc(e)}")
+                _m6_status = None
+            if _m6_status:
+                history = await _get_history(redis, sender_id)
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": _m6_status})
+                await _save_history(redis, sender_id, history)
+                await conversation_log.log_message(conversation_id, "customer", text)
+                await conversation_log.log_message(conversation_id, "bot", _m6_status)
+                return _m6_status
+
         # CA 232 §6: khach XAC NHAN + co READY draft (summary da present khop version/fingerprint) -> SERVER
         # tu chot don tu DRAFT (KHONG doi model goi create_order — sua goc c Tien). Chi enrolled route.
         # try_server_commit tra None neu khong du context (generic 'xac nhan' ngoai pending-confirm -> LLM lo).

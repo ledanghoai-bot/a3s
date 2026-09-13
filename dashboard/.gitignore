@@ -1,0 +1,5 @@
+# Next.js / Node build artifacts — KHONG commit (image build chay npm install trong Docker)
+/node_modules/
+/.next/
+/out/
+npm-debug.log*
