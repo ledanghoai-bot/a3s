@@ -234,10 +234,40 @@ def _classify(sr: SendResult) -> tuple[str, str]:
     return "retryable_error", "retry"  # network error khong status -> retryable
 
 
+async def _is_stale(conn, sc: dict) -> bool:
+    """CA 266-06: notify M6 mang stale_check {kind, order_id, version, ...}. Truoc khi gui, doi chieu state
+    hien tai: neu version hien tai > version luc enqueue -> state da tien xa hon -> notify LAC HAU, bo qua.
+    Fail-open (gui) neu thieu du lieu de khong chan nham thong bao hop le."""
+    if not sc:
+        return False
+    ver = sc.get("version")
+    if ver is None:
+        return False
+    kind, order_id = sc.get("kind"), sc.get("order_id")
+    try:
+        if kind == "shipment":
+            cur = await conn.fetchval("SELECT version FROM shipments WHERE order_id=$1", order_id)
+        elif kind == "payment":
+            cur = await conn.fetchval("SELECT version FROM payments WHERE order_id=$1", order_id)
+        else:
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    return cur is not None and int(cur) > int(ver)
+
+
 async def _send_and_record(conn, ev, send_fn) -> str:
     payload = ev["payload"]
     if isinstance(payload, str):
         payload = json.loads(payload)
+    # CA 266-06: bo qua thong bao M6 lac hau (state da tien xa hon luc enqueue) -> cancelled, khong gui.
+    sc = payload.get("stale_check") if isinstance(payload, dict) else None
+    if sc and await _is_stale(conn, sc):
+        await conn.execute(
+            "UPDATE outbox_events SET status='cancelled', cancelled_at=now(), last_error_code='superseded_stale', "
+            "lease_owner=NULL, lease_expires_at=NULL WHERE id=$1 AND status='delivering' AND lease_owner=$2",
+            ev["id"], WORKER_ID)
+        return "cancelled"
     attempt_no = ev["attempt_count"]
     corr = payload.get("correlation_id")
     if corr is None and ev.get("command_id") is not None:
@@ -301,7 +331,7 @@ async def run_once(send_fn=None) -> dict:
     """Mot vong drain: reclaim stale -> claim batch -> send+record tung event. Tra stats."""
     send_fn = send_fn or deliver
     conn = await acquire()
-    stats = {"reclaimed": 0, "delivered": 0, "retried": 0, "dead": 0, "claimed": 0}
+    stats = {"reclaimed": 0, "delivered": 0, "retried": 0, "dead": 0, "claimed": 0, "cancelled": 0}
     try:
         stats["reclaimed"] = await reclaim_stale(conn)
         events = await conn.fetch(_CLAIM_SQL, BATCH, WORKER_ID, LEASE_SECONDS)

@@ -29,6 +29,16 @@ def resolve_zone(province_code: str | None, ward_code: str | None, zone_rows: li
     return "unknown"
 
 
+def matched_rule(zone: str, weight_g: int | None, fee_rules: list[dict]) -> dict | None:
+    """Rule active dau tien khop (zone + weight in [min,max]). None neu weight thieu hoac khong match."""
+    if weight_g is None:
+        return None
+    for r in fee_rules:
+        if r.get("active", True) and r.get("zone") == zone and r["weight_min_g"] <= weight_g <= r["weight_max_g"]:
+            return r
+    return None
+
+
 def quote_fee(zone: str, weight_g: int | None, fee_rules: list[dict]) -> tuple[int | None, str]:
     """Tra (fee_vnd, fee_status). fee_status in {'quoted','quote_required','unknown'}.
 

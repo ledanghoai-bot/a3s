@@ -1,6 +1,11 @@
-"""M6 customer notification (CA Directive 265 §4.4). Qua transactional outbox co san (insert_outbox),
-template TAT DINH — KHONG de model tu nhan da thanh toan. Event gan order identity + dedupe_key (effective-once,
-retry khong tao logical event trung). command_id=None (M6 event trong allowlist CHECK migration 064).
+"""M6 customer notification (CA Directive 265 §4.4 + Review 266-06). Qua transactional outbox co san
+(insert_outbox), template TAT DINH — KHONG de model tu nhan da thanh toan. Event gan order identity +
+dedupe_key (effective-once, retry khong tao logical event trung). command_id=None (M6 event trong allowlist
+CHECK migration 064).
+
+CA 266-06: moi notify bind TRANSITION + VERSION vao payload. Worker kiem tra lai (stale-check) truoc khi gui:
+neu state hien tai da qua version nay (vi du delivered roi moi dispatch in_transit cu) thi BO QUA, khong gui
+thong bao lac hau. dedupe_key van theo (order, loai) de effective-once.
 
 Best-effort: chi enqueue khi resolve duoc kenh khach (telegram_customer/messenger). Order origin dashboard/
 khong co kenh bot -> skip (khong loi). insert_outbox nam trong CUNG transaction voi state change (atomic).
@@ -24,19 +29,24 @@ async def _customer(conn, order_id: int):
     return row["origin_channel"], row["psid"]
 
 
-async def _enqueue(conn, order_id: int, *, event_type: str, dedupe_key: str, text: str) -> None:
+async def _enqueue(conn, order_id: int, *, event_type: str, dedupe_key: str, text: str,
+                   stale_check: dict) -> None:
+    """stale_check: {'kind':'shipment'|'payment', 'version':N, ...} — worker doi chieu truoc khi gui."""
     who = await _customer(conn, order_id)
     if not who:
         return
     dest, psid = who
     await cmd_repo.insert_outbox(
         conn, command_id=None, event_type=event_type, event_version=1, destination=dest,
-        dedupe_key=dedupe_key, payload={"customer_ref": psid, "order_id": order_id, "text": text},
+        dedupe_key=dedupe_key,
+        payload={"customer_ref": psid, "order_id": order_id, "text": text, "stale_check": stale_check},
         max_attempts=MAX_ATTEMPTS)
 
 
-async def notify_shipment(conn, order_id: int, *, to_status: str, sh: dict) -> None:
-    """Thong bao khach khi shipment doi trang thai (handover/delivered/failed). dedupe theo (order, status)."""
+async def notify_shipment(conn, order_id: int, *, to_status: str, sh: dict, version: int | None = None) -> None:
+    """Thong bao khach khi shipment doi trang thai (handover/delivered/failed). dedupe theo (order, status).
+    CA 266-06: bind (to_status, version) -> stale_check shipment."""
+    sc = {"kind": "shipment", "order_id": order_id, "to_status": to_status, "version": version}
     if to_status == "in_transit":
         extra = ""
         bits = []
@@ -49,28 +59,34 @@ async def notify_shipment(conn, order_id: int, *, to_status: str, sh: dict) -> N
         eta = f" Dự kiến: {sh['eta_text']}." if sh.get("eta_text") else ""
         await _enqueue(conn, order_id, event_type="shipment.handover.notify",
                        dedupe_key=f"shipment_handover:{order_id}",
-                       text=f"Dạ đơn #{order_id} của anh/chị đang được giao{extra}.{eta}")
+                       text=f"Dạ đơn #{order_id} của anh/chị đang được giao{extra}.{eta}", stale_check=sc)
     elif to_status == "delivered":
         await _enqueue(conn, order_id, event_type="shipment.delivered.notify",
                        dedupe_key=f"shipment_delivered:{order_id}",
-                       text=f"Dạ đơn #{order_id} đã giao thành công. Cảm ơn anh/chị đã tin dùng 3S Coffee ạ!")
+                       text=f"Dạ đơn #{order_id} đã giao thành công. Cảm ơn anh/chị đã tin dùng 3S Coffee ạ!",
+                       stale_check=sc)
     elif to_status in ("delivery_failed", "return_pending"):
         await _enqueue(conn, order_id, event_type="shipment.failed.notify",
                        dedupe_key=f"shipment_failed:{order_id}:{to_status}",
                        text=(f"Dạ đơn #{order_id} giao chưa thành công, bộ phận giao hàng sẽ liên hệ lại "
-                             "với anh/chị ạ."))
+                             "với anh/chị ạ."), stale_check=sc)
 
 
-async def notify_payment(conn, order_id: int, *, kind: str, new_status: str) -> None:
+async def notify_payment(conn, order_id: int, *, kind: str, new_status: str,
+                         version: int | None = None) -> None:
     """Thong bao khach khi payment tien trien. check_request (khach bao chuyen khoan -> ack shop kiem tra);
-    confirmed (transfer confirmed / COD reconciled -> shop da nhan tien)."""
+    confirmed (transfer confirmed / COD reconciled -> shop da nhan tien). CA 266-06: bind (new_status, version).
+    KHONG thong bao khi discrepancy (cho staff xu ly, tranh hua sai voi khach)."""
+    sc = {"kind": "payment", "order_id": order_id, "new_status": new_status, "version": version}
     if kind == "customer_reported":
         await _enqueue(conn, order_id, event_type="payment.check_request.notify",
                        dedupe_key=f"payment_check:{order_id}",
                        text=(f"Dạ shop đã nhận thông tin chuyển khoản đơn #{order_id} (nội dung "
-                             f"{transfer_content(order_id)}), đang kiểm tra và sẽ xác nhận với anh/chị ạ."))
-    elif (kind == "shop_confirmed_received" and new_status == "confirmed") or \
-         (kind == "reconciled" and new_status == "reconciled"):
+                             f"{transfer_content(order_id)}), đang kiểm tra và sẽ xác nhận với anh/chị ạ."),
+                       stale_check=sc)
+    elif ((kind == "shop_confirmed_received" and new_status == "confirmed") or
+          (kind == "reconciled" and new_status == "reconciled")):
         await _enqueue(conn, order_id, event_type="payment.confirmed.notify",
                        dedupe_key=f"payment_confirmed:{order_id}",
-                       text=f"Dạ shop đã xác nhận nhận thanh toán đơn #{order_id}. Cảm ơn anh/chị ạ!")
+                       text=f"Dạ shop đã xác nhận nhận thanh toán đơn #{order_id}. Cảm ơn anh/chị ạ!",
+                       stale_check=sc)

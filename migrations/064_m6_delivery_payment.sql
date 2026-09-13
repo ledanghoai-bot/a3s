@@ -43,17 +43,20 @@ CREATE TABLE IF NOT EXISTS shipping_fee_rules (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- fee_vnd va quote_required loai tru: rule co fee cu the HOAC yeu cau quote, khong ca hai.
     CONSTRAINT fee_rule_fee_xor_quote CHECK (
-        (quote_required AND fee_vnd IS NULL) OR (NOT quote_required AND fee_vnd IS NOT NULL))
+        (quote_required AND fee_vnd IS NULL) OR (NOT quote_required AND fee_vnd IS NOT NULL)),
+    -- CA 266 §4: business key de seed IDEMPOTENT (chay lai migration khong nhan ban rule).
+    CONSTRAINT uq_fee_rule UNIQUE (zone, weight_min_g, weight_max_g, version)
 );
 CREATE INDEX IF NOT EXISTS idx_fee_rule_lookup ON shipping_fee_rules (zone, weight_min_g, weight_max_g) WHERE active;
 
 -- Seed policy Robanme (giao-nhan-hang, doc 13/09). Khoang website KHONG xac dinh -> khong seed -> quote_required.
-INSERT INTO shipping_fee_rules (zone, weight_min_g, weight_max_g, fee_vnd, quote_required) VALUES
-    ('bmt_inner', 500, 5000, 0, FALSE),        -- noi thanh BMT 500-5000g mien phi
-    ('bmt_inner', 5500, 10000, 0, FALSE),      -- noi thanh BMT 5500-10000g mien phi
-    ('province', 500, 5000, 30000, FALSE),     -- tinh khac 500-5000g = 30.000d
-    ('province', 5500, 10000, NULL, TRUE)      -- tinh khac 5500-10000g = 36.000-60.000d (khoang) -> staff chot
-ON CONFLICT DO NOTHING;
+-- ON CONFLICT tren business key -> re-run migration KHONG dup (CA 266 §4: truoc day 8 rows, nay giu 4).
+INSERT INTO shipping_fee_rules (zone, weight_min_g, weight_max_g, fee_vnd, quote_required, version) VALUES
+    ('bmt_inner', 500, 5000, 0, FALSE, 1),        -- noi thanh BMT 500-5000g mien phi
+    ('bmt_inner', 5500, 10000, 0, FALSE, 1),      -- noi thanh BMT 5500-10000g mien phi
+    ('province', 500, 5000, 30000, FALSE, 1),     -- tinh khac 500-5000g = 30.000d
+    ('province', 5500, 10000, NULL, TRUE, 1)      -- tinh khac 5500-10000g = 36.000-60.000d (khoang) -> staff chot
+ON CONFLICT (zone, weight_min_g, weight_max_g, version) DO NOTHING;
 
 -- ============================ Shipments ============================
 -- Mot shipment active cho moi order (baseline). Lich su cac lan giao thuoc shipment (attempts).
@@ -72,8 +75,11 @@ CREATE TABLE IF NOT EXISTS shipments (
     fee_status       TEXT NOT NULL DEFAULT 'unknown'
         CHECK (fee_status IN ('quoted', 'quote_required', 'unknown')),
     eta_text         TEXT,
+    eta_start_at     TIMESTAMPTZ,                     -- CA 266-08: moc bat dau ETA (COD confirm / transfer received)
+    eta_start_source TEXT,                            -- 'cod_confirmed' | 'transfer_received' | 'manual'
     handover_at      TIMESTAMPTZ,
-    policy_version   TEXT,                            -- snapshot version policy/fee-rules luc quote
+    policy_version   TEXT,                            -- snapshot label policy luc quote
+    quote_rule_version INTEGER,                       -- CA 266-04: snapshot version RULE thuc ap (config co the doi)
     quote_source     TEXT,                            -- 'auto_rule' | 'staff_manual'
     version          INTEGER NOT NULL DEFAULT 1,      -- optimistic concurrency
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -94,8 +100,10 @@ CREATE TABLE IF NOT EXISTS shipment_delivery_attempts (
     note            TEXT,
     next_contact_at TIMESTAMPTZ,
     recorded_by     TEXT NOT NULL,
+    command_key     TEXT NOT NULL,                   -- CA 266-03: client idempotency key (retry cung key = 1 attempt)
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT uq_attempt_no UNIQUE (shipment_id, attempt_no)   -- retry cung attempt_no khong tao dong moi
+    CONSTRAINT uq_attempt_no UNIQUE (shipment_id, attempt_no),
+    CONSTRAINT uq_attempt_cmd UNIQUE (shipment_id, command_key)  -- DB-atomic: replay khong tao attempt moi
 );
 -- Attempts la append-only (evidence lich su giao). Cho phep INSERT, cam UPDATE/DELETE.
 
@@ -121,10 +129,13 @@ CREATE TABLE IF NOT EXISTS payments (
     order_id      BIGINT NOT NULL UNIQUE REFERENCES orders (id),
     method        TEXT NOT NULL CHECK (method IN ('COD', 'BANK_TRANSFER')),
     amount_due_vnd INTEGER CHECK (amount_due_vnd IS NULL OR amount_due_vnd >= 0),  -- NULL khi fee chua chot
+    -- CA 266-05: TONG shop THUC nhan (cumulative shop_confirmed/reconciled) — tach voi due va evidence khach bao.
+    amount_received_vnd INTEGER NOT NULL DEFAULT 0 CHECK (amount_received_vnd >= 0),
     currency      TEXT NOT NULL DEFAULT 'VND' CHECK (currency = 'VND'),
     -- BANK_TRANSFER: awaiting -> reported -> confirmed ; COD: awaiting -> collected -> reconciled
+    -- CA 266-05: 'discrepancy' = da co evidence nhung thieu/thua, CHO staff xu ly (khong auto-confirm).
     status        TEXT NOT NULL DEFAULT 'awaiting'
-        CHECK (status IN ('awaiting', 'reported', 'confirmed', 'collected', 'reconciled')),
+        CHECK (status IN ('awaiting', 'reported', 'confirmed', 'collected', 'reconciled', 'discrepancy')),
     version       INTEGER NOT NULL DEFAULT 1,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -136,13 +147,17 @@ CREATE TABLE IF NOT EXISTS payment_events (
     payment_id     BIGINT NOT NULL REFERENCES payments (id),
     kind           TEXT NOT NULL CHECK (kind IN
         ('customer_reported', 'cod_collected', 'shop_confirmed_received', 'reconciled', 'correction')),
-    amount_vnd     INTEGER CHECK (amount_vnd IS NULL OR amount_vnd >= 0),
+    -- CA 266-05: correction la delta dieu chinh received, CO THE AM (ghi du -> tru lai); cac kind khac >= 0.
+    amount_vnd     INTEGER CHECK (amount_vnd IS NULL OR amount_vnd >= 0 OR kind = 'correction'),
     occurred_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     recorded_by    TEXT NOT NULL,
-    reference      TEXT,
+    reference      TEXT,                             -- business ref (vd ma giao dich CK) — chong ghi lai CUNG chung tu
     note           TEXT,
     attachment_ref TEXT,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    command_key    TEXT NOT NULL,                    -- CA 266-03: client idempotency key (replay cung key = 1 event)
+    corrects_event_id BIGINT REFERENCES payment_events (id),  -- CA 266-05: correction tro ve event goc bi sua
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_pe_cmd UNIQUE (payment_id, command_key)      -- DB-atomic: replay khong tao event moi
 );
 CREATE INDEX IF NOT EXISTS idx_payment_events_payment ON payment_events (payment_id, occurred_at);
 

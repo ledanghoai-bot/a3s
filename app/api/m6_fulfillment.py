@@ -6,6 +6,8 @@ Bot doc committed state qua path rieng (orchestrator), KHONG qua router nay.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -52,6 +54,42 @@ def _map_err(e: Exception) -> HTTPException:
     msg = str(e)
     code = 409 if "version conflict" in msg else 400
     return HTTPException(status_code=code, detail=msg)
+
+
+def _money(body: dict, field: str, *, required: bool = False) -> int | None:
+    """CA 266-01: tien = so nguyen VND >= 0. Sai kieu/am -> 422 (khong de raise 500)."""
+    v = body.get(field)
+    if v is None:
+        if required:
+            raise HTTPException(status_code=422, detail=f"thieu {field}")
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or (isinstance(v, float) and not v.is_integer()):
+        raise HTTPException(status_code=422, detail=f"{field} phai so nguyen VND")
+    iv = int(v)
+    if iv < 0:
+        raise HTTPException(status_code=422, detail=f"{field} phai >= 0")
+    return iv
+
+
+def _dt(body: dict, field: str):
+    """Parse ISO-8601 datetime tu body; sai dinh dang -> 422."""
+    v = body.get(field)
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail=f"{field} sai dinh dang thoi gian (ISO-8601)")
+
+
+def _command_key(body: dict) -> str:
+    """CA 266-03: client phai gui command_key on-dinh cho mutation idempotent."""
+    ck = body.get("command_key")
+    if not ck or not isinstance(ck, str):
+        raise HTTPException(status_code=422, detail="thieu command_key (idempotency key tu client)")
+    return ck
 
 
 # ============================ Board / detail (read) ============================
@@ -126,8 +164,8 @@ async def shipment_manual_quote(order_id: int, body: dict,
         async with conn.transaction():
             return await ship.set_manual_quote(
                 conn, order_id, actor=_actor(staff), zone=body.get("zone"),
-                weight_g=body.get("weight_g"),
-                fee_vnd=int(body["fee_vnd"]) if body.get("fee_vnd") is not None else None,
+                weight_g=_money(body, "weight_g"),
+                fee_vnd=_money(body, "fee_vnd"),
                 eta_text=body.get("eta_text"))
     except ship.ShipmentError as e:
         raise _map_err(e)
@@ -142,7 +180,8 @@ async def shipment_carrier(order_id: int, body: dict,
     try:
         async with conn.transaction():
             return await ship.set_carrier(conn, order_id, actor=_actor(staff),
-                                          carrier=body.get("carrier"), tracking_text=body.get("tracking_text"))
+                                          carrier=body.get("carrier"), tracking_text=body.get("tracking_text"),
+                                          expected_version=body.get("expected_version"))
     except ship.ShipmentError as e:
         raise _map_err(e)
     finally:
@@ -170,12 +209,14 @@ async def shipment_attempt(order_id: int, body: dict,
                            staff: dict = Depends(require_permission("fulfillment.status_change"))) -> dict:
     if not body.get("result"):
         raise HTTPException(status_code=422, detail="thieu result")
+    command_key = _command_key(body)
+    next_contact_at = _dt(body, "next_contact_at")
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
-            return await ship.record_attempt(conn, order_id, actor=_actor(staff), result=body["result"],
-                                             reason=body.get("reason"), note=body.get("note"),
-                                             next_contact_at=body.get("next_contact_at"))
+            return await ship.record_attempt(conn, order_id, actor=_actor(staff), command_key=command_key,
+                                             result=body["result"], reason=body.get("reason"),
+                                             note=body.get("note"), next_contact_at=next_contact_at)
     except ship.ShipmentError as e:
         raise _map_err(e)
     finally:
@@ -190,9 +231,9 @@ async def payment_ensure(order_id: int, body: dict, staff: dict = Depends(requir
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
-            p = await pay.ensure_payment(conn, order_id, method=body["method"], actor=_actor(staff))
-            await pay.recompute_amount_due(conn, order_id, actor=_actor(staff))
-            return p
+            await pay.ensure_payment(conn, order_id, method=body["method"], actor=_actor(staff))
+            await pay.sync_amount_due_if_unsettled(conn, order_id, actor=_actor(staff))
+            return dict(await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1", order_id))
     except pay.PaymentError as e:
         raise _map_err(e)
     finally:
@@ -205,14 +246,26 @@ async def payment_evidence(order_id: int, body: dict, staff: dict = Depends(requ
     if kind not in _EVIDENCE_PERM:
         raise HTTPException(status_code=422, detail="kind khong hop le")
     _require(staff, _EVIDENCE_PERM[kind])
+    command_key = _command_key(body)
+    if kind == "correction":
+        # CA 266-05: correction la delta dieu chinh received, CO THE AM (ghi du -> tru lai).
+        raw = body.get("amount_vnd")
+        if raw is None or isinstance(raw, bool) or not isinstance(raw, (int, float)) or \
+                (isinstance(raw, float) and not raw.is_integer()):
+            raise HTTPException(status_code=422, detail="correction can amount_vnd (so nguyen, co the am)")
+        amount_vnd = int(raw)
+    else:
+        amount_vnd = _money(body, "amount_vnd", required=True)
+    corrects = body.get("corrects_event_id")
+    if corrects is not None and not isinstance(corrects, int):
+        raise HTTPException(status_code=422, detail="corrects_event_id phai so nguyen")
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
             return await pay.record_evidence(
-                conn, order_id, kind=kind,
-                amount_vnd=int(body["amount_vnd"]) if body.get("amount_vnd") is not None else None,
-                recorded_by=_actor(staff), reference=body.get("reference"), note=body.get("note"),
-                attachment_ref=body.get("attachment_ref"))
+                conn, order_id, kind=kind, amount_vnd=amount_vnd, recorded_by=_actor(staff),
+                command_key=command_key, reference=body.get("reference"), note=body.get("note"),
+                attachment_ref=body.get("attachment_ref"), corrects_event_id=corrects)
     except pay.PaymentError as e:
         raise _map_err(e)
     finally:

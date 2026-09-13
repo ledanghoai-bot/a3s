@@ -29,10 +29,20 @@ def _prefix(batch: str) -> str:
     return f"m6test:{batch}:"
 
 
+def _like(prefix: str) -> str:
+    r"""CA 266-07: escape wildcard LIKE (% _ \) trong batch id do user cung cap -> match dung tien to."""
+    return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _bank_holder(batch: str) -> str:
+    return f"ROBANME TEST [M6TEST:{batch}]"
+
+
 async def create(conn, batch: str, n: int) -> list[int]:
-    # bank fixture test (nhan ro TEST)
+    # CA 266-07: bank fixture TEST-SCOPED, tag theo batch. KHONG phai prod (m5lab throwaway). Cleanup se
+    # xoa bank test cua batch + reactivate account non-test gan nhat (khoi phuc cau hinh that).
     await pay.set_bank_account(conn, bank="TEST BANK — KHONG CHUYEN TIEN", account_number="00000000",
-                              holder_name="ROBANME TEST", actor=f"m6batch:{batch}", is_test=True)
+                               holder_name=_bank_holder(batch), actor=f"m6batch:{batch}", is_test=True)
     order_ids = []
     for seq in range(1, n + 1):
         psid = f"{_prefix(batch)}{seq}"
@@ -57,7 +67,7 @@ async def create(conn, batch: str, n: int) -> list[int]:
                                         fee_vnd=0, eta_text="khoảng 3 giờ")
             method = "BANK_TRANSFER"
         await pay.ensure_payment(conn, oid, method=method, actor=f"m6batch:{batch}")
-        await pay.recompute_amount_due(conn, oid, actor=f"m6batch:{batch}")
+        await pay.sync_amount_due_if_unsettled(conn, oid, actor=f"m6batch:{batch}")
         order_ids.append(oid)
     return order_ids
 
@@ -67,11 +77,14 @@ async def batch_ids(conn, batch: str) -> dict:
         "SELECT o.id AS order_id, cu.id AS customer_id, s.id AS shipment_id, p.id AS payment_id "
         "FROM customers cu JOIN orders o ON o.customer_id=cu.id "
         "LEFT JOIN shipments s ON s.order_id=o.id LEFT JOIN payments p ON p.order_id=o.id "
-        "WHERE cu.psid LIKE $1", _prefix(batch) + "%")
+        "WHERE cu.psid LIKE $1 ESCAPE '\\'", _like(_prefix(batch)))
+    bank_ids = [r["id"] for r in await conn.fetch(
+        "SELECT id FROM bank_accounts WHERE holder_name=$1", _bank_holder(batch))]
     return {"orders": [r["order_id"] for r in rows],
             "customers": sorted({r["customer_id"] for r in rows}),
             "shipments": [r["shipment_id"] for r in rows if r["shipment_id"]],
-            "payments": [r["payment_id"] for r in rows if r["payment_id"]]}
+            "payments": [r["payment_id"] for r in rows if r["payment_id"]],
+            "bank_accounts": bank_ids}
 
 
 async def cleanup(conn, batch: str, apply: bool) -> dict:
@@ -84,6 +97,14 @@ async def cleanup(conn, batch: str, apply: bool) -> dict:
         p_ids = ids["payments"]
         o_ids = ids["orders"]
         c_ids = ids["customers"]
+        bk_ids = ids["bank_accounts"]
+        # CA 266-07: don PENDING outbox notify cua cac don test truoc (neu khong se ket lai + gui nham khi worker chay)
+        if o_ids:
+            await conn.execute(
+                "DELETE FROM delivery_attempts da USING outbox_events oe WHERE da.outbox_event_id=oe.id "
+                "AND (oe.payload->>'order_id')::bigint = ANY($1::bigint[])", o_ids)
+            await conn.execute(
+                "DELETE FROM outbox_events WHERE (payload->>'order_id')::bigint = ANY($1::bigint[])", o_ids)
         if p_ids:
             await conn.execute("DELETE FROM payment_events WHERE payment_id = ANY($1::bigint[])", p_ids)
             await conn.execute("DELETE FROM payment_instructions WHERE payment_id = ANY($1::bigint[])", p_ids)
@@ -98,6 +119,14 @@ async def cleanup(conn, batch: str, apply: bool) -> dict:
             await conn.execute("DELETE FROM orders WHERE id = ANY($1::bigint[])", o_ids)
         if c_ids:
             await conn.execute("DELETE FROM customers WHERE id = ANY($1::bigint[])", c_ids)
+        if bk_ids:
+            # xoa bank TEST cua batch; payment_instructions tham chieu da xoa o tren
+            await conn.execute("DELETE FROM bank_accounts WHERE id = ANY($1::bigint[])", bk_ids)
+            # khoi phuc: neu khong con active account, kich hoat lai account non-test moi nhat (cau hinh that)
+            if not await conn.fetchval("SELECT 1 FROM bank_accounts WHERE active"):
+                await conn.execute(
+                    "UPDATE bank_accounts SET active=true, updated_at=now() WHERE id = "
+                    "(SELECT id FROM bank_accounts WHERE NOT is_test ORDER BY version DESC LIMIT 1)")
     return {"deleted": ids}
 
 
