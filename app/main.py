@@ -15,6 +15,7 @@ from app.api.m5_address_resolution import router as m5_address_resolution_router
 from app.api.m5_address_workflow import confirmation_router as m5_confirmation_router
 from app.api.m5_address_workflow import review_router as m5_review_router
 from app.api.m5_order_binding import router as m5_order_binding_router
+from app.api.m6_fulfillment import router as m6_fulfillment_router
 from app.api.webhook import router as webhook_router
 from app.config import settings
 from app.db_pool import close_pool
@@ -74,6 +75,7 @@ app.include_router(m5_address_resolution_router)  # M5 Phase 2 (Directive 108): 
 app.include_router(m5_confirmation_router)  # M5 Phase 3 (Directive 112): customer confirmation (dormant)
 app.include_router(m5_review_router)  # M5 Phase 3 (Directive 112): staff review queue (dormant)
 app.include_router(m5_order_binding_router)  # M5 Phase 4 (Directive 116): order snapshot binding (shadow/dormant)
+app.include_router(m6_fulfillment_router)  # M6 (Directive 265): delivery & payment/COD dashboard
 
 
 @app.get("/health")
