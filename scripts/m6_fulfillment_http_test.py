@@ -16,13 +16,11 @@ import sys
 import time
 
 import asyncpg
+from httpx import ASGITransport, AsyncClient
 
+from app.api.auth import require_staff_session
 from app.config import settings
-
-from httpx import ASGITransport, AsyncClient  # noqa: E402
-
-from app.api.auth import require_staff_session  # noqa: E402
-from app.main import app  # noqa: E402
+from app.main import app
 
 RUN = str(int(time.time()))
 BASE = "/dashboard/fulfillment"
