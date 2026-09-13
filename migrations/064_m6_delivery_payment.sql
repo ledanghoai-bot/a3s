@@ -197,7 +197,23 @@ INSERT INTO role_permissions (role_key, permission_key) VALUES
     ('admin',    'bank.config')
 ON CONFLICT DO NOTHING;
 
+-- ============================ Outbox: cho phep M6 notify khong-command-backed ============================
+-- Giong escalation (062): M6 notify event dedupe theo (destination, dedupe_key) dam bao effective-once,
+-- khong can command_executions row. Mo rong allowlist CHECK (additive).
+ALTER TABLE outbox_events DROP CONSTRAINT IF EXISTS outbox_command_id_required_unless_escalation;
+ALTER TABLE outbox_events ADD CONSTRAINT outbox_command_id_required_unless_escalation
+    CHECK (
+        command_id IS NOT NULL
+        OR event_type IN (
+            'order.escalated.notify', 'handoff.escalated.notify',
+            'shipment.handover.notify', 'shipment.delivered.notify', 'shipment.failed.notify',
+            'payment.check_request.notify', 'payment.confirmed.notify')
+    );
+
 -- ROLLBACK (runbook — chi khi chua co du lieu M6 that su can giu):
+--   ALTER TABLE outbox_events DROP CONSTRAINT IF EXISTS outbox_command_id_required_unless_escalation;
+--   ALTER TABLE outbox_events ADD CONSTRAINT outbox_command_id_required_unless_escalation
+--     CHECK (command_id IS NOT NULL OR event_type IN ('order.escalated.notify','handoff.escalated.notify'));
 --   DROP TABLE IF EXISTS payment_instructions, payment_events, payments,
 --     shipment_delivery_attempts, shipments, bank_accounts, shipping_fee_rules, delivery_zones CASCADE;
 --   DROP FUNCTION IF EXISTS m6_forbid_mutate();
