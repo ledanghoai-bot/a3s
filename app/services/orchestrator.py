@@ -778,6 +778,33 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             await conversation_log.log_message(conversation_id, "bot", reply)
             return reply
 
+        # M7 (Directive 272 §3.1): hoi thoai fulfillment sau chot don — reply TAT DINH tu state machine (COD/CK/
+        # bao da chuyen/doi method). None -> khong lien quan -> luong cu. command_key = provider_message_id ->
+        # duplicate inbound tra reply cu, KHONG tao payment/instruction/QR thu 2. Loi -> bo qua (khong vo reply).
+        if settings.m7_conversational_fulfillment and channel in ("telegram_customer", "messenger"):
+            try:
+                from app.db_pool import acquire as _acq
+                from app.db_pool import release as _rel
+                from app.services.fulfillment import conversation as _fc
+                _c = await _acq()
+                try:
+                    async with _c.transaction():
+                        _m7 = await _fc.handle_customer_text(
+                            _c, sender_id, text, command_key=f"msg:{provider_message_id or sender_id}")
+                finally:
+                    await _rel(_c)
+            except Exception as e:  # noqa: BLE001
+                print(f"[orchestrator] M7 fulfillment reply skipped: {safe_exc(e)}")
+                _m7 = None
+            if _m7:
+                history = await _get_history(redis, sender_id)
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": _m7})
+                await _save_history(redis, sender_id, history)
+                await conversation_log.log_message(conversation_id, "customer", text)
+                await conversation_log.log_message(conversation_id, "bot", _m7)
+                return _m7
+
         # M6 (Directive 265 §4.1/§4.4): khach HOI trang thai don -> doc COMMITTED shipment/payment, tra reply
         # TAT DINH (khong de model tu nhan "da thanh toan"). None (chua co don M6-tracked) -> fall through
         # hanh vi cu (LLM/handoff). Read-only, khong lam vo luong.

@@ -123,6 +123,9 @@ _ADVANCE = {
     ("BANK_TRANSFER", "shop_confirmed_received"): ("settle", ("reported", "discrepancy", "confirmed")),
     ("COD", "cod_collected"): ("collected", ("awaiting", "collected", "discrepancy")),
     ("COD", "reconciled"): ("settle", ("collected", "discrepancy", "reconciled")),
+    # M7-C0 (Directive 272 §3.5): xac nhan TU DONG tu provider (SePay test) — CHI payment service ghi sau khi
+    # matching (account/code/amount/state) pass o provider_ingest. Cung semantics settle (== due -> confirmed).
+    ("BANK_TRANSFER", "bank_auto_confirmed"): ("settle", ("awaiting", "reported", "discrepancy")),
 }
 
 
@@ -141,8 +144,10 @@ def _replay(pay, ev_row, new_fp: str, cur: str) -> dict:
 
 async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | None, recorded_by: str,
                           command_key: str, reference: str | None = None, note: str | None = None,
-                          attachment_ref: str | None = None, corrects_event_id: int | None = None) -> dict:
-    """CA 266-03/267-02: command_key idempotent + fingerprint + DB lock serialize. 266-05: cumulative received."""
+                          attachment_ref: str | None = None, corrects_event_id: int | None = None,
+                          notify: bool = True) -> dict:
+    """CA 266-03/267-02: command_key idempotent + fingerprint + DB lock serialize. 266-05: cumulative received.
+    M7: notify=False khi caller (bot conversation) tu tra reply cung noi dung — tranh thong bao trung."""
     if not command_key:
         raise PaymentError("thieu command_key (idempotency)")
     # CA 267-02: khoa aggregate payment -> cac request tren cung payment SERIALIZE (khong dua count/insert).
@@ -216,13 +221,18 @@ async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | N
         if new_status == "confirmed":   # transfer received -> ETA start
             from app.services.fulfillment import shipment_service as _sh
             await _sh.set_eta_start(conn, order_id, source="transfer_received")
-        from app.services.fulfillment import notify as _n
-        await _n.notify_payment(conn, order_id, kind=kind, new_status=new_status, version=pay["version"])
+        if notify:
+            from app.services.fulfillment import notify as _n
+            await _n.notify_payment(conn, order_id, kind=kind, new_status=new_status, version=pay["version"])
+        if new_status in ("confirmed", "reconciled"):
+            # M7: hoi thoai fulfillment (neu co) -> completed; best-effort trong cung tx (khong vo evidence).
+            from app.services.fulfillment import conversation as _fc
+            await _fc.on_payment_confirmed(conn, order_id, actor=recorded_by)
     else:
         new_status = to_status
         if new_status != cur:
             pay = await _update_payment(conn, pay, received=pay["amount_received_vnd"], status=new_status)
-        if kind == "customer_reported":
+        if kind == "customer_reported" and notify:
             from app.services.fulfillment import notify as _n
             await _n.notify_payment(conn, order_id, kind=kind, new_status=new_status, version=pay["version"])
 
@@ -263,41 +273,87 @@ async def _insert(conn, payment_id, kind, amount_vnd, recorded_by, reference, no
 # ---------------- Bank account config + instruction ----------------
 
 async def set_bank_account(conn, *, bank: str, account_number: str, holder_name: str, actor: str,
-                           branch: str | None = None, is_test: bool = False) -> dict:
+                           branch: str | None = None, is_test: bool = False, bin_code: str | None = None) -> dict:
+    """M7: bin_code (NAPAS BIN 6 so, vd VietinBank 970415) de sinh VietQR; thieu BIN -> instruction KHONG co QR."""
     if not (bank and account_number and holder_name):
         raise PaymentError("thieu bank/account_number/holder_name")
+    if bin_code is not None and not (isinstance(bin_code, str) and bin_code.isdigit() and len(bin_code) == 6):
+        raise PaymentError("bin phai 6 chu so (NAPAS BIN)")
     prev = await conn.fetchrow("SELECT * FROM bank_accounts WHERE active")
     new_version = (prev["version"] + 1) if prev else 1
     if prev:
         await conn.execute("UPDATE bank_accounts SET active=false, updated_at=now() WHERE id=$1", prev["id"])
     row = await conn.fetchrow(
-        "INSERT INTO bank_accounts (bank, account_number, holder_name, branch, version, active, is_test) "
-        "VALUES ($1,$2,$3,$4,$5,true,$6) RETURNING *", bank, account_number, holder_name, branch, new_version,
-        is_test)
+        "INSERT INTO bank_accounts (bank, account_number, holder_name, branch, version, active, is_test, bin) "
+        "VALUES ($1,$2,$3,$4,$5,true,$6,$7) RETURNING *", bank, account_number, holder_name, branch, new_version,
+        is_test, bin_code)
     await audit_service.record(conn, actor_type="cli", action="bank.config", actor_ref=actor,
                                entity_type="bank_accounts", entity_id=str(row["id"]),
                                after={"bank": bank, "version": new_version, "is_test": is_test})
     return dict(row)
 
 
-async def generate_instruction(conn, order_id: int, *, actor: str) -> dict:
-    pay = await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1", order_id)
+async def generate_instruction(conn, order_id: int, *, actor: str, command_key: str | None = None) -> dict:
+    """Instruction CK bat bien (snapshot account version + noi dung tat dinh + VietQR payload).
+    M7 (272 §3.3): command_key -> idempotent (replay tra DUNG row cu, khong tao instruction/QR thu 2); regenerate
+    (command_key moi) tao version moi ro rang (instruction_version), KHONG sua noi dung da gui. Doi active bank
+    KHONG anh huong row cu. Thieu BIN -> qr_payload NULL (khong bia QR)."""
+    pay = await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1 FOR UPDATE", order_id)
     if not pay:
         raise PaymentError(f"payment cho order {order_id} chua ton tai")
     if pay["method"] != "BANK_TRANSFER":
         raise PaymentError("instruction chi cho BANK_TRANSFER")
     if pay["amount_due_vnd"] is None:   # CA 266-04: khong phat instruction tu amount chua chot
         raise PaymentError("chua chot tong tien (phi giao chua co) — khong phat huong dan chuyen khoan")
+    if command_key:
+        ex = await conn.fetchrow("SELECT * FROM payment_instructions WHERE payment_id=$1 AND command_key=$2",
+                                 pay["id"], command_key)
+        if ex:
+            out = dict(ex)
+            out["duplicate"] = True
+            return out
     acct = await conn.fetchrow("SELECT * FROM bank_accounts WHERE active")
     if not acct:
         raise PaymentError("chua cau hinh tai khoan nhan tien — chon COD hoac lien he nhan vien")
+    content = transfer_content(order_id)
+    qr_payload = None
+    if acct["bin"]:
+        from app.services.payment import vietqr as _vq
+        try:
+            qr_payload = _vq.build_payload(bin_code=acct["bin"], account_number=str(acct["account_number"]),
+                                           amount_vnd=int(pay["amount_due_vnd"]), add_info=content)
+        except _vq.VietQRError as e:
+            raise PaymentError(f"khong sinh duoc VietQR: {e}") from e
+    ver = (await conn.fetchval("SELECT count(*) FROM payment_instructions WHERE payment_id=$1", pay["id"])) + 1
     row = await conn.fetchrow(
         "INSERT INTO payment_instructions (order_id, payment_id, bank_account_id, account_version, "
-        "bank_snapshot, account_number_snapshot, holder_snapshot, transfer_content, amount_vnd, is_test) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
+        "bank_snapshot, account_number_snapshot, holder_snapshot, transfer_content, amount_vnd, is_test, "
+        "bin_snapshot, qr_payload, qr_version, command_key, instruction_version) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,1,$13,$14) "
+        "ON CONFLICT (payment_id, command_key) WHERE command_key IS NOT NULL DO NOTHING RETURNING *",
         order_id, pay["id"], acct["id"], acct["version"], acct["bank"], acct["account_number"],
-        acct["holder_name"], transfer_content(order_id), pay["amount_due_vnd"], acct["is_test"])
+        acct["holder_name"], content, pay["amount_due_vnd"], acct["is_test"], acct["bin"], qr_payload,
+        command_key, ver)
+    if row is None:  # race cung command_key
+        ex = await conn.fetchrow("SELECT * FROM payment_instructions WHERE payment_id=$1 AND command_key=$2",
+                                 pay["id"], command_key)
+        out = dict(ex)
+        out["duplicate"] = True
+        return out
     await audit_service.record(conn, actor_type="cli", action="payment.instruction", actor_ref=actor,
                                entity_type="payment_instructions", entity_id=str(row["id"]),
-                               after={"order_id": order_id, "account_version": acct["version"]})
-    return dict(row)
+                               after={"order_id": order_id, "account_version": acct["version"],
+                                      "instruction_version": ver, "has_qr": qr_payload is not None})
+    out = dict(row)
+    out["duplicate"] = False
+    return out
+
+
+async def record_provider_confirmation(conn, order_id: int, *, amount_vnd: int, provider: str,
+                                       provider_event_id: str, reference: str | None) -> dict:
+    """M7-C0: ghi event bank_auto_confirmed sau khi provider_ingest match PASS. command_key = provider event key
+    (retry/duplicate -> replay, khong 2 effect). reference = ma giao dich ngan hang (uq_pe_kind_reference)."""
+    return await record_evidence(conn, order_id, kind="bank_auto_confirmed", amount_vnd=int(amount_vnd),
+                                 recorded_by=f"provider:{provider}", command_key=f"{provider}:{provider_event_id}",
+                                 reference=reference or f"{provider}:{provider_event_id}",
+                                 note=f"auto-confirm tu {provider} event {provider_event_id}")

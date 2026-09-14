@@ -388,6 +388,15 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
             max_attempts=MAX_ATTEMPTS,
         )
 
+    # --- M7 (CA Directive 272 §3.1): bat dau hoi thoai fulfillment TRONG CUNG tx chot don — chi khi flag BAT, kenh
+    # khach co chat va order_address_snapshot hop le (Gate E da bind). KHONG goi provider/bao phi o day (worker 2 pha).
+    # Loi o day -> raise -> rollback (fail-closed, cung nguyen tac outbox/audit).
+    if settings.m7_conversational_fulfillment and env.channel in ("messenger", "telegram_customer"):
+        if await conn.fetchval("SELECT 1 FROM order_address_snapshot WHERE order_id=$1", order_id):
+            from app.services.fulfillment import conversation as _fc
+            await _fc.ensure_started(conn, order_id, channel=env.channel, customer_ref=str(env.actor.id),
+                                     command_key=f"start:{env.command_id}")
+
     # --- Audit fail-closed BẮT BUỘC (CR-05) ---
     # M1 schema (>=015) luôn có audit_log; KHÔNG guard audit_exists nữa -> nếu thiếu/hỏng audit thì
     # record() raise -> transaction rollback (không commit business mutation mà không có audit).
