@@ -150,6 +150,9 @@ async def route_quote(order_id: int, body: dict | None = None,
         raise HTTPException(status_code=409, detail=str(e))
     except rops.RouteOpInFlight as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except rops.RouteOpAmbiguous as e:
+        # CA 277-01: provider ket qua khong chac chan -> da chuyen staff, KHONG tu goi lai (at-most-once).
+        raise HTTPException(status_code=409, detail=str(e))
     except ship.ShipmentError as e:
         raise _map_err(e)
     finally:

@@ -172,9 +172,11 @@ async def main():  # noqa: C901
         async with conn.transaction():
             c6 = await ROPS.claim(conn, oid6, command_key=f"k6:{oid6}", request_fingerprint=ROPS.fingerprint(oid6),
                                   owner_token=owner6)
+        async with conn.transaction():
+            await ROPS.mark_provider_started(conn, c6["op"]["id"], provider="ghn", expected_owner=owner6)
         ghn_res = await FC.prepare_ghn_quote(conn, oid6, provider=g6)   # goi GHN 1 lan (ghi nhan)
         async with conn.transaction():
-            rec = await ROPS.record_provider(conn, c6["op"]["id"], provider="ghn",
+            rec = await ROPS.record_provider(conn, c6["op"]["id"],
                                              provider_result=ghn_res.snapshot(), expected_owner=owner6)
         ck("T6a provider_recorded (GHN goi 1 lan, luu ket qua)", rec is not None and g6.calls == 1,
            f"rec={rec is not None} ghn={g6.calls}")
@@ -196,9 +198,11 @@ async def main():  # noqa: C901
         async with conn.transaction():
             cc6 = await ROPS.claim(conn, oid6c, command_key=f"k6c:{oid6c}",
                                    request_fingerprint=ROPS.fingerprint(oid6c), owner_token=owner6c)
+        async with conn.transaction():
+            await ROPS.mark_provider_started(conn, cc6["op"]["id"], provider="ghn", expected_owner=owner6c)
         gr = await FC.prepare_ghn_quote(conn, oid6c, provider=g6c)
         async with conn.transaction():
-            await ROPS.record_provider(conn, cc6["op"]["id"], provider="ghn",
+            await ROPS.record_provider(conn, cc6["op"]["id"],
                                        provider_result=gr.snapshot(), expected_owner=owner6c)
         # lease CON hieu luc -> request khac phai in_flight (khong cuop quyen owner dang apply)
         inflight6 = False
