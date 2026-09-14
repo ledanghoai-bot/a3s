@@ -393,6 +393,10 @@ async def escalate(conn, order_id: int, *, reason: str, actor: str, detail: dict
     fc = await get(conn, order_id, lock=True)
     if not fc:
         return None
+    if fc["step"] == COMPLETED:
+        # CA 275-03: KHONG mo lai hoi thoai da completed (don da thanh toan/xong) — chi mo attention cho staff.
+        aid = await _att.open_attention(conn, order_id, reason=reason, detail=detail, created_by=actor)
+        return {"step": COMPLETED, "reason": reason, "attention_id": aid, "already": True}
     already = fc["step"] == STAFF_ATTENTION and fc["attention_reason"] == reason
     if not already:
         frm = fc["step"]
@@ -570,12 +574,21 @@ async def on_payment_confirmed(conn, order_id: int, *, actor: str = "payment") -
                                after={"order_id": order_id})
 
 
+class AttentionOpenError(Exception):
+    """CA 275-04: con open attention -> resume bi tu choi (staff phai resolve truoc)."""
+
+
 async def resume(conn, order_id: int, *, actor: str) -> dict | None:
     """Staff da xu ly ngoai le -> staff_attention -> routing (worker gui lai tong tien + hoi method). Quote thu cong
-    (quote_source=staff_manual) duoc giu nguyen o advance_routing."""
+    (quote_source=staff_manual) duoc giu nguyen o advance_routing.
+    CA 275-04: FAIL-CLOSED khi con open attention — buoc staff Resolve (co note) TRUOC khi Resume, tranh worker
+    bao gia/gui prompt moi trong luc mismatch chua duoc xu ly. Idempotent: da routing -> None (no-op)."""
     fc = await get(conn, order_id, lock=True)
     if not fc or fc["step"] != STAFF_ATTENTION:
         return None
+    open_att = await conn.fetchval("SELECT count(*) FROM staff_attention WHERE order_id=$1 AND status='open'", order_id)
+    if open_att and int(open_att) > 0:
+        raise AttentionOpenError(f"con {open_att} attention chua resolve — resolve truoc khi resume")
     fc2 = await _set_step(conn, fc, step=ROUTING, method_prompts=0)
     await _journal(conn, order_id, command_key=f"resume:{fc['version']}", source="staff", from_step=STAFF_ATTENTION,
                    to_step=ROUTING, detail={"by": actor}, reply_text=None)

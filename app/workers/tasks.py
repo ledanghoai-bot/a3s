@@ -114,7 +114,10 @@ async def _process_message_inner(event: dict) -> None:
     # CR-04: truyền provider message id (Messenger mid) thật vào command idempotency/causation.
     reply = await handle_message(sender_id, text, channel="messenger",
                                  provider_message_id=message.get("mid"))
-    await send_text(sender_id, reply)
+    # CA 275-01: chi goi sender khi co reply THAT (non-empty string). None/rong = M7 SILENT (bot im lang) hoac
+    # khong co reply -> KHONG goi Messenger API voi text=null (tranh loi/retry provider).
+    if isinstance(reply, str) and reply.strip():
+        await send_text(sender_id, reply)
 
 
 async def deliver_outbox_job(ctx) -> None:

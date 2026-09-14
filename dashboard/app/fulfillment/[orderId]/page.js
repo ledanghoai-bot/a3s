@@ -388,10 +388,23 @@ export default function FulfillmentDetail() {
             <Row label="Mốc chờ CK">bắt đầu {new Date(m7.conversation.transfer_started_at).toLocaleString("vi-VN")} · hạn {m7.conversation.transfer_deadline_at ? new Date(m7.conversation.transfer_deadline_at).toLocaleString("vi-VN") : "—"}</Row>
           )}
           <Row label="Hành động">
-            <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/shipment/route-quote`), "Đã định tuyến lại + báo phí")}>Retry định tuyến/phí</button>
-            {m7.conversation.step === "staff_attention" && (
-              <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/conversation/resume`), "Đã resume hội thoại")}>Resume hội thoại</button>
-            )}
+            {/* CA 275-04: route-quote idempotency key (double-click/ambiguous retry không gọi GHN 2 lần) */}
+            <button disabled={busy} onClick={() => {
+              const { key, consume } = opKey(`route-quote:${orderId}`, {});
+              act(() => post(`/orders/${orderId}/shipment/route-quote`, { command_key: key }), "Đã định tuyến lại + báo phí", consume);
+            }}>Retry định tuyến/phí</button>
+            {m7.conversation.step === "staff_attention" && (() => {
+              const hasOpenAtt = (m7.attention || []).some((a) => a.status === "open");
+              return (
+                <>
+                  <button disabled={busy || hasOpenAtt} title={hasOpenAtt ? "Resolve attention trước khi resume" : ""}
+                    onClick={() => act(() => post(`/orders/${orderId}/conversation/resume`), "Đã resume hội thoại")}>
+                    Resume hội thoại
+                  </button>
+                  {hasOpenAtt && <span style={{ color: "#9a6700", marginLeft: 6, fontSize: 12 }}>Resolve attention trước</span>}
+                </>
+              );
+            })()}
           </Row>
           {m7.instruction && m7.instruction.qr_svg_data_uri && (
             <div style={{ marginTop: 8, padding: 12, background: "#f6f8fa", borderRadius: 6 }}>

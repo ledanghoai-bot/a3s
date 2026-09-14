@@ -337,25 +337,28 @@ def _is_explicit_cancel(text: str) -> bool:
     return any(m in t for m in _CANCEL_MARKERS)
 
 
-async def _active_committed_fulfillment(sender_id: str):
-    """CA 274-05: tra order_id neu khach co don ĐÃ CHOT dang trong fulfillment (conversation step chua
-    completed/none), else None. Dung de KHONG claim 'da huy' cho don da commit (huy/doi -> nhan vien)."""
+async def _committed_fulfillment_status(sender_id: str):
+    """CA 274-05/275-05: phan biet 3 truong hop cho cancel guard:
+      ('committed', order_id) = khach co don ĐÃ CHOT co fulfillment conversation (GOM 'completed' — don da xong
+        van la committed order) va order chua bi cancel;
+      ('none', None) = khong co committed fulfillment (pre-order thuan);
+      ('error', None) = DB check loi -> caller FAIL TOWARD 'can nhan vien', KHONG duoc claim da huy.
+    Completed order van la committed -> huy/doi phai chuyen staff, khong claim cancellation."""
     try:
         from app.db_pool import acquire as _acq
         from app.db_pool import release as _rel
         _c = await _acq()
         try:
-            return await _c.fetchval(
-                "SELECT fc.order_id FROM fulfillment_conversations fc JOIN customers cu ON cu.id=("
-                "  SELECT customer_id FROM orders WHERE id=fc.order_id) "
-                "WHERE cu.psid=$1 AND fc.step IN "
-                "('routing','awaiting_method','awaiting_transfer','cod_handoff','staff_attention') "
+            oid = await _c.fetchval(
+                "SELECT fc.order_id FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
+                "JOIN customers cu ON cu.id=o.customer_id WHERE cu.psid=$1 AND o.status <> 'cancelled' "
                 "ORDER BY fc.updated_at DESC LIMIT 1", sender_id)
         finally:
             await _rel(_c)
+        return ("committed", int(oid)) if oid is not None else ("none", None)
     except Exception as e:  # noqa: BLE001
-        print(f"[orchestrator] active committed fulfillment check skipped: {safe_exc(e)}")
-        return None
+        print(f"[orchestrator] committed fulfillment check FAILED (fail-safe to staff): {safe_exc(e)}")
+        return ("error", None)
 
 
 # CA 233-03: confirmation detector HIGH-PRECISION + anchored (BO 'ung'/'ok em' substring rong). Commit chi
@@ -788,11 +791,10 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # luot nay (KHONG vao LLM loop -> KHONG the goi create_order tao intent/don moi undo cancel). Tra
         # phan hoi huy tat dinh.
         if _is_explicit_cancel(text):
-            # CA 274-05: don ĐÃ CHOT dang fulfillment -> KHONG claim da huy (order/fulfillment giu nguyen);
-            # chuyen nhan vien (staff_attention idempotent), tra message tat dinh. Chi pre-order/open-intent moi
-            # dung hanh vi M5 (terminalize CANCELLED + 'da huy').
-            _committed_oid = await _active_committed_fulfillment(sender_id)
-            if _committed_oid is not None:
+            # CA 274-05/275-05: don ĐÃ CHOT (gom completed) HOAC DB-check loi -> KHONG claim da huy; chuyen nhan
+            # vien (giu order state). Chi 'none' (pre-order thuan) moi dung hanh vi M5 (terminalize + 'da huy').
+            _cf_status, _committed_oid = await _committed_fulfillment_status(sender_id)
+            if _cf_status == "committed":
                 try:
                     from app.db_pool import acquire as _acq
                     from app.db_pool import release as _rel
@@ -808,6 +810,10 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                     print(f"[orchestrator] cancel handoff skipped: {safe_exc(e)}")
                 reply = ("Dạ đơn của anh/chị đã được lên đơn nên yêu cầu thay đổi/huỷ cần nhân viên kiểm tra và "
                          "xử lý giúp ạ. Nhân viên shop sẽ liên hệ lại với anh/chị.")
+            elif _cf_status == "error":
+                # CA 275-05: state-check thất bại -> FAIL TOWARD staff, KHONG xác nhận huỷ.
+                reply = ("Dạ để chắc chắn, yêu cầu huỷ/thay đổi của anh/chị cần nhân viên kiểm tra giúp ạ. "
+                         "Nhân viên shop sẽ liên hệ lại với anh/chị.")
             else:
                 await _terminalize_open_intent("CANCELLED", "customer_cancel")
                 reply = ("Dạ em đã huỷ yêu cầu đặt hàng đang xử lý cho anh/chị rồi ạ. "

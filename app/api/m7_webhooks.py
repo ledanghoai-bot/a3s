@@ -37,5 +37,5 @@ async def sepay_webhook(request: Request, authorization: str | None = Header(def
             row_id, created, conflict = await provider_ingest.ingest(conn, ev, mode="test")
     finally:
         await conn.close()
-    # CA 274-01: cung event ID khac payload -> conflict (fail-closed, da ghi last_error cho staff).
-    return {"success": True, "event_id": row_id, "duplicate": not created, "conflict": conflict}
+    # CA 275-02: cung event ID khac payload -> conflict fail-closed (row -> error, attention mo). success=False.
+    return {"success": not conflict, "event_id": row_id, "duplicate": not created, "conflict": conflict}

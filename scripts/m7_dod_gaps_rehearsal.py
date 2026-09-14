@@ -138,7 +138,8 @@ async def main():  # noqa: C901
         await conn.execute("INSERT INTO payments(order_id,method,amount_due_vnd,status) VALUES($1,'COD',200000,'awaiting')",
                            oidc)
         _, st = await _sepay(conn, ev_id=f"{RUN}-cod", order_id=oidc, amount=200000)
-        ck("SePay payment_not_bank_transfer -> unmatched", st == "unmatched", st)
+        ck("SePay payment_not_bank_transfer -> discrepancy (order-bound escalate, CA 275-03)",
+           st == "discrepancy", st)
 
         # no_instruction: BANK_TRANSFER payment, khong instruction
         oidn, _pn, _ = await _mk_order(conn)
@@ -146,7 +147,8 @@ async def main():  # noqa: C901
         await conn.execute("INSERT INTO payments(order_id,method,amount_due_vnd,status) "
                            "VALUES($1,'BANK_TRANSFER',200000,'awaiting')", oidn)
         _, st = await _sepay(conn, ev_id=f"{RUN}-noinstr", order_id=oidn, amount=200000)
-        ck("SePay no_instruction -> unmatched", st == "unmatched", st)
+        ck("SePay no_instruction -> discrepancy (order-bound escalate, CA 275-03)",
+           st == "discrepancy", st)
 
         # CA 274-01: same event ID / KHAC hash -> conflict (fail-closed), khong xu ly payload cu nhu duplicate lanh
         oidc2, _p2, _i2 = await _mk_transfer(conn)

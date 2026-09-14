@@ -32,6 +32,7 @@ import asyncpg
 
 from app.config import settings
 from app.services.command import outbox_worker as ow
+from app.services.fulfillment import attention as attn_svc
 from app.services.fulfillment import conversation as fc
 from app.services.fulfillment import shipment_service as ship
 from app.services.payment import payment_service as pay
@@ -334,7 +335,8 @@ async def main() -> int:
         _, _, st = await _sepay(conn, ev_id=f"{RUN}-7d", order_id=o7, amount=t7, content=f"3SCF {o7} 3SCF {o6}")
         ck("G7 trung/nhieu ma -> unmatched", st == "unmatched")
         _, _, st = await _sepay(conn, ev_id=f"{RUN}-7e", order_id=o7, amount=t7, account="0000000000")
-        ck("G7 sai account -> unmatched", st == "unmatched")
+        # CA 275-03: event gan dung 1 order code nhung account khac instruction -> shared escalation payment_mismatch
+        ck("G7 sai account (order-bound) -> discrepancy + escalate", st == "discrepancy")
         _, _, st = await _sepay(conn, ev_id=f"{RUN}-7f", order_id=o7, amount=t7, direction="out")
         ck("G7 tien ra -> ignored", st == "ignored")
         _, _, st = await _sepay(conn, ev_id=f"{RUN}-7g", order_id=999999999, amount=t7)
@@ -406,6 +408,21 @@ async def main() -> int:
         async with conn.transaction():
             await fc.ensure_started(conn, o_ghn, channel="telegram_customer", customer_ref=p_ghn, command_key=f"start:{RUN}:{o_ghn}")
             await conn.execute("UPDATE fulfillment_conversations SET step='staff_attention' WHERE order_id=$1", o_ghn)
+        # CA 275-04: resume fail-closed khi con open attention -> staff phai resolve truoc.
+        try:
+            async with conn.transaction():
+                await fc.resume(conn, o_ghn, actor="staff1")
+            resume_blocked = False
+        except fc.AttentionOpenError:
+            resume_blocked = True
+        ck("G10 resume BLOCK khi con open attention (CA 275-04 fail-closed)", resume_blocked, resume_blocked)
+        # staff resolve het open attention cua o_ghn roi moi resume (query truc tiep — khong phu thuoc list limit)
+        open_ids = [r["id"] for r in await conn.fetch(
+            "SELECT id FROM staff_attention WHERE order_id=$1 AND status='open'", o_ghn)]
+        for aid in open_ids:
+            async with conn.transaction():
+                await attn_svc.resolve(conn, aid, resolved_by="staff1", note="G10 rehearsal resolve")
+        async with conn.transaction():
             rs = await fc.resume(conn, o_ghn, actor="staff1")
         async with conn.transaction():
             out10 = await fc.advance_routing(conn, o_ghn)

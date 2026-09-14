@@ -115,10 +115,12 @@ async def main():  # noqa: C901
         _, st = await _sepay(conn, ev_id=f"{RUN}-r1c", oid=oid2, amount=250000)   # amount v2
         ck("R1 event amount instruction hiện hành (v2) -> matched", st == "matched", st)
 
-        # non-test instruction -> C0 khong auto-confirm
+        # non-test instruction -> C0 khong auto-confirm; order-bound -> discrepancy + escalate (CA 275-03)
         oid3, psid3, payid3, _ = await _awaiting_transfer(conn, amount=200000, is_test=False)
         _, st = await _sepay(conn, ev_id=f"{RUN}-r1d", oid=oid3, amount=200000)
-        ck("R1 instruction NON-TEST -> C0 khong auto-confirm (unmatched)", st == "unmatched", st)
+        fc3 = await C.get(conn, oid3)
+        ck("R1 instruction NON-TEST -> C0 khong auto-confirm (discrepancy + escalate)",
+           st == "discrepancy" and fc3["step"] == "staff_attention", f"{st}/{fc3['step']}")
 
         # mode live row -> C0 khong xu ly
         oid4, psid4, payid4, _ = await _awaiting_transfer(conn, amount=200000)

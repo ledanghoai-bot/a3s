@@ -126,8 +126,11 @@ async def conversation_detail(order_id: int) -> dict:
 
 
 @router.post("/orders/{order_id}/shipment/route-quote")
-async def route_quote(order_id: int, staff: dict = Depends(require_permission("shipment.manage"))) -> dict:
-    """Retry dinh tuyen + bao phi (2 pha: GHN HTTP NGOAI tx). Khong doi hoi thoai; staff resume rieng."""
+async def route_quote(order_id: int, body: dict | None = None,
+                      staff: dict = Depends(require_permission("shipment.manage"))) -> dict:
+    """Retry dinh tuyen + bao phi (2 pha: GHN HTTP NGOAI tx). Khong doi hoi thoai; staff resume rieng.
+    CA 275-04: body.command_key = client idempotency (chong double-click). Self/manual route la deterministic
+    (re-quote cung ket qua); GHN request-dedup/lease se them khi bat GHN staging that (C1, hien flag OFF)."""
     conn = await asyncpg.connect(_db_url())
     try:
         ghn_res = await fc.prepare_ghn_quote(conn, order_id)
@@ -152,6 +155,9 @@ async def conversation_resume(order_id: int, staff: dict = Depends(require_permi
         if out is None:
             raise HTTPException(status_code=400, detail="hoi thoai khong o staff_attention hoac khong ton tai")
         return out
+    except fc.AttentionOpenError as e:
+        # CA 275-04: con open attention -> phai Resolve truoc khi Resume (fail-closed).
+        raise HTTPException(status_code=409, detail=str(e))
     finally:
         await conn.close()
 
