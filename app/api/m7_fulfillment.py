@@ -14,6 +14,7 @@ from app.api.auth import require_active_session, require_permission
 from app.config import settings
 from app.services.fulfillment import attention as att
 from app.services.fulfillment import conversation as fc
+from app.services.fulfillment import route_operation as rops
 from app.services.fulfillment import shipment_service as ship
 from app.services.payment import payment_service as pay
 from app.services.payment import vietqr as vq
@@ -129,15 +130,26 @@ async def conversation_detail(order_id: int) -> dict:
 async def route_quote(order_id: int, body: dict | None = None,
                       staff: dict = Depends(require_permission("shipment.manage"))) -> dict:
     """Retry dinh tuyen + bao phi (2 pha: GHN HTTP NGOAI tx). Khong doi hoi thoai; staff resume rieng.
-    CA 275-04: body.command_key = client idempotency (chong double-click). Self/manual route la deterministic
-    (re-quote cung ket qua); GHN request-dedup/lease se them khi bat GHN staging that (C1, hien flag OFF)."""
+    CA 276-01: SERVER-SIDE idempotency BAT BUOC. `body.command_key` (non-empty) -> receipt ben vung
+    `fulfillment_route_operations`: request dau claim ATOMIC truoc khi goi GHN; double-click/retry/dong thoi cung key
+    -> in_flight/replay (GHN goi DUNG 1 lan, apply 1 lan); cung key khac payload -> conflict (409); crash-recovery qua
+    lease + provider_result da ghi (retry KHONG goi GHN lan hai). Self/manual deterministic khong goi GHN."""
+    ck = (body or {}).get("command_key")
+    if not isinstance(ck, str) or not ck.strip():
+        raise HTTPException(status_code=422, detail="thieu command_key (idempotency key tu client)")
     conn = await asyncpg.connect(_db_url())
     try:
-        ghn_res = await fc.prepare_ghn_quote(conn, order_id)
-        async with conn.transaction():
-            row = await ship.route_and_quote(conn, order_id, actor=_actor(staff), ghn_result=ghn_res)
-        row["quote_snapshot"] = _jsonb(row.get("quote_snapshot"))
+        out = await rops.execute(conn, order_id, actor=_actor(staff), command_key=ck.strip())
+        row = dict(out["shipment"]) if out.get("shipment") else {}
+        if "quote_snapshot" in row:
+            row["quote_snapshot"] = _jsonb(row.get("quote_snapshot"))
+        row["duplicate"] = out["duplicate"]
+        row["op_state"] = out["op_state"]
         return row
+    except rops.RouteOpConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except rops.RouteOpInFlight as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ship.ShipmentError as e:
         raise _map_err(e)
     finally:

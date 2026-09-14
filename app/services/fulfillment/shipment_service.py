@@ -64,6 +64,16 @@ async def ensure_shipment(conn, order_id: int, *, actor: str) -> dict:
     return dict(row)
 
 
+async def get_shipment(conn, order_id: int) -> dict | None:
+    """Read-only: shipment row hien tai (dung cho replay idempotent route-quote — ket qua da apply)."""
+    row = await conn.fetchrow("SELECT * FROM shipments WHERE order_id=$1", order_id)
+    if not row:
+        return None
+    out = dict(row)
+    out["attention_reason"] = None
+    return out
+
+
 async def _load_zone_rows(conn):
     return [dict(r) for r in await conn.fetch(
         "SELECT province_code, ward_code, zone, active FROM delivery_zones WHERE active")]
