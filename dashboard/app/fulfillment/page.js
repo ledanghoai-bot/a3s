@@ -80,6 +80,7 @@ export default function FulfillmentBoard() {
   return (
     <div>
       <h1>Giao &amp; Thu tiền</h1>
+      <p><a href="/fulfillment/attention">→ Hàng đợi cần nhân viên (M7)</a></p>
       <div style={{ display: "flex", gap: 12, margin: "12px 0", flexWrap: "wrap" }}>
         <label>
           Trạng thái giao:{" "}

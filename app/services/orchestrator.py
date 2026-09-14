@@ -337,6 +337,27 @@ def _is_explicit_cancel(text: str) -> bool:
     return any(m in t for m in _CANCEL_MARKERS)
 
 
+async def _active_committed_fulfillment(sender_id: str):
+    """CA 274-05: tra order_id neu khach co don ĐÃ CHOT dang trong fulfillment (conversation step chua
+    completed/none), else None. Dung de KHONG claim 'da huy' cho don da commit (huy/doi -> nhan vien)."""
+    try:
+        from app.db_pool import acquire as _acq
+        from app.db_pool import release as _rel
+        _c = await _acq()
+        try:
+            return await _c.fetchval(
+                "SELECT fc.order_id FROM fulfillment_conversations fc JOIN customers cu ON cu.id=("
+                "  SELECT customer_id FROM orders WHERE id=fc.order_id) "
+                "WHERE cu.psid=$1 AND fc.step IN "
+                "('routing','awaiting_method','awaiting_transfer','cod_handoff','staff_attention') "
+                "ORDER BY fc.updated_at DESC LIMIT 1", sender_id)
+        finally:
+            await _rel(_c)
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] active committed fulfillment check skipped: {safe_exc(e)}")
+        return None
+
+
 # CA 233-03: confirmation detector HIGH-PRECISION + anchored (BO 'ung'/'ok em' substring rong). Commit chi
 # xay ra khi try_server_commit thay READY intent + summary present khop DUNG version/fingerprint hien tai
 # (pending-confirm context) -> confirm cho summary CU/superseded/ngoai context KHONG commit.
@@ -767,9 +788,30 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # luot nay (KHONG vao LLM loop -> KHONG the goi create_order tao intent/don moi undo cancel). Tra
         # phan hoi huy tat dinh.
         if _is_explicit_cancel(text):
-            await _terminalize_open_intent("CANCELLED", "customer_cancel")
-            reply = ("Dạ em đã huỷ yêu cầu đặt hàng đang xử lý cho anh/chị rồi ạ. "
-                     "Khi nào cần đặt lại, anh/chị nhắn em nhé.")
+            # CA 274-05: don ĐÃ CHOT dang fulfillment -> KHONG claim da huy (order/fulfillment giu nguyen);
+            # chuyen nhan vien (staff_attention idempotent), tra message tat dinh. Chi pre-order/open-intent moi
+            # dung hanh vi M5 (terminalize CANCELLED + 'da huy').
+            _committed_oid = await _active_committed_fulfillment(sender_id)
+            if _committed_oid is not None:
+                try:
+                    from app.db_pool import acquire as _acq
+                    from app.db_pool import release as _rel
+                    from app.services.fulfillment import conversation as _fc
+                    _c = await _acq()
+                    try:
+                        async with _c.transaction():
+                            await _fc.escalate(_c, int(_committed_oid), reason="other", actor="m7:cancel",
+                                               detail={"customer_cancel_request": True}, notify_customer=False)
+                    finally:
+                        await _rel(_c)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[orchestrator] cancel handoff skipped: {safe_exc(e)}")
+                reply = ("Dạ đơn của anh/chị đã được lên đơn nên yêu cầu thay đổi/huỷ cần nhân viên kiểm tra và "
+                         "xử lý giúp ạ. Nhân viên shop sẽ liên hệ lại với anh/chị.")
+            else:
+                await _terminalize_open_intent("CANCELLED", "customer_cancel")
+                reply = ("Dạ em đã huỷ yêu cầu đặt hàng đang xử lý cho anh/chị rồi ạ. "
+                         "Khi nào cần đặt lại, anh/chị nhắn em nhé.")
             history = await _get_history(redis, sender_id)
             history.append({"role": "user", "content": text})
             history.append({"role": "assistant", "content": reply})
@@ -782,6 +824,8 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # bao da chuyen/doi method). None -> khong lien quan -> luong cu. command_key = provider_message_id ->
         # duplicate inbound tra reply cu, KHONG tao payment/instruction/QR thu 2. Loi -> bo qua (khong vo reply).
         if settings.m7_conversational_fulfillment and channel in ("telegram_customer", "messenger"):
+            _m7 = None
+            _m7_silent = False
             try:
                 from app.db_pool import acquire as _acq
                 from app.db_pool import release as _rel
@@ -793,10 +837,16 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                             _c, sender_id, text, command_key=f"msg:{provider_message_id or sender_id}")
                 finally:
                     await _rel(_c)
+                _m7_silent = _m7 is _fc.SILENT
             except Exception as e:  # noqa: BLE001
                 print(f"[orchestrator] M7 fulfillment reply skipped: {safe_exc(e)}")
                 _m7 = None
-            if _m7:
+            # CA 274-02: SILENT -> M7 da xu ly (dang cho nhan vien) -> bot IM LANG, KHONG roi xuong LLM.
+            if _m7_silent:
+                await conversation_log.log_message(conversation_id, "customer", text)
+                return None
+            # CA 274-03: reply luot khach -> DIRECT-SEND DUY NHAT (M7 khong enqueue outbox cho reply nay).
+            if isinstance(_m7, str) and _m7:
                 history = await _get_history(redis, sender_id)
                 history.append({"role": "user", "content": text})
                 history.append({"role": "assistant", "content": _m7})

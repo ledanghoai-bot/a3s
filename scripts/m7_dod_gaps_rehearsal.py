@@ -88,7 +88,7 @@ async def _sepay(conn, *, ev_id, order_id, amount, direction="in", content=None,
                       "referenceCode": f"R-{RUN}-{ev_id}"}).encode()
     ev = SP.parse_envelope(raw)
     async with conn.transaction():
-        rid, _ = await PI.ingest(conn, ev, mode="test")
+        rid, _created, _conflict = await PI.ingest(conn, ev, mode="test")
     async with conn.transaction():
         st = await PI.process(conn, rid)
     return rid, st
@@ -148,16 +148,22 @@ async def main():  # noqa: C901
         _, st = await _sepay(conn, ev_id=f"{RUN}-noinstr", order_id=oidn, amount=200000)
         ck("SePay no_instruction -> unmatched", st == "unmatched", st)
 
-        # amount_due_unknown: payment amount_due NULL
-        oidu, _pu, _ = await _mk_order(conn)
-        payu = await conn.fetchval("INSERT INTO payments(order_id,method,amount_due_vnd,status) "
-                                   "VALUES($1,'BANK_TRANSFER',NULL,'awaiting') RETURNING id", oidu)
-        await conn.execute(
-            "INSERT INTO payment_instructions(order_id,payment_id,bank_account_id,account_version,bank_snapshot,"
-            "account_number_snapshot,holder_snapshot,transfer_content,amount_vnd,is_test) VALUES "
-            "($1,$2,$3,1,'V',$4,'H',$5,200000,true)", oidu, payu, await _bank_id(conn), ACCT, f"3SCF {oidu}")
-        _, st = await _sepay(conn, ev_id=f"{RUN}-due0", order_id=oidu, amount=200000)
-        ck("SePay amount_due_unknown -> discrepancy", st == "discrepancy", st)
+        # CA 274-01: same event ID / KHAC hash -> conflict (fail-closed), khong xu ly payload cu nhu duplicate lanh
+        oidc2, _p2, _i2 = await _mk_transfer(conn)
+        raw1 = json.dumps({"id": f"{RUN}-conf", "gateway": "VietinBank", "accountNumber": ACCT,
+                           "content": f"3SCF {oidc2}", "transferType": "in", "transferAmount": 200000,
+                           "referenceCode": "R1"}).encode()
+        raw2 = json.dumps({"id": f"{RUN}-conf", "gateway": "VietinBank", "accountNumber": ACCT,
+                           "content": f"3SCF {oidc2}", "transferType": "in", "transferAmount": 999999,
+                           "referenceCode": "R2"}).encode()
+        async with conn.transaction():
+            _r, c1, cf1 = await PI.ingest(conn, SP.parse_envelope(raw1), mode="test")
+        async with conn.transaction():
+            _r2, c2, cf2 = await PI.ingest(conn, SP.parse_envelope(raw2), mode="test")
+        le = await conn.fetchval("SELECT last_error FROM provider_events WHERE provider_event_id=$1", f"{RUN}-conf")
+        ck("SePay same ID same-hash=replay / different-hash=conflict (fail-closed, last_error ghi)",
+           c1 is True and cf1 is False and c2 is False and cf2 is True and le == "payload_hash_conflict",
+           f"c1={c1} cf1={cf1} c2={c2} cf2={cf2} le={le}")
 
         # amount_invalid: transferAmount = 0
         oidi, _pi2, _ii = await _mk_transfer(conn)
@@ -171,7 +177,7 @@ async def main():  # noqa: C901
                           "transferAmount": 200000, "referenceCode": f"R-{RUN}-recov"}).encode()
         ev = SP.parse_envelope(raw)
         async with conn.transaction():
-            rid, _ = await PI.ingest(conn, ev, mode="test")
+            rid, _c, _cf = await PI.ingest(conn, ev, mode="test")
         orig = PI._pay.record_provider_confirmation
 
         async def _boom(*a, **k):

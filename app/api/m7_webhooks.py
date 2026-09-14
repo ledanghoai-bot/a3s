@@ -34,7 +34,8 @@ async def sepay_webhook(request: Request, authorization: str | None = Header(def
     conn = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
     try:
         async with conn.transaction():
-            row_id, created = await provider_ingest.ingest(conn, ev, mode="test")
+            row_id, created, conflict = await provider_ingest.ingest(conn, ev, mode="test")
     finally:
         await conn.close()
-    return {"success": True, "event_id": row_id, "duplicate": not created}
+    # CA 274-01: cung event ID khac payload -> conflict (fail-closed, da ghi last_error cho staff).
+    return {"success": True, "event_id": row_id, "duplicate": not created, "conflict": conflict}

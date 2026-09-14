@@ -26,17 +26,23 @@ from app.services.safe_log import safe_exc
 BATCH = 25
 
 
-async def ingest(conn, ev: IncomingTransfer, *, mode: str = "test") -> tuple[int, bool]:
-    """Tra (provider_event row id, created). created=False = duplicate (cung provider+event id)."""
+async def ingest(conn, ev: IncomingTransfer, *, mode: str = "test") -> tuple[int, bool, bool]:
+    """Tra (provider_event row id, created, conflict). created=False = duplicate cung (provider, event id).
+    CA 274-01: cung event ID nhung KHAC payload_hash -> CONFLICT (fail-closed): ghi last_error='payload_hash_conflict'
+    de staff thay, KHONG xu ly payload moi nhu duplicate lanh. Payload dau (first-come) van la ban ghi hop le."""
     rid = await conn.fetchval(
         "INSERT INTO provider_events (provider, provider_event_id, mode, payload_hash, raw) "
         "VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (provider, provider_event_id) DO NOTHING RETURNING id",
         ev.provider, ev.provider_event_id, mode, ev.payload_hash, json.dumps(ev.raw_minimal, ensure_ascii=False))
     if rid is not None:
-        return int(rid), True
+        return int(rid), True, False
     old = await conn.fetchrow("SELECT id, payload_hash FROM provider_events WHERE provider=$1 AND provider_event_id=$2",
                               ev.provider, ev.provider_event_id)
-    return int(old["id"]), False
+    conflict = old["payload_hash"] != ev.payload_hash
+    if conflict:
+        await conn.execute("UPDATE provider_events SET last_error='payload_hash_conflict', updated_at=now() "
+                           "WHERE id=$1", old["id"])
+    return int(old["id"]), False, conflict
 
 
 def _allowed_accounts(active_account: str | None) -> set[str]:
@@ -89,12 +95,25 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
                                           "reference": ev.reference, "code_order_id": order_id}, created_by=actor)
         return state
 
+    # CA 274-02: discrepancy khop 1 don cu the -> handoff DUNG CHUNG (chuyen conversation staff_attention + bao khach)
+    async def _discrepancy(reason: str, *, order_id, payment_id) -> str:
+        await _finish(conn, row_id, state="discrepancy", reason=reason, order_id=order_id, payment_id=payment_id)
+        from app.services.fulfillment import conversation as _conv
+        await _conv.escalate(conn, order_id, reason="payment_mismatch", actor=actor,
+                             detail={"provider": provider, "provider_event_id": ev.provider_event_id,
+                                     "reason": reason})
+        return "discrepancy"
+
     if ev.direction != "in":
         await _finish(conn, row_id, state="ignored", reason=f"direction_{ev.direction}")
         return "ignored"
-    active_acct = await conn.fetchval("SELECT account_number FROM bank_accounts WHERE active")
-    allowed = _allowed_accounts(active_acct)
-    if not ev.account_number or ev.account_number not in allowed:
+    # CA 274-01: C0 Test Mode CHI xu ly row mode='test'; row live KHONG duoc C0 auto-confirm.
+    if row["mode"] != "test":
+        return await _unmatched("mode_not_test", state="ignored", order_exists=False)
+    # CA 274-01: KHONG dung active bank. Config sepay_allowed_accounts CHI la gate phong ve khi duoc cau hinh;
+    # rang buoc CHINH la snapshot cua instruction (account_number_snapshot) kiem o duoi.
+    allowed = _allowed_accounts(None)
+    if allowed and (not ev.account_number or ev.account_number not in allowed):
         return await _unmatched("account_not_allowed")
     codes = _sp.extract_codes(ev.raw_minimal.get("code"), ev.content)
     if not codes:
@@ -102,37 +121,51 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
     if len(codes) > 1:
         return await _unmatched("code_multiple")
     order_id = codes[0]
-    pay = await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1", order_id)
+    pay = await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1 FOR UPDATE", order_id)   # lock payment
     if not pay:
         exists = bool(await conn.fetchval("SELECT 1 FROM orders WHERE id=$1", order_id))
         return await _unmatched("order_or_payment_not_found", order_id=order_id, order_exists=exists)
     if pay["method"] != "BANK_TRANSFER":
         return await _unmatched("payment_not_bank_transfer", order_id=order_id, payment_id=pay["id"])
-    instr = await conn.fetchval("SELECT count(*) FROM payment_instructions WHERE payment_id=$1", pay["id"])
+    # CA 274-01: bind vao instruction HIEN HANH cua conversation (fulfillment_conversations.instruction_id);
+    # fallback instruction moi nhat cua payment. Exact-match theo SNAPSHOT cua chinh instruction do.
+    cur_iid = await conn.fetchval("SELECT instruction_id FROM fulfillment_conversations WHERE order_id=$1", order_id)
+    if cur_iid is not None:
+        instr = await conn.fetchrow("SELECT * FROM payment_instructions WHERE id=$1", cur_iid)
+    else:
+        instr = await conn.fetchrow("SELECT * FROM payment_instructions WHERE payment_id=$1 ORDER BY id DESC LIMIT 1",
+                                    pay["id"])
     if not instr:
-        return await _unmatched("no_instruction", order_id=order_id, payment_id=pay["id"])
+        return await _unmatched("no_current_instruction", order_id=order_id, payment_id=pay["id"])
+    # CA 274-01: C0 chi auto-confirm instruction TEST; instruction non-test KHONG duoc C0 xac nhan.
+    if not instr["is_test"]:
+        return await _unmatched("instruction_not_test", order_id=order_id, payment_id=pay["id"])
+    if int(instr["order_id"]) != int(order_id):
+        return await _unmatched("instruction_order_mismatch", order_id=order_id, payment_id=pay["id"])
     if pay["status"] not in ("awaiting", "reported", "discrepancy"):
         return await _unmatched(f"payment_closed_{pay['status']}", order_id=order_id, payment_id=pay["id"])
     if ev.amount_vnd is None or ev.amount_vnd <= 0:
         return await _unmatched("amount_invalid", order_id=order_id, payment_id=pay["id"])
-    due = pay["amount_due_vnd"]
-    if due is None:
-        return await _unmatched("amount_due_unknown", order_id=order_id, payment_id=pay["id"], state="discrepancy",
+    # CA 274-01: EXACT match theo snapshot instruction da gui (account + amount), KHONG theo active/current due.
+    # Account KHAC instruction (tien vao account khac ta bao) -> KHONG phai xac nhan instruction nay -> unmatched +
+    # staff (KHONG dao lon conversation khach vi event co the spurious). Amount sai (account DUNG) -> khach da tra
+    # nham so -> discrepancy + escalate handoff.
+    if str(instr["account_number_snapshot"]) != str(ev.account_number):
+        return await _unmatched("account_snapshot_mismatch", order_id=order_id, payment_id=pay["id"],
                                 att_reason="payment_mismatch")
-    if int(ev.amount_vnd) != int(due):
-        kind = "excess" if int(ev.amount_vnd) > int(due) else "partial"
-        return await _unmatched(f"amount_mismatch_{kind}", order_id=order_id, payment_id=pay["id"],
-                                state="discrepancy", att_reason="payment_mismatch")
-    # PASS: exact code + exact amount + eligible state -> deterministic payment service (command_key = provider event)
+    if int(instr["amount_vnd"]) != int(ev.amount_vnd):
+        kind = "excess" if int(ev.amount_vnd) > int(instr["amount_vnd"]) else "partial"
+        return await _discrepancy(f"amount_snapshot_mismatch_{kind}", order_id=order_id, payment_id=pay["id"])
+    # PASS: exact instruction snapshot (account+amount) + eligible state -> deterministic payment service
     try:
         res = await _pay.record_provider_confirmation(conn, order_id, amount_vnd=int(ev.amount_vnd), provider=provider,
                                                       provider_event_id=ev.provider_event_id, reference=ev.reference)
     except _pay.PaymentError as e:
         await _finish(conn, row_id, state="error", reason=f"payment_error:{str(e)[:120]}", order_id=order_id,
                       payment_id=pay["id"])
-        await _att.open_attention(conn, order_id, reason="payment_mismatch",
-                                  detail={"provider_event_id": ev.provider_event_id, "error": str(e)[:160]},
-                                  created_by=actor)
+        from app.services.fulfillment import conversation as _conv
+        await _conv.escalate(conn, order_id, reason="payment_mismatch", actor=actor,
+                             detail={"provider_event_id": ev.provider_event_id, "error": str(e)[:160]})
         return "error"
     await _finish(conn, row_id, state="matched", reason="exact_match" + (":replay" if res.get("duplicate") else ""),
                   order_id=order_id, payment_id=pay["id"], payment_event_id=int(res["event_id"]))

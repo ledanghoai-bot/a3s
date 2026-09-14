@@ -228,7 +228,8 @@ async def m7_routing_job(ctx) -> None:
 
 
 async def m7_due_job(ctx) -> None:
-    """M7: reminder 30 phut (1 lan) + staff_attention timeout cho awaiting_transfer qua han. Flag TAT -> no-op."""
+    """M7 (CA Amendment 273): reminder t+7/t+13 + staff_attention timeout t+15 (config-versioned) cho
+    awaiting_transfer. Flag TAT -> no-op."""
     if not settings.m7_conversational_fulfillment:
         return
     try:

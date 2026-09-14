@@ -28,6 +28,12 @@ from app.services.payment import payment_service as _pay
 ROUTING, AWAITING_METHOD, COD_HANDOFF = "routing", "awaiting_method", "cod_handoff"
 AWAITING_TRANSFER, STAFF_ATTENTION, COMPLETED = "awaiting_transfer", "staff_attention", "completed"
 MAX_METHOD_PROMPTS = 3
+
+# CA 274-02/03: contract tra ve handle_customer_text — 1 delivery authority.
+#   str  = reply TAT DINH cho luot khach (orchestrator direct-send DUY NHAT; M7 KHONG enqueue outbox cho reply nay).
+#   SILENT = M7 da xu ly nhung KHONG gui reply luot nay (vd dang staff_attention -> bot im lang) -> chan LLM.
+#   None = khong lien quan M7 -> fall-through (M6/LLM).
+SILENT = object()
 MAX_ATTEMPTS = 8
 _CUSTOMER_DEST = {"telegram_customer", "messenger"}
 
@@ -325,14 +331,14 @@ async def advance_routing(conn, order_id: int, *, ghn_result=None, actor: str = 
 
 
 async def _to_cod(conn, fc, *, command_key: str, source: str, actor: str) -> str:
+    # CA 274-03: reply luot khach -> DIRECT-SEND (return) la delivery authority DUY NHAT. KHONG enqueue outbox
+    # (tranh gui 2 lan). Chi worker-context (advance_routing/run_due/escalate) moi dung outbox.
     order_id = fc["order_id"]
     pay = await _pay.ensure_payment(conn, order_id, method="COD", actor=actor)
     text = cod_text(order_id, pay.get("amount_due_vnd"))
-    fc2 = await _set_step(conn, fc, step=COD_HANDOFF, method="COD", transfer_deadline_at=None)
+    await _set_step(conn, fc, step=COD_HANDOFF, method="COD", transfer_deadline_at=None)
     await _journal(conn, order_id, command_key=command_key, source=source, from_step=fc["step"], to_step=COD_HANDOFF,
                    detail={"payment_id": pay["id"], "amount_due_vnd": pay.get("amount_due_vnd")}, reply_text=text)
-    await _enqueue_customer(conn, fc2, event_type=EV_COD, dedupe_key=f"fc_cod:{order_id}:{fc2['version']}", text=text,
-                            stale_check={"kind": "fulfillment", "order_id": order_id, "step": COD_HANDOFF})
     return text
 
 
@@ -376,18 +382,52 @@ async def _to_transfer(conn, fc, *, command_key: str, source: str, actor: str) -
     return text
 
 
-async def handle_customer_text(conn, customer_ref: str, text: str, *, command_key: str,
-                               actor: str = "m7:bot") -> str | None:
-    """Orchestrator goi TRONG tx. Tra reply tat dinh hoac None (khong lien quan -> luong cu). command_key =
-    provider_message_id -> duplicate inbound tra reply cu, KHONG effect moi."""
+async def escalate(conn, order_id: int, *, reason: str, actor: str, detail: dict | None = None,
+                   notify_customer: bool = True) -> dict | None:
+    """CA 274-02: handoff escalation DUNG CHUNG (worker-context) — ATOMIC trong tx caller:
+    lock conversation -> (notify_customer) notification intent (template reason, outbox) -> step=staff_attention ->
+    open_attention idempotent -> reminder/instruction notify cu -> stale (do step doi). Bot IM LANG sau handoff
+    (handle_customer_text tra SILENT). Idempotent: da o staff_attention cung reason -> khong re-notify.
+    notify_customer=False khi caller tu gui reply luot khach (vd huy don) — tranh gui 2 lan.
+    payment_mismatch/timeout/large_order/quantity_unit/account/quote/method/other dung CHUNG semantics nay."""
+    fc = await get(conn, order_id, lock=True)
+    if not fc:
+        return None
+    already = fc["step"] == STAFF_ATTENTION and fc["attention_reason"] == reason
+    if not already:
+        frm = fc["step"]
+        fc = await _set_step(conn, fc, step=STAFF_ATTENTION, attention_reason=reason,
+                             attention_at=datetime.now(timezone.utc))
+        await _journal(conn, order_id, command_key=f"escalate:{reason}:{fc['version']}", source="system",
+                       from_step=frm, to_step=STAFF_ATTENTION, detail={"reason": reason, **(detail or {})},
+                       reply_text=None)
+        if notify_customer:
+            # notification intent (reason) TRUOC -> outbox; stale-check step=staff_attention (late confirm -> huy)
+            await _enqueue_customer(conn, fc, event_type=EV_STAFF, dedupe_key=f"fc_staff:{order_id}:{reason}",
+                                    text=staff_text(order_id, reason),
+                                    stale_check={"kind": "fulfillment", "order_id": order_id, "step": STAFF_ATTENTION})
+    aid = await _att.open_attention(conn, order_id, reason=reason, detail=detail, created_by=actor)
+    return {"step": STAFF_ATTENTION, "reason": reason, "attention_id": aid, "already": already}
+
+
+async def handle_customer_text(conn, customer_ref: str, text: str, *, command_key: str, actor: str = "m7:bot"):
+    """Orchestrator goi TRONG tx. CA 274-02/03 return contract: str (direct-send) | SILENT (M7 xu ly, bot im lang,
+    chan LLM) | None (khong lien quan -> fall-through). command_key = provider_message_id -> duplicate inbound
+    tra reply cu."""
     fc = await get_by_customer(conn, customer_ref, lock=True)
     if not fc:
         return None
     order_id = fc["order_id"]
     rp = await _replay(conn, order_id, command_key)
     if rp:
-        return rp["reply_text"]
+        return rp["reply_text"] if rp["reply_text"] is not None else SILENT
     step = fc["step"]
+    # CA 274-02: dang cho nhan vien -> bot IM LANG (khong direct reply, KHONG roi xuong LLM). Handoff message da gui
+    # luc escalate. Khach nhan tin them -> khong tu tra loi (tranh chuoi mau thuan / bot noi tiep sau khi bao staff).
+    if step == STAFF_ATTENTION:
+        await _journal(conn, order_id, command_key=command_key, source="customer", from_step=step, to_step=step,
+                       detail={"silenced_during_staff_attention": True}, reply_text=None)
+        return SILENT
     m = parse_method(text)
     if step == AWAITING_METHOD:
         if m == "COD":
@@ -480,19 +520,10 @@ async def run_due(conn, *, now: datetime | None = None, actor: str = "m7:worker"
             continue
         instr = await conn.fetchrow("SELECT * FROM payment_instructions WHERE id=$1", iid)
         if now >= to_at:
-            # timeout: 273 §4 thu tu — notification intent (reason) TRƯỚC -> staff_attention cùng atomic -> outbox
-            text = staff_text(oid, "payment_timeout")
-            fc2 = await _set_step(conn, fc, step=STAFF_ATTENTION, attention_reason="payment_timeout", attention_at=now)
-            await _journal(conn, oid, command_key=f"due:{iid}:timeout", source="worker",
-                           from_step=AWAITING_TRANSFER, to_step=STAFF_ATTENTION,
-                           detail={"reason": "payment_timeout", "payment_status": pay["status"] if pay else None},
-                           reply_text=text)
-            await _enqueue_customer(conn, fc2, event_type=EV_STAFF, dedupe_key=f"fc_timeout:{oid}:{iid}", text=text,
-                                    stale_check={"kind": "payment", "order_id": oid,
-                                                 "new_status": pay["status"] if pay else "awaiting"})
-            await _att.open_attention(conn, oid, reason="payment_timeout",
-                                      detail={"instruction_id": iid,
-                                              "payment_status": pay["status"] if pay else None}, created_by=actor)
+            # CA 274-02: timeout -> escalate handoff DUNG CHUNG (notification intent + staff_attention + open atten
+            # atomic). Reminder cu pending bi stale (step doi awaiting_transfer -> staff_attention).
+            await escalate(conn, oid, reason="payment_timeout", actor=actor,
+                           detail={"instruction_id": iid, "payment_status": pay["status"] if pay else None})
             stats["escalated"] += 1
             continue
         # reminders: chon moc cao nhat da toi, dedupe DB-atomic (instruction_id, reminder_no)
@@ -508,18 +539,21 @@ async def run_due(conn, *, now: datetime | None = None, actor: str = "m7:worker"
                                from_step=AWAITING_TRANSFER, to_step=AWAITING_TRANSFER,
                                detail={"reminder_no": rn, "payment_status": pay["status"] if pay else None},
                                reply_text=text)
+                # CA 274-02: stale-check theo STEP — escalation/completed (step doi khoi awaiting_transfer) -> huy
+                # reminder pending chua gui.
                 await _enqueue_customer(conn, fc, event_type=EV_REMINDER,
                                         dedupe_key=f"fc_reminder:{oid}:{iid}:{rn}", text=text,
-                                        stale_check={"kind": "payment", "order_id": oid,
-                                                     "new_status": pay["status"] if pay else "awaiting"})
+                                        stale_check={"kind": "fulfillment", "order_id": oid,
+                                                     "step": AWAITING_TRANSFER})
                 stats["reminded"] += 1
             break   # xu ly toi da 1 slot reminder/tick (slot cao nhat da toi)
     return stats
 
 
 async def on_payment_confirmed(conn, order_id: int, *, actor: str = "payment") -> None:
-    """Hook tu payment service khi status -> confirmed/reconciled: hoi thoai -> completed; auto-resolve attention
-    'payment_timeout' (neu co) — KHONG phat notify (payment service da phat 'payment.confirmed.notify' 1 lan)."""
+    """Hook tu payment service khi status -> confirmed/reconciled: hoi thoai -> completed; auto-resolve cac attention
+    LIEN QUAN THANH TOAN ('payment_timeout'/'payment_mismatch') — KHONG phat notify (payment service da phat
+    'payment.confirmed.notify' 1 lan). CA 274-02: late valid confirm resolve handoff, khong tao mau thuan."""
     fc = await get(conn, order_id, lock=True)
     if not fc or fc["step"] in (COMPLETED,):
         return
@@ -527,9 +561,9 @@ async def on_payment_confirmed(conn, order_id: int, *, actor: str = "payment") -
     await _set_step(conn, fc, step=COMPLETED, completed_at=now)
     await _journal(conn, order_id, command_key=f"paid:{fc['version']}", source="provider" if actor.startswith("provider")
                    else "staff", from_step=fc["step"], to_step=COMPLETED, detail={"by": actor}, reply_text=None)
-    row = await conn.fetchrow(
-        "SELECT id FROM staff_attention WHERE order_id=$1 AND reason='payment_timeout' AND status='open'", order_id)
-    if row:
+    for row in await conn.fetch(
+            "SELECT id FROM staff_attention WHERE order_id=$1 AND status='open' "
+            "AND reason IN ('payment_timeout','payment_mismatch')", order_id):
         await _att.resolve(conn, row["id"], resolved_by="system", note=f"auto: payment confirmed ({actor})")
     await audit_service.record(conn, actor_type="system", action="fulfillment.conversation_completed",
                                actor_ref=actor, entity_type="fulfillment_conversations", entity_id=str(fc["id"]),

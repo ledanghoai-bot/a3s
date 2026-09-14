@@ -189,8 +189,9 @@ async def main():  # noqa: C901
         ck("T 15:00 -> escalate payment_timeout", s["escalated"] == 1
            and await _step(conn, oid) == "staff_attention", f"{s} step={await _step(conn, oid)}")
         att = await conn.fetchval("SELECT reason FROM staff_attention WHERE order_id=$1 AND status='open'", oid)
+        # CA 274-02: escalate handoff dung chung -> dedupe_key fc_staff:{order}:{reason}
         notif = await conn.fetchval(
-            "SELECT count(*) FROM outbox_events WHERE dedupe_key=$1", f"fc_timeout:{oid}:{iid}")
+            "SELECT count(*) FROM outbox_events WHERE dedupe_key=$1", f"fc_staff:{oid}:payment_timeout")
         ck("T escalate: staff_attention(payment_timeout) + notif tao", att == "payment_timeout" and notif == 1,
            f"att={att} notif={notif}")
         s = await due_at(20, 0)   # sau escalate -> khong lay lai

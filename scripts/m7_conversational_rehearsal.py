@@ -116,7 +116,7 @@ async def _sepay(conn, *, ev_id, order_id, amount, account=ACCT, direction="in",
                       "transferType": direction, "transferAmount": amount, "referenceCode": f"REF-{RUN}-{ev_id}"}).encode()
     ev = sp.parse_envelope(raw)
     async with conn.transaction():
-        rid, created = await pi.ingest(conn, ev, mode="test")
+        rid, created, _conflict = await pi.ingest(conn, ev, mode="test")
     async with conn.transaction():
         st = await pi.process(conn, rid)
     return rid, created, st
@@ -200,8 +200,10 @@ async def main() -> int:
            and pay2 and pay2["method"] == "COD" and pay2["amount_due_vnd"] == t2, f"{c2['step']} due={pay2['amount_due_vnd'] if pay2 else None}")
         rep_dup = await _say(conn, p2, "COD nhé", "g2-1")
         n_pay = await conn.fetchval("SELECT count(*) FROM payments WHERE order_id=$1", o2)
-        ck("G2 duplicate inbound (cung command_key) -> cung reply, 1 payment, 1 cod notify",
-           rep_dup == rep and n_pay == 1 and len(await _outbox(conn, o2, fc.EV_COD)) == 1)
+        # CA 274-03: reply COD = DIRECT-SEND (return) la delivery authority DUY NHAT; KHONG enqueue EV_COD outbox
+        # (tranh gui 2 lan). duplicate inbound -> cung reply, 1 payment, 0 EV_COD outbox.
+        ck("G2 duplicate inbound -> cung reply, 1 payment, COD reply direct-send (0 EV_COD outbox)",
+           rep_dup == rep and n_pay == 1 and len(await _outbox(conn, o2, fc.EV_COD)) == 0)
         ck("G2 reply COD khong noi da nhan tien", "đã nhận thanh toán" not in rep.lower() and "COD" in rep)
 
         # ================= G3 CK + VietQR =================
@@ -366,8 +368,8 @@ async def main() -> int:
             finally:
                 await c.close()
         outs = await asyncio.gather(_ing(), _ing(), _ing())
-        ck("G7 concurrent duplicate ingest -> dung 1 created, cung id", sum(1 for _, c in outs if c) == 1 and
-           len({r for r, _ in outs}) == 1)
+        ck("G7 concurrent duplicate ingest -> dung 1 created, cung id", sum(1 for _r, c, _cf in outs if c) == 1 and
+           len({r for r, _c, _cf in outs}) == 1)
         async with conn.transaction():
             st = await pi.process(conn, outs[0][0])
         async with conn.transaction():
@@ -393,7 +395,9 @@ async def main() -> int:
         ck("G8 weight thieu -> fee unknown -> staff_attention(quote), khong prompt tong, khong 0d",
            out8["step"] == "staff_attention" and out8["attention_reason"] == "quote" and
            len(await _outbox(conn, o8, fc.EV_PROMPT)) == 0 and (pay8 is None or pay8["amount_due_vnd"] is None))
-        ck("G8 khach chon CK khi staff_attention -> None (khong tao instruction)", (await _say(conn, p8, "chuyển khoản", "g8-1")) is None
+        # CA 274-02: khi staff_attention -> bot IM LANG (SILENT), chan LLM, KHONG tao instruction.
+        ck("G8 khach chon CK khi staff_attention -> SILENT (bot im lang, khong tao instruction)",
+           (await _say(conn, p8, "chuyển khoản", "g8-1")) is fc.SILENT
            and (await conn.fetchval("SELECT count(*) FROM payment_instructions WHERE order_id=$1", o8)) == 0)
 
         # ================= G10 Resume voi manual quote =================
