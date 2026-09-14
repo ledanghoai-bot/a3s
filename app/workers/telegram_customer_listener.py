@@ -60,7 +60,10 @@ async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text
     reply = await handle_message(
         sender_id, text, channel="telegram_customer",
         provider_message_id=(f"tg:{message_id}" if message_id is not None else None))
-    await _send_reply(client, chat_id, reply)
+    # CA 275-01: chi gui khi co reply THAT (non-empty string). None/rong = M7 SILENT (bot im lang) -> KHONG goi
+    # Telegram API voi text=null.
+    if isinstance(reply, str) and reply.strip():
+        await _send_reply(client, chat_id, reply)
 
 
 async def _poll_loop() -> None:

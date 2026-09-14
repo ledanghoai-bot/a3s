@@ -296,7 +296,7 @@ async def payment_instruction(order_id: int, staff: dict = Depends(require_activ
 async def get_bank_account(staff: dict = Depends(require_active_session)) -> dict:
     conn = await asyncpg.connect(_db_url())
     try:
-        row = await conn.fetchrow("SELECT bank, account_number, holder_name, branch, version, is_test "
+        row = await conn.fetchrow("SELECT bank, account_number, holder_name, branch, version, is_test, bin "
                                   "FROM bank_accounts WHERE active")
         return {"account": dict(row) if row else None}
     finally:
@@ -314,8 +314,9 @@ async def set_bank_account(body: dict, staff: dict = Depends(require_permission(
             row = await pay.set_bank_account(
                 conn, bank=body["bank"], account_number=body["account_number"],
                 holder_name=body["holder_name"], branch=body.get("branch"),
-                is_test=bool(body.get("is_test", False)), actor=_actor(staff))
-            return {k: row[k] for k in ("id", "bank", "account_number", "holder_name", "version", "is_test")}
+                is_test=bool(body.get("is_test", False)), actor=_actor(staff),
+                bin_code=(str(body["bin"]).strip() if body.get("bin") else None))  # M7: NAPAS BIN cho VietQR
+            return {k: row[k] for k in ("id", "bank", "account_number", "holder_name", "version", "is_test", "bin")}
     except pay.PaymentError as e:
         raise _map_err(e)
     finally:

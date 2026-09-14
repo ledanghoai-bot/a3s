@@ -122,6 +122,7 @@ export default function FulfillmentDetail() {
   const [corr, setCorr] = useState({ amount_vnd: "", note: "", corrects_event_id: "" });
   const [att, setAtt] = useState({ result: "failed", reason: "", note: "", next_contact_at: "" });
   const [bank, setBank] = useState({ bank: "", account_number: "", holder_name: "", branch: "" });
+  const [m7, setM7] = useState(null); // CA 274-04: hội thoại/route/QR/provider M7
 
   useEffect(() => {
     if (ready) load();
@@ -134,6 +135,12 @@ export default function FulfillmentDetail() {
       setD(await apiFetch(`/dashboard/fulfillment/orders/${orderId}`));
     } catch (err) {
       setError(err.message);
+    }
+    try {
+      const c = await apiFetch(`/dashboard/fulfillment/orders/${orderId}/conversation`);
+      setM7(c && c.conversation ? c : null);
+    } catch {
+      setM7(null); // đơn M6-only (không có hội thoại M7) — bỏ qua panel
     }
   }
   // CA 267-01: consume chỉ chạy sau success → retry (network/timeout) tái dùng key; 4xx dứt khoát không reload.
@@ -370,6 +377,71 @@ export default function FulfillmentDetail() {
           }), "Đã cập nhật tài khoản nhận")}>Lưu tài khoản</button>
         </Row>
       </Section>
+
+      {m7 && (
+        <Section title="Hội thoại M7 (Conversational Fulfillment)">
+          <Row label="Bước / phương thức"><b>{m7.conversation.step}</b>{m7.conversation.method ? ` · ${m7.conversation.method}` : ""}</Row>
+          <Row label="Định tuyến / phí">
+            {m7.routing ? `${m7.routing.routing_source || "—"} · ${m7.routing.fee_status || "—"}${m7.routing.delivery_fee_vnd != null ? ` (${vnd(m7.routing.delivery_fee_vnd)})` : ""} · ${m7.routing.quote_provider || ""}` : "—"}
+          </Row>
+          {m7.conversation.transfer_started_at && (
+            <Row label="Mốc chờ CK">bắt đầu {new Date(m7.conversation.transfer_started_at).toLocaleString("vi-VN")} · hạn {m7.conversation.transfer_deadline_at ? new Date(m7.conversation.transfer_deadline_at).toLocaleString("vi-VN") : "—"}</Row>
+          )}
+          <Row label="Hành động">
+            {/* CA 275-04: route-quote idempotency key (double-click/ambiguous retry không gọi GHN 2 lần) */}
+            <button disabled={busy} onClick={() => {
+              const { key, consume } = opKey(`route-quote:${orderId}`, {});
+              act(() => post(`/orders/${orderId}/shipment/route-quote`, { command_key: key }), "Đã định tuyến lại + báo phí", consume);
+            }}>Retry định tuyến/phí</button>
+            {m7.conversation.step === "staff_attention" && (() => {
+              const hasOpenAtt = (m7.attention || []).some((a) => a.status === "open");
+              return (
+                <>
+                  <button disabled={busy || hasOpenAtt} title={hasOpenAtt ? "Resolve attention trước khi resume" : ""}
+                    onClick={() => act(() => post(`/orders/${orderId}/conversation/resume`), "Đã resume hội thoại")}>
+                    Resume hội thoại
+                  </button>
+                  {hasOpenAtt && <span style={{ color: "#9a6700", marginLeft: 6, fontSize: 12 }}>Resolve attention trước</span>}
+                </>
+              );
+            })()}
+          </Row>
+          {m7.instruction && m7.instruction.qr_svg_data_uri && (
+            <div style={{ marginTop: 8, padding: 12, background: "#f6f8fa", borderRadius: 6 }}>
+              <div><b>VietQR</b>{m7.instruction.is_test ? <span style={{ color: "#b71c1c", marginLeft: 8 }}>[TEST — KHÔNG CHUYỂN TIỀN]</span> : null}</div>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={m7.instruction.qr_svg_data_uri} alt="VietQR" style={{ width: 180, height: 180 }} />
+              {m7.instruction.qr_decoded && !m7.instruction.qr_decoded.error && (
+                <div style={{ fontSize: 13 }}>
+                  <div>BIN: <code>{m7.instruction.qr_decoded.bin}</code> · STK: <code>{m7.instruction.qr_decoded.account}</code></div>
+                  <div>Số tiền: <code>{vnd(m7.instruction.qr_decoded.amount_vnd)}</code> · Nội dung: <code>{m7.instruction.qr_decoded.content}</code> · CRC {m7.instruction.qr_decoded.crc_ok ? "✓" : "✗"}</div>
+                  <button onClick={async () => {
+                    const t = `${m7.instruction.account_number_snapshot} · ${vnd(m7.instruction.amount_vnd)} · ${m7.instruction.transfer_content}`;
+                    try { await navigator.clipboard.writeText(t); setMsg("Đã copy thông tin CK"); }
+                    catch { const ta = document.createElement("textarea"); ta.value = t; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta); setMsg("Đã copy thông tin CK"); }
+                  }}>Copy thông tin</button>
+                </div>
+              )}
+            </div>
+          )}
+          {m7.attention && m7.attention.length > 0 && (
+            <div style={{ marginTop: 8, fontSize: 13 }}>
+              <b>Attention:</b>
+              <ul>{m7.attention.map((a) => (
+                <li key={a.id}>#{a.id} {a.reason} — {a.status}{a.resolution_note ? ` · ${a.resolution_note}` : ""}</li>
+              ))}</ul>
+            </div>
+          )}
+          {m7.provider_events && m7.provider_events.length > 0 && (
+            <div style={{ marginTop: 8, fontSize: 13 }}>
+              <b>Provider events (SePay):</b>
+              <ul>{m7.provider_events.map((e) => (
+                <li key={e.id}>{e.provider}:{e.provider_event_id} — {e.processing_state}{e.match_reason ? ` (${e.match_reason})` : ""} · {e.mode}</li>
+              ))}</ul>
+            </div>
+          )}
+        </Section>
+      )}
     </div>
   );
 }

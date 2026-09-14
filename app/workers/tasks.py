@@ -114,7 +114,10 @@ async def _process_message_inner(event: dict) -> None:
     # CR-04: truyền provider message id (Messenger mid) thật vào command idempotency/causation.
     reply = await handle_message(sender_id, text, channel="messenger",
                                  provider_message_id=message.get("mid"))
-    await send_text(sender_id, reply)
+    # CA 275-01: chi goi sender khi co reply THAT (non-empty string). None/rong = M7 SILENT (bot im lang) hoac
+    # khong co reply -> KHONG goi Messenger API voi text=null (tranh loi/retry provider).
+    if isinstance(reply, str) and reply.strip():
+        await send_text(sender_id, reply)
 
 
 async def deliver_outbox_job(ctx) -> None:
@@ -214,6 +217,52 @@ async def _on_shutdown(ctx) -> None:
     await close_pool()
 
 
+async def m7_routing_job(ctx) -> None:
+    """M7 (Directive 272): dinh tuyen + bao phi cho hoi thoai step=routing (GHN goi NGOAI tx). Flag TAT -> no-op."""
+    if not settings.m7_conversational_fulfillment:
+        return
+    try:
+        from app.services.fulfillment import conversation as _fc
+        stats = await _fc.run_routing()
+        if stats.get("claimed"):
+            print(f"[m7-routing] {stats}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[m7-routing] loi (bo qua vong nay): {safe_exc(e)}")
+
+
+async def m7_due_job(ctx) -> None:
+    """M7 (CA Amendment 273): reminder t+7/t+13 + staff_attention timeout t+15 (config-versioned) cho
+    awaiting_transfer. Flag TAT -> no-op."""
+    if not settings.m7_conversational_fulfillment:
+        return
+    try:
+        from app.db_pool import acquire, release
+        from app.services.fulfillment import conversation as _fc
+        conn = await acquire()
+        try:
+            async with conn.transaction():
+                stats = await _fc.run_due(conn)
+        finally:
+            await release(conn)
+        if stats.get("reminded") or stats.get("completed"):
+            print(f"[m7-due] {stats}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[m7-due] loi (bo qua vong nay): {safe_exc(e)}")
+
+
+async def m7_provider_events_job(ctx) -> None:
+    """M7-C0: xu ly provider_events received (SePay test) -> matching tat dinh -> payment service. Flag TAT -> no-op."""
+    if not settings.m7_sepay_test_connector:
+        return
+    try:
+        from app.services.payment import provider_ingest as _pi
+        stats = await _pi.run_once()
+        if stats.get("claimed"):
+            print(f"[m7-provider] {stats}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[m7-provider] loi (bo qua vong nay): {safe_exc(e)}")
+
+
 class WorkerSettings:
     functions = [process_message, m4_signing_execute]
     # I-B M1: cron drain outbox moi 10 giay (poller). Producer chi sinh event khi flag BAT.
@@ -225,6 +274,10 @@ class WorkerSettings:
         cron(retention_job, hour={3}, minute={15}, run_at_startup=False),
         # Directive 91: auto-revoke temp signer role + expire signer-access window moi 60s.
         cron(signer_access_expiry_job, second={0}, run_at_startup=False),
+        # M7 (Directive 272): routing/quote 10s; reminder/timeout 60s; provider events 10s. Flag TAT -> no-op.
+        cron(m7_routing_job, second={5, 15, 25, 35, 45, 55}, run_at_startup=False),
+        cron(m7_due_job, second={30}, run_at_startup=False),
+        cron(m7_provider_events_job, second={3, 13, 23, 33, 43, 53}, run_at_startup=False),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20

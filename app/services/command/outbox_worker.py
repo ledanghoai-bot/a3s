@@ -65,6 +65,15 @@ class SendResult:
 # --------------------------------------------------------------------------
 
 def _telegram_admin_text(p: dict) -> str:
+    if p.get("kind") == "staff_attention":
+        # M7 (Directive 272 §4): hang doi staff_attention -> bao admin (redacted, chi ma don + ly do).
+        return (
+            "\U0001F514 3S Coffee - CAN NHAN VIEN (M7 fulfillment)\n"
+            f"Ma don: #{p.get('order_id')}\n"
+            f"Ly do: {p.get('reason') or '-'}\n"
+            f"Chi tiet: {(p.get('detail_text') or '-')[:160]}\n"
+            "(Xem dashboard /fulfillment/attention de xu ly.)"
+        )
     if p.get("kind") == "escalation":
         # CA 251 §3.D + 252-02: admin-notify khi ESCALATED. has_intent=True -> escalation gan order-intent
         # (don chua chot); has_intent=False -> handoff conversation-scoped (khong gan don).
@@ -165,9 +174,23 @@ async def _telegram_customer_send(payload: dict) -> SendResult:
     ref = str(payload.get("customer_ref") or "")
     chat_id = ref[3:] if ref.startswith("tg:") else ref
     url = f"https://api.telegram.org/bot{settings.telegram_customer_bot_token}/sendMessage"
+    # M7 (272 §3.3): payload co qr_payload -> tai tao PNG TAT DINH tu snapshot luc dispatch va gui sendPhoto
+    # (caption = text). Thieu lib/render loi -> fallback sendMessage text (instruction text da du thong tin).
+    png = None
+    if payload.get("qr_payload"):
+        try:
+            from app.services.payment import vietqr as _vq
+            png = _vq.png_bytes(str(payload["qr_payload"]))
+        except Exception:  # noqa: BLE001
+            png = None
     try:
         async with httpx.AsyncClient(timeout=_timeout()) as client:
-            resp = await client.post(url, json={"chat_id": chat_id, "text": payload.get("text", "")})
+            if png:
+                purl = f"https://api.telegram.org/bot{settings.telegram_customer_bot_token}/sendPhoto"
+                resp = await client.post(purl, data={"chat_id": chat_id, "caption": payload.get("text", "")[:1024]},
+                                         files={"photo": ("vietqr.png", png, "image/png")})
+            else:
+                resp = await client.post(url, json={"chat_id": chat_id, "text": payload.get("text", "")})
     except httpx.TimeoutException:
         return SendResult(ok=False, is_timeout=True, error_class="timeout")
     except httpx.HTTPError as e:  # noqa: BLE001
@@ -245,19 +268,22 @@ async def _is_stale(conn, sc: dict) -> bool:
     if not sc:
         return False
     kind, order_id = sc.get("kind"), sc.get("order_id")
-    expected = sc.get("to_status") if kind == "shipment" else sc.get("new_status")
-    if expected is None:
-        return False
     try:
         if kind == "shipment":
+            expected = sc.get("to_status")
             cur = await conn.fetchval("SELECT status FROM shipments WHERE order_id=$1", order_id)
         elif kind == "payment":
+            expected = sc.get("new_status")
             cur = await conn.fetchval("SELECT status FROM payments WHERE order_id=$1", order_id)
+        elif kind == "fulfillment":
+            # M7: prompt/cod notify mo ta 1 step hoi thoai; step da doi (khach chon xong / staff) -> stale.
+            expected = sc.get("step")
+            cur = await conn.fetchval("SELECT step FROM fulfillment_conversations WHERE order_id=$1", order_id)
         else:
             return False
     except Exception:  # noqa: BLE001
         return False
-    if cur is None:
+    if expected is None or cur is None:
         return False
     return cur != expected
 

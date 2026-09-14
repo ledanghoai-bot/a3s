@@ -12,6 +12,7 @@ KHONG tu cong ton kho khi giao that bai/hoan.
 from __future__ import annotations
 
 import hashlib
+import json as _json
 
 from app.services import audit_service
 from app.services.fulfillment import quote as _q
@@ -63,6 +64,16 @@ async def ensure_shipment(conn, order_id: int, *, actor: str) -> dict:
     return dict(row)
 
 
+async def get_shipment(conn, order_id: int) -> dict | None:
+    """Read-only: shipment row hien tai (dung cho replay idempotent route-quote — ket qua da apply)."""
+    row = await conn.fetchrow("SELECT * FROM shipments WHERE order_id=$1", order_id)
+    if not row:
+        return None
+    out = dict(row)
+    out["attention_reason"] = None
+    return out
+
+
 async def _load_zone_rows(conn):
     return [dict(r) for r in await conn.fetch(
         "SELECT province_code, ward_code, zone, active FROM delivery_zones WHERE active")]
@@ -108,6 +119,100 @@ async def auto_quote(conn, order_id: int, *, actor: str) -> dict:
                               eta=_q.eta_text(zone), quote_source="auto_rule", rule_version=rv, actor=actor)
 
 
+async def route_and_quote(conn, order_id: int, *, actor: str, ghn_result=None, open_attention: bool = True) -> dict:
+    """M7 (Directive 272 §3.2/§3.4): dinh tuyen TAT DINH tu order_address_snapshot + allowlist hieu luc, roi bao phi:
+      SELF_DELIVERY -> bang phi noi bo (zone bmt_inner); GHN -> provider read-only quote (fail-closed quote_required);
+      MANUAL_REVIEW -> quote_required. Snapshot route + quote (rule/mapping version, fingerprint, fee/ETA, inputs,
+      quoted_at) vao shipments; version CAS; dong bo amount_due (payment chua settled). quote_required/manual ->
+      mo staff_attention (idempotent). KHONG bao gio tra 0d khi khong biet phi."""
+    from app.services.fulfillment import attention as _att
+    from app.services.fulfillment import routing as _r
+
+    sh = await ensure_shipment(conn, order_id, actor=actor)
+    if not _pre_handover(sh["status"]):
+        raise ShipmentError(f"khong the quote khi shipment o trang thai '{sh['status']}' (da/dang giao)")
+    route = await _r.resolve_for_order(conn, order_id)
+    weight = await _order_weight(conn, order_id)
+    snapshot: dict = {"route": {"source": route.source, "reason": route.reason, "version": route.version,
+                                "province_code": route.province_code, "ward_code": route.ward_code},
+                      "inputs": {"weight_g": weight}}
+    fee, fee_status, rv, eta, qprov, att_reason = None, "quote_required", None, None, "manual", None
+    if route.source == _r.SELF_DELIVERY:
+        zone = "bmt_inner"
+        rule = _q.matched_rule(zone, weight, await _load_fee_rules(conn))
+        qprov = "self_rule"
+        if weight is None:
+            fee_status, att_reason = "unknown", "quote"
+            snapshot["fee"] = {"reason": "weight_missing"}
+        elif rule is None or rule["quote_required"]:
+            rv = rule["version"] if rule else None
+            att_reason = "quote"
+            snapshot["fee"] = {"reason": "no_rule_or_quote_required", "rule_version": rv}
+        else:
+            fee, fee_status, rv = int(rule["fee_vnd"]), "quoted", rule["version"]
+            snapshot["fee"] = {"fee_vnd": fee, "rule_version": rv, "policy_version": POLICY_VERSION}
+        eta = _q.eta_text(zone)
+    elif route.source == _r.GHN:
+        zone = "province" if route.province_code == "66" else "unknown"
+        qprov = "ghn"
+        if weight is None:
+            fee_status, att_reason = "unknown", "quote"
+            snapshot["fee"] = {"provider": "ghn", "reason": "weight_missing"}
+        else:
+            # GHN HTTP da goi NGOAI transaction (conversation.prepare_ghn_quote / API 2 pha) -> ghn_result.
+            # Fingerprint request phai khop input hien tai (weight/dims) — khac -> quote_required (khong dung gia cu).
+            from app.services.providers import ghn as _ghn
+            from app.services.providers.base import QUOTE_OK, QuoteRequest, QuoteResult
+            dims = _ghn.default_dims_cm(weight)
+            req = QuoteRequest(order_id=order_id, province_code=route.province_code or "",
+                               ward_code=route.ward_code or "", weight_g=weight, length_cm=dims[0],
+                               width_cm=dims[1], height_cm=dims[2])
+            snapshot["inputs"].update({"length_cm": dims[0], "width_cm": dims[1], "height_cm": dims[2]})
+            res = ghn_result
+            if res is None:
+                from app.config import settings as _st
+                res = QuoteResult(status="quote_required", provider="ghn",
+                                  reason="ghn_disabled" if not _st.m7_ghn_quote else "ghn_no_result",
+                                  request_fingerprint=req.fingerprint())
+            elif res.request_fingerprint != req.fingerprint():
+                res = QuoteResult(status="quote_required", provider="ghn", reason="ghn_fingerprint_mismatch",
+                                  request_fingerprint=req.fingerprint())
+            snapshot["fee"] = res.snapshot()
+            if res.status == QUOTE_OK and res.fee_vnd is not None:
+                fee, fee_status, eta = int(res.fee_vnd), "quoted", res.eta_text
+            else:
+                att_reason = "provider_error" if res.reason.startswith("ghn_") and res.reason not in (
+                    "ghn_disabled", "ghn_not_configured") else "quote"
+    else:  # MANUAL_REVIEW
+        zone = "unknown"
+        att_reason = "address"
+        snapshot["fee"] = {"reason": route.reason}
+    row = await conn.fetchrow(
+        "UPDATE shipments SET zone=$2, weight_g=$3, delivery_fee_vnd=$4, fee_status=$5, eta_text=$6, "
+        "policy_version=$7, quote_rule_version=$8, quote_source=$9, routing_source=$10, routing_version=$11, "
+        "routing_province_code=$12, routing_ward_code=$13, routing_reason=$14, routed_at=now(), quote_provider=$15, "
+        "quote_snapshot=$16::jsonb, quoted_at=now(), version=version+1, updated_at=now() "
+        "WHERE id=$1 AND version=$17 RETURNING *",
+        sh["id"], zone, weight, fee, fee_status, eta, POLICY_VERSION, rv, "auto_route", route.source, route.version,
+        route.province_code, route.ward_code, route.reason, qprov, _json.dumps(snapshot), sh["version"])
+    if row is None:
+        raise ShipmentError("version conflict (concurrent) — tai lai roi thu lai")
+    await audit_service.record(conn, actor_type="system", action="shipment.route_quote", actor_ref=actor,
+                               entity_type="shipments", entity_id=str(sh["id"]),
+                               after={"route": route.source, "routing_version": route.version, "fee_vnd": fee,
+                                      "fee_status": fee_status, "provider": qprov})
+    from app.services.payment import payment_service as _p
+    await _p.sync_amount_due_if_unsettled(conn, order_id, actor=actor)
+    if open_attention and att_reason:
+        await _att.open_attention(conn, order_id, reason=att_reason,
+                                  detail={"route": route.source, "route_reason": route.reason,
+                                          "fee_status": fee_status, "quote_reason": snapshot["fee"].get("reason")},
+                                  created_by=actor)
+    out = dict(row)
+    out["attention_reason"] = att_reason
+    return out
+
+
 async def set_manual_quote(conn, order_id: int, *, actor: str, zone: str | None = None,
                            weight_g: int | None = None, fee_vnd: int | None = None,
                            eta_text: str | None = None) -> dict:
@@ -144,6 +249,10 @@ async def _apply_quote(conn, sh, *, zone, weight_g, fee_vnd, fee_status, eta, qu
     # tang phi tren payment da xac nhan). Cross-domain best-effort trong cung tx.
     from app.services.payment import payment_service as _p
     await _p.sync_amount_due_if_unsettled(conn, sh["order_id"], actor=actor)
+    # M7: tong da gui cho khach (hoi thoai) KHONG con dung sau re-quote -> staff reconfirm (khong tu gui tong moi).
+    if row["delivery_fee_vnd"] != sh["delivery_fee_vnd"] or row["fee_status"] != sh["fee_status"]:
+        from app.services.fulfillment import conversation as _fc
+        await _fc.on_quote_changed(conn, sh["order_id"], actor=actor)
     return dict(row)
 
 

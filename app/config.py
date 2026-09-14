@@ -95,6 +95,7 @@ class Settings(BaseSettings):
         "gate_e_fullscope_telegram_customer", "gate_e_fullscope_messenger",
         "address_resolver_fullscope_telegram_customer", "address_resolver_fullscope_messenger",
         "gate_e_kill_switch", "enable_gate_e_order_wiring", "enable_address_resolver",
+        "m7_conversational_fulfillment", "m7_ghn_quote", "m7_sepay_test_connector", "sepay_live_enabled",
         mode="before")
     @classmethod
     def _failclosed_bool(cls, v):
@@ -188,6 +189,32 @@ class Settings(BaseSettings):
     # M4-S0..S3 development. Enforcement (masked orchestration) chi sau gate M4-G1 +
     # directive rieng. MAC DINH TAT.
     m4_trusted_pii_path: bool = False
+
+    # I-B M7 Conversational Fulfillment (CA Directive 272, PRE-CUSTOMER). MAC DINH TAT — fail-closed.
+    # m7_conversational_fulfillment: sau chot don (Gate E snapshot hop le) bot tu dan khach: routing -> phi/tong ->
+    #   chon COD/CK -> COD handoff | VietQR + cho 15 phut -> nhac t+7/t+13 -> t+15 staff_attention (CA Amend 273).
+    #   OFF = M6 nguyen trang (staff thao tac dashboard). Nguong 100 hu + moc timeout/nhac = config CO VERSION
+    #   (bang fulfillment_policy_versions), KHONG dat o day; order snapshot policy_version luc chot don.
+    m7_conversational_fulfillment: bool = False
+    # m7_ghn_quote: GHN read-only quote/leadtime (staging). OFF -> route GHN = quote_required (staff bao phi), KHONG loi.
+    m7_ghn_quote: bool = False
+    # m7_sepay_test_connector: nhan webhook SePay TEST MODE (Apikey). OFF -> endpoint tra 404. Live (C1) = flag rieng
+    # sepay_live_enabled — KHONG duoc bat trong directive 272 (gate FINANCIAL rieng).
+    m7_sepay_test_connector: bool = False
+    sepay_live_enabled: bool = False
+    # GHN (server-side secret; KHONG log/commit). base_url rong = staging mac dinh trong adapter.
+    ghn_base_url: str = ""
+    ghn_token: str = ""
+    ghn_shop_id: str = ""
+    ghn_from_district_id: int | None = None
+    ghn_from_ward_code: str = ""
+    ghn_timeout_seconds: float = 8.0
+    ghn_max_retries: int = 2
+    ghn_light_max_g: int = 20000
+    ghn_address_map_version: int = 1
+    # SePay Test Mode (server-side secret). sepay_allowed_accounts: CSV so TK duoc phep nhan (rong = chi active bank).
+    sepay_test_api_key: str = ""
+    sepay_allowed_accounts: str = ""
     # M4-S1 Trusted Slot Store (bang pii_slots, migration provisional 040):
     # - m4_slot_key_b64: khoa AES-256-GCM (base64 32 byte) ma hoa gia tri slot o TANG APP,
     #   AAD bind customer|conversation|slot_type. RONG = slot store KHONG hoat dong

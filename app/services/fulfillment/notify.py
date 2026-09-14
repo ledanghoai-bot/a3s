@@ -94,7 +94,7 @@ async def notify_payment(conn, order_id: int, *, kind: str, new_status: str,
                        text=(f"Dạ shop đã nhận thông tin chuyển khoản đơn #{order_id} (nội dung "
                              f"{transfer_content(order_id)}), đang kiểm tra và sẽ xác nhận với anh/chị ạ."),
                        stale_check=sc)
-    elif ((kind == "shop_confirmed_received" and new_status == "confirmed") or
+    elif ((kind in ("shop_confirmed_received", "bank_auto_confirmed") and new_status == "confirmed") or
           (kind == "reconciled" and new_status == "reconciled")):
         await _enqueue(conn, order_id, event_type="payment.confirmed.notify",
                        dedupe_key=f"payment_confirmed:{ident}",

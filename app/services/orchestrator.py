@@ -337,6 +337,30 @@ def _is_explicit_cancel(text: str) -> bool:
     return any(m in t for m in _CANCEL_MARKERS)
 
 
+async def _committed_fulfillment_status(sender_id: str):
+    """CA 274-05/275-05: phan biet 3 truong hop cho cancel guard:
+      ('committed', order_id) = khach co don ĐÃ CHOT co fulfillment conversation (GOM 'completed' — don da xong
+        van la committed order) va order chua bi cancel;
+      ('none', None) = khong co committed fulfillment (pre-order thuan);
+      ('error', None) = DB check loi -> caller FAIL TOWARD 'can nhan vien', KHONG duoc claim da huy.
+    Completed order van la committed -> huy/doi phai chuyen staff, khong claim cancellation."""
+    try:
+        from app.db_pool import acquire as _acq
+        from app.db_pool import release as _rel
+        _c = await _acq()
+        try:
+            oid = await _c.fetchval(
+                "SELECT fc.order_id FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
+                "JOIN customers cu ON cu.id=o.customer_id WHERE cu.psid=$1 AND o.status <> 'cancelled' "
+                "ORDER BY fc.updated_at DESC LIMIT 1", sender_id)
+        finally:
+            await _rel(_c)
+        return ("committed", int(oid)) if oid is not None else ("none", None)
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] committed fulfillment check FAILED (fail-safe to staff): {safe_exc(e)}")
+        return ("error", None)
+
+
 # CA 233-03: confirmation detector HIGH-PRECISION + anchored (BO 'ung'/'ok em' substring rong). Commit chi
 # xay ra khi try_server_commit thay READY intent + summary present khop DUNG version/fingerprint hien tai
 # (pending-confirm context) -> confirm cho summary CU/superseded/ngoai context KHONG commit.
@@ -767,9 +791,33 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         # luot nay (KHONG vao LLM loop -> KHONG the goi create_order tao intent/don moi undo cancel). Tra
         # phan hoi huy tat dinh.
         if _is_explicit_cancel(text):
-            await _terminalize_open_intent("CANCELLED", "customer_cancel")
-            reply = ("Dạ em đã huỷ yêu cầu đặt hàng đang xử lý cho anh/chị rồi ạ. "
-                     "Khi nào cần đặt lại, anh/chị nhắn em nhé.")
+            # CA 274-05/275-05: don ĐÃ CHOT (gom completed) HOAC DB-check loi -> KHONG claim da huy; chuyen nhan
+            # vien (giu order state). Chi 'none' (pre-order thuan) moi dung hanh vi M5 (terminalize + 'da huy').
+            _cf_status, _committed_oid = await _committed_fulfillment_status(sender_id)
+            if _cf_status == "committed":
+                try:
+                    from app.db_pool import acquire as _acq
+                    from app.db_pool import release as _rel
+                    from app.services.fulfillment import conversation as _fc
+                    _c = await _acq()
+                    try:
+                        async with _c.transaction():
+                            await _fc.escalate(_c, int(_committed_oid), reason="other", actor="m7:cancel",
+                                               detail={"customer_cancel_request": True}, notify_customer=False)
+                    finally:
+                        await _rel(_c)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[orchestrator] cancel handoff skipped: {safe_exc(e)}")
+                reply = ("Dạ đơn của anh/chị đã được lên đơn nên yêu cầu thay đổi/huỷ cần nhân viên kiểm tra và "
+                         "xử lý giúp ạ. Nhân viên shop sẽ liên hệ lại với anh/chị.")
+            elif _cf_status == "error":
+                # CA 275-05: state-check thất bại -> FAIL TOWARD staff, KHONG xác nhận huỷ.
+                reply = ("Dạ để chắc chắn, yêu cầu huỷ/thay đổi của anh/chị cần nhân viên kiểm tra giúp ạ. "
+                         "Nhân viên shop sẽ liên hệ lại với anh/chị.")
+            else:
+                await _terminalize_open_intent("CANCELLED", "customer_cancel")
+                reply = ("Dạ em đã huỷ yêu cầu đặt hàng đang xử lý cho anh/chị rồi ạ. "
+                         "Khi nào cần đặt lại, anh/chị nhắn em nhé.")
             history = await _get_history(redis, sender_id)
             history.append({"role": "user", "content": text})
             history.append({"role": "assistant", "content": reply})
@@ -777,6 +825,41 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             await conversation_log.log_message(conversation_id, "customer", text)
             await conversation_log.log_message(conversation_id, "bot", reply)
             return reply
+
+        # M7 (Directive 272 §3.1): hoi thoai fulfillment sau chot don — reply TAT DINH tu state machine (COD/CK/
+        # bao da chuyen/doi method). None -> khong lien quan -> luong cu. command_key = provider_message_id ->
+        # duplicate inbound tra reply cu, KHONG tao payment/instruction/QR thu 2. Loi -> bo qua (khong vo reply).
+        if settings.m7_conversational_fulfillment and channel in ("telegram_customer", "messenger"):
+            _m7 = None
+            _m7_silent = False
+            try:
+                from app.db_pool import acquire as _acq
+                from app.db_pool import release as _rel
+                from app.services.fulfillment import conversation as _fc
+                _c = await _acq()
+                try:
+                    async with _c.transaction():
+                        _m7 = await _fc.handle_customer_text(
+                            _c, sender_id, text, command_key=f"msg:{provider_message_id or sender_id}")
+                finally:
+                    await _rel(_c)
+                _m7_silent = _m7 is _fc.SILENT
+            except Exception as e:  # noqa: BLE001
+                print(f"[orchestrator] M7 fulfillment reply skipped: {safe_exc(e)}")
+                _m7 = None
+            # CA 274-02: SILENT -> M7 da xu ly (dang cho nhan vien) -> bot IM LANG, KHONG roi xuong LLM.
+            if _m7_silent:
+                await conversation_log.log_message(conversation_id, "customer", text)
+                return None
+            # CA 274-03: reply luot khach -> DIRECT-SEND DUY NHAT (M7 khong enqueue outbox cho reply nay).
+            if isinstance(_m7, str) and _m7:
+                history = await _get_history(redis, sender_id)
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": _m7})
+                await _save_history(redis, sender_id, history)
+                await conversation_log.log_message(conversation_id, "customer", text)
+                await conversation_log.log_message(conversation_id, "bot", _m7)
+                return _m7
 
         # M6 (Directive 265 §4.1/§4.4): khach HOI trang thai don -> doc COMMITTED shipment/payment, tra reply
         # TAT DINH (khong de model tu nhan "da thanh toan"). None (chua co don M6-tracked) -> fall through
