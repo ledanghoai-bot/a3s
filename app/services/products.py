@@ -43,7 +43,8 @@ async def list_products_full() -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         products = await conn.fetch(
-            "SELECT id, sku, name, description, price_vnd, stock, created_at FROM products ORDER BY id"
+            "SELECT id, sku, name, description, price_vnd, stock, shipping_weight_g, sales_unit, created_at "
+            "FROM products ORDER BY id"
         )
         result = []
         for p in products:
@@ -80,13 +81,19 @@ async def get_sku_summary_text() -> str:
         return f"He thong hien co {len(rows)} SKU: {items}."
 
 
-async def create_product(sku: str, name: str, description: str, price_vnd: int, stock: int) -> dict:
+async def create_product(sku: str, name: str, description: str, price_vnd: int, stock: int,
+                         shipping_weight_g: int | None = None, sales_unit: str | None = None) -> dict:
     """Tao san pham moi + tu dong tao 1 knowledge_chunk RAG rieng cho san pham
     nay ("Lop 2" - issue #8, 17/7). Tinh embedding TRUOC khi mo transaction de
     khong giu connection/transaction mo qua lau trong luc goi model embedding
-    (CPU-bound, xem app/services/embedder.py)."""
+    (CPU-bound, xem app/services/embedder.py).
+
+    shipping_weight_g / sales_unit (M6/M7): can cho tinh phi giao tu dong (bang phi theo can nang) va guard
+    don-lon (Amendment 273, so sanh sales_unit voi don vi policy). None/rong -> luu NULL (M7 fail-closed -> staff
+    bao phi/kiem so luong tay)."""
     content = _product_embedding_text(sku, name, description)
     vec_str = _vec_str(await embed_async(content))
+    su = sales_unit.strip() if isinstance(sales_unit, str) and sales_unit.strip() else None
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -94,14 +101,16 @@ async def create_product(sku: str, name: str, description: str, price_vnd: int, 
             async with conn.transaction():
                 product_id = await conn.fetchval(
                     """
-                    INSERT INTO products (sku, name, description, price_vnd, stock)
-                    VALUES ($1, $2, $3, $4, $5) RETURNING id
+                    INSERT INTO products (sku, name, description, price_vnd, stock, shipping_weight_g, sales_unit)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
                     """,
                     sku,
                     name,
                     description,
                     price_vnd,
                     stock,
+                    shipping_weight_g,
+                    su,
                 )
                 await conn.execute(
                     """
@@ -116,10 +125,12 @@ async def create_product(sku: str, name: str, description: str, price_vnd: int, 
         except asyncpg.UniqueViolationError:
             raise ValueError(f"SKU '{sku}' da ton tai, dung SKU khac.")
         return {"id": product_id, "sku": sku, "name": name, "description": description,
-                "price_vnd": price_vnd, "stock": stock, "price_tiers": []}
+                "price_vnd": price_vnd, "stock": stock, "shipping_weight_g": shipping_weight_g,
+                "sales_unit": su, "price_tiers": []}
 
 
-async def update_product(product_id: int, name: str, description: str, price_vnd: int, stock: int) -> dict:
+async def update_product(product_id: int, name: str, description: str, price_vnd: int, stock: int,
+                         shipping_weight_g: int | None = None, sales_unit: str | None = None) -> dict:
     """Sua san pham - KHONG cho sua `sku` (immutable sau khi tao) vi sku la
     khoa tool dung de tra cuu (search_products/check_stock/create_order) - doi
     sku giua chung co the lam LLM/khach dang dung sku cu bi loi khong tim thay
@@ -138,15 +149,19 @@ async def update_product(product_id: int, name: str, description: str, price_vnd
 
     content = _product_embedding_text(sku, name, description)
     vec_str = _vec_str(await embed_async(content))
+    su = sales_unit.strip() if isinstance(sales_unit, str) and sales_unit.strip() else None
 
     async with pool.acquire() as conn:
         async with conn.transaction():
             result = await conn.execute(
-                "UPDATE products SET name = $1, description = $2, price_vnd = $3, stock = $4 WHERE id = $5",
+                "UPDATE products SET name = $1, description = $2, price_vnd = $3, stock = $4, "
+                "shipping_weight_g = $5, sales_unit = $6 WHERE id = $7",
                 name,
                 description,
                 price_vnd,
                 stock,
+                shipping_weight_g,
+                su,
                 product_id,
             )
             if result == "UPDATE 0":
@@ -164,7 +179,8 @@ async def update_product(product_id: int, name: str, description: str, price_vnd
                 product_id,
             )
         return {"id": product_id, "name": name, "description": description,
-                "price_vnd": price_vnd, "stock": stock}
+                "price_vnd": price_vnd, "stock": stock, "shipping_weight_g": shipping_weight_g,
+                "sales_unit": su}
 
 
 async def delete_product(product_id: int) -> None:

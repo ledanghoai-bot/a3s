@@ -434,6 +434,19 @@ async def get_products_full() -> list[dict]:
     return await products_service.list_products_full()
 
 
+def _opt_int(v):
+    """Parse truong so tuy chon (shipping_weight_g): None/rong -> None; so hop le -> int; khac -> 422."""
+    if v in (None, ""):
+        return None
+    try:
+        n = int(v)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="shipping_weight_g phai la so nguyen (gram) hoac de trong")
+    if n < 0:
+        raise HTTPException(status_code=422, detail="shipping_weight_g phai >= 0")
+    return n
+
+
 @router.post("/products")
 async def create_product_endpoint(body: dict) -> dict:
     required = ["sku", "name", "price_vnd", "stock"]
@@ -447,6 +460,8 @@ async def create_product_endpoint(body: dict) -> dict:
             description=body.get("description", ""),
             price_vnd=int(body["price_vnd"]),
             stock=int(body["stock"]),
+            shipping_weight_g=_opt_int(body.get("shipping_weight_g")),
+            sales_unit=body.get("sales_unit"),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -467,6 +482,8 @@ async def update_product_endpoint(product_id: int, body: dict) -> dict:
             description=body.get("description", ""),
             price_vnd=int(body["price_vnd"]),
             stock=int(body["stock"]),
+            shipping_weight_g=_opt_int(body.get("shipping_weight_g")),
+            sales_unit=body.get("sales_unit"),
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
