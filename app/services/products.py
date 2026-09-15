@@ -24,6 +24,9 @@ from app.services.embedder import embed_async
 
 PRODUCT_SOURCE_LABEL = "dashboard:product"
 
+# CA 283-01: sentinel phan biet "field khong duoc truyen" (giu nguyen) voi "truyen ro null/blank" (clear NULL).
+_UNSET = object()
+
 
 def _vec_str(vec: list[float]) -> str:
     return "[" + ",".join(str(x) for x in vec) + "]"
@@ -130,7 +133,7 @@ async def create_product(sku: str, name: str, description: str, price_vnd: int, 
 
 
 async def update_product(product_id: int, name: str, description: str, price_vnd: int, stock: int,
-                         shipping_weight_g: int | None = None, sales_unit: str | None = None) -> dict:
+                         shipping_weight_g=_UNSET, sales_unit=_UNSET) -> dict:
     """Sua san pham - KHONG cho sua `sku` (immutable sau khi tao) vi sku la
     khoa tool dung de tra cuu (search_products/check_stock/create_order) - doi
     sku giua chung co the lam LLM/khach dang dung sku cu bi loi khong tim thay
@@ -139,7 +142,10 @@ async def update_product(product_id: int, name: str, description: str, price_vnd
     "Lop 2": XOA knowledge_chunk RAG cu cua san pham nay roi TAO LAI (khong
     UPDATE embedding tai cho) - tranh truong hop content moi nhung embedding
     cu bi lech nhau, giong het pattern update_faq() trong knowledge_entries.py.
-    """
+
+    CA 283-01: PHAN BIET field OMITTED voi field gui EXPLICIT null/blank. shipping_weight_g/sales_unit mac dinh
+    `_UNSET` (khong truyen) -> GIU nguyen gia tri hien tai (KHONG ghi de NULL). Truyen ro None/"" -> clear ve NULL.
+    Response tra state CUOI THUC TE (doc lai sau update)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT sku FROM products WHERE id = $1", product_id)
@@ -149,23 +155,27 @@ async def update_product(product_id: int, name: str, description: str, price_vnd
 
     content = _product_embedding_text(sku, name, description)
     vec_str = _vec_str(await embed_async(content))
-    su = sales_unit.strip() if isinstance(sales_unit, str) and sales_unit.strip() else None
+
+    # SET dong: chi cot duoc truyen ro moi ghi (omitted -> giu nguyen).
+    sets = ["name = $1", "description = $2", "price_vnd = $3", "stock = $4"]
+    params: list = [name, description, price_vnd, stock]
+    if shipping_weight_g is not _UNSET:
+        params.append(shipping_weight_g)
+        sets.append(f"shipping_weight_g = ${len(params)}")
+    if sales_unit is not _UNSET:
+        su = sales_unit.strip() if isinstance(sales_unit, str) and sales_unit.strip() else None
+        params.append(su)
+        sets.append(f"sales_unit = ${len(params)}")
+    params.append(product_id)
 
     async with pool.acquire() as conn:
         async with conn.transaction():
             result = await conn.execute(
-                "UPDATE products SET name = $1, description = $2, price_vnd = $3, stock = $4, "
-                "shipping_weight_g = $5, sales_unit = $6 WHERE id = $7",
-                name,
-                description,
-                price_vnd,
-                stock,
-                shipping_weight_g,
-                su,
-                product_id,
-            )
+                f"UPDATE products SET {', '.join(sets)} WHERE id = ${len(params)}", *params)
             if result == "UPDATE 0":
                 raise LookupError(f"Khong tim thay san pham id={product_id}")
+            final = await conn.fetchrow(
+                "SELECT shipping_weight_g, sales_unit FROM products WHERE id = $1", product_id)
 
             await conn.execute("DELETE FROM knowledge_chunks WHERE product_id = $1", product_id)
             await conn.execute(
@@ -179,8 +189,8 @@ async def update_product(product_id: int, name: str, description: str, price_vnd
                 product_id,
             )
         return {"id": product_id, "name": name, "description": description,
-                "price_vnd": price_vnd, "stock": stock, "shipping_weight_g": shipping_weight_g,
-                "sales_unit": su}
+                "price_vnd": price_vnd, "stock": stock,
+                "shipping_weight_g": final["shipping_weight_g"], "sales_unit": final["sales_unit"]}
 
 
 async def delete_product(product_id: int) -> None:

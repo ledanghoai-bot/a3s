@@ -476,14 +476,19 @@ async def update_product_endpoint(product_id: int, body: dict) -> dict:
     if missing:
         raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
     try:
+        # CA 283-01: chi truyen field khi body CO key do -> omitted (legacy body) giu nguyen; gui ro null/blank -> clear.
+        opt = {}
+        if "shipping_weight_g" in body:
+            opt["shipping_weight_g"] = _opt_int(body.get("shipping_weight_g"))
+        if "sales_unit" in body:
+            opt["sales_unit"] = body.get("sales_unit")
         return await products_service.update_product(
             product_id=product_id,
             name=body["name"],
             description=body.get("description", ""),
             price_vnd=int(body["price_vnd"]),
             stock=int(body["stock"]),
-            shipping_weight_g=_opt_int(body.get("shipping_weight_g")),
-            sales_unit=body.get("sales_unit"),
+            **opt,
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
