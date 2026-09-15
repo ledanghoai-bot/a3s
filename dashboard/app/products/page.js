@@ -17,6 +17,8 @@ function ProductForm({ product, onSaved, onCancel }) {
   const [description, setDescription] = useState(product?.description || "");
   const [priceVnd, setPriceVnd] = useState(product?.price_vnd ?? "");
   const [stock, setStock] = useState(product?.stock ?? "");
+  const [shippingWeightG, setShippingWeightG] = useState(product?.shipping_weight_g ?? "");
+  const [salesUnit, setSalesUnit] = useState(product?.sales_unit || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -32,6 +34,9 @@ function ProductForm({ product, onSaved, onCancel }) {
     }
     setBusy(true);
     try {
+      // shipping_weight_g / sales_unit tuy chon: de trong -> gui null (M7 fail-closed -> staff bao phi/kiem so luong)
+      const swg = shippingWeightG === "" ? null : Number(shippingWeightG);
+      const su = salesUnit.trim() === "" ? null : salesUnit.trim();
       if (isEdit) {
         await apiFetch(`/dashboard/products/${product.id}`, {
           method: "PATCH",
@@ -40,6 +45,8 @@ function ProductForm({ product, onSaved, onCancel }) {
             description,
             price_vnd: Number(priceVnd),
             stock: Number(stock),
+            shipping_weight_g: swg,
+            sales_unit: su,
           }),
         });
       } else {
@@ -51,6 +58,8 @@ function ProductForm({ product, onSaved, onCancel }) {
             description,
             price_vnd: Number(priceVnd),
             stock: Number(stock),
+            shipping_weight_g: swg,
+            sales_unit: su,
           }),
         });
       }
@@ -96,6 +105,20 @@ function ProductForm({ product, onSaved, onCancel }) {
           value={stock}
           onChange={(e) => setStock(e.target.value)}
         />
+        <input
+          type="number"
+          placeholder="Cân nặng ship (gram, gồm bao bì) — để tính phí giao tự động"
+          value={shippingWeightG}
+          onChange={(e) => setShippingWeightG(e.target.value)}
+        />
+        <input
+          placeholder='Đơn vị bán (vd "hũ") — dùng cho guard đơn lớn'
+          value={salesUnit}
+          onChange={(e) => setSalesUnit(e.target.value)}
+        />
+        <div style={{ fontSize: 11, color: "#999" }}>
+          Cân nặng + đơn vị để trống → phí giao/số lượng sẽ do nhân viên xử lý tay (M7 fail-closed).
+        </div>
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
         <button className="primary" disabled={busy} onClick={save}>
@@ -276,6 +299,7 @@ export default function ProductsPage() {
               <th>Tên</th>
               <th>Giá lẻ</th>
               <th>Tồn kho</th>
+              <th>KL ship / ĐV</th>
               <th>Bậc giá</th>
               <th></th>
             </tr>
@@ -288,6 +312,11 @@ export default function ProductsPage() {
                   <td>{p.name}</td>
                   <td>{formatVnd(p.price_vnd)}</td>
                   <td>{p.stock}</td>
+                  <td style={{ fontSize: 12 }}>
+                    {p.shipping_weight_g != null ? `${p.shipping_weight_g}g` : <span style={{ color: "#c00" }}>—</span>}
+                    {" / "}
+                    {p.sales_unit ? p.sales_unit : <span style={{ color: "#c00" }}>—</span>}
+                  </td>
                   <td style={{ fontSize: 12 }}>
                     {p.price_tiers.length === 0
                       ? "(chưa có bậc giá)"
@@ -323,14 +352,14 @@ export default function ProductsPage() {
                 </tr>
                 {editingId === p.id && (
                   <tr>
-                    <td colSpan={6}>
+                    <td colSpan={7}>
                       <ProductForm product={p} onSaved={afterSave} onCancel={() => setEditingId(null)} />
                     </td>
                   </tr>
                 )}
                 {editingTiersId === p.id && (
                   <tr>
-                    <td colSpan={6}>
+                    <td colSpan={7}>
                       <TiersEditor product={p} onSaved={afterSave} onCancel={() => setEditingTiersId(null)} />
                     </td>
                   </tr>

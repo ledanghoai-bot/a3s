@@ -121,7 +121,7 @@ export default function FulfillmentDetail() {
   const [ev, setEv] = useState({ kind: "cod_collected", amount_vnd: "", reference: "", note: "" });
   const [corr, setCorr] = useState({ amount_vnd: "", note: "", corrects_event_id: "" });
   const [att, setAtt] = useState({ result: "failed", reason: "", note: "", next_contact_at: "" });
-  const [bank, setBank] = useState({ bank: "", account_number: "", holder_name: "", branch: "" });
+  const [bank, setBank] = useState({ bank: "", account_number: "", holder_name: "", branch: "", bin: "" });
   const [m7, setM7] = useState(null); // CA 274-04: hội thoại/route/QR/provider M7
 
   useEffect(() => {
@@ -371,10 +371,12 @@ export default function FulfillmentDetail() {
           <input placeholder="số tài khoản" value={bank.account_number} onChange={(e) => setBank({ ...bank, account_number: e.target.value })} />
           <input placeholder="chủ TK" value={bank.holder_name} onChange={(e) => setBank({ ...bank, holder_name: e.target.value })} />
           <input placeholder="chi nhánh" value={bank.branch} onChange={(e) => setBank({ ...bank, branch: e.target.value })} />
+          <input placeholder="BIN NAPAS (vd Vietinbank 970415) — để sinh VietQR" value={bank.bin} onChange={(e) => setBank({ ...bank, bin: e.target.value })} />
           <button disabled={busy} onClick={() => act(() => post(`/bank-account`, {
             bank: bank.bank, account_number: bank.account_number, holder_name: bank.holder_name,
-            branch: bank.branch || null,
+            branch: bank.branch || null, bin: bank.bin.trim() || null,
           }), "Đã cập nhật tài khoản nhận")}>Lưu tài khoản</button>
+          <div style={{ fontSize: 11, color: "#999" }}>Thiếu BIN → hướng dẫn CK vẫn có STK/nội dung nhưng KHÔNG có mã VietQR.</div>
         </Row>
       </Section>
 
