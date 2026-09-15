@@ -34,10 +34,21 @@ def test_empty_allowlist_fail_closed(monkeypatch):
     assert S.m7_enabled_for(1) is False  # AC-4: rong -> 0 enrolled
 
 
-def test_malformed_allowlist_rejects_invalid_tokens(monkeypatch):
-    _set(monkeypatch, master=True, scope="tester", ids="1, abc, , 2 , -5, 0, 3x, 4")
-    assert S.tester_ids() == {1, 2, 4}  # bo abc/-5/0/3x, dedupe, giu 1/2/4
-    assert S.m7_enabled_for(4) is True and S.m7_enabled_for(5) is False
+def test_valid_allowlist_whitespace_dedupe_canonical(monkeypatch):
+    # canonical IDs + whitespace + duplicate hop le -> canonical dedupe set (CA 289 §2.4)
+    _set(monkeypatch, master=True, scope="tester", ids=" 1 , 2 ,1, 3 , 2 ,")
+    assert S.allowlist_valid() is True and S.tester_ids() == {1, 2, 3}
+    assert S.m7_enabled_for(1) and S.m7_enabled_for(3) and S.m7_enabled_for(4) is False
+
+
+def test_malformed_allowlist_fail_closed_entirely(monkeypatch):
+    # CA 289-01: BAT KY token rac nao -> toan bo allowlist rong, KHONG ai eligible (khong giu token dung).
+    for bad in ("1,bad,2", "1,-5,2", "1,0,2", "1,2x", "1, abc ,2", "1,01,2", "1,+2,3", "1,1.0,2"):
+        _set(monkeypatch, master=True, scope="tester", ids=bad)
+        assert S.allowlist_valid() is False, bad
+        assert S.tester_ids() == set(), bad
+        # master ON + scope tester + malformed -> tat ca (ke ca token "dung" 1/2/3) deu False
+        assert not any(S.m7_enabled_for(c) for c in (1, 2, 3, 5)), bad
 
 
 def test_scope_off_disabled(monkeypatch):
@@ -56,13 +67,24 @@ def test_scope_malformed_defaults_off(monkeypatch):
 
 
 def test_readback_no_id_leak(monkeypatch):
-    _set(monkeypatch, master=True, scope="tester", ids="7,7,3,invalid")
+    _set(monkeypatch, master=True, scope="tester", ids="7,7,3,5")
     rb = S.readback()
-    assert rb["master"] is True and rb["scope"] == "tester" and rb["tester_count"] == 2  # {3,7}
+    assert rb["master"] is True and rb["scope"] == "tester" and rb["allowlist_valid"] is True
+    assert rb["tester_count"] == 3  # {3,5,7}
     assert isinstance(rb["tester_hash"], str) and len(rb["tester_hash"]) == 12
-    # readback KHONG chua ID/PSID tho
-    assert "7" not in str(rb.get("tester_hash")) or True
-    assert "tester_ids" not in rb and "psid" not in rb
+    # no-leak = schema/key contract: readback KHONG mang raw allowlist value hay ID/PSID
+    assert set(rb) == {"master", "scope", "allowlist_valid", "tester_count", "tester_hash"}
+    for k in ("tester_ids", "ids", "customer_ids", "psid", "allowlist", "raw"):
+        assert k not in rb
+
+
+def test_readback_malformed_flags_invalid_no_leak(monkeypatch):
+    # CA 289-01 §2.4: readback config malformed -> allowlist_valid False, 0 enrolled, khong lo raw value/IDs.
+    _set(monkeypatch, master=True, scope="tester", ids="7,bad,3")
+    rb = S.readback()
+    assert rb["allowlist_valid"] is False and rb["tester_count"] == 0 and rb["tester_hash"] == ""
+    assert set(rb) == {"master", "scope", "allowlist_valid", "tester_count", "tester_hash"}
+    assert "7" not in str(rb.values()) and "bad" not in str(rb.values())
 
 
 def test_readback_empty_hash_blank(monkeypatch):

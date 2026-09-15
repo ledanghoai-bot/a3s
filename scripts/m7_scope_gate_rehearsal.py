@@ -130,6 +130,29 @@ async def main():  # noqa: C901
         ck("AC run_due non-tester -> skipped_scope>=1 (khong reminder/escalation)",
            due.get("skipped_scope", 0) >= 1, due)
 
+        # AC-8 (CA 289-01): malformed allowlist -> fail-closed toan bo, KE CA token "dung" cung khong eligible;
+        # cron KHONG advance/prompt/attention. cidM la positive canonical hop le NHUNG bi "bad" lam hong config.
+        oidM, cidM, psidM = await _order_convo(conn, ward)                 # step=routing
+        oidMd, cidMd, _ = await _order_convo(conn, ward, step="awaiting_transfer")
+        await conn.execute("UPDATE fulfillment_conversations SET transfer_started_at=now()-interval '20 min', "
+                           "instruction_id=NULL WHERE order_id=$1", oidMd)
+        settings.m7_tester_customer_ids = f"{cidM},bad,{cidMd}"            # malformed (co token rac)
+        ck("AC-8 malformed config -> allowlist_valid False, cidM (canonical) van disabled (fail-closed)",
+           S.allowlist_valid() is False and S.m7_enabled_for(cidM) is False and S.tester_ids() == set(), cidM)
+        stM = await FC.run_routing(limit=50)
+        outM = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE (payload->>'order_id')::bigint=$1", oidM)
+        attnM = await conn.fetchval("SELECT count(*) FROM staff_attention WHERE order_id=$1", oidM)
+        ck("AC-8 malformed -> run_routing KHONG advance/outbox/attention (skipped_scope)",
+           (await _step(conn, oidM)) == "routing" and int(outM) == 0 and int(attnM) == 0
+           and stM.get("skipped_scope", 0) >= 1 and stM.get("advanced", 0) == 0,
+           f"stepM={await _step(conn, oidM)} out={outM} attn={attnM} skip={stM.get('skipped_scope')}")
+        async with conn.transaction():
+            dueM = await FC.run_due(conn)
+        remM = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE (payload->>'order_id')::bigint=$1 "
+                                   "AND event_type='fulfillment.reminder.notify'", oidMd)
+        ck("AC-8 malformed -> run_due KHONG reminder (skipped_scope)",
+           dueM.get("skipped_scope", 0) >= 1 and int(remM) == 0, f"skip={dueM.get('skipped_scope')} rem={remM}")
+
         print("RESULT:", "ALL PASS" if not FAILS else f"FAIL {FAILS}")
         return 1 if FAILS else 0
     finally:
