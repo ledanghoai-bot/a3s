@@ -836,11 +836,15 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                 from app.db_pool import acquire as _acq
                 from app.db_pool import release as _rel
                 from app.services.fulfillment import conversation as _fc
+                from app.services.fulfillment import m7_scope as _m7s
                 _c = await _acq()
                 try:
-                    async with _c.transaction():
-                        _m7 = await _fc.handle_customer_text(
-                            _c, sender_id, text, command_key=f"msg:{provider_message_id or sender_id}")
+                    # CA Directive 286: chi vao M7 khi customer nay eligible (master + tester allowlist). Non-tester ->
+                    # _m7=None -> roi xuong luong M5/M6/LLM binh thuong (KHONG M7 effect, KHONG SILENT).
+                    if await _m7s.enabled_for_psid(_c, sender_id):
+                        async with _c.transaction():
+                            _m7 = await _fc.handle_customer_text(
+                                _c, sender_id, text, command_key=f"msg:{provider_message_id or sender_id}")
                 finally:
                     await _rel(_c)
                 _m7_silent = _m7 is _fc.SILENT

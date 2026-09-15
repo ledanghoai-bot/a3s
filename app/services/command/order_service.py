@@ -391,7 +391,10 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     # --- M7 (CA Directive 272 §3.1): bat dau hoi thoai fulfillment TRONG CUNG tx chot don — chi khi flag BAT, kenh
     # khach co chat va order_address_snapshot hop le (Gate E da bind). KHONG goi provider/bao phi o day (worker 2 pha).
     # Loi o day -> raise -> rollback (fail-closed, cung nguyen tac outbox/audit).
-    if settings.m7_conversational_fulfillment and env.channel in ("messenger", "telegram_customer"):
+    # CA Directive 286: gate M7 theo scope (master + tester allowlist), KHONG chi master flag. Non-tester -> KHONG
+    # tao conversation (giu baseline M5/M6). m7_scope.m7_enabled_for da bao gom check master.
+    from app.services.fulfillment import m7_scope as _m7s
+    if _m7s.m7_enabled_for(customer_id) and env.channel in ("messenger", "telegram_customer"):
         if await conn.fetchval("SELECT 1 FROM order_address_snapshot WHERE order_id=$1", order_id):
             from app.services.fulfillment import conversation as _fc
             await _fc.ensure_started(conn, order_id, channel=env.channel, customer_ref=str(env.actor.id),

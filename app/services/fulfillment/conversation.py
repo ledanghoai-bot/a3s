@@ -502,14 +502,19 @@ async def run_due(conn, *, now: datetime | None = None, actor: str = "m7:worker"
     staff_attention(payment_timeout) cung atomic; else >=r2/r1 (chua gui) -> DUNG 1 reminder (dedupe
     (instruction_id, reminder_no)). KHONG huy don, KHONG doi inventory. Restart/retry khong tao effect 2 lan.
     `now` inject duoc (fake clock cho test)."""
+    from app.services.fulfillment import m7_scope as _m7s
     now = now or datetime.now(timezone.utc)
-    stats = {"reminded": 0, "escalated": 0, "completed": 0}
+    stats = {"reminded": 0, "escalated": 0, "completed": 0, "skipped_scope": 0}
     rows = await conn.fetch(
         "SELECT * FROM fulfillment_conversations WHERE step=$1 AND transfer_started_at IS NOT NULL "
         "ORDER BY transfer_started_at LIMIT 100 FOR UPDATE SKIP LOCKED", AWAITING_TRANSFER)
     for r in rows:
         fc = dict(r)
         oid, iid = fc["order_id"], fc["instruction_id"]
+        # CA Directive 286: customer khong con eligible -> KHONG gui reminder/escalation moi (state giu cho staff).
+        if not _m7s.m7_enabled_for(await conn.fetchval("SELECT customer_id FROM orders WHERE id=$1", oid)):
+            stats["skipped_scope"] += 1
+            continue
         policy = await _policy_for(conn, fc)
         started = fc["transfer_started_at"]
         r1_at = started + timedelta(minutes=int(policy["reminder1_minutes"]))
@@ -633,12 +638,19 @@ async def prepare_ghn_quote(conn, order_id: int, provider=None):
 async def run_routing(*, limit: int = 25, provider=None) -> dict:
     """Cron 10s: xu ly step='routing' — pha 1 GHN quote NGOAI tx, pha 2 advance_routing TRONG tx ngan."""
     from app.db_pool import acquire, release
-    stats = {"claimed": 0, "advanced": 0, "errors": 0}
+    from app.services.fulfillment import m7_scope as _m7s
+    stats = {"claimed": 0, "advanced": 0, "errors": 0, "skipped_scope": 0}
     conn = await acquire()
     try:
-        ids = [r["order_id"] for r in await conn.fetch(
-            "SELECT order_id FROM fulfillment_conversations WHERE step=$1 ORDER BY created_at LIMIT $2", ROUTING, limit)]
-        for oid in ids:
+        rows = await conn.fetch(
+            "SELECT fc.order_id, o.customer_id FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
+            "WHERE fc.step=$1 ORDER BY fc.created_at LIMIT $2", ROUTING, limit)
+        for _r in rows:
+            oid = _r["order_id"]
+            # CA Directive 286: customer khong con eligible (removed mid-flow / khong tester) -> KHONG advance/send.
+            if not _m7s.m7_enabled_for(_r["customer_id"]):
+                stats["skipped_scope"] += 1
+                continue
             stats["claimed"] += 1
             try:
                 ghn_res = await prepare_ghn_quote(conn, oid, provider=provider)
