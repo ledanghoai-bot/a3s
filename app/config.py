@@ -196,6 +196,12 @@ class Settings(BaseSettings):
     #   OFF = M6 nguyen trang (staff thao tac dashboard). Nguong 100 hu + moc timeout/nhac = config CO VERSION
     #   (bang fulfillment_policy_versions), KHONG dat o day; order snapshot policy_version luc chot don.
     m7_conversational_fulfillment: bool = False
+    # CA Directive 286: M7 scope gate DOC LAP voi Gate E full-scope. m7_conversational_scope = off|tester|public
+    #   (public LOCKED, chua duoc phep). M7 chi chay khi master (m7_conversational_fulfillment) ON VA scope cho phep
+    #   customer hien tai. m7_tester_customer_ids = CSV internal customer_id (rong/malformed -> fail-closed 0 enrolled).
+    #   KHONG dung gate_e_fullscope_* lam M7 scope. Xem app/services/fulfillment/m7_scope.py.
+    m7_conversational_scope: str = "off"
+    m7_tester_customer_ids: str = ""
     # m7_ghn_quote: GHN read-only quote/leadtime (staging). OFF -> route GHN = quote_required (staff bao phi), KHONG loi.
     m7_ghn_quote: bool = False
     # m7_sepay_test_connector: nhan webhook SePay TEST MODE (Apikey). OFF -> endpoint tra 404. Live (C1) = flag rieng
