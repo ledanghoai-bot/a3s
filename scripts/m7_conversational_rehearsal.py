@@ -131,7 +131,15 @@ async def main() -> int:
     settings.m7_sepay_test_connector = True
     settings.m7_ghn_quote = False
     settings.sepay_allowed_accounts = ""
+    # CA Directive 286: tester scope; allowlist tat ca customer test (rehearsal drives run_due truc tiep).
+    settings.m7_conversational_scope = "tester"
     conn = await asyncpg.connect(DSN)
+
+    async def _allow_awaiting():
+        ids = [r[0] for r in await conn.fetch(
+            "SELECT DISTINCT o.customer_id FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
+            "WHERE fc.step='awaiting_transfer'")]
+        settings.m7_tester_customer_ids = ",".join(str(i) for i in ids) or "-1"
     try:
         # idempotency across re-runs: don awaiting_transfer ton dong -> completed (khoi nhieu run_due chen G6)
         await conn.execute("UPDATE fulfillment_conversations SET step='completed', completed_at=now() "
@@ -291,6 +299,7 @@ async def main() -> int:
         await _start(conn, o6, p6)
         await _say(conn, p6, "chuyển khoản", "g6-1")
         # (Chi tiet timeline moc t+7/t+13/t+15 + fake clock o scripts/m7_amendment273_rehearsal.py; day la tich hop e2e)
+        await _allow_awaiting()
         async with conn.transaction():
             s0 = await fc.run_due(conn)
         ck("G6 truoc moc -> khong nhac/escalate", s0["reminded"] == 0 and s0["escalated"] == 0
@@ -298,12 +307,14 @@ async def main() -> int:
         # ep qua timeout: transfer_started_at = now - 16' (> t+15 CA 273)
         await conn.execute("UPDATE fulfillment_conversations SET transfer_started_at=now()-interval '16 minutes' "
                            "WHERE order_id=$1", o6)
+        await _allow_awaiting()
         async with conn.transaction():
             s1 = await fc.run_due(conn)
         c6 = await fc.get(conn, o6)
         ck("G6 qua timeout -> escalate payment_timeout, khong huy don", s1["escalated"] >= 1
            and c6["step"] == "staff_attention" and len(await _attn(conn, o6, "payment_timeout")) == 1
            and (await conn.fetchval("SELECT status FROM orders WHERE id=$1", o6)) == "confirmed")
+        await _allow_awaiting()
         async with conn.transaction():
             s2 = await fc.run_due(conn)
         ck("G6 run lai -> khong double escalate", s2["escalated"] == 0)

@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
+from app.config import settings
 from app.services.fulfillment import conversation as C
 
 RUN = str(int(time.time()))
@@ -107,7 +108,17 @@ async def _step(conn, oid):
 
 
 async def main():  # noqa: C901
+    # CA Directive 286: gate M7 scope. Rehearsal = tester scope; allowlist tat ca customer test (refresh truoc run_due).
+    settings.m7_conversational_fulfillment = True
+    settings.m7_conversational_scope = "tester"
     conn = await asyncpg.connect(DSN)
+
+    async def _allow_awaiting():
+        ids = [r[0] for r in await conn.fetch(
+            "SELECT DISTINCT o.customer_id FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
+            "WHERE fc.step='awaiting_transfer'")]
+        settings.m7_tester_customer_ids = ",".join(str(i) for i in ids) or "-1"
+
     try:
         await conn.execute("INSERT INTO delivery_zones(province_code,ward_code,zone) VALUES('66','24169','bmt_inner') "
                            "ON CONFLICT DO NOTHING")
@@ -164,10 +175,12 @@ async def main():  # noqa: C901
         oid, iid = await _seed_awaiting_transfer(conn, started=T0)
 
         async def due(delta_min):
+            await _allow_awaiting()
             async with conn.transaction():
                 return await C.run_due(conn, now=T0 + timedelta(minutes=delta_min, seconds=0))
 
         async def due_at(m, s):
+            await _allow_awaiting()
             async with conn.transaction():
                 return await C.run_due(conn, now=T0 + timedelta(minutes=m, seconds=s))
 
