@@ -408,9 +408,12 @@ async def main() -> int:
         ck("G8 weight thieu -> fee unknown -> staff_attention(quote), khong prompt tong, khong 0d",
            out8["step"] == "staff_attention" and out8["attention_reason"] == "quote" and
            len(await _outbox(conn, o8, fc.EV_PROMPT)) == 0 and (pay8 is None or pay8["amount_due_vnd"] is None))
-        # CA 274-02: khi staff_attention -> bot IM LANG (SILENT), chan LLM, KHONG tao instruction.
-        ck("G8 khach chon CK khi staff_attention -> SILENT (bot im lang, khong tao instruction)",
-           (await _say(conn, p8, "chuyển khoản", "g8-1")) is fc.SILENT
+        # CA Review 292-02: khi staff_attention -> bot KHONG roi LLM, KHONG tao instruction; tin DAU tra ack xac dinh
+        # (rate-limit), tin SAU trong cooldown -> SILENT. Ca hai deu KHONG tao instruction / khong doi order.
+        g8a = await _say(conn, p8, "chuyển khoản", "g8-1")
+        g8b = await _say(conn, p8, "cho em hỏi", "g8-2")
+        ck("G8 staff_attention: tin dau -> ack nhan vien (rate-limit), tin sau -> SILENT; khong tao instruction",
+           isinstance(g8a, str) and "nhân viên" in g8a and g8b is fc.SILENT
            and (await conn.fetchval("SELECT count(*) FROM payment_instructions WHERE order_id=$1", o8)) == 0)
 
         # ================= G10 Resume voi manual quote =================
