@@ -261,6 +261,9 @@ async def payment_evidence(order_id: int, body: dict, staff: dict = Depends(requ
                 (isinstance(raw, float) and not raw.is_integer()):
             raise HTTPException(status_code=422, detail="correction can amount_vnd (so nguyen, co the am)")
         amount_vnd = int(raw)
+    elif kind == "reconciled":
+        # CA Directive 293 §5: doi soat COD la accounting-only — KHONG yeu cau/khong cong so tien.
+        amount_vnd = None
     else:
         amount_vnd = _money(body, "amount_vnd", required=True)
     corrects = body.get("corrects_event_id")

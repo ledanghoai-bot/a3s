@@ -318,12 +318,16 @@ export default function FulfillmentDetail() {
             <option value="shop_confirmed_received">Shop xác nhận nhận CK</option>
             <option value="reconciled">Đối soát COD</option>
           </select>
-          <input placeholder="số tiền VNĐ" value={ev.amount_vnd} onChange={(e) => setEv({ ...ev, amount_vnd: e.target.value })} style={{ width: 110 }} />
+          {/* CA Directive 293 §5: doi soat COD KHONG yeu cau so tien (accounting-only) */}
+          {ev.kind !== "reconciled" && (
+            <input placeholder="số tiền VNĐ" value={ev.amount_vnd} onChange={(e) => setEv({ ...ev, amount_vnd: e.target.value })} style={{ width: 110 }} />
+          )}
           <input placeholder="mã GD (nếu có)" value={ev.reference} onChange={(e) => setEv({ ...ev, reference: e.target.value })} />
           <input placeholder="ghi chú" value={ev.note} onChange={(e) => setEv({ ...ev, note: e.target.value })} />
           <button disabled={busy} onClick={() => {
             const payload = {
-              kind: ev.kind, amount_vnd: ev.amount_vnd === "" ? null : Number(ev.amount_vnd),
+              kind: ev.kind,
+              amount_vnd: ev.kind === "reconciled" ? null : (ev.amount_vnd === "" ? null : Number(ev.amount_vnd)),
               reference: ev.reference || null, note: ev.note || null,
             };
             const { key, consume } = opKey(`evidence:${orderId}`, payload);
@@ -331,6 +335,13 @@ export default function FulfillmentDetail() {
               "Đã ghi evidence", consume);
           }}>Ghi nhận</button>
         </Row>
+        {/* CA Directive 293 §5: mo ta ro tac dong tung hanh dong (cod_collected = gui xac nhan khach; reconcile = noi bo) */}
+        <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>
+          {ev.kind === "cod_collected" && "COD: Đã thu tiền — nhập ĐÚNG số thực thu. Khi khớp số cần thu, hệ thống GỬI KHÁCH xác nhận đã thu tiền COD và hoàn tất đơn (lệch → chuyển nhân viên, không gửi)."}
+          {ev.kind === "reconciled" && `Đối soát COD — chỉ đối soát kế toán nội bộ: KHÔNG cộng tiền, KHÔNG gửi lại thông báo. Đã nhận ${vnd(p ? p.amount_received_vnd : null)} / cần thu ${vnd(p ? p.amount_due_vnd : null)}.`}
+          {ev.kind === "shop_confirmed_received" && "Shop xác nhận nhận CK — khi khớp số cần thu, gửi khách xác nhận đã nhận thanh toán."}
+          {ev.kind === "customer_reported" && "Khách báo đã CK — chỉ ghi nhận khách báo, CHƯA xác nhận đã nhận tiền."}
+        </div>
         {p && p.status === "discrepancy" && (
           <Row label="Điều chỉnh (±)">
             <input placeholder="delta VNĐ (±)" value={corr.amount_vnd} onChange={(e) => setCorr({ ...corr, amount_vnd: e.target.value })} style={{ width: 120 }} />

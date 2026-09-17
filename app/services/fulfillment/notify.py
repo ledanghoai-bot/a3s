@@ -84,7 +84,8 @@ async def notify_shipment(conn, order_id: int, *, to_status: str, sh: dict, vers
 async def notify_payment(conn, order_id: int, *, kind: str, new_status: str,
                          version: int | None = None) -> None:
     """Thong bao khach khi payment tien trien. check_request (khach bao chuyen khoan -> ack shop kiem tra);
-    confirmed (transfer confirmed / COD reconciled -> shop da nhan tien). CA 267-03: dedupe theo (order, version).
+    confirmed: BANK_TRANSFER confirmed (shop/auto) HOAC COD 'collected' (CA Directive 293 — mốc staff xác nhận đã
+    thu đủ tiền COD; reconciled KHÔNG còn phát confirmation). CA 267-03: dedupe theo (order, version).
     KHONG thong bao khi discrepancy (cho staff xu ly, tranh hua sai voi khach)."""
     sc = {"kind": "payment", "order_id": order_id, "new_status": new_status, "version": version}
     ident = f"{order_id}:{version}"
@@ -94,8 +95,16 @@ async def notify_payment(conn, order_id: int, *, kind: str, new_status: str,
                        text=(f"Dạ shop đã nhận thông tin chuyển khoản đơn #{order_id} (nội dung "
                              f"{transfer_content(order_id)}), đang kiểm tra và sẽ xác nhận với anh/chị ạ."),
                        stale_check=sc)
-    elif ((kind in ("shop_confirmed_received", "bank_auto_confirmed") and new_status == "confirmed") or
-          (kind == "reconciled" and new_status == "reconciled")):
+    elif kind == "cod_collected" and new_status == "collected":
+        # CA Directive 293 §2: nói rõ ĐÃ THU TIỀN COD cho đúng đơn, KHÔNG ngụ ý đã đối soát kế toán.
+        # CA Review 294-01: confirmation này còn ĐÚNG khi status là 'collected' HOẶC successor 'reconciled'
+        # (đối soát KHÔNG được hủy confirmation đang chờ gửi); chỉ hủy nếu chuyển 'discrepancy'/status khác (mất bằng
+        # chứng đã thu đủ) -> allowed_statuses thay cho exact-match new_status.
+        await _enqueue(conn, order_id, event_type="payment.confirmed.notify",
+                       dedupe_key=f"payment_confirmed:{ident}",
+                       text=f"Dạ shop đã xác nhận thu đủ tiền COD đơn #{order_id}. Cảm ơn anh/chị ạ!",
+                       stale_check={**sc, "allowed_statuses": ["collected", "reconciled"]})
+    elif kind in ("shop_confirmed_received", "bank_auto_confirmed") and new_status == "confirmed":
         await _enqueue(conn, order_id, event_type="payment.confirmed.notify",
                        dedupe_key=f"payment_confirmed:{ident}",
                        text=f"Dạ shop đã xác nhận nhận thanh toán đơn #{order_id}. Cảm ơn anh/chị ạ!",
