@@ -74,16 +74,68 @@ def _reset():
     L._poll_started_at = None
 
 
-def test_reconnect_after_consecutive_errors(monkeypatch):
+def test_next_reconnect_count_resets_after_success():
+    # CA 298-01: had_success -> reset ve 1 (base); khong -> tang dan.
+    assert L._next_reconnect_count(5, True) == 1
+    assert L._next_reconnect_count(5, False) == 6
+    assert L._next_reconnect_count(0, False) == 1
+    # backoff cua reconnect sau outage-co-success = muc base (thap), khong bi lich su lam cham.
+    assert L._backoff_delay(L._next_reconnect_count(9, True)) <= L._BACKOFF_BASE * (1 + L._JITTER)
+
+
+def test_reconnect_raises_and_inner_does_not_own_delay(monkeypatch):
+    # CA 298-02: inner KHONG sleep khi RAISE reconnect (chi sleep cho retry TRONG phien). Sleep count = threshold-1.
+    _reset()
+    slept = []
+
+    async def _cnt(d=0):
+        slept.append(d)
+    monkeypatch.setattr(L.asyncio, "sleep", _cnt)
+    monkeypatch.setattr(L.settings, "telegram_customer_bot_token", "T")
+    import httpx
+    client = _FakeClient([httpx.ConnectError("dns")] * L._RECONNECT_AFTER_CONSEC_ERRORS)
+    with pytest.raises(L._ReconnectSession) as ei:
+        asyncio.run(L._run_session(client, {"offset": None}))
+    assert ei.value.had_success is False          # khong poll OK -> outer tang backoff
+    assert client.get_calls == L._RECONNECT_AFTER_CONSEC_ERRORS
+    assert len(slept) == L._RECONNECT_AFTER_CONSEC_ERRORS - 1   # KHONG sleep o lan raise (single-delay ownership)
+
+
+def test_reconnect_after_success_marks_had_success(monkeypatch):
+    # phien poll OK vai lan roi loi lien tiep -> _ReconnectSession(had_success=True) -> outer se reset backoff.
     _reset()
     _no_sleep(monkeypatch)
     monkeypatch.setattr(L.settings, "telegram_customer_bot_token", "T")
     import httpx
-    client = _FakeClient([httpx.ConnectError("dns"), httpx.ConnectError("dns"), httpx.ConnectError("dns")])
-    state = {"offset": None}
-    with pytest.raises(RuntimeError):          # >= _RECONNECT_AFTER_CONSEC_ERRORS -> raise de outer tao client moi
-        asyncio.run(L._run_session(client, state))
-    assert client.get_calls == L._RECONNECT_AFTER_CONSEC_ERRORS
+    ok = {"result": []}
+    client = _FakeClient([ok, ok] + [httpx.ConnectError("x")] * L._RECONNECT_AFTER_CONSEC_ERRORS)
+    with pytest.raises(L._ReconnectSession) as ei:
+        asyncio.run(L._run_session(client, {"offset": None}))
+    assert ei.value.had_success is True and L._last_poll_ok_at is not None
+
+
+def test_time_based_heartbeat(monkeypatch, capsys):
+    # CA 298-03: heartbeat theo THOI GIAN (~60s), khong theo so poll. Jump time -> co dong heartbeat.
+    _reset()
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(L.settings, "telegram_customer_bot_token", "T")
+    t = {"v": 1000.0}
+    monkeypatch.setattr(L.time, "monotonic", lambda: t["v"])
+
+    ok = {"result": []}
+    calls = {"n": 0}
+    orig_get = _FakeClient.get
+
+    async def _get(self, url, params=None):
+        calls["n"] += 1
+        t["v"] += 40      # moi poll +40s -> poll 2 vuot 60s ke tu last_hb
+        return await orig_get(self, url, params)
+    monkeypatch.setattr(_FakeClient, "get", _get)
+    client = _FakeClient([ok, ok])   # 2 poll OK roi CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(L._run_session(client, {"offset": None}))
+    out = capsys.readouterr().out
+    assert "heartbeat: dang poll" in out
 
 
 def test_success_updates_heartbeat_and_message_error_isolated(monkeypatch):
