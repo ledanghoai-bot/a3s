@@ -97,10 +97,13 @@ async def notify_payment(conn, order_id: int, *, kind: str, new_status: str,
                        stale_check=sc)
     elif kind == "cod_collected" and new_status == "collected":
         # CA Directive 293 §2: nói rõ ĐÃ THU TIỀN COD cho đúng đơn, KHÔNG ngụ ý đã đối soát kế toán.
+        # CA Review 294-01: confirmation này còn ĐÚNG khi status là 'collected' HOẶC successor 'reconciled'
+        # (đối soát KHÔNG được hủy confirmation đang chờ gửi); chỉ hủy nếu chuyển 'discrepancy'/status khác (mất bằng
+        # chứng đã thu đủ) -> allowed_statuses thay cho exact-match new_status.
         await _enqueue(conn, order_id, event_type="payment.confirmed.notify",
                        dedupe_key=f"payment_confirmed:{ident}",
                        text=f"Dạ shop đã xác nhận thu đủ tiền COD đơn #{order_id}. Cảm ơn anh/chị ạ!",
-                       stale_check=sc)
+                       stale_check={**sc, "allowed_statuses": ["collected", "reconciled"]})
     elif kind in ("shop_confirmed_received", "bank_auto_confirmed") and new_status == "confirmed":
         await _enqueue(conn, order_id, event_type="payment.confirmed.notify",
                        dedupe_key=f"payment_confirmed:{ident}",

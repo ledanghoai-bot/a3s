@@ -273,8 +273,14 @@ async def _is_stale(conn, sc: dict) -> bool:
             expected = sc.get("to_status")
             cur = await conn.fetchval("SELECT status FROM shipments WHERE order_id=$1", order_id)
         elif kind == "payment":
-            expected = sc.get("new_status")
             cur = await conn.fetchval("SELECT status FROM payments WHERE order_id=$1", order_id)
+            # CA Review 294-01: notify co the hop le cho NHIEU status ke tiep (vd COD confirmation dung ca 'collected'
+            # lan successor 'reconciled') -> allowed_statuses (semantic ro rang) thay vi exact-match. Fallback exact
+            # new_status cho cac payment notify khac (check_request/BANK confirmed) — KHONG noi long chung.
+            allowed = sc.get("allowed_statuses")
+            if allowed:
+                return cur is not None and cur not in allowed
+            expected = sc.get("new_status")
         elif kind == "fulfillment":
             # M7: prompt/cod notify mo ta 1 step hoi thoai; step da doi (khach chon xong / staff) -> stale.
             expected = sc.get("step")

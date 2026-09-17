@@ -18,12 +18,15 @@ Chung minh qua SERVICE THAT (payment_service/notify/conversation) + DB:
 Khong PII/secret. Re-runnable (RUN suffix).
 """
 import asyncio
+import json
 import os
 import sys
 import time
 
 import asyncpg
 
+from app.services.command import outbox_worker as ow
+from app.services.command.outbox_worker import SendResult
 from app.services.fulfillment import shipment_service as ship
 from app.services.payment import payment_service as pay
 
@@ -269,6 +272,67 @@ async def main():  # noqa: C901
                         command_key=key(f"ckmis-{oidM2}"))
         ck("T13 CK mismatch -> discrepancy, 0 confirmation",
            rm["status"] == "discrepancy" and (await _confirmed_notify(conn, oidM2)) == 0, rm["status"])
+
+        # ============ CA Review 294-01: outbox stale/dispatch path (KHONG chi dem row) ============
+        async def _confirm_event(oid):
+            r = await conn.fetchrow("SELECT id, payload, status FROM outbox_events "
+                                    "WHERE (payload->>'order_id')::bigint=$1 AND event_type='payment.confirmed.notify'",
+                                    oid)
+            if not r:
+                return None
+            p = r["payload"]
+            p = json.loads(p) if isinstance(p, str) else p
+            return {"id": r["id"], "sc": p.get("stale_check"), "status": r["status"]}
+
+        # T14: enqueue at collected -> reconcile TRUOC dispatch -> KHONG stale (con hop le) + dispatch gui DUNG 1 lan.
+        oidS, *_s, dueS = await _mk_cod_order(conn)
+        await _rec(conn, oidS, kind="cod_collected", amount_vnd=dueS, recorded_by="d", command_key=key(f"t14-{oidS}"))
+        ev = await _confirm_event(oidS)
+        stale_at_collected = await ow._is_stale(conn, ev["sc"])
+        await _rec(conn, oidS, kind="reconciled", amount_vnd=None, recorded_by="po", command_key=key(f"t14r-{oidS}"))
+        stale_after_reconcile = await ow._is_stale(conn, ev["sc"])   # BLOCKER 294-01: phai False (khong huy)
+        sent = []
+
+        async def _fake(dest, payload):
+            sent.append((dest, (payload if isinstance(payload, dict) else json.loads(payload)).get("order_id")))
+            return SendResult(ok=True, http_status=200, provider_message_id="pmid-test")
+        for _ in range(30):
+            st = await ow.run_once(send_fn=_fake)
+            if (await _confirm_event(oidS))["status"] in ("delivered", "cancelled"):
+                break
+            if st.get("claimed", 0) == 0:
+                break
+        final_status = (await _confirm_event(oidS))["status"]
+        sent_our = sum(1 for d, o in sent if o == oidS)
+        ck("T14 (294-01) reconcile truoc dispatch: confirmation KHONG stale -> gui DUNG 1 lan (delivered), khong cancel",
+           stale_at_collected is False and stale_after_reconcile is False and final_status == "delivered"
+           and sent_our == 1,
+           f"col={stale_at_collected} recon={stale_after_reconcile} final={final_status} sent={sent_our}")
+
+        # T15: enqueue at collected -> payment thanh discrepancy TRUOC dispatch -> stale (bi cancel).
+        oidD2, *_d2, dueD2 = await _mk_cod_order(conn)
+        await _rec(conn, oidD2, kind="cod_collected", amount_vnd=dueD2, recorded_by="d", command_key=key(f"t15-{oidD2}"))
+        evD = await _confirm_event(oidD2)
+        # dua ve discrepancy bang correction (them tien -> received != due)
+        pidD2 = await conn.fetchval("SELECT id FROM payments WHERE order_id=$1", oidD2)
+        collev = await conn.fetchval("SELECT id FROM payment_events WHERE payment_id=$1 AND kind='cod_collected' "
+                                     "ORDER BY id LIMIT 1", pidD2)
+        await _rec(conn, oidD2, kind="correction", amount_vnd=1000, recorded_by="po", note="test excess",
+                   corrects_event_id=collev, command_key=key(f"t15c-{oidD2}"))
+        disc_status = await conn.fetchval("SELECT status FROM payments WHERE order_id=$1", oidD2)
+        stale_disc = await ow._is_stale(conn, evD["sc"])
+        ck("T15 (294-01) discrepancy truoc dispatch -> confirmation STALE (cancel)",
+           disc_status == "discrepancy" and stale_disc is True, f"st={disc_status} stale={stale_disc}")
+
+        # T16: dispatch TRUOC reconcile -> reconcile khong enqueue/gui lan 2 (retry effective-once).
+        before = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE (payload->>'order_id')::bigint=$1 "
+                                     "AND event_type='payment.confirmed.notify'", oidS)
+        await ow.run_once(send_fn=_fake)     # retry worker
+        after = await conn.fetchval("SELECT count(*) FROM outbox_events WHERE (payload->>'order_id')::bigint=$1 "
+                                    "AND event_type='payment.confirmed.notify'", oidS)
+        sent_our2 = sum(1 for d, o in sent if o == oidS)
+        ck("T16 retry/reconcile -> effective-once (1 confirmation row, khong gui lan 2)",
+           before == 1 and after == 1 and sent_our2 == 1, f"rows={after} sent={sent_our2}")
 
         print("RESULT:", "ALL PASS" if not FAILS else f"FAIL {FAILS}")
         return 1 if FAILS else 0

@@ -76,10 +76,21 @@ async def test_cod_collected_exact_confirms_and_completes():
         step = await conn.fetchval("SELECT step FROM fulfillment_conversations WHERE order_id=$1", oid)
         assert r["status"] == "collected" and recv == due and step == "completed" and await notif() == 1
 
+        # CA Review 294-01: confirmation enqueued tại collected phải KHÔNG stale sau khi reconcile (successor),
+        # nếu không outbox worker sẽ hủy -> khách mất confirmation.
+        from app.services.command import outbox_worker as ow
+        evrow = await conn.fetchrow("SELECT payload FROM outbox_events WHERE (payload->>'order_id')::bigint=$1 "
+                                    "AND event_type='payment.confirmed.notify'", oid)
+        pl = evrow["payload"]
+        pl = __import__("json").loads(pl) if isinstance(pl, str) else pl
+        sc = pl["stale_check"]
+        assert await ow._is_stale(conn, sc) is False   # status collected -> not stale
+
         async with conn.transaction():
             rr = await P.record_evidence(conn, oid, kind="reconciled", amount_vnd=None, recorded_by="po",
                                          command_key=f"{tag}:rec")
         recv2 = await conn.fetchval("SELECT amount_received_vnd FROM payments WHERE order_id=$1", oid)
         assert rr["status"] == "reconciled" and recv2 == due and await notif() == 1  # no 2nd notify
+        assert await ow._is_stale(conn, sc) is False   # 294-01: reconciled (successor) -> vẫn KHÔNG stale
     finally:
         await conn.close()
