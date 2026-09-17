@@ -440,17 +440,22 @@ async def handle_customer_text(conn, customer_ref: str, text: str, *, command_ke
     # XÁC ĐỊNH, RATE-LIMIT 1 lần / STAFF_ACK_COOLDOWN_MIN (theo staff_ack event gần nhất). Trong cooldown -> SILENT.
     # (duplicate cùng command_key đã được _replay ở trên trả lại reply cũ -> không gửi 2 lần.)
     if step == STAFF_ATTENTION:
+        # CA Review 299-02: cooldown thuộc EPISODE hiện tại — lọc staff_ack theo `attention_at` (mốc vào episode).
+        # resolve rồi re-escalate cập nhật attention_at -> episode mới được ack lại (ack cũ không suppress).
+        att_at = fc.get("attention_at")
         last_ack = await conn.fetchval(
             "SELECT max(created_at) FROM fulfillment_conversation_events WHERE order_id=$1 "
-            "AND (detail->>'staff_ack')='1'", order_id)
+            "AND (detail->>'staff_ack')='1' AND ($2::timestamptz IS NULL OR created_at >= $2)", order_id, att_at)
         now = datetime.now(timezone.utc)
         if last_ack is not None and (now - last_ack) < timedelta(minutes=STAFF_ACK_COOLDOWN_MIN):
             await _journal(conn, order_id, command_key=command_key, source="customer", from_step=step, to_step=step,
                            detail={"silenced_during_staff_attention": True}, reply_text=None)
             return SILENT
         ack = staff_ack_text(order_id)
+        # CA Review 299-01: journal reply_text=None -> replay cùng command_key (duplicate inbound) trả SILENT, KHÔNG
+        # để orchestrator re-send ack lần 2. detail 'staff_ack' đánh dấu episode. Ack chỉ direct-send ĐÚNG 1 lần (lượt đầu).
         await _journal(conn, order_id, command_key=command_key, source="customer", from_step=step, to_step=step,
-                       detail={"staff_ack": "1"}, reply_text=ack)
+                       detail={"staff_ack": "1"}, reply_text=None)
         return ack
     m = parse_method(text)
     if step == AWAITING_METHOD:
