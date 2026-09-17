@@ -36,7 +36,9 @@ def transfer_content(order_id: int) -> str:
 
 
 def _settle_status(method: str) -> str:
-    return "confirmed" if method == "BANK_TRANSFER" else "reconciled"
+    # CA Directive 293: COD exact-match settle point is 'collected' (customer confirmation + completion);
+    # 'reconciled' is a later accounting-only transition reached ONLY via the explicit reconciled step.
+    return "confirmed" if method == "BANK_TRANSFER" else "collected"
 
 
 async def _order_total(conn, order_id: int) -> int:
@@ -121,8 +123,10 @@ def _reconcile_status(method: str, received: int, due: int | None, cur: str) -> 
 _ADVANCE = {
     ("BANK_TRANSFER", "customer_reported"): ("reported", ("awaiting", "reported", "discrepancy")),
     ("BANK_TRANSFER", "shop_confirmed_received"): ("settle", ("reported", "discrepancy", "confirmed")),
-    ("COD", "cod_collected"): ("collected", ("awaiting", "collected", "discrepancy")),
-    ("COD", "reconciled"): ("settle", ("collected", "discrepancy", "reconciled")),
+    # CA Directive 293: cod_collected = money + customer-confirmation + M7 completion point (exact match);
+    # reconciled = accounting-only transition from an exact 'collected' (no money add, no customer notify).
+    ("COD", "cod_collected"): ("cod_settle", ("awaiting", "collected", "discrepancy")),
+    ("COD", "reconciled"): ("cod_reconcile", ("collected",)),
     # M7-C0 (Directive 272 §3.5): xac nhan TU DONG tu provider (SePay test) — CHI payment service ghi sau khi
     # matching (account/code/amount/state) pass o provider_ingest. Cung semantics settle (== due -> confirmed).
     ("BANK_TRANSFER", "bank_auto_confirmed"): ("settle", ("awaiting", "reported", "discrepancy")),
@@ -140,6 +144,17 @@ def _replay(pay, ev_row, new_fp: str, cur: str) -> dict:
         raise PaymentError("command_key da dung cho payload khac — tu choi (idempotency mismatch)")
     return {"payment": dict(pay), "event_id": str(ev_row["id"]), "duplicate": True,
             "status": cur, "discrepancy": _disc(pay)}
+
+
+async def _cod_collected_effect(conn, order_id: int, pay, *, notify: bool, actor: str) -> None:
+    """CA Directive 293: khi COD đạt 'collected' đúng số — phát ĐÚNG 1 customer confirmation "đã thu tiền COD"
+    + hoàn thành hội thoại M7 + auto-resolve payment attention. Gọi ở exact cod_collected (hoặc correction đưa về
+    đúng số), KHÔNG đợi reconcile. dedupe theo (order, version) đảm bảo effective-once."""
+    if notify:
+        from app.services.fulfillment import notify as _n
+        await _n.notify_payment(conn, order_id, kind="cod_collected", new_status="collected", version=pay["version"])
+    from app.services.fulfillment import conversation as _fc
+    await _fc.on_payment_confirmed(conn, order_id, actor=actor)
 
 
 async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | None, recorded_by: str,
@@ -189,6 +204,10 @@ async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | N
         new_received = max(0, pay["amount_received_vnd"] + delta)
         new_status = _reconcile_status(method, new_received, pay["amount_due_vnd"], cur)
         pay = await _update_payment(conn, pay, received=new_received, status=new_status)
+        # CA Directive 293: nếu correction đưa COD về đúng số (discrepancy -> collected) thì đây là mốc xác nhận
+        # COD -> phát ĐÚNG 1 confirmation cho khách + hoàn thành hội thoại (chỉ khi TRANSITION vào 'collected').
+        if method == "COD" and new_status == "collected" and cur != "collected":
+            await _cod_collected_effect(conn, order_id, pay, notify=notify, actor=recorded_by)
         await audit_service.record(conn, actor_type="cli", action="payment.correction", actor_ref=recorded_by,
                                    entity_type="payments", entity_id=str(pay["id"]),
                                    after={"delta": delta, "received": new_received, "status": new_status})
@@ -201,6 +220,13 @@ async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | N
     to_status, valid_from = spec
     if cur not in valid_from:
         raise PaymentError(f"sai thu tu: {method} status={cur} khong the ghi '{kind}'")
+    # CA Directive 293: validate cod_collected TRUOC khi insert (so tien > 0 + da co due) — fail-closed, khong ghi
+    # event rac. (Amount am se vi pham CHECK constraint neu de xuong _insert.)
+    if kind == "cod_collected":
+        if amount_vnd is None or int(amount_vnd) <= 0:
+            raise PaymentError("cod_collected phai co so tien thuc thu > 0")
+        if pay["amount_due_vnd"] is None:
+            raise PaymentError("amount_due chua chot — khong the ghi nhan thu tien COD")
 
     ev = await _insert(conn, pay["id"], kind, amount_vnd, recorded_by, reference, note, attachment_ref,
                        command_key, None, fp)
@@ -210,7 +236,8 @@ async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | N
         return _replay(pay, ev, fp, cur)
 
     if to_status == "settle":
-        # cong vao TONG shop thuc nhan roi so voi due (== -> settled ; != -> discrepancy)
+        # BANK_TRANSFER (shop_confirmed_received / bank_auto_confirmed): cong vao TONG thuc nhan, so voi due
+        # (== -> confirmed ; != -> discrepancy).
         got = int(amount_vnd or 0)
         new_received = pay["amount_received_vnd"] + got
         due = pay["amount_due_vnd"]
@@ -224,10 +251,31 @@ async def record_evidence(conn, order_id: int, *, kind: str, amount_vnd: int | N
         if notify:
             from app.services.fulfillment import notify as _n
             await _n.notify_payment(conn, order_id, kind=kind, new_status=new_status, version=pay["version"])
-        if new_status in ("confirmed", "reconciled"):
+        if new_status == "confirmed":
             # M7: hoi thoai fulfillment (neu co) -> completed; best-effort trong cung tx (khong vo evidence).
             from app.services.fulfillment import conversation as _fc
             await _fc.on_payment_confirmed(conn, order_id, actor=recorded_by)
+    elif to_status == "cod_settle":
+        # CA Directive 293: cod_collected = mốc tiền + xác nhận khách + hoàn thành hội thoại.
+        got = int(amount_vnd or 0)
+        if got <= 0:
+            raise PaymentError("cod_collected phai co so tien thuc thu > 0")
+        due = pay["amount_due_vnd"]
+        if due is None:
+            raise PaymentError("amount_due chua chot — khong the ghi nhan thu tien COD")
+        new_received = pay["amount_received_vnd"] + got
+        new_status = "collected" if new_received == due else "discrepancy"   # thieu/thua -> staff, KHONG confirm
+        pay = await _update_payment(conn, pay, received=new_received, status=new_status)
+        if new_status == "collected" and cur != "collected":
+            await _cod_collected_effect(conn, order_id, pay, notify=notify, actor=recorded_by)
+    elif to_status == "cod_reconcile":
+        # CA Directive 293: reconciled = accounting-only. Chi tu 'collected' da thu DU (received == due);
+        # KHONG cong tien, KHONG notify lan 2. Legacy collected received=0 hoac discrepancy -> reject (fail-closed).
+        due = pay["amount_due_vnd"]
+        if due is None or pay["amount_received_vnd"] != due:
+            raise PaymentError("chi doi soat khi da thu du (received == due); discrepancy phai correction truoc")
+        new_status = "reconciled"
+        pay = await _update_payment(conn, pay, received=pay["amount_received_vnd"], status=new_status)
     else:
         new_status = to_status
         if new_status != cur:
