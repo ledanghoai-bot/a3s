@@ -17,6 +17,8 @@ Chay tay de test:
 """
 
 import asyncio
+import random
+import time
 
 import httpx
 
@@ -28,6 +30,45 @@ from app.services.safe_log import safe_exc
 
 API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 30
+
+# CA Review 292-03: auto-recovery cho poll loop (backoff + jitter co gioi han + re-init client khi loi lien tiep).
+_BACKOFF_BASE = 1.0            # giay
+_BACKOFF_CAP = 60.0            # tran backoff
+_JITTER = 0.25                 # +/- 25%
+# So loi getUpdates lien tiep -> DONG client cu + tao client MOI (fresh pool) de thoat trang thai ket/pool poisoned.
+_RECONNECT_AFTER_CONSEC_ERRORS = 3
+# CA Review 298-03: heartbeat theo THOI GIAN (~60s), KHONG theo so poll — long-poll 30s nen 60 poll co the ~30 phut,
+# qua cham de phat hien treo. Log dinh ky khi poller con poll de operator/supervisor thay song.
+_HEARTBEAT_SECONDS = 60
+
+# Heartbeat/liveness: phan biet "process con song" vs "poller THUC SU dang poll".
+# _last_poll_ok_at = time.monotonic() cua lan getUpdates thanh cong gan nhat (None neu chua bao gio).
+_last_poll_ok_at: float | None = None
+_poll_started_at: float | None = None
+
+
+def _backoff_delay(consec_errors: int) -> float:
+    """Exponential backoff co tran + jitter. consec_errors >= 1. TAT DINH-ish (jitter ngau nhien) nhung bounded:
+    delay = min(cap, base * 2^(n-1)) * (1 +/- jitter). Khong bao gio vuot cap*(1+jitter)."""
+    n = max(1, int(consec_errors))
+    raw = min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** (n - 1)))
+    return raw * (1.0 + random.uniform(-_JITTER, _JITTER))
+
+
+def _next_reconnect_count(prev: int, had_success: bool) -> int:
+    """CA Review 298-01: neu phien vua roi TUNG poll thanh cong -> reset ve 1 (backoff base) cho reconnect ke tiep;
+    neu chua tung poll OK (outage lien tuc) -> tang dan (backoff lon dan toi cap)."""
+    return 1 if had_success else prev + 1
+
+
+def poller_status(*, now: float | None = None, max_age_s: float = POLL_TIMEOUT * 3) -> dict:
+    """Readiness cho liveness check: 'started' (loop da chay), 'last_ok_age_s' (giay tu lan poll OK cuoi),
+    'healthy' (co poll OK trong max_age_s gan day). max_age_s mac dinh = 3 chu ky long-poll."""
+    now = now if now is not None else time.monotonic()
+    started = _poll_started_at is not None
+    age = None if _last_poll_ok_at is None else (now - _last_poll_ok_at)
+    healthy = started and age is not None and age <= max_age_s
+    return {"started": started, "last_ok_age_s": age, "healthy": healthy}
 
 
 def _configured() -> bool:
@@ -66,45 +107,108 @@ async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text
         await _send_reply(client, chat_id, reply)
 
 
-async def _poll_loop() -> None:
-    offset = None
+class _ReconnectSession(Exception):
+    """CA Review 298-02: inner RAISE (khong sleep) khi can tao client moi; outer lifecycle SO HUU reconnect delay.
+    Mang `had_success` de outer reset backoff neu phien nay tung poll thanh cong (CA 298-01)."""
+    def __init__(self, had_success: bool):
+        self.had_success = had_success
 
-    async with httpx.AsyncClient(timeout=POLL_TIMEOUT + 10) as client:
+
+async def _run_session(client: httpx.AsyncClient, state: dict) -> None:
+    """Mot phien voi 1 httpx client. Loi getUpdates lien tiep < nguong -> retry TRONG phien (cung client, backoff).
+    >= nguong -> RAISE _ReconnectSession (KHONG sleep — outer so huu delay) de tao client moi (thoat pool poisoned/ket).
+    offset giu qua cac phien (state). CancelledError (shutdown) propagate. Loi xu ly 1 message KHONG lam vo loop.
+    Heartbeat theo THOI GIAN (~_HEARTBEAT_SECONDS) — CA 298-03."""
+    global _last_poll_ok_at
+    token = settings.telegram_customer_bot_token
+    try:
+        await client.post(f"{API_BASE}/bot{token}/deleteWebhook")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"[telegram_customer_listener] deleteWebhook loi (bo qua): {safe_exc(e)}")
+
+    print("[telegram_customer_listener] Da ket noi, bat dau long-polling (kenh khach hang)...")
+    consec_errors = 0
+    ok_count = 0
+    had_success = False
+    last_hb = time.monotonic()
+    while True:
         try:
-            await client.post(f"{API_BASE}/bot{settings.telegram_customer_bot_token}/deleteWebhook")
+            params = {"timeout": POLL_TIMEOUT}
+            if state.get("offset") is not None:
+                params["offset"] = state["offset"]
+            resp = await client.get(f"{API_BASE}/bot{token}/getUpdates", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        except asyncio.CancelledError:
+            raise                                  # shutdown -> propagate (client dong o async with)
         except Exception as e:
-            print(f"[telegram_customer_listener] deleteWebhook loi (bo qua): {safe_exc(e)}")
+            consec_errors += 1
+            if consec_errors >= _RECONNECT_AFTER_CONSEC_ERRORS:
+                # CA 298-02: KHONG sleep o day — RAISE ngay, outer lifecycle so huu reconnect delay (1 tang duy nhat).
+                print(f"[telegram_customer_listener] Loi getUpdates ({consec_errors}): {safe_exc(e)} -> tao ket noi moi")
+                raise _ReconnectSession(had_success) from e
+            delay = _backoff_delay(consec_errors)   # retry trong phien (cung client)
+            print(f"[telegram_customer_listener] Loi getUpdates ({consec_errors}): {safe_exc(e)}, thu lai sau {delay:.1f}s")
+            await asyncio.sleep(delay)
+            continue
 
-        print("[telegram_customer_listener] Da ket noi, bat dau long-polling (kenh khach hang)...")
+        # getUpdates OK -> reset backoff trong phien + cap nhat heartbeat + danh dau phien da poll thanh cong
+        consec_errors = 0
+        had_success = True
+        _last_poll_ok_at = time.monotonic()
+        ok_count += 1
+        if (_last_poll_ok_at - last_hb) >= _HEARTBEAT_SECONDS:     # heartbeat theo thoi gian (~60s)
+            last_hb = _last_poll_ok_at
+            print(f"[telegram_customer_listener] heartbeat: dang poll (poll_ok={ok_count}, offset={state.get('offset')})")
 
-        while True:
+        for update in data.get("result", []):
+            state["offset"] = update["update_id"] + 1     # tien offset TRUOC khi xu ly (khong xu ly lai update loi)
+            message = update.get("message") or {}
+            chat_id = (message.get("chat") or {}).get("id")
+            text = message.get("text")
+            if not chat_id or not text:
+                continue  # bo qua sticker/anh/lenh he thong khac
             try:
-                params = {"timeout": POLL_TIMEOUT}
-                if offset is not None:
-                    params["offset"] = offset
-                resp = await client.get(
-                    f"{API_BASE}/bot{settings.telegram_customer_bot_token}/getUpdates", params=params
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-                for update in data.get("result", []):
-                    offset = update["update_id"] + 1
-                    message = update.get("message") or {}
-                    chat_id = (message.get("chat") or {}).get("id")
-                    text = message.get("text")
-
-                    if not chat_id or not text:
-                        continue  # bo qua sticker/anh/lenh he thong khac
-
-                    await _handle_customer_message(client, chat_id, text, message.get("message_id"))
-
-            except httpx.HTTPError as e:
-                print(f"[telegram_customer_listener] Loi goi Telegram API: {safe_exc(e)}, thu lai sau 5s")
-                await asyncio.sleep(5)
+                await _handle_customer_message(client, chat_id, text, message.get("message_id"))
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                print(f"[telegram_customer_listener] Loi khong xac dinh: {safe_exc(e)}, thu lai sau 5s")
-                await asyncio.sleep(5)
+                # loi xu ly 1 message KHONG duoc lam vo poll loop (offset da tien -> khong lap vo han)
+                print(f"[telegram_customer_listener] Loi xu ly message (bo qua update nay): {safe_exc(e)}")
+
+
+async def _poll_loop() -> None:
+    """Outer lifecycle: moi vong tao 1 httpx client MOI; neu phien ket thuc bat thuong -> backoff roi tao lai.
+    Client re-init giai quyet pool poisoned/ket sau loi mang/DNS tam thoi (CA Review 292-03)."""
+    global _poll_started_at
+    _poll_started_at = time.monotonic()
+    state: dict = {"offset": None}      # offset ben vung qua cac phien
+    reconnects = 0                      # so lan reconnect LIEN TIEP (khong co poll thanh cong o giua)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=POLL_TIMEOUT + 10) as client:
+                await _run_session(client, state)
+            # _run_session chi tra ve binh thuong khi bi cancel-free break (hien khong xay ra) -> reset an toan.
+            reconnects = 0
+        except asyncio.CancelledError:
+            print("[telegram_customer_listener] Nhan cancel -> dung long-polling.")
+            raise
+        except _ReconnectSession as rs:
+            # CA 298-01: RESET backoff neu phien vua roi TUNG poll thanh cong (outage cu khong con lam cham recovery
+            # cua outage moi). CA 298-02: outer SO HUU reconnect delay (chi 1 tang sleep).
+            reconnects = _next_reconnect_count(reconnects, rs.had_success)
+            delay = _backoff_delay(reconnects)
+            print(f"[telegram_customer_listener] Reconnect #{reconnects} (had_success={rs.had_success}) -> "
+                  f"tao client moi sau {delay:.1f}s")
+            await asyncio.sleep(delay)
+        except Exception as e:
+            reconnects += 1
+            delay = _backoff_delay(reconnects)
+            print(f"[telegram_customer_listener] Phien poll loi bat thuong ({reconnects}): {safe_exc(e)}, "
+                  f"khoi dong lai sau {delay:.1f}s")
+            await asyncio.sleep(delay)
 
 
 async def main() -> None:
