@@ -139,10 +139,13 @@ async def main():  # noqa: C901
         fcm = await C.get(conn, oidm)
         ck("R2 mismatch -> conversation staff_attention (payment_mismatch)", st == "discrepancy"
            and fcm["step"] == "staff_attention" and fcm["attention_reason"] == "payment_mismatch", f"{st}/{fcm['step']}")
-        # khach nhan tin sau escalation -> SILENT (chan LLM)
+        # CA Review 292-02: khach nhan tin sau escalation -> tin DAU ack nhan vien (khong LLM), tin SAU -> SILENT.
         async with conn.transaction():
             r = await C.handle_customer_text(conn, psidm, "chuyển khoản rồi nhé", command_key=f"{RUN}-r2msg")
-        ck("R2 khach nhan tin sau escalation -> SILENT (bot im lang, chan LLM)", r is C.SILENT, r)
+        async with conn.transaction():
+            r2 = await C.handle_customer_text(conn, psidm, "alo shop ơi", command_key=f"{RUN}-r2msg2")
+        ck("R2 khach nhan tin sau escalation -> ack nhan vien (tin dau) + SILENT (tin sau), khong LLM",
+           isinstance(r, str) and "nhân viên" in r and r2 is C.SILENT, f"{r!r}/{r2!r}")
         # outbox worker (mock): reason message gui; reminder cu -> cancelled (stale step doi). Xa het backlog.
         sent.clear()
         for _ in range(60):

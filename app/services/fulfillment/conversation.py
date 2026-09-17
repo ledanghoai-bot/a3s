@@ -28,6 +28,9 @@ from app.services.payment import payment_service as _pay
 ROUTING, AWAITING_METHOD, COD_HANDOFF = "routing", "awaiting_method", "cod_handoff"
 AWAITING_TRANSFER, STAFF_ATTENTION, COMPLETED = "awaiting_transfer", "staff_attention", "completed"
 MAX_METHOD_PROMPTS = 3
+# CA Review 292-02: khi đơn đang chờ nhân viên, bot trả 1 acknowledgement XÁC ĐỊNH (không im hoàn toàn), RATE-LIMIT
+# 1 lần / cooldown để retry/nhiều tin không spam; không đưa tin sang LLM, không đổi order/payment/shipment.
+STAFF_ACK_COOLDOWN_MIN = 30
 
 # CA 274-02/03: contract tra ve handle_customer_text — 1 delivery authority.
 #   str  = reply TAT DINH cho luot khach (orchestrator direct-send DUY NHAT; M7 KHONG enqueue outbox cho reply nay).
@@ -105,6 +108,13 @@ _ESCALATION_TEXT = {
                         "Shop sẽ liên hệ lại với bạn.",
     "quantity_unit_review": "Thông tin số lượng cần được nhân viên kiểm tra thêm. Shop sẽ liên hệ lại với bạn.",
 }
+
+
+def staff_ack_text(order_id: int) -> str:
+    """CA Review 292-02: ack XÁC ĐỊNH khi đơn đang chờ nhân viên. KHÔNG hứa đã xử lý xong, KHÔNG nói tiền/giao —
+    chỉ trấn an là nhân viên đang xử lý và sẽ liên hệ."""
+    return (f"Dạ đơn #{order_id} của anh/chị đang được nhân viên shop kiểm tra và sẽ liên hệ lại với anh/chị sớm ạ. "
+            "Anh/chị vui lòng chờ giúp em một chút nhé.")
 
 
 def staff_text(order_id: int, reason: str) -> str:
@@ -426,12 +436,27 @@ async def handle_customer_text(conn, customer_ref: str, text: str, *, command_ke
     if rp:
         return rp["reply_text"] if rp["reply_text"] is not None else SILENT
     step = fc["step"]
-    # CA 274-02: dang cho nhan vien -> bot IM LANG (khong direct reply, KHONG roi xuong LLM). Handoff message da gui
-    # luc escalate. Khach nhan tin them -> khong tu tra loi (tranh chuoi mau thuan / bot noi tiep sau khi bao staff).
+    # CA Review 292-02: đang chờ nhân viên -> bot KHÔNG rơi xuống LLM, KHÔNG đổi order/payment/shipment; trả 1 ack
+    # XÁC ĐỊNH, RATE-LIMIT 1 lần / STAFF_ACK_COOLDOWN_MIN (theo staff_ack event gần nhất). Trong cooldown -> SILENT.
+    # (duplicate cùng command_key đã được _replay ở trên trả lại reply cũ -> không gửi 2 lần.)
     if step == STAFF_ATTENTION:
+        # CA Review 299-02: cooldown thuộc EPISODE hiện tại — lọc staff_ack theo `attention_at` (mốc vào episode).
+        # resolve rồi re-escalate cập nhật attention_at -> episode mới được ack lại (ack cũ không suppress).
+        att_at = fc.get("attention_at")
+        last_ack = await conn.fetchval(
+            "SELECT max(created_at) FROM fulfillment_conversation_events WHERE order_id=$1 "
+            "AND (detail->>'staff_ack')='1' AND ($2::timestamptz IS NULL OR created_at >= $2)", order_id, att_at)
+        now = datetime.now(timezone.utc)
+        if last_ack is not None and (now - last_ack) < timedelta(minutes=STAFF_ACK_COOLDOWN_MIN):
+            await _journal(conn, order_id, command_key=command_key, source="customer", from_step=step, to_step=step,
+                           detail={"silenced_during_staff_attention": True}, reply_text=None)
+            return SILENT
+        ack = staff_ack_text(order_id)
+        # CA Review 299-01: journal reply_text=None -> replay cùng command_key (duplicate inbound) trả SILENT, KHÔNG
+        # để orchestrator re-send ack lần 2. detail 'staff_ack' đánh dấu episode. Ack chỉ direct-send ĐÚNG 1 lần (lượt đầu).
         await _journal(conn, order_id, command_key=command_key, source="customer", from_step=step, to_step=step,
-                       detail={"silenced_during_staff_attention": True}, reply_text=None)
-        return SILENT
+                       detail={"staff_ack": "1"}, reply_text=None)
+        return ack
     m = parse_method(text)
     if step == AWAITING_METHOD:
         if m == "COD":
