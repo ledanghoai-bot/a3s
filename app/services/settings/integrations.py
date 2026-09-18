@@ -235,6 +235,51 @@ async def test_connection(conn, integration_id: int, *, actor: str, post=None) -
     return result
 
 
+# ------------------------------------------------------------------ SePay S0 readiness (CA Directive 306 §8)
+async def sepay_readiness(conn, integration_id: int, *, actor: str) -> dict:
+    """SePay Test Mode readiness: decrypt api_key + validate FORMAT (usable voi verify_test_auth). LOCAL — KHONG gia
+    'webhook ping' (SePay khong co endpoint read-only tuong ung; CA 306 §8). Bind config+secret version, redacted."""
+    r = await conn.fetchrow("SELECT * FROM integrations WHERE id=$1 FOR UPDATE", integration_id)
+    if not r:
+        raise SettingsError("integration khong ton tai")
+    if r["provider"] != "sepay":
+        raise SettingsError("sepay_readiness: chi cho provider sepay")
+    key = await _decrypt_secret(conn, integration_id, "sepay", "api_key")
+    if not key:
+        result = {"ok": False, "error_class": "not_configured"}
+    else:
+        from app.services.providers import sepay as _sp
+        ok = _sp.verify_test_auth(f"Apikey {key}", key)   # sanity: key decrypt duoc + dung dinh dang Apikey
+        result = {"ok": bool(ok), "capability": "test-mode-key-format" if ok else None,
+                  "error_class": None if ok else "key_format"}
+    sec_ver = await conn.fetchval("SELECT version FROM integration_secrets WHERE integration_id=$1 AND key_name='api_key'",
+                                  integration_id)
+    await conn.execute(
+        "UPDATE integrations SET last_test_status=$2, last_test_at=now(), last_test_config_version=$3, "
+        "last_test_secret_version=$4, last_test_detail=$5::jsonb, updated_at=now() WHERE id=$1",
+        integration_id, "pass" if result["ok"] else "fail", r["version"], sec_ver, json.dumps(result))
+    await _audit(conn, "settings.integration.test", actor, integration_id,
+                 {"provider": "sepay", "ok": result["ok"], "error_class": result.get("error_class")})
+    return result
+
+
+def vietqr_self_test(*, bin_code: str, account_number: str, amount_vnd: int, add_info: str) -> dict:
+    """CA Directive 306 §8: build + decode VietQR payload LOCAL, verify CRC + khop BIN/account/amount/content.
+    KHONG chuyen tien, KHONG goi banking app. Tra ket qua REDACTED (account chi last4)."""
+    from app.services.payment import vietqr as _vq
+    try:
+        _vq.validate_inputs(bin_code=bin_code, account_number=account_number, amount_vnd=amount_vnd, add_info=add_info)
+        payload = _vq.build_payload(bin_code=bin_code, account_number=account_number, amount_vnd=amount_vnd,
+                                    add_info=add_info)
+        dec = _vq.decode(payload)   # verify CRC + parse nguoc
+        match = (dec.bin_code == bin_code and dec.account_number == account_number
+                 and int(dec.amount_vnd) == int(amount_vnd) and dec.add_info == add_info)
+        return {"ok": bool(match), "bin": bin_code, "account_last4": account_number[-4:], "crc_valid": True,
+                "amount_vnd": amount_vnd}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error_class": type(e).__name__}
+
+
 # ------------------------------------------------------------------ enable / disable
 async def enable(conn, integration_id: int, *, expected_version: int, actor: str) -> dict:
     """Bat CHI khi latest test PASS va khop config+secret version hien hanh (CA 305-06)."""

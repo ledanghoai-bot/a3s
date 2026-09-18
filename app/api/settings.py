@@ -143,7 +143,12 @@ async def clear_secret(integration_id: int, key_name: str, staff: dict = Depends
 async def test_connection(integration_id: int, staff: dict = Depends(require_active_session)) -> dict:
     conn = await asyncpg.connect(_db_url())
     try:
+        prov = await conn.fetchval("SELECT provider FROM integrations WHERE id=$1", integration_id)
+        if prov is None:
+            raise HTTPException(status_code=404, detail="integration khong ton tai")
         async with conn.transaction():
+            if prov == "sepay":
+                return await svc.sepay_readiness(conn, integration_id, actor=_actor(staff))
             return await svc.test_connection(conn, integration_id, actor=_actor(staff))
     except svc.SettingsError as e:
         raise _map_err(e)
