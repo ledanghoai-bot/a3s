@@ -1,12 +1,20 @@
 "use client";
 
-// CA Directive 305 — Cài đặt Shop / Tích hợp (kiểu WooCommerce). GĐ1: tab Vận chuyển hoạt động (GHN staging);
-// Thanh toán "sắp có". Secret WRITE-ONLY (không đọc lại plaintext). Save ≠ Enable; test-pass mới Enable được.
+// CA Directive 305 (+ Review 307 V02) — Cài đặt Shop / Tích hợp (kiểu WooCommerce). GĐ1: tab Vận chuyển (GHN staging).
+// Secret WRITE-ONLY (không đọc lại plaintext). Save ≠ Enable; test-pass (khớp config_revision + secret version) mới Enable.
+// Mọi mutation gửi command_key (idempotency) + expected_version (CAS). Module OFF -> API 404 -> hiển thị "chưa bật".
 import { useEffect, useState } from "react";
 import { apiFetch } from "../../lib/api";
 import { useAuthGuard } from "../../lib/useAuthGuard";
 
 const GHN_STAGING_BASE = "https://dev-online-gateway.ghn.vn/shiip/public-api";
+
+function uuid() {
+  try { if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID(); } catch { /* noop */ }
+  return "ck-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+}
+// gộp command_key vào body JSON của mutation.
+function withCmd(obj) { return JSON.stringify({ ...obj, command_key: uuid() }); }
 
 function Badge({ text, tone }) {
   const bg = { ok: "#e6f4ea", warn: "#fff4e5", bad: "#fdecea", neutral: "#eef1f4" }[tone] || "#eef1f4";
@@ -14,10 +22,12 @@ function Badge({ text, tone }) {
   return <span style={{ background: bg, color: fg, padding: "2px 8px", borderRadius: 10, fontSize: 12 }}>{text}</span>;
 }
 
+// Enable được khi: test PASS + config_version(test) == config_revision hiện tại + secret_version khớp + đang tắt.
 function canEnable(it) {
   const t = it.last_test || {};
-  const secVer = it.secrets?.token?.version ?? null;
-  return t.status === "pass" && t.config_version === it.version && t.secret_version === secVer && !it.enabled;
+  const secrets = it.secrets || {};
+  const secVer = Object.keys(secrets).length ? Math.max(...Object.values(secrets).map((s) => s.version)) : null;
+  return t.status === "pass" && t.config_version === it.config_revision && t.secret_version === secVer && !it.enabled;
 }
 
 export default function SettingsPage() {
@@ -25,6 +35,7 @@ export default function SettingsPage() {
   const [tab, setTab] = useState("shipping");
   const [items, setItems] = useState([]);
   const [meta, setMeta] = useState({ crypto_configured: false, module_enabled: false });
+  const [moduleOff, setModuleOff] = useState(false);
   const [sel, setSel] = useState(null); // integration đang Manage (hoặc {new:true})
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
@@ -38,7 +49,11 @@ export default function SettingsPage() {
       const d = await apiFetch(`/dashboard/settings/integrations?kind=shipping`);
       setItems(d.items || []);
       setMeta({ crypto_configured: d.crypto_configured, module_enabled: d.module_enabled });
-    } catch (e) { setErr(e.message); }
+      setModuleOff(false);
+    } catch (e) {
+      if (String(e.message).includes("404") || /chua bat/i.test(e.message)) { setModuleOff(true); }
+      else setErr(e.message);
+    }
   }
 
   async function act(fn, ok) {
@@ -61,6 +76,11 @@ export default function SettingsPage() {
         ))}
       </div>
 
+      {moduleOff && (
+        <p style={{ background: "#eef1f4", color: "#444", padding: 12, borderRadius: 6 }}>
+          Module Cài đặt tích hợp <b>chưa được bật</b> trên server (đang dormant). Sau khi vận hành Apply và bật
+          <code> settings_integrations_enabled</code>, màn hình này mới hoạt động.</p>
+      )}
       {msg && <p style={{ color: "#1e7e34" }}>{msg}</p>}
       {err && <p style={{ color: "#b71c1c" }}>{err}</p>}
 
@@ -71,12 +91,12 @@ export default function SettingsPage() {
 
       {tab === "payment" && (
         <div style={{ padding: 16, background: "#f6f8fa", borderRadius: 8 }}>
-          <b>Thanh toán</b> — Chuyển khoản/VietQR, COD, SePay Test Mode. <Badge text="Sắp có (GĐ2/D306)" tone="neutral" />
+          <b>Thanh toán</b> — Chuyển khoản/VietQR, COD, SePay Test Mode. <Badge text="Sắp có (D306)" tone="neutral" />
           <p style={{ color: "#555", marginTop: 6 }}>SePay Live: <Badge text="Khóa — cần gate S1" tone="bad" /></p>
         </div>
       )}
 
-      {tab === "shipping" && (
+      {tab === "shipping" && !moduleOff && (
         <div>
           {!meta.crypto_configured && (
             <p style={{ background: "#fff4e5", color: "#9a6700", padding: 10, borderRadius: 6 }}>
@@ -92,18 +112,27 @@ export default function SettingsPage() {
             </div>
           </div>
 
+          {/* Hàng đợi địa chỉ chưa khớp (Directive 305 §2) — link tới màn hình review hiện có, không sao chép dữ liệu. */}
+          <div style={{ border: "1px solid #e3e6ea", borderRadius: 8, padding: 12, marginBottom: 16, background: "#fbfcfd" }}>
+            <b>Địa chỉ chưa khớp (GHN)</b>
+            <div style={{ color: "#555", fontSize: 13 }}>
+              Đơn có địa chỉ chưa map sang mã GHN sẽ chờ nhân viên xử lý ở hàng đợi review địa chỉ.
+              {" "}<a href="/fulfillment">Mở hàng đợi xử lý →</a>
+            </div>
+          </div>
+
           <h3>Đơn vị vận chuyển</h3>
           {ghn ? (
             <ProviderRow it={ghn} onManage={() => setSel(ghn)}
               onTest={() => act(() => apiFetch(`/dashboard/settings/integrations/${ghn.id}/test-connection`, { method: "POST" }), "Đã test kết nối")}
               onToggle={() => act(() => ghn.enabled
-                ? apiFetch(`/dashboard/settings/integrations/${ghn.id}/disable`, { method: "POST" })
-                : apiFetch(`/dashboard/settings/integrations/${ghn.id}/enable`, { method: "POST", body: JSON.stringify({ expected_version: ghn.version }) }),
+                ? apiFetch(`/dashboard/settings/integrations/${ghn.id}/disable`, { method: "POST", body: withCmd({ expected_version: ghn.version }) })
+                : apiFetch(`/dashboard/settings/integrations/${ghn.id}/enable`, { method: "POST", body: withCmd({ expected_version: ghn.version }) }),
                 ghn.enabled ? "Đã tắt" : "Đã bật")}
               busy={busy} />
           ) : (
             <button disabled={busy} onClick={() => act(() => apiFetch(`/dashboard/settings/integrations`, {
-              method: "POST", body: JSON.stringify({ kind: "shipping", provider: "ghn", label: "GHN staging", mode: "staging",
+              method: "POST", body: withCmd({ kind: "shipping", provider: "ghn", label: "GHN staging", mode: "staging",
                 config_public: { base_url: GHN_STAGING_BASE } }) }), "Đã tạo GHN staging").then((r) => r && setSel(r))}>
               + Thêm GHN staging
             </button>
@@ -142,12 +171,14 @@ function ProviderRow({ it, onManage, onTest, onToggle, busy }) {
 
 function GhnManage({ it, busy, onClose, reload, setBusy, setMsg, setErr }) {
   const cp = it.config_public || {};
-  const [form, setForm] = useState({
+  const init = {
     label: it.label, shop_id: cp.shop_id || "", from_district_id: cp.from_district_id ?? "",
     from_ward_code: cp.from_ward_code || "", timeout_seconds: cp.timeout_seconds ?? 8,
     max_retries: cp.max_retries ?? 2, light_max_g: cp.light_max_g ?? 20000, address_map_version: cp.address_map_version ?? 1,
-  });
+  };
+  const [form, setForm] = useState(init);
   const [token, setToken] = useState("");
+  const dirty = JSON.stringify(form) !== JSON.stringify(init);
 
   async function run(fn, ok) {
     setBusy(true); setErr(null); setMsg(null);
@@ -159,7 +190,7 @@ function GhnManage({ it, busy, onClose, reload, setBusy, setMsg, setErr }) {
   return (
     <div style={{ border: "1px solid #cdd3da", borderRadius: 8, padding: 16, marginTop: 12, background: "#fafbfc" }}>
       <div style={{ display: "flex", justifyContent: "space-between" }}>
-        <h3 style={{ margin: 0 }}>Quản lý GHN staging (#{it.id}, v{it.version})</h3>
+        <h3 style={{ margin: 0 }}>Quản lý GHN staging (#{it.id}, v{it.version}, cfg-rev {it.config_revision})</h3>
         <button onClick={onClose}>Đóng</button>
       </div>
 
@@ -176,8 +207,17 @@ function GhnManage({ it, busy, onClose, reload, setBusy, setMsg, setErr }) {
           </label>
           <button disabled={busy || !token} style={{ marginLeft: 8 }}
             onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${it.id}/secret`, {
-              method: "POST", body: JSON.stringify({ key_name: "token", value: token }) }).then(() => setToken("")), "Đã lưu token")}>
-            Lưu/Xoay token</button>
+              method: "POST", body: withCmd({ key_name: "token", value: token, expected_version: it.version }) }).then(() => setToken("")),
+              "Đã lưu token")}>
+            {it.secrets?.token ? "Xoay token" : "Lưu token"}</button>
+          {it.secrets?.token && (
+            <button disabled={busy} style={{ marginLeft: 8, color: "#b71c1c" }}
+              title="Xóa hẳn token (chỉ PO/owner có quyền)"
+              onClick={() => { if (confirm("Xóa hẳn token GHN? Tích hợp sẽ bị tắt.")) run(() =>
+                apiFetch(`/dashboard/settings/integrations/${it.id}/secret/token/purge`, {
+                  method: "POST", body: withCmd({ expected_version: it.version }) }), "Đã xóa token"); }}>
+              Xóa token (PO)</button>
+          )}
         </div>
       </fieldset>
 
@@ -193,23 +233,24 @@ function GhnManage({ it, busy, onClose, reload, setBusy, setMsg, setErr }) {
         <label>Map version <input value={form.address_map_version} onChange={(e) => setForm({ ...form, address_map_version: e.target.value })} style={{ width: 50 }} /></label>
       </fieldset>
 
-      <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${it.id}`, {
-          method: "PATCH", body: JSON.stringify({ label: form.label, expected_version: it.version, config_public: {
+      <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <button disabled={busy || !dirty} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${it.id}`, {
+          method: "PATCH", body: withCmd({ label: form.label, expected_version: it.version, config_public: {
             shop_id: form.shop_id, from_district_id: num(form.from_district_id), from_ward_code: form.from_ward_code,
             timeout_seconds: num(form.timeout_seconds), max_retries: num(form.max_retries),
             light_max_g: num(form.light_max_g), address_map_version: num(form.address_map_version) } }) }), "Đã lưu cấu hình")}>
-          Lưu cấu hình</button>
+          Lưu cấu hình{dirty ? " *" : ""}</button>
         <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${it.id}/test-connection`, { method: "POST" }), "Đã test kết nối")}>
           Test kết nối (read-only)</button>
-        <button disabled={busy || !canEnable(it)} title={canEnable(it) ? "" : "Cần test PASS khớp version hiện tại"}
+        <button disabled={busy || !canEnable(it)} title={canEnable(it) ? "" : "Cần test PASS khớp cấu hình hiện tại"}
           onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${it.id}/enable`, {
-            method: "POST", body: JSON.stringify({ expected_version: it.version }) }), "Đã bật")}>Bật</button>
-        {it.enabled && <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${it.id}/disable`, { method: "POST" }), "Đã tắt")}>Tắt</button>}
+            method: "POST", body: withCmd({ expected_version: it.version }) }), "Đã bật")}>Bật</button>
+        {it.enabled && <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${it.id}/disable`, { method: "POST", body: withCmd({ expected_version: it.version }) }), "Đã tắt")}>Tắt</button>}
       </div>
+      {dirty && <p style={{ fontSize: 12, color: "#9a6700", marginTop: 6 }}>Có thay đổi chưa lưu (*). Lưu trước khi test/bật.</p>}
       <p style={{ fontSize: 12, color: "#888", marginTop: 8 }}>
         Lưu và Bật là hai bước riêng. Đổi cấu hình/token làm kết quả test hết hiệu lực — phải test lại trước khi bật.
-        Token không bao giờ hiển thị lại; muốn đổi thì nhập giá trị mới.</p>
+        Token không bao giờ hiển thị lại; muốn đổi thì nhập giá trị mới. Xóa hẳn token là quyền riêng của PO/owner.</p>
     </div>
   );
 }

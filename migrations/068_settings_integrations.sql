@@ -1,6 +1,10 @@
--- 068_settings_integrations.sql — CA Directive 305: Shop Settings platform + GHN staging config path.
+-- 068_settings_integrations.sql — CA Directive 305 (+ Review 307 V02): Shop Settings platform + GHN staging config path.
 -- Additive/idempotent. Rollback theo batch chuan (cuoi file). KHONG migrate bank/GHN .env o day (chi platform).
 -- Secret KHONG bao gio luu plaintext: integration_secrets giu ciphertext (AES-256-GCM) + nonce + keyed fingerprint.
+--
+-- V02 (Review 307): (307-02) command journal + CAS day du; (307-05) tach config_revision khoi lifecycle version;
+-- (307-06) permission purge PO-only; (307 §3) integration_secrets.integration_id -> BIGINT; invariant MOT integration
+-- non-archived / (provider,mode) (khong chi khi enabled) de serialize concurrent create.
 
 -- ============================ integrations (public config) ============================
 CREATE TABLE IF NOT EXISTS integrations (
@@ -11,10 +15,11 @@ CREATE TABLE IF NOT EXISTS integrations (
     mode                     TEXT NOT NULL DEFAULT 'test',   -- allowlist per-provider enforce o service (vd ghn: staging)
     enabled                  BOOLEAN NOT NULL DEFAULT false,
     config_public            JSONB NOT NULL DEFAULT '{}'::jsonb,   -- KHONG chua secret
-    version                  INTEGER NOT NULL DEFAULT 1,           -- CAS cho mutation config_public/mode/label
+    version                  INTEGER NOT NULL DEFAULT 1,           -- LIFECYCLE/CAS: bump moi mutation (optimistic lock)
+    config_revision          INTEGER NOT NULL DEFAULT 1,           -- CHI bump khi config_public/secret doi -> bind test (307-05)
     last_test_status         TEXT CHECK (last_test_status IN ('pass', 'fail')),
     last_test_at             TIMESTAMPTZ,
-    last_test_config_version INTEGER,                              -- bind test-connection voi config version
+    last_test_config_version INTEGER,                              -- bind test-connection voi config_revision (KHONG lifecycle version)
     last_test_secret_version INTEGER,                             -- ... va secret version (enable gate)
     last_test_detail         JSONB,                               -- redacted (latency/error class), KHONG token/header
     archived_at              TIMESTAMPTZ,
@@ -23,15 +28,21 @@ CREATE TABLE IF NOT EXISTS integrations (
     created_by               TEXT,
     updated_by               TEXT
 );
--- Deterministic: toi da MOT integration active (enabled + chua archive) cho moi (provider, mode).
+-- config_revision co the vang mat o lab da tao ban V01 -> them idempotent.
+ALTER TABLE integrations ADD COLUMN IF NOT EXISTS config_revision INTEGER NOT NULL DEFAULT 1;
+
+-- Deterministic (V02): toi da MOT integration non-archived cho moi (provider, mode) — bat ke enabled. Serialize
+-- concurrent create; khong con canh "nhieu disabled record cung provider/mode". (Index enabled cu giu de ro y dinh.)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_integrations_live_provider_mode
+    ON integrations (provider, mode) WHERE archived_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_integrations_active_provider_mode
     ON integrations (provider, mode) WHERE enabled AND archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_integrations_kind ON integrations (kind, provider);
 
 -- ============================ integration_secrets (ciphertext only) ============================
 CREATE TABLE IF NOT EXISTS integration_secrets (
-    integration_id INTEGER NOT NULL REFERENCES integrations (id) ON DELETE CASCADE,
-    key_name       TEXT NOT NULL,                 -- 'token' | 'api_key' | 'hmac' | 'account_number' | 'shop_id'
+    integration_id BIGINT NOT NULL REFERENCES integrations (id) ON DELETE CASCADE,   -- BIGINT dong kieu integrations.id (307 §3)
+    key_name       TEXT NOT NULL,                 -- 'token' | 'api_key' | 'account_number'
     key_id         TEXT NOT NULL,                 -- encryption key ring id da dung (rotation doc key cu)
     ciphertext     BYTEA NOT NULL,                -- AES-256-GCM ciphertext+tag (AAD bind integration/provider/key/version)
     nonce          BYTEA NOT NULL,
@@ -43,11 +54,28 @@ CREATE TABLE IF NOT EXISTS integration_secrets (
     updated_by     TEXT,
     PRIMARY KEY (integration_id, key_name)
 );
+-- Lab da tao ban V01 voi INTEGER -> ep ve BIGINT (idempotent).
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name='integration_secrets' AND column_name='integration_id' AND data_type='integer') THEN
+        ALTER TABLE integration_secrets ALTER COLUMN integration_id TYPE BIGINT;
+    END IF;
+END $$;
 
--- ============================ audit trigger: KHONG cho SELECT lo plaintext (khong the — chi ciphertext) ============================
--- (integration_secrets khong bao gio chua plaintext; audit redaction o service layer.)
+-- ============================ integration_commands (307-02 durable idempotency) ============================
+-- Command journal: cung command_key + cung payload -> tra ket qua cu (replay effective-once); cung key + khac
+-- payload -> conflict. PK serialize concurrent same-key. request_fingerprint KHONG chua plaintext (dung keyed fp).
+CREATE TABLE IF NOT EXISTS integration_commands (
+    command_key         TEXT PRIMARY KEY,
+    action              TEXT NOT NULL,
+    integration_id      BIGINT,
+    request_fingerprint TEXT NOT NULL,      -- sha256 canonical(action|integration|payload public) — plaintext dung keyed fp
+    result              JSONB,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_integration_commands_integration ON integration_commands (integration_id);
 
--- ============================ RBAC (additive) — CA Review 304-03 granular ============================
+-- ============================ RBAC (additive) — CA Review 304-03 granular + 307-06 purge ============================
 INSERT INTO roles (key, name, is_system, is_active) VALUES
     ('shop_manager', 'Quản lý shop', false, true)
 ON CONFLICT (key) DO NOTHING;
@@ -56,16 +84,19 @@ INSERT INTO permissions (key, description) VALUES
     ('settings.integration.view',           'Xem trạng thái tích hợp (đã redact)'),
     ('settings.integration.manage_public',  'Sửa cấu hình public của tích hợp (không secret)'),
     ('settings.integration.secret_write',   'Ghi/xoay secret tích hợp (write-only, không đọc lại)'),
+    ('settings.integration.secret_purge',   'Xóa hẳn secret tích hợp (PO/owner-only, tách khỏi ghi/xoay)'),
     ('settings.integration.test',           'Chạy test-connection read-only'),
     ('settings.integration.activate',       'Bật/tắt tích hợp'),
     ('settings.integration.live_financial',  'Kích hoạt/xoay secret tài chính LIVE (SePay live) — reserved')
 ON CONFLICT DO NOTHING;
 
--- admin = PO/owner: toan bo. shop_manager: view/manage_public/test (secret_write/activate cap explicit sau).
+-- admin = PO/owner: toan bo (gom purge). shop_manager: view/manage_public/test. secret_write/secret_purge/activate
+-- CAP EXPLICIT sau; ĐẶC BIET secret_purge KHONG bao gio grant mac dinh cho shop_manager (307-06 PO-only).
 INSERT INTO role_permissions (role_key, permission_key) VALUES
     ('admin', 'settings.integration.view'),
     ('admin', 'settings.integration.manage_public'),
     ('admin', 'settings.integration.secret_write'),
+    ('admin', 'settings.integration.secret_purge'),
     ('admin', 'settings.integration.test'),
     ('admin', 'settings.integration.activate'),
     ('admin', 'settings.integration.live_financial'),
@@ -75,6 +106,7 @@ INSERT INTO role_permissions (role_key, permission_key) VALUES
 ON CONFLICT DO NOTHING;
 
 -- ============================ ROLLBACK (batch, chay tay khi can) ============================
+-- DROP TABLE IF EXISTS integration_commands;
 -- DELETE FROM role_permissions WHERE permission_key LIKE 'settings.integration.%';
 -- DELETE FROM permissions WHERE key LIKE 'settings.integration.%';
 -- DELETE FROM roles WHERE key='shop_manager';
