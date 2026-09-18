@@ -16,7 +16,8 @@ function Badge({ text, tone }) {
 
 function canEnable(it) {
   const t = it.last_test || {};
-  const secVer = it.secrets?.token?.version ?? null;
+  const vers = Object.values(it.secrets || {}).map((s) => s.version);
+  const secVer = vers.length ? Math.max(...vers) : null;   // khớp max(secret version) như enable-gate backend
   return t.status === "pass" && t.config_version === it.version && t.secret_version === secVer && !it.enabled;
 }
 
@@ -69,12 +70,7 @@ export default function SettingsPage() {
           (không gom vào đây) — GĐ1 chỉ liên kết, không sao chép.</p>
       )}
 
-      {tab === "payment" && (
-        <div style={{ padding: 16, background: "#f6f8fa", borderRadius: 8 }}>
-          <b>Thanh toán</b> — Chuyển khoản/VietQR, COD, SePay Test Mode. <Badge text="Sắp có (GĐ2/D306)" tone="neutral" />
-          <p style={{ color: "#555", marginTop: 6 }}>SePay Live: <Badge text="Khóa — cần gate S1" tone="bad" /></p>
-        </div>
-      )}
+      {tab === "payment" && <PaymentSettings setMsg={setMsg} setErr={setErr} />}
 
       {tab === "shipping" && (
         <div>
@@ -210,6 +206,88 @@ function GhnManage({ it, busy, onClose, reload, setBusy, setMsg, setErr }) {
       <p style={{ fontSize: 12, color: "#888", marginTop: 8 }}>
         Lưu và Bật là hai bước riêng. Đổi cấu hình/token làm kết quả test hết hiệu lực — phải test lại trước khi bật.
         Token không bao giờ hiển thị lại; muốn đổi thì nhập giá trị mới.</p>
+    </div>
+  );
+}
+
+// CA Directive 306 — tab Thanh toán: Chuyển khoản/VietQR (bank_accounts, MASK account) + COD + SePay Test Mode S0.
+function PaymentSettings({ setMsg, setErr }) {
+  const [ov, setOv] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [bank, setBank] = useState({ bank: "", account_number: "", holder_name: "", branch: "", bin: "", is_test: false });
+  const [sepayKey, setSepayKey] = useState("");
+
+  async function load() {
+    setErr(null);
+    try { const d = await apiFetch(`/dashboard/settings/payments`); setOv(d); } catch (e) { setErr(e.message); }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  async function run(fn, ok) {
+    setBusy(true); setErr(null); setMsg(null);
+    try { const r = await fn(); if (ok) setMsg(ok); await load(); return r; } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+  if (!ov) return <p>Đang tải…</p>;
+  const sepay = (ov.sepay?.integrations || []).find((i) => i.provider === "sepay");
+
+  return (
+    <div>
+      {/* Chuyển khoản / VietQR */}
+      <div style={{ border: "1px solid #e3e6ea", borderRadius: 8, padding: 14, marginBottom: 12 }}>
+        <b>Chuyển khoản / VietQR</b>
+        <div style={{ fontSize: 13, color: "#555", marginTop: 4 }}>
+          {ov.bank_transfer.account
+            ? `${ov.bank_transfer.account.bank} · BIN ${ov.bank_transfer.account.bin || "—"} · ${ov.bank_transfer.account.holder_name} · ••••${ov.bank_transfer.account.account_last4 || "----"} ${ov.bank_transfer.account.is_test ? "· TEST" : ""}`
+            : "Chưa cấu hình tài khoản nhận."}
+        </div>
+        <details style={{ marginTop: 8 }}>
+          <summary>Cập nhật tài khoản nhận</summary>
+          <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <input placeholder="ngân hàng" value={bank.bank} onChange={(e) => setBank({ ...bank, bank: e.target.value })} />
+            <input placeholder="số tài khoản" value={bank.account_number} onChange={(e) => setBank({ ...bank, account_number: e.target.value })} />
+            <input placeholder="chủ TK" value={bank.holder_name} onChange={(e) => setBank({ ...bank, holder_name: e.target.value })} />
+            <input placeholder="BIN NAPAS" value={bank.bin} onChange={(e) => setBank({ ...bank, bin: e.target.value })} />
+            <label style={{ fontSize: 13 }}><input type="checkbox" checked={bank.is_test} onChange={(e) => setBank({ ...bank, is_test: e.target.checked })} /> test</label>
+            <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/payments/bank`, { method: "POST", body: JSON.stringify(bank) }), "Đã lưu tài khoản")}>Lưu</button>
+          </div>
+        </details>
+        <button style={{ marginTop: 8 }} disabled={busy} onClick={() => run(async () => {
+          const r = await apiFetch(`/dashboard/settings/payments/vietqr-self-test`, { method: "POST", body: JSON.stringify({ amount_vnd: 10000 }) });
+          setMsg(r.ok ? `VietQR self-test ĐẠT (BIN ${r.bin}, ••••${r.account_last4}, CRC hợp lệ)` : `VietQR self-test LỖI: ${r.error_class}`);
+        })}>Test VietQR (local, không chuyển tiền)</button>
+      </div>
+
+      {/* COD */}
+      <div style={{ border: "1px solid #e3e6ea", borderRadius: 8, padding: 14, marginBottom: 12 }}>
+        <b>COD</b> <Badge text="Vận hành qua Giao & Thu tiền" tone="neutral" />
+        <div style={{ fontSize: 13, color: "#555" }}>{ov.cod.note}</div>
+      </div>
+
+      {/* SePay Test Mode S0 */}
+      <div style={{ border: "1px solid #e3e6ea", borderRadius: 8, padding: 14 }}>
+        <b>SePay Test Mode (S0)</b> {sepay ? (sepay.enabled ? <Badge text="Bật" tone="ok" /> : <Badge text="Tắt" tone="neutral" />) : <Badge text="Chưa tạo" tone="neutral" />}
+        {" "}<Badge text="Live: Khóa — cần gate S1" tone="bad" />
+        {!sepay ? (
+          <div style={{ marginTop: 8 }}>
+            <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations`, { method: "POST", body: JSON.stringify({ kind: "payment", provider: "sepay", label: "SePay Test", mode: "test", config_public: { code_prefix: "3SCF" } }) }), "Đã tạo SePay Test")}>+ Thêm SePay Test</button>
+          </div>
+        ) : (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 13, color: "#555" }}>
+              API key: {sepay.secrets?.api_key ? `đã lưu (v${sepay.secrets.api_key.version})` : "chưa nhập"} ·
+              Readiness: {sepay.last_test?.status ? <Badge text={sepay.last_test.status === "pass" ? "Sẵn sàng" : "Lỗi"} tone={sepay.last_test.status === "pass" ? "ok" : "bad"} /> : "chưa test"}
+            </div>
+            <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <input type="password" placeholder={sepay.secrets?.api_key ? "•••• đã lưu — để trống nếu không đổi" : "SePay Test API key"} value={sepayKey} onChange={(e) => setSepayKey(e.target.value)} style={{ width: 280 }} />
+              <button disabled={busy || !sepayKey} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${sepay.id}/secret`, { method: "POST", body: JSON.stringify({ key_name: "api_key", value: sepayKey }) }).then(() => setSepayKey("")), "Đã lưu API key")}>Lưu key</button>
+              <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${sepay.id}/test-connection`, { method: "POST" }), "Đã test readiness")}>Test readiness</button>
+              <button disabled={busy || (!sepay.enabled && !canEnable(sepay))} onClick={() => run(() => sepay.enabled
+                ? apiFetch(`/dashboard/settings/integrations/${sepay.id}/disable`, { method: "POST" })
+                : apiFetch(`/dashboard/settings/integrations/${sepay.id}/enable`, { method: "POST", body: JSON.stringify({ expected_version: sepay.version }) }), sepay.enabled ? "Đã tắt" : "Đã bật")}>{sepay.enabled ? "Tắt" : "Bật"}</button>
+            </div>
+            <p style={{ fontSize: 12, color: "#888", marginTop: 6 }}>Bật ở đây KHÔNG tự vượt kill-switch runtime (m7_sepay_test_connector) — cần authorization kích hoạt riêng.</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
