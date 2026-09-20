@@ -26,7 +26,30 @@ def test_address_queue_links_to_address_review_not_fulfillment():
 # 309-02 — permission readback + gate
 def test_reads_permissions_from_auth_me():
     assert '/dashboard/auth/me' in SRC, "phai doc quyen tu /dashboard/auth/me (309-02)"
-    assert 'const can =' in SRC and 'perms === null' in SRC, "phai co helper can() fail-open khi chua biet quyen"
+
+
+# 311-01 — FAIL-CLOSED (KHONG fail-open)
+def test_permission_gate_is_fail_closed():
+    # dung module gate thuan makeGate (permGate.mjs), khong con can() fail-open perms===null
+    assert 'makeGate' in SRC, "phai dung makeGate (permGate.mjs) — 311-01"
+    assert 'perms === null || perms.includes' not in SRC, "KHONG duoc fail-open (perms===null || includes) — 311-01"
+
+
+def test_three_state_permission_with_retry():
+    assert 'permState' in SRC, "phai co trang thai quyen 3 muc (loading|loaded|error|unprovisioned) — 311-01"
+    for st in ('"loading"', '"loaded"', '"error"', '"unprovisioned"'):
+        assert st in SRC, f"thieu trang thai {st} — 311-01"
+    assert 'loadPerms' in SRC and 'Thử lại' in SRC, "phai co retry khi loi quyen — 311-01"
+
+
+GATE = pathlib.Path(__file__).resolve().parents[1] / "dashboard" / "app" / "settings" / "permGate.mjs"
+
+
+def test_gate_module_fail_closed():
+    src = GATE.read_text(encoding="utf-8")
+    # can() chi true khi ready (loaded + mang) VA includes; ready doi permState==="loaded"
+    assert 'permState === "loaded"' in src and 'Array.isArray(perms)' in src, "gate phai fail-closed theo loaded+mang"
+    assert 'ready && perms.includes' in src, "can() phai doi ready + includes (fail-closed)"
 
 
 @pytest.mark.parametrize("perm", [

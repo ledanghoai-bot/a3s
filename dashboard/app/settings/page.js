@@ -6,6 +6,7 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "../../lib/api";
 import { useAuthGuard } from "../../lib/useAuthGuard";
+import { makeGate } from "./permGate.mjs";
 
 const GHN_STAGING_BASE = "https://dev-online-gateway.ghn.vn/shiip/public-api";
 
@@ -40,17 +41,25 @@ export default function SettingsPage() {
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [perms, setPerms] = useState(null); // null = chưa biết -> KHÔNG ẩn (backend vẫn enforce 403)
+  // CA 311-01: FAIL-CLOSED. permState = loading|loaded|error|unprovisioned; mutation controls chỉ hiện khi loaded.
+  const [permState, setPermState] = useState("loading");
+  const [perms, setPerms] = useState([]);
+  const gate = makeGate(permState, perms);
+  const can = gate.can;
 
-  // can(p): role-specific controls (309-02). perms===null (chưa load/không provisioned) -> không ẩn; backend là nguồn enforce.
-  const can = (p) => perms === null || perms.includes(p);
+  async function loadPerms() {
+    setPermState("loading");
+    try {
+      const me = await apiFetch("/dashboard/auth/me");
+      if (!me.rbac_provisioned) { setPerms([]); setPermState("unprovisioned"); }
+      else { setPerms(me.permissions || []); setPermState("loaded"); }
+    } catch { setPerms([]); setPermState("error"); }
+  }
 
   useEffect(() => {
     if (!ready) return;
     load();
-    apiFetch("/dashboard/auth/me")
-      .then((me) => setPerms(me.rbac_provisioned ? (me.permissions || []) : null))
-      .catch(() => setPerms(null));
+    loadPerms();
     /* eslint-disable-next-line */
   }, [ready]);
 
@@ -112,6 +121,17 @@ export default function SettingsPage() {
           {!meta.crypto_configured && (
             <p style={{ background: "#fff4e5", color: "#9a6700", padding: 10, borderRadius: 6 }}>
               ⚠ Khóa mã hóa (CONFIG_ENC_KEYS) chưa cấu hình trên server — chưa lưu/xoay được secret. Liên hệ vận hành.</p>
+          )}
+          {/* CA 311-01: trong lúc loading/error/unprovisioned KHÔNG render mutation control (gate.can=false); hiện trạng thái. */}
+          {gate.loading && <p style={{ color: "#555" }}>Đang tải quyền…</p>}
+          {gate.error && (
+            <p style={{ background: "#fdecea", color: "#b71c1c", padding: 10, borderRadius: 6 }}>
+              Không tải được quyền — các thao tác đang bị ẩn để an toàn.{" "}
+              <button onClick={loadPerms}>Thử lại</button></p>
+          )}
+          {gate.unprovisioned && (
+            <p style={{ background: "#eef1f4", color: "#444", padding: 10, borderRadius: 6 }}>
+              Tài khoản chưa được gán quyền cấu hình tích hợp — chỉ xem, không có thao tác.</p>
           )}
           {/* Shipping zones (WooCommerce-style summary) */}
           <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
