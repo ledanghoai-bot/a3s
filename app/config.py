@@ -96,6 +96,7 @@ class Settings(BaseSettings):
         "address_resolver_fullscope_telegram_customer", "address_resolver_fullscope_messenger",
         "gate_e_kill_switch", "enable_gate_e_order_wiring", "enable_address_resolver",
         "m7_conversational_fulfillment", "m7_ghn_quote", "m7_sepay_test_connector", "sepay_live_enabled",
+        "settings_integrations_enabled", "settings_integrations_env_fallback",
         mode="before")
     @classmethod
     def _failclosed_bool(cls, v):
@@ -221,6 +222,17 @@ class Settings(BaseSettings):
     # SePay Test Mode (server-side secret). sepay_allowed_accounts: CSV so TK duoc phep nhan (rong = chi active bank).
     sepay_test_api_key: str = ""
     sepay_allowed_accounts: str = ""
+    # CA Directive 305 — Shop Settings integrations. Secret (GHN token/SePay key) ma hoa AES-256-GCM o DB.
+    # config_enc_keys: key ring "keyid:base64_32byte,keyid2:...". config_enc_key_current: key_id dung de GHI (write).
+    #   Key cu chi de DOC (rotation). RONG = fail-closed (khong luu/doc secret). Key material CHI o env, KHONG qua Dashboard.
+    # config_secret_fp_key: khoa HMAC-SHA256 fingerprint (base64 32 byte) — TACH khoi encryption key (CA 304-01, khong SHA raw).
+    config_enc_keys: str = ""
+    config_enc_key_current: str = ""
+    config_secret_fp_key: str = ""
+    # settings_integrations_enabled: bat loader doc config tu DB (mac dinh OFF -> giu nguyen .env baseline).
+    # settings_integrations_env_fallback: khi ON nhung chua co DB record active -> co cho phep fallback .env khong.
+    settings_integrations_enabled: bool = False
+    settings_integrations_env_fallback: bool = False
     # M4-S1 Trusted Slot Store (bang pii_slots, migration provisional 040):
     # - m4_slot_key_b64: khoa AES-256-GCM (base64 32 byte) ma hoa gia tri slot o TANG APP,
     #   AAD bind customer|conversation|slot_type. RONG = slot store KHONG hoat dong

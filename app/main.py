@@ -18,6 +18,7 @@ from app.api.m5_order_binding import router as m5_order_binding_router
 from app.api.m6_fulfillment import router as m6_fulfillment_router
 from app.api.m7_fulfillment import router as m7_fulfillment_router
 from app.api.m7_webhooks import router as m7_webhooks_router
+from app.api.settings import router as settings_router
 from app.api.webhook import router as webhook_router
 from app.config import settings
 from app.db_pool import close_pool
@@ -80,6 +81,7 @@ app.include_router(m5_order_binding_router)  # M5 Phase 4 (Directive 116): order
 app.include_router(m6_fulfillment_router)  # M6 (Directive 265): delivery & payment/COD dashboard
 app.include_router(m7_fulfillment_router)  # M7 (Directive 272): conversational fulfillment dashboard (attention/QR/provider)
 app.include_router(m7_webhooks_router)  # M7-C0 (Directive 272): SePay test webhook (flag OFF -> 404)
+app.include_router(settings_router)  # Directive 305: Shop Settings integrations (dormant; module flag OFF)
 
 
 @app.get("/health")
