@@ -317,7 +317,7 @@ function PaymentSettings({ can, setMsg, setErr }) {
       setPub(a ? { bank: a.bank, bin: a.bin || "", holder_name: a.holder_name, branch: a.branch || "", is_test: a.is_test } : { bank: "", bin: "", holder_name: "", branch: "", is_test: false });
       const sp = (d.sepay?.integrations || []).find((i) => i.provider === "sepay");
       const cp = sp?.config_public || {};
-      setSepayCfg({ allowed_accounts: cp.allowed_accounts || "", code_prefix: cp.code_prefix || "3SCF" });
+      setSepayCfg({ allowed_accounts: cp.allowed_accounts || "", code_prefix: cp.code_prefix || "" });
     } catch (e) { if (String(e.message).includes("404")) setOff(true); else setErr(e.message); }
   }
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
@@ -401,7 +401,7 @@ function PaymentSettings({ can, setMsg, setErr }) {
         {!sepay ? (
           can("settings.integration.manage_public") && (
             <div style={{ marginTop: 8 }}>
-              <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations`, { method: "POST", body: withCmd({ kind: "payment", provider: "sepay", label: "SePay Test", mode: "test", config_public: { code_prefix: "3SCF" } }) }), "Đã tạo SePay Test")}>+ Thêm SePay Test</button>
+              <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations`, { method: "POST", body: withCmd({ kind: "payment", provider: "sepay", label: "SePay Test", mode: "test", config_public: {} }) }), "Đã tạo SePay Test")}>+ Thêm SePay Test</button>
             </div>
           )
         ) : (
@@ -413,10 +413,11 @@ function PaymentSettings({ can, setMsg, setErr }) {
             {can("settings.integration.manage_public") && sepayCfg && (
               <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                 <input placeholder="TK nhận cho phép (CSV)" value={sepayCfg.allowed_accounts} onChange={(e) => setSepayCfg({ ...sepayCfg, allowed_accounts: e.target.value })} style={{ width: 220 }} />
-                <input placeholder="tiền tố mã (prefix)" value={sepayCfg.code_prefix} onChange={(e) => setSepayCfg({ ...sepayCfg, code_prefix: e.target.value })} style={{ width: 120 }} />
+                <input placeholder="tiền tố mã (prefix, vd SEVQR)" value={sepayCfg.code_prefix} onChange={(e) => setSepayCfg({ ...sepayCfg, code_prefix: e.target.value })} style={{ width: 160 }} />
                 <button disabled={busy} onClick={() => run(() => apiFetch(`/dashboard/settings/integrations/${sepay.id}`, { method: "PATCH", body: withCmd({ expected_version: sepay.version, config_public: { allowed_accounts: sepayCfg.allowed_accounts, code_prefix: sepayCfg.code_prefix } }) }), "Đã lưu cấu hình SePay")}>Lưu cấu hình</button>
               </div>
             )}
+            <p style={{ fontSize: 12, color: "#888", marginTop: 4 }}>Tiền tố mã (prefix) do bạn tự cấu hình để hệ thống nhận diện đơn (2–12 ký tự A-Z/0-9, tự chuyển hoa). Phải có prefix hợp lệ trước khi readiness/bật. Nội dung CK mới sẽ là "&lt;prefix&gt; &lt;mã đơn&gt;".</p>
             <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
               {can("settings.integration.secret_write") && <>
                 <input type="password" placeholder={sepay.secrets?.api_key ? "•••• đã lưu — để trống nếu không đổi" : "SePay Test API key"} value={sepayKey} onChange={(e) => setSepayKey(e.target.value)} style={{ width: 280 }} />

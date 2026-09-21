@@ -13,7 +13,7 @@ khong co kenh bot -> skip (khong loi). insert_outbox nam trong CUNG transaction 
 from __future__ import annotations
 
 from app.services.command import repository as cmd_repo
-from app.services.payment.payment_service import transfer_content
+from app.services.payment.payment_service import current_transfer_content
 
 MAX_ATTEMPTS = 8
 _CUSTOMER_DEST = {"telegram_customer", "messenger"}
@@ -90,10 +90,12 @@ async def notify_payment(conn, order_id: int, *, kind: str, new_status: str,
     sc = {"kind": "payment", "order_id": order_id, "new_status": new_status, "version": version}
     ident = f"{order_id}:{version}"
     if kind == "customer_reported":
+        _tc = await current_transfer_content(conn, order_id)   # CA 323: doc snapshot, khong re-derive prefix
+        _nd = f" (nội dung {_tc})" if _tc else ""
         await _enqueue(conn, order_id, event_type="payment.check_request.notify",
                        dedupe_key=f"payment_check:{ident}",
-                       text=(f"Dạ shop đã nhận thông tin chuyển khoản đơn #{order_id} (nội dung "
-                             f"{transfer_content(order_id)}), đang kiểm tra và sẽ xác nhận với anh/chị ạ."),
+                       text=(f"Dạ shop đã nhận thông tin chuyển khoản đơn #{order_id}{_nd}, "
+                             "đang kiểm tra và sẽ xác nhận với anh/chị ạ."),
                        stale_check=sc)
     elif kind == "cod_collected" and new_status == "collected":
         # CA Directive 293 §2: nói rõ ĐÃ THU TIỀN COD cho đúng đơn, KHÔNG ngụ ý đã đối soát kế toán.

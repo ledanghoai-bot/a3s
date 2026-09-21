@@ -191,8 +191,10 @@ def reminder_text(order_id: int, instr: dict) -> str:
             "nếu muốn đổi sang COD, nhắn \"COD\" giúp em ạ.")
 
 
-def reported_text(order_id: int) -> str:
-    return (f"Dạ shop đã nhận thông tin chuyển khoản đơn #{order_id} (nội dung {_pay.transfer_content(order_id)}), "
+def reported_text(order_id: int, content: str | None = None) -> str:
+    # CA 323: content = snapshot instruction (caller truyen); None -> khong nhac noi dung (khong re-derive prefix).
+    nd = f" (nội dung {content})" if content else ""
+    return (f"Dạ shop đã nhận thông tin chuyển khoản đơn #{order_id}{nd}, "
             "đang kiểm tra và sẽ xác nhận với anh/chị ạ.")
 
 
@@ -487,7 +489,7 @@ async def handle_customer_text(conn, customer_ref: str, text: str, *, command_ke
                 await _pay.record_evidence(conn, order_id, kind="customer_reported", amount_vnd=None,
                                            recorded_by=actor, command_key=f"fc:{order_id}:{command_key}",
                                            note="khach bao da chuyen (bot)", notify=False)
-            reply = reported_text(order_id)
+            reply = reported_text(order_id, await _pay.current_transfer_content(conn, order_id))
             await _journal(conn, order_id, command_key=command_key, source="customer", from_step=step,
                            to_step=step, detail={"customer_reported": True}, reply_text=reply)
             return reply
