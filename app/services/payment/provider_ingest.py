@@ -58,24 +58,35 @@ async def ingest(conn, ev: IncomingTransfer, *, mode: str = "test") -> tuple[int
     return int(old["id"]), False, conflict
 
 
-async def _allowed_accounts(conn) -> set[str]:
-    """Gate account cho phep. MAC DINH env sepay_allowed_accounts (giu hanh vi M6/M7 khi module OFF — 308-03).
-    Khi settings_integrations_enabled ON + co active sepay integration -> UNION them config_public.allowed_accounts
-    tu Settings (CA 308-04, cau hinh qua Dashboard). Chi doc config_public (KHONG can secret)."""
-    out = {a.strip() for a in (settings.sepay_allowed_accounts or "").split(",") if a.strip()}
-    if settings.settings_integrations_enabled:
-        row = await conn.fetchrow(
-            "SELECT config_public FROM integrations WHERE provider='sepay' AND mode='test' AND enabled "
-            "AND archived_at IS NULL ORDER BY id DESC LIMIT 1")
-        if row:
-            cp = row["config_public"]
-            cp = json.loads(cp) if isinstance(cp, str) else (cp or {})
-            aa = cp.get("allowed_accounts")
-            if isinstance(aa, str):
-                out |= {a.strip() for a in aa.split(",") if a.strip()}
-            elif isinstance(aa, list):
-                out |= {str(a).strip() for a in aa if str(a).strip()}
-    return out
+def _parse_accts(aa) -> set[str]:
+    if isinstance(aa, str):
+        return {a.strip() for a in aa.split(",") if a.strip()}
+    if isinstance(aa, list):
+        return {str(a).strip() for a in aa if str(a).strip()}
+    return set()
+
+
+async def _allowed_accounts(conn) -> tuple[set[str], bool]:
+    """Gate account cho phep — PRECEDENCE tat dinh (CA 315-02), tra (accounts, enforce).
+    - module OFF: baseline env; enforce chi khi env co cau hinh (giu hanh vi M6/M7).
+    - module ON + active SePay DB config: DB allowlist la NGUON QUYET DINH (KHONG union env). enforce=True luon ->
+      DB empty/invalid => fail-closed (reject moi account, khong roi ve env stale).
+    - module ON + KHONG co active DB record: chi fallback env khi settings_integrations_env_fallback; nguoc lai
+      fail-closed (enforce=True, rong).
+    enforce=True + set rong => moi account bi tu choi (fail-closed)."""
+    env = {a.strip() for a in (settings.sepay_allowed_accounts or "").split(",") if a.strip()}
+    if not settings.settings_integrations_enabled:
+        return env, bool(env)
+    row = await conn.fetchrow(
+        "SELECT config_public FROM integrations WHERE provider='sepay' AND mode='test' AND enabled "
+        "AND archived_at IS NULL ORDER BY id DESC LIMIT 1")
+    if row:
+        cp = row["config_public"]
+        cp = json.loads(cp) if isinstance(cp, str) else (cp or {})
+        return _parse_accts(cp.get("allowed_accounts")), True   # DB authoritative + fail-closed
+    if settings.settings_integrations_env_fallback:
+        return env, bool(env)
+    return set(), True   # module ON, no DB, no fallback -> fail-closed
 
 
 async def _finish(conn, row_id: int, *, state: str, reason: str, order_id=None, payment_id=None,
@@ -143,8 +154,8 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
         return await _unmatched("mode_not_test", state="ignored", order_exists=False)
     # CA 274-01: KHONG dung active bank. Config sepay_allowed_accounts CHI la gate phong ve khi duoc cau hinh;
     # rang buoc CHINH la snapshot cua instruction (account_number_snapshot) kiem o duoi.
-    allowed = await _allowed_accounts(conn)
-    if allowed and (not ev.account_number or ev.account_number not in allowed):
+    allowed, enforce = await _allowed_accounts(conn)
+    if enforce and (not ev.account_number or ev.account_number not in allowed):
         return await _unmatched("account_not_allowed")
     codes = _sp.extract_codes(ev.raw_minimal.get("code"), ev.content)
     if not codes:
@@ -206,6 +217,10 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
 async def run_once(*, limit: int = BATCH) -> dict:
     from app.db_pool import acquire, release
     stats = {"claimed": 0, "matched": 0, "unmatched": 0, "discrepancy": 0, "ignored": 0, "error": 0}
+    # CA 315-03: connector OFF -> worker INERT (khong claim/process). SePay la provider duy nhat feed provider_events;
+    # kill-switch m7_sepay_test_connector tat => khong xu ly bat ky event ton dong nao (fail-closed dormant).
+    if not settings.m7_sepay_test_connector:
+        return {**stats, "skipped": "connector_off"}
     conn = await acquire()
     try:
         ids = [r["id"] for r in await conn.fetch(

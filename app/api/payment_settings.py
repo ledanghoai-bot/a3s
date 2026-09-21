@@ -121,6 +121,22 @@ async def replace_bank_account(body: dict, staff: dict = Depends(require_active_
         await conn.close()
 
 
+@router.post("/bank/account/clear", dependencies=[Depends(require_permission(_P_SECRET))])
+async def clear_bank_account(body: dict, staff: dict = Depends(require_active_session)) -> dict:
+    """308-01/315-01: XÓA (deactivate) tài khoản nhận hiện hành — explicit clear (blank/omitted KHÔNG phải clear).
+    Quyền secret_write. Historical instruction snapshot BẤT BIẾN; sau clear instruction mới fail-closed tới khi có account."""
+    ev = _expected_version(body)
+    ck = _cmd_key(body)
+    conn = await asyncpg.connect(_db_url())
+    try:
+        async with conn.transaction():
+            return await banksvc.clear_account(conn, expected_version=ev, actor=_actor(staff), command_key=ck)
+    except svc.SettingsError as e:
+        raise _map_err(e)
+    finally:
+        await conn.close()
+
+
 @router.post("/vietqr-self-test", dependencies=[Depends(require_permission(_P_TEST))])
 async def vietqr_self_test(body: dict, staff: dict = Depends(require_active_session)) -> dict:
     """Build+decode VietQR LOCAL từ active bank — verify CRC. KHÔNG chuyển tiền. 308-05: input sai kiểu -> 422 (KHÔNG

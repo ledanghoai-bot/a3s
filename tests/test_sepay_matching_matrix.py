@@ -144,34 +144,145 @@ async def test_stale_instruction_after_regenerate():
 
 
 @pytest.mark.asyncio
-async def test_allowed_accounts_from_settings(monkeypatch):
-    """308-04: module OFF -> env only; ON + active sepay integration -> union config allowed_accounts."""
+async def test_allowed_accounts_precedence(monkeypatch):
+    """315-02: precedence tat dinh. OFF->env baseline; ON+DB active-> DB authoritative (KHONG union env, stale env bi loai);
+    ON+DB empty-> fail-closed enforce rong; ON+no-DB+no-fallback-> fail-closed; ON+no-DB+fallback-> env."""
+    import base64
     conn = await _conn()
     iid = None
     try:
-        monkeypatch.setattr(settings, "sepay_allowed_accounts", "")
-        # module OFF -> env only (rong)
-        monkeypatch.setattr(settings, "settings_integrations_enabled", False)
-        assert await PI._allowed_accounts(conn) == set()
-        # tao active sepay integration voi allowed_accounts qua config
-        import base64
+        monkeypatch.setattr(settings, "sepay_allowed_accounts", "9999999999")   # env stale
         monkeypatch.setattr(settings, "config_enc_keys", f"k1:{base64.b64encode(b'A'*32).decode()}")
         monkeypatch.setattr(settings, "config_enc_key_current", "k1")
         monkeypatch.setattr(settings, "config_secret_fp_key", base64.b64encode(b'F'*32).decode())
         from app.services.settings import integrations as S
+
+        # module OFF -> env baseline (enforce vi env co)
+        monkeypatch.setattr(settings, "settings_integrations_enabled", False)
+        acc, enf = await PI._allowed_accounts(conn)
+        assert acc == {"9999999999"} and enf is True
+
+        # ON + no DB + no fallback -> fail-closed (rong, enforce)
+        monkeypatch.setattr(settings, "settings_integrations_enabled", True)
+        monkeypatch.setattr(settings, "settings_integrations_env_fallback", False)
+        acc, enf = await PI._allowed_accounts(conn)
+        assert acc == set() and enf is True
+        # ON + no DB + fallback -> env
+        monkeypatch.setattr(settings, "settings_integrations_env_fallback", True)
+        acc, enf = await PI._allowed_accounts(conn)
+        assert acc == {"9999999999"} and enf is True
+        monkeypatch.setattr(settings, "settings_integrations_env_fallback", False)
+
+        # ON + DB active allowlist=[ACCT] -> DB authoritative, stale env 9999 bi LOAI
         async with conn.transaction():
             it = await S.create_integration(conn, kind="payment", provider="sepay", label="SP", mode="test",
                                             config_public={"code_prefix": "3SCF", "allowed_accounts": ACCT},
                                             actor="po", command_key=f"sp-{os.urandom(3).hex()}")
         iid = it["id"]
-        # enable can secret+test; de test _allowed_accounts chi can enabled -> set enabled truc tiep (bo qua gate cho unit)
         await conn.execute("UPDATE integrations SET enabled=true WHERE id=$1", iid)
-        monkeypatch.setattr(settings, "settings_integrations_enabled", True)
-        allowed = await PI._allowed_accounts(conn)
-        assert ACCT in allowed   # Settings config duoc union
+        acc, enf = await PI._allowed_accounts(conn)
+        assert acc == {ACCT} and enf is True and "9999999999" not in acc
+
+        # ON + DB active nhung allowlist RONG -> fail-closed (enforce rong)
+        async with conn.transaction():
+            await conn.execute("UPDATE integrations SET config_public=jsonb_set(config_public,'{allowed_accounts}','\"\"') "
+                               "WHERE id=$1", iid)
+        acc, enf = await PI._allowed_accounts(conn)
+        assert acc == set() and enf is True
     finally:
         if iid:
             async with conn.transaction():
                 await conn.execute("DELETE FROM integration_commands WHERE integration_id=$1", iid)
                 await conn.execute("DELETE FROM integrations WHERE id=$1", iid)
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_connector_off_webhook_404_and_worker_inert(monkeypatch):
+    """315-03: connector OFF -> webhook 404, run_once INERT (khong claim), event ton dong khong auto-confirm."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    monkeypatch.setattr(settings, "m7_sepay_test_connector", False)
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.post("/webhooks/sepay", json={"id": 1, "transferType": "in"})
+    assert r.status_code == 404   # webhook khong ton tai khi connector OFF
+    # worker inert
+    stats = await PI.run_once()
+    assert stats.get("skipped") == "connector_off" and stats["claimed"] == 0
+    # event ton dong (seed thang) khong bi confirm khi connector OFF
+    conn = await _conn()
+    try:
+        oid, _, _ = await _seed(conn)
+        ev = _event(oid, eid=int(f"{int(time.time())%100000}8"))
+        async with conn.transaction():
+            await PI.ingest(conn, ev, mode="test")
+        await PI.run_once()   # inert
+        assert await _pay_status(conn, oid) != "confirmed"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_delivery_one_durable_confirm(monkeypatch):
+    """315-03: hai delivery/process dong thoi cung event -> dung MOT durable confirm + count assertions."""
+    import asyncio
+    conn = await _conn()
+    c1 = await _conn()
+    c2 = await _conn()
+    oid = None
+    try:
+        oid, _, _ = await _seed(conn)
+        ev = _event(oid, eid=int(f"{int(time.time())%100000}9"))
+        # ingest MOT lan (cung event); hai process dong thoi tren 2 connection
+        async with conn.transaction():
+            rid, created, _ = await PI.ingest(conn, ev, mode="test")
+        assert created
+
+        async def _proc(cc):
+            try:
+                async with cc.transaction():
+                    return await PI.process(cc, rid)
+            except Exception:  # noqa: BLE001
+                return "err"
+        r1, r2 = await asyncio.gather(_proc(c1), _proc(c2))
+        # dung MOT durable effect: payment confirmed + dung 1 evidence row cho payment nay
+        pid = await conn.fetchval("SELECT id FROM payments WHERE order_id=$1", oid)
+        confirms = await conn.fetchval("SELECT count(*) FROM payment_events WHERE payment_id=$1", pid)
+        assert confirms == 1, f"phai dung 1 confirmation evidence, co {confirms} ({r1},{r2})"
+        assert await _pay_status(conn, oid) == "confirmed"
+    finally:
+        await conn.close()
+        await c1.close()
+        await c2.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ingest_same_id(monkeypatch):
+    """315-03: cung event ID concurrent — same payload -> dung 1 created (con lai duplicate); diff payload -> conflict."""
+    import asyncio
+    setup = await _conn()
+    c1 = await _conn()
+    c2 = await _conn()
+    oid = None
+    try:
+        oid, _, _ = await _seed(setup)
+        eid = int(f"{int(time.time())%100000}0")
+        # same payload concurrent
+        evA = _event(oid, eid=eid)
+
+        async def _ing(cc, ev):
+            async with cc.transaction():
+                return await PI.ingest(cc, ev, mode="test")
+        (_, cr1, cf1), (_, cr2, cf2) = await asyncio.gather(_ing(c1, evA), _ing(c2, evA))
+        assert [cr1, cr2].count(True) == 1 and not (cf1 or cf2)   # dung 1 created, khong conflict
+        # diff payload concurrent (event moi, cung id) -> 1 created, 1 conflict
+        eid2 = int(f"{int(time.time())%100000}1")
+        evB1 = _event(oid, eid=eid2, amount=230000)
+        evB2 = _event(oid, eid=eid2, amount=111111)
+        (_, crb1, cfb1), (_, crb2, cfb2) = await asyncio.gather(_ing(c1, evB1), _ing(c2, evB2))
+        assert [crb1, crb2].count(True) == 1 and [cfb1, cfb2].count(True) == 1   # 1 created, 1 conflict
+    finally:
+        await setup.close()
+        await c1.close()
+        await c2.close()

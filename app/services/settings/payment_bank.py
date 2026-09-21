@@ -43,6 +43,30 @@ def _valid_account(v):
     return a
 
 
+def _valid_str_field(fields: dict, key: str, prev, *, required_nonempty: bool):
+    """Validate DETERMINISTIC (315-04): field co mat phai dung kieu chuoi; sai kieu/rong -> reject (khong im lang giu prev)."""
+    if key not in fields:
+        return prev
+    v = fields[key]
+    if v is None and not required_nonempty:
+        return None
+    if not isinstance(v, str):
+        raise BankSettingsError(f"{key} phai chuoi")
+    v = v.strip()
+    if required_nonempty and not v:
+        raise BankSettingsError(f"{key} rong")
+    return v
+
+
+def _valid_is_test(fields: dict, prev):
+    if "is_test" not in fields:
+        return prev
+    v = fields["is_test"]
+    if not isinstance(v, bool):   # 315-04: KHONG bool("false")==True; phai boolean that
+        raise BankSettingsError("is_test phai boolean")
+    return v
+
+
 async def get_active_bank(conn):
     return await conn.fetchrow(
         "SELECT id, bank, bin, holder_name, branch, account_number, is_test, active, version FROM bank_accounts "
@@ -76,11 +100,11 @@ async def update_public(conn, *, fields: dict, expected_version: int, actor: str
             raise BankSettingsError("chua co tai khoan bank active — nhap account (secret_write) truoc")
         if prev["version"] != expected_version:
             raise _S.SettingsConflict("version conflict (bank da doi) — tai lai")
-        bank = fields["bank"].strip() if isinstance(fields.get("bank"), str) and fields["bank"].strip() else prev["bank"]
-        holder = fields["holder_name"].strip() if isinstance(fields.get("holder_name"), str) and \
-            fields["holder_name"].strip() else prev["holder_name"]
-        branch = fields["branch"] if "branch" in fields else prev["branch"]
-        is_test = bool(fields["is_test"]) if "is_test" in fields else prev["is_test"]
+        # validate DETERMINISTIC truoc mutation (315-04): sai kieu -> reject, khong im lang giu prev/DB ep.
+        bank = _valid_str_field(fields, "bank", prev["bank"], required_nonempty=True)
+        holder = _valid_str_field(fields, "holder_name", prev["holder_name"], required_nonempty=True)
+        branch = _valid_str_field(fields, "branch", prev["branch"], required_nonempty=False)
+        is_test = _valid_is_test(fields, prev["is_test"])
         bin_code = _valid_bin(fields["bin"]) if "bin" in fields else prev["bin"]
         row = await _new_active(conn, prev=prev, account_number=prev["account_number"], bank=bank, bin_code=bin_code,
                                 holder_name=holder, branch=branch, is_test=is_test, actor=actor,
@@ -112,11 +136,34 @@ async def replace_account(conn, *, account_number: str, expected_version: int, a
             c = create or {}
             if not (c.get("bank") and c.get("holder_name")):
                 raise BankSettingsError("tao bank moi can bank + holder_name")
+            is_test = c["is_test"] if isinstance(c.get("is_test"), bool) else False   # KHONG ep chuoi -> bool
             row = await _new_active(conn, prev=None, account_number=acct, bank=c["bank"].strip(),
                                     bin_code=_valid_bin(c.get("bin")), holder_name=c["holder_name"].strip(),
-                                    branch=c.get("branch"), is_test=bool(c.get("is_test", False)), actor=actor,
-                                    action="bank.create")
+                                    branch=c.get("branch"), is_test=is_test, actor=actor, action="bank.create")
         return mask_bank(row)
 
     return await _S._run_command(conn, command_key=command_key, action="bank_account", integration_id=None,
+                                 payload_fp=fp, fn=_do)
+
+
+async def clear_account(conn, *, expected_version: int, actor: str, command_key: str) -> dict:
+    """CA 315-01: XOA (deactivate) tai khoan nhan hien hanh — explicit clear (blank/omitted KHONG phai clear).
+    Deactivate active row (GIU row cho FK historical instruction — snapshot BAT BIEN). Sau clear KHONG co active bank
+    -> generate_instruction fail-closed ('chua cau hinh tai khoan nhan'). CAS + command_key + audit redacted.
+    Quyen secret_write (account-scoped, co the bat lai bang cach nhap account moi — khong phai purge vinh vien)."""
+    fp = _S._payload_fp("bank_clear", None, {"v": expected_version})
+
+    async def _do():
+        prev = await conn.fetchrow("SELECT * FROM bank_accounts WHERE active FOR UPDATE")
+        if not prev:
+            raise _S.SettingsNotFound("khong co tai khoan bank active de xoa")
+        if prev["version"] != expected_version:
+            raise _S.SettingsConflict("version conflict (bank da doi) — tai lai")
+        await conn.execute("UPDATE bank_accounts SET active=false, updated_at=now() WHERE id=$1", prev["id"])
+        await audit_service.record(conn, actor_type="staff", action="bank.clear_account", actor_ref=actor,
+                                   entity_type="bank_accounts", entity_id=str(prev["id"]),
+                                   after={"cleared": True, "prev_version": prev["version"]})   # KHONG account
+        return {"cleared": True, "prev_version": prev["version"]}
+
+    return await _S._run_command(conn, command_key=command_key, action="bank_clear", integration_id=None,
                                  payload_fp=fp, fn=_do)

@@ -362,6 +362,12 @@ function PaymentSettings({ can, setMsg, setErr }) {
               {!hasBank && <><input placeholder="ngân hàng" value={pub.bank} onChange={(e) => setPub({ ...pub, bank: e.target.value })} /><input placeholder="chủ TK" value={pub.holder_name} onChange={(e) => setPub({ ...pub, holder_name: e.target.value })} /></>}
               <input placeholder="số tài khoản (6-19 số)" value={acct} onChange={(e) => setAcct(e.target.value)} />
               <button disabled={busy || !acct} onClick={() => run(() => apiFetch(`/dashboard/settings/payments/bank/account`, { method: "POST", body: withCmd(hasBank ? { expected_version: ver, account_number: acct } : { expected_version: 0, account_number: acct, create: { bank: pub.bank, holder_name: pub.holder_name, bin: pub.bin, is_test: pub.is_test } }) }).then(() => setAcct("")), "Đã lưu số tài khoản")}>Lưu số TK</button>
+              {hasBank && (
+                <button style={{ color: "#b71c1c" }} disabled={busy}
+                  title="Xóa (ngừng dùng) tài khoản nhận hiện hành — hướng dẫn CK mới sẽ bị khóa cho tới khi nhập lại"
+                  onClick={() => { if (confirm("Xóa tài khoản nhận hiện hành? Hướng dẫn chuyển khoản MỚI sẽ bị khóa (snapshot đã phát vẫn giữ). Cần nhập tài khoản mới để phát lại.")) run(() => apiFetch(`/dashboard/settings/payments/bank/account/clear`, { method: "POST", body: withCmd({ expected_version: ver }) }), "Đã xóa tài khoản nhận"); }}>
+                  Xóa tài khoản</button>
+              )}
             </div>
           </details>
         )}

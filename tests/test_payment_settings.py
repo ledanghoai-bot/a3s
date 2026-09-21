@@ -186,3 +186,115 @@ async def test_bank_field_level_cas_and_validation(monkeypatch):
     finally:
         await conn.execute("UPDATE bank_accounts SET active=false WHERE active")
         await conn.close()
+
+
+@pytest.mark.skipif(not DB, reason="can DB")
+@pytest.mark.asyncio
+async def test_bank_type_validation_reject_before_mutation(monkeypatch):
+    """315-04: is_test phai boolean that (khong ep 'false'->True); bank sai kieu -> reject."""
+    _crypto(monkeypatch)
+    from app.services.settings import payment_bank as B
+    conn = await _conn()
+    try:
+        await conn.execute("UPDATE bank_accounts SET active=false WHERE active")
+        async with conn.transaction():
+            m = await B.replace_account(conn, account_number="0071000123456", expected_version=0, actor="po",
+                                        command_key=_ck(), create={"bank": "VCB", "holder_name": "H"})
+        v = m["version"]
+        with pytest.raises(B.BankSettingsError):   # is_test chuoi "false"
+            async with conn.transaction():
+                await B.update_public(conn, fields={"is_test": "false"}, expected_version=v, actor="po",
+                                      command_key=_ck())
+        with pytest.raises(B.BankSettingsError):   # bank sai kieu
+            async with conn.transaction():
+                await B.update_public(conn, fields={"bank": 123}, expected_version=v, actor="po", command_key=_ck())
+    finally:
+        await conn.execute("UPDATE bank_accounts SET active=false WHERE active")
+        await conn.close()
+
+
+@pytest.mark.skipif(not DB, reason="can DB")
+@pytest.mark.asyncio
+async def test_bank_clear_explicit_historical_immutable(monkeypatch):
+    """315-01: explicit clear deactivate active; historical instruction snapshot BAT BIEN; instruction moi fail-closed."""
+    _crypto(monkeypatch)
+    import time as _t
+
+    from app.services.payment import payment_service as PS
+    from app.services.settings import payment_bank as B
+    conn = await _conn()
+    oid = None
+    try:
+        tag = f"BC-{int(_t.time()*1000)}"
+        cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+                                  f"tg:{tag}")
+        pidp = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
+                                   "VALUES($1,'CF',100000,999,300,'hu') RETURNING id", tag)
+        oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "
+                                  "VALUES($1,'confirmed',230000,'telegram_customer') RETURNING id", cid)
+        await conn.execute("INSERT INTO order_items(order_id,product_id,quantity,unit_price_vnd) VALUES($1,$2,1,230000)",
+                           oid, pidp)
+        await conn.execute("INSERT INTO payments(order_id,method,amount_due_vnd,status) "
+                           "VALUES($1,'BANK_TRANSFER',230000,'awaiting')", oid)
+        await conn.execute("UPDATE bank_accounts SET active=false WHERE active")
+        async with conn.transaction():
+            m = await B.replace_account(conn, account_number="0071000123456", expected_version=0, actor="po",
+                                        command_key=_ck(), create={"bank": "VCB", "holder_name": "H", "bin": "970415"})
+        # phat instruction (snapshot account)
+        instr = await PS.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i")
+        snap_before = await conn.fetchval("SELECT account_number_snapshot FROM payment_instructions WHERE id=$1",
+                                          instr["id"])
+        # clear (explicit) -> deactivate
+        async with conn.transaction():
+            r = await B.clear_account(conn, expected_version=m["version"], actor="po", command_key=_ck())
+        assert r["cleared"] is True
+        assert await B.get_active_bank(conn) is None   # khong con active
+        # historical instruction snapshot BAT BIEN
+        snap_after = await conn.fetchval("SELECT account_number_snapshot FROM payment_instructions WHERE id=$1",
+                                         instr["id"])
+        assert snap_after == snap_before == "0071000123456"
+        # instruction MOI fail-closed (chua co active bank)
+        with pytest.raises(PS.PaymentError):
+            await PS.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i2")
+        # clear lan 2 (khong con active) -> NotFound
+        with pytest.raises(S.SettingsNotFound):
+            async with conn.transaction():
+                await B.clear_account(conn, expected_version=m["version"], actor="po", command_key=_ck())
+    finally:
+        await conn.execute("UPDATE bank_accounts SET active=false WHERE active")
+        await conn.close()
+
+
+@pytest.mark.skipif(not DB, reason="can DB")
+@pytest.mark.asyncio
+async def test_concurrent_bank_update_one_win(monkeypatch):
+    """315-04: hai update_public dong thoi cung expected_version -> dung 1 thang, 1 conflict, 1 active row."""
+    import asyncio
+    _crypto(monkeypatch)
+    from app.services.settings import payment_bank as B
+    setup = await _conn()
+    c1 = await _conn()
+    c2 = await _conn()
+    try:
+        await setup.execute("UPDATE bank_accounts SET active=false WHERE active")
+        async with setup.transaction():
+            m = await B.replace_account(setup, account_number="0071000123456", expected_version=0, actor="po",
+                                        command_key=_ck(), create={"bank": "VCB", "holder_name": "H"})
+        v = m["version"]
+
+        async def _upd(cc, name):
+            try:
+                async with cc.transaction():
+                    return await B.update_public(cc, fields={"holder_name": name}, expected_version=v, actor="po",
+                                                 command_key=_ck())
+            except S.SettingsError:
+                return "conflict"
+        r1, r2 = await asyncio.gather(_upd(c1, "A"), _upd(c2, "B"))
+        assert [r1, r2].count("conflict") == 1, f"phai dung 1 conflict, {r1},{r2}"
+        n_active = await setup.fetchval("SELECT count(*) FROM bank_accounts WHERE active")
+        assert n_active == 1
+    finally:
+        await setup.execute("UPDATE bank_accounts SET active=false WHERE active")
+        await setup.close()
+        await c1.close()
+        await c2.close()
