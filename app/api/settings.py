@@ -176,9 +176,14 @@ async def purge_secret(integration_id: int, key_name: str, body: dict,
 # ---------------------------------------------------------------- test / enable / disable / archive
 @router.post("/integrations/{integration_id}/test-connection", dependencies=[Depends(require_permission(_P_TEST))])
 async def test_connection(integration_id: int, staff: dict = Depends(require_active_session)) -> dict:
-    # KHONG bao transaction o API: service tu quan ly HAI PHA (probe ngoai txn, khong giu row-lock — 307-04).
+    # KHONG bao transaction o API: service tu quan ly (GHN HAI PHA probe ngoai txn — 307-04; SePay readiness LOCAL).
     conn = await asyncpg.connect(_db_url())
     try:
+        prov = await conn.fetchval("SELECT provider FROM integrations WHERE id=$1", integration_id)
+        if prov is None:
+            raise HTTPException(status_code=404, detail="integration khong ton tai")
+        if prov == "sepay":
+            return await svc.sepay_readiness(conn, integration_id, actor=_actor(staff))   # D306 §8 (308-02)
         return await svc.test_connection(conn, integration_id, actor=_actor(staff))
     except svc.SettingsError as e:
         raise _map_err(e)

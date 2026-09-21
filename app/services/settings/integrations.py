@@ -426,6 +426,79 @@ async def test_connection(conn, integration_id: int, *, actor: str, post=None) -
     return result
 
 
+# ------------------------------------------------------------------ SePay readiness (D306 §8, honest — 308-02)
+async def sepay_readiness(conn, integration_id: int, *, actor: str) -> dict:
+    """SePay Test Mode readiness — TRUNG THUC (CA 308-02). SePay KHONG co endpoint read-only de xac thuc credential
+    offline, nen readiness CHI xac nhan: (1) secret decrypt/auth-tag PASS (đung key da luu, AAD-bound); (2) key ĐUNG
+    ĐINH DANG (looks_like_test_key); (3) cau hinh du: allowed_accounts + code_prefix. Trang thai = 'stored/decryptable
+    + config-complete', KHONG PHAI 'authenticated' (auth that xay ra khi SePay gui webhook ky bang key -> connector match).
+    Bind config_revision + secret_version; config/secret doi -> readiness het hieu luc (expiry). HAI PHA khong can (local)."""
+    async with conn.transaction():
+        r = await conn.fetchrow("SELECT * FROM integrations WHERE id=$1 FOR UPDATE", integration_id)
+        if not r:
+            raise SettingsNotFound("integration khong ton tai")
+        if r["provider"] != "sepay":
+            raise SettingsError("sepay_readiness: chi cho provider sepay")
+        cp = json.loads(r["config_public"]) if isinstance(r["config_public"], str) else (r["config_public"] or {})
+        sec_ver = await conn.fetchval(
+            "SELECT version FROM integration_secrets WHERE integration_id=$1 AND key_name='api_key'", integration_id)
+        # (1) decrypt — ConfigDecryptError -> fail closed (caller map)
+        key = None
+        try:
+            key = await _decrypt_secret(conn, integration_id, "sepay", "api_key")
+        except _c.ConfigDecryptError:
+            key = None
+            _decrypt_failed = True
+        else:
+            _decrypt_failed = False
+
+        from app.services.providers import sepay as _sp
+        allowed = cp.get("allowed_accounts")
+        allowed_ok = bool(allowed) and (isinstance(allowed, str) and allowed.strip()
+                                        or isinstance(allowed, list) and len(allowed) > 0)
+        prefix_ok = bool(cp.get("code_prefix"))
+        if _decrypt_failed:
+            result = {"ok": False, "authenticated": False, "error_class": "decrypt_failed"}
+        elif not key:
+            result = {"ok": False, "authenticated": False, "error_class": "not_configured"}
+        elif not _sp.looks_like_test_key(key):
+            result = {"ok": False, "authenticated": False, "error_class": "key_format"}
+        elif not allowed_ok:
+            result = {"ok": False, "authenticated": False, "error_class": "allowed_accounts_missing"}
+        elif not prefix_ok:
+            result = {"ok": False, "authenticated": False, "error_class": "code_prefix_missing"}
+        else:
+            # stored+decryptable+config-complete. KHONG claim authenticated (SePay khong verify offline duoc).
+            result = {"ok": True, "authenticated": False, "verified": "stored+decryptable+config-complete",
+                      "note": "readiness != authentication; auth xay ra khi SePay gui webhook ky bang key"}
+        await conn.execute(
+            "UPDATE integrations SET last_test_status=$2, last_test_at=now(), last_test_config_version=$3, "
+            "last_test_secret_version=$4, last_test_detail=$5::jsonb, updated_at=now() WHERE id=$1",
+            integration_id, "pass" if result["ok"] else "fail", r["config_revision"], sec_ver, json.dumps(result))
+        await _audit(conn, "settings.integration.test", actor, integration_id,
+                     {"provider": "sepay", "ok": result["ok"], "error_class": result.get("error_class"),
+                      "authenticated": False})
+    return result
+
+
+def vietqr_self_test(*, bin_code: str, account_number: str, amount_vnd: int, add_info: str) -> dict:
+    """CA 306/308 §8: build + decode VietQR payload LOCAL, verify CRC + khop BIN/account/amount/content.
+    KHONG chuyen tien, KHONG goi banking app. Tra REDACTED (account chi last4). Input sai kieu -> caller da 422
+    truoc khi goi (KHONG silent-substitute — 308-05)."""
+    from app.services.payment import vietqr as _vq
+    try:
+        _vq.validate_inputs(bin_code=bin_code, account_number=account_number, amount_vnd=amount_vnd, add_info=add_info)
+        payload = _vq.build_payload(bin_code=bin_code, account_number=account_number, amount_vnd=amount_vnd,
+                                    add_info=add_info)
+        dec = _vq.decode(payload)
+        match = (dec.bin_code == bin_code and dec.account_number == account_number
+                 and int(dec.amount_vnd) == int(amount_vnd) and dec.add_info == add_info)
+        return {"ok": bool(match), "bin": bin_code, "account_last4": account_number[-4:] if len(account_number) >= 4
+                else None, "crc_valid": True, "amount_vnd": amount_vnd}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error_class": type(e).__name__}
+
+
 # ------------------------------------------------------------------ enable / disable / archive
 async def enable(conn, integration_id: int, *, expected_version: int, actor: str, command_key: str) -> dict:
     """Bat CHI khi latest test PASS va khop config_revision + secret version hien hanh (CA 305-06, 307-05)."""
@@ -524,3 +597,17 @@ async def load_active_config(conn, provider: str, mode: str) -> dict:
             raise SettingsError(f"active integration thieu secret '{k}' — fail closed")
         secrets[k] = pt
     return {"source": "database", "enabled": True, "config": cp, "secrets": secrets, "integration_id": r["id"]}
+
+
+async def resolve_sepay_test_key(conn) -> str | None:
+    """CA 316-01: SePay Test api_key cho webhook runtime theo PRECEDENCE loader D305 (DB authoritative khi module ON).
+    - module OFF -> env baseline (settings.sepay_test_api_key).
+    - ON + active DB record -> key DB (load_active_config raise neu thieu secret/decrypt loi -> caller fail-closed).
+    - ON + no DB record -> env CHI khi settings_integrations_env_fallback; nguoc lai None (fail-closed reject).
+    KHONG log/tra plaintext; secret chi song trong pham vi verify request cua caller."""
+    cfg = await load_active_config(conn, "sepay", "test")
+    if cfg["source"] == "database":
+        return cfg["secrets"].get("api_key")
+    if cfg["source"] == "env":
+        return settings.sepay_test_api_key or None
+    return None   # source 'none' -> fail closed
