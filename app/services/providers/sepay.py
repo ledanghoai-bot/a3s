@@ -27,6 +27,16 @@ class SepayError(ValueError):
     pass
 
 
+def looks_like_test_key(key: str | None) -> bool:
+    """Kiem tra ĐINH DANG (co can cu) cua SePay Test API key — KHONG phai xac thuc voi SePay (offline khong the).
+    SePay Apikey la token opaque dai, khong khoang trang. Dung cho readiness 'stored/decryptable', khong claim authenticated.
+    Rang buoc: chuoi, >=16 ky tu, chi chu/so/-/_ (khong whitespace/control). Fail -> readiness key_format."""
+    if not isinstance(key, str):
+        return False
+    k = key.strip()
+    return len(k) >= 16 and k == key and re.fullmatch(r"[A-Za-z0-9_\-]{16,}", k) is not None
+
+
 def verify_test_auth(authorization: str | None, expected_key: str) -> bool:
     """Test Mode: 'Apikey <key>' so sanh hang so thoi gian. Thieu key cau hinh -> False (fail-closed)."""
     if not expected_key or not authorization:

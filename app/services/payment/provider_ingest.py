@@ -58,10 +58,23 @@ async def ingest(conn, ev: IncomingTransfer, *, mode: str = "test") -> tuple[int
     return int(old["id"]), False, conflict
 
 
-def _allowed_accounts(active_account: str | None) -> set[str]:
+async def _allowed_accounts(conn) -> set[str]:
+    """Gate account cho phep. MAC DINH env sepay_allowed_accounts (giu hanh vi M6/M7 khi module OFF — 308-03).
+    Khi settings_integrations_enabled ON + co active sepay integration -> UNION them config_public.allowed_accounts
+    tu Settings (CA 308-04, cau hinh qua Dashboard). Chi doc config_public (KHONG can secret)."""
     out = {a.strip() for a in (settings.sepay_allowed_accounts or "").split(",") if a.strip()}
-    if active_account:
-        out.add(active_account.strip())
+    if settings.settings_integrations_enabled:
+        row = await conn.fetchrow(
+            "SELECT config_public FROM integrations WHERE provider='sepay' AND mode='test' AND enabled "
+            "AND archived_at IS NULL ORDER BY id DESC LIMIT 1")
+        if row:
+            cp = row["config_public"]
+            cp = json.loads(cp) if isinstance(cp, str) else (cp or {})
+            aa = cp.get("allowed_accounts")
+            if isinstance(aa, str):
+                out |= {a.strip() for a in aa.split(",") if a.strip()}
+            elif isinstance(aa, list):
+                out |= {str(a).strip() for a in aa if str(a).strip()}
     return out
 
 
@@ -130,7 +143,7 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
         return await _unmatched("mode_not_test", state="ignored", order_exists=False)
     # CA 274-01: KHONG dung active bank. Config sepay_allowed_accounts CHI la gate phong ve khi duoc cau hinh;
     # rang buoc CHINH la snapshot cua instruction (account_number_snapshot) kiem o duoi.
-    allowed = _allowed_accounts(None)
+    allowed = await _allowed_accounts(conn)
     if allowed and (not ev.account_number or ev.account_number not in allowed):
         return await _unmatched("account_not_allowed")
     codes = _sp.extract_codes(ev.raw_minimal.get("code"), ev.content)
