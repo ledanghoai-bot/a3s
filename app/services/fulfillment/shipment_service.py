@@ -137,6 +137,7 @@ async def route_and_quote(conn, order_id: int, *, actor: str, ghn_result=None, o
                                 "province_code": route.province_code, "ward_code": route.ward_code},
                       "inputs": {"weight_g": weight}}
     fee, fee_status, rv, eta, qprov, att_reason = None, "quote_required", None, None, "manual", None
+    policy_version_col, quote_source_col = POLICY_VERSION, "auto_route"   # 338: fallback ghi de -> fallback_policy
     if route.source == _r.SELF_DELIVERY:
         zone = "bmt_inner"
         rule = _q.matched_rule(zone, weight, await _load_fee_rules(conn))
@@ -183,6 +184,25 @@ async def route_and_quote(conn, order_id: int, *, actor: str, ghn_result=None, o
             else:
                 att_reason = "provider_error" if res.reason.startswith("ghn_") and res.reason not in (
                     "ghn_disabled", "ghn_not_configured") else "quote"
+                # CA Amendment 338: API GHN khong dung duoc -> neu flag fallback ON, bao gia theo bang PO (KHONG
+                # retry provider sau ambiguous). Quote hop le tu API o tren -> KHONG toi day (khong fallback song song).
+                from app.config import settings as _st_fb
+                if _st_fb.ghn_fallback_enabled:
+                    from app.services.fulfillment import fallback_quote as _fb
+                    _policy = await _fb.load_policy(conn)
+                    if _policy:
+                        _fee, _reason, _detail = _fb.compute_fallback_fee(_policy, route.province_code, weight)
+                        if _fee is not None:
+                            fee, fee_status, eta = int(_fee), "quoted", _q.eta_text(zone)
+                            quote_source_col = "fallback_policy"
+                            policy_version_col = _policy["policy_version"]
+                            # snapshot: source fallback + policy/rounding version + inputs + API error reason (redacted)
+                            snapshot["fee"] = {**snapshot["fee"], **_detail, "fee_vnd": int(_fee),
+                                               "api_error_reason": res.reason}
+                            att_reason = "quote"   # van mo staff_attention (338 §3 audit/awareness)
+                        else:
+                            # thieu weight / khong phan loai duoc -> manual (fail-closed, khong bao so)
+                            snapshot["fee"] = {**snapshot["fee"], "fallback_reason": _reason}
     else:  # MANUAL_REVIEW
         zone = "unknown"
         att_reason = "address"
@@ -193,8 +213,8 @@ async def route_and_quote(conn, order_id: int, *, actor: str, ghn_result=None, o
         "routing_province_code=$12, routing_ward_code=$13, routing_reason=$14, routed_at=now(), quote_provider=$15, "
         "quote_snapshot=$16::jsonb, quoted_at=now(), version=version+1, updated_at=now() "
         "WHERE id=$1 AND version=$17 RETURNING *",
-        sh["id"], zone, weight, fee, fee_status, eta, POLICY_VERSION, rv, "auto_route", route.source, route.version,
-        route.province_code, route.ward_code, route.reason, qprov, _json.dumps(snapshot), sh["version"])
+        sh["id"], zone, weight, fee, fee_status, eta, policy_version_col, rv, quote_source_col, route.source,
+        route.version, route.province_code, route.ward_code, route.reason, qprov, _json.dumps(snapshot), sh["version"])
     if row is None:
         raise ShipmentError("version conflict (concurrent) — tai lai roi thu lai")
     await audit_service.record(conn, actor_type="system", action="shipment.route_quote", actor_ref=actor,
