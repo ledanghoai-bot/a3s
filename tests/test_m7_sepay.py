@@ -49,10 +49,13 @@ def test_parse_envelope_rejects(raw):
 
 
 def test_extract_codes():
+    # CA 322/323: order_id = token TOAN SO tach boi khoang trang (prefix-agnostic; noi dung sinh = "<PREFIX> <order_id>").
     assert sp.extract_codes(None, "3SCF 154") == [154]
-    assert sp.extract_codes("3SCF154", None) == [154]
+    assert sp.extract_codes(None, "SEVQR 154") == [154]                  # prefix bat ky
+    assert sp.extract_codes("SEVQR 0154", None) == [154]                 # 0* strip
     assert sp.extract_codes(None, "CK 3scf 0154 tien hang") == [154]
     assert sp.extract_codes(None, "3SCF 154 3SCF 155") == [154, 155]     # trung/nhieu ma -> staff
-    assert sp.extract_codes(None, "3SCF 154 va 3SCF 154") == [154]        # cung ma lap lai = 1
+    assert sp.extract_codes(None, "SEVQR 154 va SEVQR 154") == [154]     # cung ma lap lai = 1
     assert sp.extract_codes(None, "chuyen tien mua ca phe") == []
-    assert sp.extract_codes(None, "3SCF") == []
+    assert sp.extract_codes(None, "3SCF154") == []                       # dinh vao prefix (khong token so) -> khong tach
+    assert sp.extract_codes(None, "SEVQR") == []

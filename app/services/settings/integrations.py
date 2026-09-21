@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 
 import asyncpg
@@ -101,6 +102,19 @@ def _as_str(v, name) -> str:
 _GHN_REQUIRED = ("shop_id", "from_district_id", "from_ward_code", "timeout_seconds", "max_retries",
                  "light_max_g", "address_map_version")
 
+_CODE_PREFIX_RE = re.compile(r"^[A-Z0-9]{2,12}$")
+
+
+def validate_code_prefix(v):
+    """CA 322/323: prefix ma thanh toan — DETERMINISTIC, uppercase, [A-Z0-9]{2,12}, khong whitespace/control.
+    KHONG hard-code/suy dien theo bank. Rong/sai -> SettingsError. Tra ve gia tri chuan hoa (upper)."""
+    if not isinstance(v, str):
+        raise SettingsError("code_prefix phai chuoi")
+    s = v.strip().upper()
+    if not _CODE_PREFIX_RE.fullmatch(s):
+        raise SettingsError("code_prefix phai 2-12 ky tu A-Z/0-9 (khong khoang trang)")
+    return s
+
 
 def _validate_public(provider: str, config_public: dict) -> dict:
     """Chi giu field public trong allowlist + reject unknown/invalid (307-03). Cho phep partial (Save != Enable)."""
@@ -129,7 +143,31 @@ def _validate_public(provider: str, config_public: dict) -> dict:
             out["light_max_g"] = _as_int(out["light_max_g"], "light_max_g", lo=1, hi=2000000)
         if "address_map_version" in out:
             out["address_map_version"] = _as_int(out["address_map_version"], "address_map_version", lo=1)
+    if provider == "sepay":
+        # CA 323: code_prefix do Dashboard cau hinh — validate DETERMINISTIC, normalize upper. KHONG default/bank-specific.
+        if "code_prefix" in out and out["code_prefix"] is not None:
+            out["code_prefix"] = validate_code_prefix(out["code_prefix"])
+        if "allowed_accounts" in out and isinstance(out["allowed_accounts"], str):
+            out["allowed_accounts"] = out["allowed_accounts"].strip()
     return out
+
+
+async def effective_sepay_prefix(conn) -> str | None:
+    """CA 322/323: prefix hieu luc = code_prefix cua SePay integration non-archived (Dashboard). Nguon DUY NHAT,
+    khong hard-code/default/bank-specific. Khong co integration / prefix rong/sai -> None (caller fail-closed)."""
+    row = await conn.fetchrow(
+        "SELECT config_public FROM integrations WHERE provider='sepay' AND archived_at IS NULL ORDER BY id DESC LIMIT 1")
+    if not row:
+        return None
+    cp = row["config_public"]
+    cp = json.loads(cp) if isinstance(cp, str) else (cp or {})
+    raw = cp.get("code_prefix")
+    if not raw:
+        return None
+    try:
+        return validate_code_prefix(raw)
+    except SettingsError:
+        return None
 
 
 def _require_ghn_complete(config: dict) -> None:

@@ -153,8 +153,12 @@ async def vietqr_self_test(body: dict, staff: dict = Depends(require_active_sess
         bank = await banksvc.get_active_bank(conn)
         if not bank or not bank["bin"]:
             raise HTTPException(status_code=400, detail="chua co bank active co BIN (khong sinh duoc VietQR)")
+        # CA 323: prefix effective tu code_prefix (Dashboard), khong hard-code. Chua cau hinh -> 400.
+        prefix = await svc.effective_sepay_prefix(conn)
+        if not prefix:
+            raise HTTPException(status_code=400, detail="chua cau hinh code_prefix (SePay integration) — nhap prefix truoc")
         from app.services.payment import payment_service as pay
-        add_info = pay.transfer_content(order_id)
+        add_info = pay.transfer_content(order_id, prefix)
         return svc.vietqr_self_test(bin_code=str(bank["bin"]), account_number=bank["account_number"],
                                     amount_vnd=amount, add_info=add_info)
     finally:

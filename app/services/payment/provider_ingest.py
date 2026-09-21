@@ -185,6 +185,13 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
         return await _discrepancy("instruction_not_test", order_id=order_id, payment_id=pay["id"])
     if int(instr["order_id"]) != int(order_id):
         return await _discrepancy("instruction_order_mismatch", order_id=order_id, payment_id=pay["id"])
+    # CA 322/323: match theo SNAPSHOT instruction (khong regex/prefix global). Content webhook PHAI chua transfer_content
+    # snapshot (prefix + order) cua chinh instruction hien hanh -> foreign/wrong prefix fail-closed, khong cross-match
+    # prefix cu (3SCF) vs moi (SEVQR). Case-insensitive (ngan hang thuong upper).
+    _tc = str(instr["transfer_content"] or "").strip().upper()
+    _hay = f"{ev.content or ''} {ev.raw_minimal.get('code') or ''}".upper()
+    if not _tc or _tc not in _hay:
+        return await _discrepancy("transfer_content_snapshot_mismatch", order_id=order_id, payment_id=pay["id"])
     if pay["status"] not in ("awaiting", "reported", "discrepancy"):
         return await _unmatched(f"payment_closed_{pay['status']}", order_id=order_id, payment_id=pay["id"])
     if ev.amount_vnd is None or ev.amount_vnd <= 0:

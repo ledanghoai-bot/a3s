@@ -31,8 +31,29 @@ class PaymentError(Exception):
     """Fail-closed. Khong leak secret."""
 
 
-def transfer_content(order_id: int) -> str:
-    return f"3SCF {order_id}"
+# CA 324-01 §3.3: prefix compatibility CHI cho duong module-OFF (dormant baseline) — giu hanh vi CK M6/M7 pre-322.
+# KHONG dung lam nguon cho module-ON hoac SePay matching (matching theo snapshot instruction). Khi Settings module ON,
+# prefix effective CHI den tu Dashboard (code_prefix cua SePay integration).
+_LEGACY_COMPAT_PREFIX = "3SCF"
+
+
+def transfer_content(order_id: int, prefix: str) -> str:
+    """Noi dung CK = "<prefix> <order_id>". CA 322/323: prefix do Dashboard cau hinh (code_prefix cua SePay
+    integration), KHONG hard-code. Instruction luu snapshot bat bien; matching theo snapshot (khong regex global)."""
+    return f"{prefix} {order_id}"
+
+
+async def current_transfer_content(conn, order_id: int) -> str | None:
+    """Snapshot transfer_content cua instruction HIEN HANH cua order (binding fulfillment_conversations.instruction_id,
+    fallback instruction moi nhat cua payment). Dung cho DISPLAY (notify/status/reply) — KHONG re-derive prefix."""
+    cur_iid = await conn.fetchval("SELECT instruction_id FROM fulfillment_conversations WHERE order_id=$1", order_id)
+    if cur_iid is not None:
+        tc = await conn.fetchval("SELECT transfer_content FROM payment_instructions WHERE id=$1", cur_iid)
+        if tc is not None:
+            return tc
+    return await conn.fetchval(
+        "SELECT pi.transfer_content FROM payment_instructions pi JOIN payments p ON p.id=pi.payment_id "
+        "WHERE p.order_id=$1 ORDER BY pi.id DESC LIMIT 1", order_id)
 
 
 def _settle_status(method: str) -> str:
@@ -341,11 +362,14 @@ async def set_bank_account(conn, *, bank: str, account_number: str, holder_name:
     return dict(row)
 
 
-async def generate_instruction(conn, order_id: int, *, actor: str, command_key: str | None = None) -> dict:
+async def generate_instruction(conn, order_id: int, *, actor: str, command_key: str | None = None,
+                               code_prefix: str | None = None) -> dict:
     """Instruction CK bat bien (snapshot account version + noi dung tat dinh + VietQR payload).
     M7 (272 §3.3): command_key -> idempotent (replay tra DUNG row cu, khong tao instruction/QR thu 2); regenerate
     (command_key moi) tao version moi ro rang (instruction_version), KHONG sua noi dung da gui. Doi active bank
-    KHONG anh huong row cu. Thieu BIN -> qr_payload NULL (khong bia QR)."""
+    KHONG anh huong row cu. Thieu BIN -> qr_payload NULL (khong bia QR).
+    CA 322/323: prefix = code_prefix (neu goi truyen) HOAC code_prefix cua SePay integration (Dashboard). KHONG co
+    prefix hop le -> FAIL-CLOSED (khong hard-code/default). Snapshot transfer_content bat bien."""
     pay = await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1 FOR UPDATE", order_id)
     if not pay:
         raise PaymentError(f"payment cho order {order_id} chua ton tai")
@@ -360,10 +384,30 @@ async def generate_instruction(conn, order_id: int, *, actor: str, command_key: 
             out = dict(ex)
             out["duplicate"] = True
             return out
+    # CA 322/323/324-01: resolve effective code_prefix.
+    #  - caller truyen code_prefix -> dung (validate).
+    #  - Settings module ON -> Dashboard la NGUON DUY NHAT; missing/invalid -> FAIL-CLOSED cho instruction moi.
+    #  - Settings module OFF (dormant) -> LEGACY COMPAT PATH (324 §3.3): giu hanh vi CK M6/M7 baseline, khong lam
+    #    bank-transfer unusable truoc khi PO bat Dashboard. CHI cho module-OFF; KHONG phai source cho module-ON/matching
+    #    (connector OFF khi module OFF -> instruction chi de xac nhan thu cong).
+    from app.config import settings as _settings
+    from app.services.settings.integrations import (
+        effective_sepay_prefix,
+        validate_code_prefix,
+    )
+    if code_prefix is not None:
+        prefix = validate_code_prefix(code_prefix)
+    elif _settings.settings_integrations_enabled:
+        prefix = await effective_sepay_prefix(conn)
+        if not prefix:
+            raise PaymentError("chua cau hinh ma thanh toan (code_prefix) tren Dashboard — cau hinh SePay integration "
+                               "truoc khi phat huong dan chuyen khoan")
+    else:
+        prefix = _LEGACY_COMPAT_PREFIX
     acct = await conn.fetchrow("SELECT * FROM bank_accounts WHERE active")
     if not acct:
         raise PaymentError("chua cau hinh tai khoan nhan tien — chon COD hoac lien he nhan vien")
-    content = transfer_content(order_id)
+    content = transfer_content(order_id, prefix)
     qr_payload = None
     if acct["bin"]:
         from app.services.payment import vietqr as _vq

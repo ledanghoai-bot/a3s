@@ -43,7 +43,7 @@ async def _seed(conn, *, amount=230000):
     await conn.execute("UPDATE bank_accounts SET active=false WHERE active")
     await conn.execute("INSERT INTO bank_accounts(bank,account_number,holder_name,version,active,is_test,bin) "
                        "VALUES('VietinBank',$1,'SHOP TEST',999,true,true,$2)", ACCT, BIN)
-    instr = await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:instr")
+    instr = await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:instr", code_prefix="3SCF")
     return oid, instr, tag
 
 
@@ -134,7 +134,7 @@ async def test_stale_instruction_after_regenerate():
         oid, instr, tag = await _seed(conn)
         # regenerate instruction voi amount moi (doi active bank amount qua due) -> instruction moi la current
         await conn.execute("UPDATE payments SET amount_due_vnd=500000, version=version+1 WHERE order_id=$1", oid)
-        await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:instr2")
+        await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:instr2", code_prefix="3SCF")
         # event khop instruction CU (230000) -> khong khop current (500000) -> discrepancy, no confirm
         _, _, _, st = await _ingest_process(conn, _event(oid, amount=230000,
                                                         eid=int(f"{int(time.time())%100000}7")))
@@ -286,3 +286,104 @@ async def test_concurrent_ingest_same_id(monkeypatch):
         await setup.close()
         await c1.close()
         await c2.close()
+
+
+async def _seed_ob(conn, *, amount=230000):
+    """order + BANK_TRANSFER payment (amount_due) + active TEST bank — KHONG tao instruction (de resolver prefix)."""
+    tag = f"TP-{int(time.time()*1000)}-{os.urandom(2).hex()}"
+    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+                              f"tg:{tag}")
+    pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
+                              "VALUES($1,'CF',100000,999,300,'hu') RETURNING id", tag)
+    oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "
+                              "VALUES($1,'confirmed',$2,'telegram_customer') RETURNING id", cid, amount)
+    await conn.execute("INSERT INTO order_items(order_id,product_id,quantity,unit_price_vnd) VALUES($1,$2,1,$3)",
+                       oid, pid, amount)
+    await conn.execute("INSERT INTO payments(order_id,method,amount_due_vnd,status) "
+                       "VALUES($1,'BANK_TRANSFER',$2,'awaiting')", oid, amount)
+    await conn.execute("UPDATE bank_accounts SET active=false WHERE active")
+    await conn.execute("INSERT INTO bank_accounts(bank,account_number,holder_name,version,active,is_test,bin) "
+                       "VALUES('VietinBank',$1,'SHOP TEST',999,true,true,$2)", ACCT, BIN)
+    return oid, tag
+
+
+@pytest.mark.asyncio
+async def test_two_dashboard_prefixes_end_to_end_no_cross_match(monkeypatch):
+    """CA 323 §3: prefix do Dashboard (SEVQR & 3SCF) đi xuyên Dashboard->instruction->webhook exact match;
+    đổi prefix giữ snapshot cũ/mới riêng biệt, KHÔNG cross-match; foreign prefix fail-closed. (module ON: Dashboard authoritative)"""
+    from app.services.settings import integrations as S
+    monkeypatch.setattr(settings, "settings_integrations_enabled", True)   # CA 324: module ON -> Dashboard la nguon prefix
+    monkeypatch.setattr(settings, "sepay_allowed_accounts", "")
+    conn = await _conn()
+    iid = None
+    n = int(time.time()) % 100000
+    try:
+        async with conn.transaction():
+            it = await S.create_integration(conn, kind="payment", provider="sepay", label="SP", mode="test",
+                                            config_public={"code_prefix": "SEVQR", "allowed_accounts": ACCT},
+                                            actor="po", command_key=f"tp-{os.urandom(3).hex()}")
+        iid = it["id"]
+        await conn.execute("UPDATE integrations SET enabled=true WHERE id=$1", iid)   # active -> allowed_accounts DB authoritative
+        # order A: instruction resolves prefix SEVQR (Dashboard) -> "SEVQR <oid>"
+        oidA, tagA = await _seed_ob(conn)
+        instrA = await P.generate_instruction(conn, oidA, actor="t", command_key=f"{tagA}:i")
+        assert instrA["transfer_content"] == f"SEVQR {oidA}"
+        _, _, _, st = await _ingest_process(conn, _event(oidA, content=f"SEVQR {oidA}", eid=int(f"{n}11")))
+        assert st == "matched" and await _pay_status(conn, oidA) == "confirmed"
+        # order B (SEVQR instr) nhưng webhook prefix FOREIGN "3SCF" -> snapshot mismatch, no confirm
+        oidB, tagB = await _seed_ob(conn)
+        await P.generate_instruction(conn, oidB, actor="t", command_key=f"{tagB}:i")
+        _, _, _, stB = await _ingest_process(conn, _event(oidB, content=f"3SCF {oidB}", eid=int(f"{n}12")))
+        assert stB == "discrepancy" and await _pay_status(conn, oidB) != "confirmed"
+        # đổi Dashboard prefix -> 3SCF
+        d = await S.get_integration(conn, iid)
+        async with conn.transaction():
+            await S.update_public(conn, iid, label=None,
+                                  config_public={"code_prefix": "3SCF", "allowed_accounts": ACCT},
+                                  expected_version=d["version"], actor="po", command_key=f"tp-{os.urandom(3).hex()}")
+        # order C: instruction resolves prefix 3SCF (mới) -> "3SCF <oid>"
+        oidC, tagC = await _seed_ob(conn)
+        instrC = await P.generate_instruction(conn, oidC, actor="t", command_key=f"{tagC}:i")
+        assert instrC["transfer_content"] == f"3SCF {oidC}"
+        _, _, _, stC = await _ingest_process(conn, _event(oidC, content=f"3SCF {oidC}", eid=int(f"{n}13")))
+        assert stC == "matched" and await _pay_status(conn, oidC) == "confirmed"
+        # order D (3SCF instr) webhook FOREIGN "SEVQR" -> mismatch, no confirm (no cross-match prefix cũ)
+        oidD, tagD = await _seed_ob(conn)
+        await P.generate_instruction(conn, oidD, actor="t", command_key=f"{tagD}:i")
+        _, _, _, stD = await _ingest_process(conn, _event(oidD, content=f"SEVQR {oidD}", eid=int(f"{n}14")))
+        assert stD == "discrepancy" and await _pay_status(conn, oidD) != "confirmed"
+    finally:
+        if iid:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM integration_commands WHERE integration_id=$1", iid)
+                await conn.execute("DELETE FROM integrations WHERE id=$1", iid)
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_module_on_missing_prefix_fail_closed(monkeypatch):
+    """CA 324 §3.2: module ON + không có Dashboard prefix -> generate_instruction fail-closed (không default)."""
+    monkeypatch.setattr(settings, "settings_integrations_enabled", True)
+    conn = await _conn()
+    try:
+        await conn.execute("UPDATE integrations SET archived_at=now() WHERE provider='sepay' AND archived_at IS NULL")
+        oid, tag = await _seed_ob(conn)
+        with pytest.raises(P.PaymentError):
+            await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i")
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_module_off_legacy_baseline_bank_transfer_works(monkeypatch):
+    """CA 324-01 §3.1/§4: module OFF + 0 SePay integration -> CK/M6-M7 instruction VAN tao duoc (legacy compat baseline),
+    KHONG raise loi, KHONG yeu cau Dashboard config (giu dormant behavior)."""
+    monkeypatch.setattr(settings, "settings_integrations_enabled", False)   # dormant
+    conn = await _conn()
+    try:
+        await conn.execute("UPDATE integrations SET archived_at=now() WHERE provider='sepay' AND archived_at IS NULL")
+        oid, tag = await _seed_ob(conn)
+        instr = await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i")   # KHONG code_prefix
+        assert instr["transfer_content"] == f"3SCF {oid}"   # legacy compat prefix giu nguyen baseline
+    finally:
+        await conn.close()

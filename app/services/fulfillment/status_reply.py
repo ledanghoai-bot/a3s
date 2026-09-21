@@ -3,8 +3,6 @@ va tra text TAT DINH — KHONG de model tu nhan "da thanh toan". Read-only. None
 caller fall-through hanh vi cu (handoff)."""
 from __future__ import annotations
 
-from app.services.payment.payment_service import transfer_content
-
 
 def _vnd(n: int | None) -> str:
     return "-" if n is None else f"{n:,}".replace(",", ".") + "đ"
@@ -50,7 +48,9 @@ def format_status(row: dict) -> str:
                 "reconciled": "Đã thanh toán (COD đã đối soát)."}
         parts.append(" " + pmap.get(pstat, "Thanh toán: COD."))
     elif method == "BANK_TRANSFER":
-        pmap = {"awaiting": f"Thanh toán: chuyển khoản (nội dung: {transfer_content(oid)}).",
+        _tc = row.get("transfer_content")   # CA 323: snapshot instruction, khong re-derive prefix
+        _awaiting = (f"Thanh toán: chuyển khoản (nội dung: {_tc})." if _tc else "Thanh toán: chuyển khoản.")
+        pmap = {"awaiting": _awaiting,
                 "reported": "Anh/chị đã báo chuyển khoản, shop đang kiểm tra.",
                 "confirmed": "Đã nhận thanh toán chuyển khoản."}
         parts.append(" " + pmap.get(pstat, "Thanh toán: chuyển khoản."))
@@ -69,7 +69,9 @@ async def order_status_reply(psid: str) -> str | None:
             return None
         row = await conn.fetchrow(
             "SELECT o.id, o.status AS order_status, s.status AS ship_status, s.carrier, s.tracking_text, "
-            "s.eta_text, s.delivery_fee_vnd, s.fee_status, p.method, p.status AS pay_status, p.amount_due_vnd "
+            "s.eta_text, s.delivery_fee_vnd, s.fee_status, p.method, p.status AS pay_status, p.amount_due_vnd, "
+            "(SELECT pi.transfer_content FROM payment_instructions pi WHERE pi.payment_id=p.id "
+            " ORDER BY pi.id DESC LIMIT 1) AS transfer_content "
             "FROM orders o LEFT JOIN shipments s ON s.order_id=o.id LEFT JOIN payments p ON p.order_id=o.id "
             "WHERE o.customer_id=$1 AND (s.id IS NOT NULL OR p.id IS NOT NULL) "
             "ORDER BY o.created_at DESC LIMIT 1", cid)

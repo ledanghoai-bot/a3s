@@ -241,7 +241,7 @@ async def test_bank_clear_explicit_historical_immutable(monkeypatch):
             m = await B.replace_account(conn, account_number="0071000123456", expected_version=0, actor="po",
                                         command_key=_ck(), create={"bank": "VCB", "holder_name": "H", "bin": "970415"})
         # phat instruction (snapshot account)
-        instr = await PS.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i")
+        instr = await PS.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i", code_prefix="3SCF")
         snap_before = await conn.fetchval("SELECT account_number_snapshot FROM payment_instructions WHERE id=$1",
                                           instr["id"])
         # clear (explicit) -> deactivate
@@ -255,7 +255,7 @@ async def test_bank_clear_explicit_historical_immutable(monkeypatch):
         assert snap_after == snap_before == "0071000123456"
         # instruction MOI fail-closed (chua co active bank)
         with pytest.raises(PS.PaymentError):
-            await PS.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i2")
+            await PS.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i2", code_prefix="3SCF")
         # clear lan 2 (khong con active) -> NotFound
         with pytest.raises(S.SettingsNotFound):
             async with conn.transaction():

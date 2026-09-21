@@ -18,7 +18,10 @@ from typing import Any
 from app.services.providers.base import IncomingTransfer, payload_hash
 
 PROVIDER = "sepay"
-_CODE_RE = re.compile(r"3SCF\s*0*(\d{1,12})", re.IGNORECASE)
+# CA 322/323: prefix do Dashboard cau hinh (khong hard-code, co the chua so vd '3SCF'). Noi dung sinh = "<PREFIX> <order_id>".
+# Tach order_id = token TOAN SO phan tach boi khoang trang (khong dinh vao prefix). Binding CHINH XAC theo snapshot
+# instruction o provider_ingest (khong tin regex global) -> foreign prefix/wrong content fail-closed.
+_CODE_RE = re.compile(r"(?:^|\s)0*(\d{1,12})(?=\s|$)")
 _KEEP = ("id", "gateway", "transactionDate", "accountNumber", "code", "content", "transferType", "transferAmount",
          "subAccount", "referenceCode", "description")
 
@@ -48,7 +51,8 @@ def verify_test_auth(authorization: str | None, expected_key: str) -> bool:
 
 
 def extract_codes(*texts: str | None) -> list[int]:
-    """Tat ca ma don `3SCF <id>` tim thay (de phat hien TRUNG ma -> staff)."""
+    """Tat ca order_id tim thay sau prefix-token bat ky (de phat hien TRUNG ma -> staff). Prefix cu the do
+    Dashboard cau hinh; binding chinh xac theo snapshot instruction (provider_ingest)."""
     out: list[int] = []
     for t in texts:
         if not t:

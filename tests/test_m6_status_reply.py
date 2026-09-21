@@ -6,7 +6,7 @@ from app.services.fulfillment.status_reply import format_status
 def _row(**kw):
     base = {"id": 42, "order_status": "confirmed", "ship_status": None, "carrier": None,
             "tracking_text": None, "eta_text": None, "delivery_fee_vnd": None, "fee_status": "unknown",
-            "method": None, "pay_status": None, "amount_due_vnd": None}
+            "method": None, "pay_status": None, "amount_due_vnd": None, "transfer_content": None}
     base.update(kw)
     return base
 
@@ -43,8 +43,9 @@ def test_cod_reconciled_paid():
 
 
 def test_transfer_awaiting_shows_deterministic_content_not_paid():
-    s = format_status(_row(id=99, method="BANK_TRANSFER", pay_status="awaiting"))
-    assert "3SCF 99" in s and "Đã nhận thanh toán" not in s
+    # CA 323: nội dung CK = snapshot instruction (row.transfer_content), không re-derive prefix hard-code
+    s = format_status(_row(id=99, method="BANK_TRANSFER", pay_status="awaiting", transfer_content="SEVQR 99"))
+    assert "SEVQR 99" in s and "Đã nhận thanh toán" not in s
 
 
 def test_transfer_reported_not_confirmed():
