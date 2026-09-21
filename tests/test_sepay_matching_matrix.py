@@ -387,3 +387,118 @@ async def test_module_off_legacy_baseline_bank_transfer_works(monkeypatch):
         assert instr["transfer_content"] == f"3SCF {oid}"   # legacy compat prefix giu nguyen baseline
     finally:
         await conn.close()
+
+
+# ============================ CA Directive 331: S0 tester REAL-BANK auto-confirm ============================
+def _m7_tester(monkeypatch, cid):
+    monkeypatch.setattr(settings, "m7_conversational_fulfillment", True)
+    monkeypatch.setattr(settings, "m7_conversational_scope", "tester")
+    monkeypatch.setattr(settings, "m7_tester_customer_ids", str(cid))
+
+
+async def _seed_realbank(conn, *, amount=170000):
+    """order + BANK_TRANSFER + active bank is_test=FALSE (thật) + instruction is_test=false (prefix SEVQR explicit)."""
+    tag = f"RB-{int(time.time()*1000)}-{os.urandom(2).hex()}"
+    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+                              f"tg:{tag}")
+    pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
+                              "VALUES($1,'CF',100000,999,300,'hu') RETURNING id", tag)
+    oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "
+                              "VALUES($1,'confirmed',$2,'telegram_customer') RETURNING id", cid, amount)
+    await conn.execute("INSERT INTO order_items(order_id,product_id,quantity,unit_price_vnd) VALUES($1,$2,1,$3)",
+                       oid, pid, amount)
+    await conn.execute("INSERT INTO payments(order_id,method,amount_due_vnd,status) "
+                       "VALUES($1,'BANK_TRANSFER',$2,'awaiting')", oid, amount)
+    await conn.execute("UPDATE bank_accounts SET active=false WHERE active")
+    await conn.execute("INSERT INTO bank_accounts(bank,account_number,holder_name,version,active,is_test,bin) "
+                       "VALUES('Vietinbank',$1,'SHOP THAT',999,true,false,$2)", ACCT, BIN)   # is_test=FALSE
+    instr = await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i", code_prefix="SEVQR")
+    assert instr["is_test"] is False and instr["transfer_content"] == f"SEVQR {oid}"
+    return oid, cid, tag
+
+
+def _rb_event(oid, *, amount=170000, account=ACCT, eid=None):
+    # content dang THAT: bank prepend ref + SEVQR <oid> (chung minh extraction chiu duoc)
+    return _event(oid, amount=amount, account=account, eid=eid, content=f"502D609218GGZCV7 SEVQR {oid}")
+
+
+@pytest.mark.asyncio
+async def test_331_tester_realbank_exact_autoconfirm(monkeypatch):
+    """331 §3.1: tester PO + connector ON + live OFF + real-bank is_test=false + exact -> auto-confirm 1 lan."""
+    monkeypatch.setattr(settings, "m7_sepay_test_connector", True)
+    monkeypatch.setattr(settings, "sepay_live_enabled", False)
+    conn = await _conn()
+    try:
+        oid, cid, tag = await _seed_realbank(conn)
+        _m7_tester(monkeypatch, cid)
+        _, _, _, st = await _ingest_process(conn, _rb_event(oid, eid=int(f"{int(time.time())%100000}31")))
+        assert st == "matched" and await _pay_status(conn, oid) == "confirmed"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_331_non_tester_realbank_no_autoconfirm(monkeypatch):
+    """331 §3.2: cùng điều kiện nhưng order KHÔNG thuộc tester scope -> zero auto-confirm (instruction_not_test)."""
+    monkeypatch.setattr(settings, "m7_sepay_test_connector", True)
+    monkeypatch.setattr(settings, "sepay_live_enabled", False)
+    conn = await _conn()
+    try:
+        oid, cid, tag = await _seed_realbank(conn)
+        _m7_tester(monkeypatch, cid + 999999)   # allowlist KHÁC -> order khong thuoc tester
+        _, _, _, st = await _ingest_process(conn, _rb_event(oid, eid=int(f"{int(time.time())%100000}32")))
+        assert st == "discrepancy" and await _pay_status(conn, oid) != "confirmed"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_331_connector_off_realbank_no_autoconfirm(monkeypatch):
+    """331 §3.3/§1: connector OFF -> gate không thỏa -> is_test=false vẫn escalate (không auto-confirm)."""
+    monkeypatch.setattr(settings, "m7_sepay_test_connector", False)   # connector OFF
+    monkeypatch.setattr(settings, "sepay_live_enabled", False)
+    conn = await _conn()
+    try:
+        oid, cid, tag = await _seed_realbank(conn)
+        _m7_tester(monkeypatch, cid)
+        _, _, _, st = await _ingest_process(conn, _rb_event(oid, eid=int(f"{int(time.time())%100000}33")))
+        assert st == "discrepancy" and await _pay_status(conn, oid) != "confirmed"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_331_live_flag_on_realbank_no_autoconfirm(monkeypatch):
+    """331 §1: sepay_live_enabled ON -> gate không thỏa -> escalate (không auto-confirm real-bank)."""
+    monkeypatch.setattr(settings, "m7_sepay_test_connector", True)
+    monkeypatch.setattr(settings, "sepay_live_enabled", True)   # live ON -> reject real-bank auto-confirm
+    conn = await _conn()
+    try:
+        oid, cid, tag = await _seed_realbank(conn)
+        _m7_tester(monkeypatch, cid)
+        _, _, _, st = await _ingest_process(conn, _rb_event(oid, eid=int(f"{int(time.time())%100000}34")))
+        assert st == "discrepancy" and await _pay_status(conn, oid) != "confirmed"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_331_tester_realbank_mismatch_failclosed(monkeypatch):
+    """331 §3.4: tester real-bank nhưng amount/content sai -> vẫn fail-closed (no false-positive)."""
+    monkeypatch.setattr(settings, "m7_sepay_test_connector", True)
+    monkeypatch.setattr(settings, "sepay_live_enabled", False)
+    conn = await _conn()
+    try:
+        # wrong amount
+        oid, cid, tag = await _seed_realbank(conn)
+        _m7_tester(monkeypatch, cid)
+        _, _, _, st = await _ingest_process(conn, _rb_event(oid, amount=99999, eid=int(f"{int(time.time())%100000}35")))
+        assert st == "discrepancy" and await _pay_status(conn, oid) != "confirmed"
+        # foreign prefix (3SCF) -> snapshot mismatch
+        oid2, cid2, tag2 = await _seed_realbank(conn)
+        _m7_tester(monkeypatch, cid2)
+        _, _, _, st2 = await _ingest_process(conn, _event(oid2, content=f"3SCF {oid2}",
+                                                          eid=int(f"{int(time.time())%100000}36")))
+        assert st2 == "discrepancy" and await _pay_status(conn, oid2) != "confirmed"
+    finally:
+        await conn.close()
