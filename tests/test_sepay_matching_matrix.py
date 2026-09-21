@@ -308,10 +308,12 @@ async def _seed_ob(conn, *, amount=230000):
 
 
 @pytest.mark.asyncio
-async def test_two_dashboard_prefixes_end_to_end_no_cross_match():
+async def test_two_dashboard_prefixes_end_to_end_no_cross_match(monkeypatch):
     """CA 323 §3: prefix do Dashboard (SEVQR & 3SCF) đi xuyên Dashboard->instruction->webhook exact match;
-    đổi prefix giữ snapshot cũ/mới riêng biệt, KHÔNG cross-match; foreign prefix fail-closed."""
+    đổi prefix giữ snapshot cũ/mới riêng biệt, KHÔNG cross-match; foreign prefix fail-closed. (module ON: Dashboard authoritative)"""
     from app.services.settings import integrations as S
+    monkeypatch.setattr(settings, "settings_integrations_enabled", True)   # CA 324: module ON -> Dashboard la nguon prefix
+    monkeypatch.setattr(settings, "sepay_allowed_accounts", "")
     conn = await _conn()
     iid = None
     n = int(time.time()) % 100000
@@ -321,6 +323,7 @@ async def test_two_dashboard_prefixes_end_to_end_no_cross_match():
                                             config_public={"code_prefix": "SEVQR", "allowed_accounts": ACCT},
                                             actor="po", command_key=f"tp-{os.urandom(3).hex()}")
         iid = it["id"]
+        await conn.execute("UPDATE integrations SET enabled=true WHERE id=$1", iid)   # active -> allowed_accounts DB authoritative
         # order A: instruction resolves prefix SEVQR (Dashboard) -> "SEVQR <oid>"
         oidA, tagA = await _seed_ob(conn)
         instrA = await P.generate_instruction(conn, oidA, actor="t", command_key=f"{tagA}:i")
@@ -358,14 +361,29 @@ async def test_two_dashboard_prefixes_end_to_end_no_cross_match():
 
 
 @pytest.mark.asyncio
-async def test_generate_instruction_fail_closed_without_prefix():
-    """CA 323: không có code_prefix cấu hình -> generate_instruction fail-closed (không hard-code/default)."""
+async def test_module_on_missing_prefix_fail_closed(monkeypatch):
+    """CA 324 §3.2: module ON + không có Dashboard prefix -> generate_instruction fail-closed (không default)."""
+    monkeypatch.setattr(settings, "settings_integrations_enabled", True)
     conn = await _conn()
     try:
-        # đảm bảo không có sepay integration
         await conn.execute("UPDATE integrations SET archived_at=now() WHERE provider='sepay' AND archived_at IS NULL")
         oid, tag = await _seed_ob(conn)
         with pytest.raises(P.PaymentError):
             await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i")
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_module_off_legacy_baseline_bank_transfer_works(monkeypatch):
+    """CA 324-01 §3.1/§4: module OFF + 0 SePay integration -> CK/M6-M7 instruction VAN tao duoc (legacy compat baseline),
+    KHONG raise loi, KHONG yeu cau Dashboard config (giu dormant behavior)."""
+    monkeypatch.setattr(settings, "settings_integrations_enabled", False)   # dormant
+    conn = await _conn()
+    try:
+        await conn.execute("UPDATE integrations SET archived_at=now() WHERE provider='sepay' AND archived_at IS NULL")
+        oid, tag = await _seed_ob(conn)
+        instr = await P.generate_instruction(conn, oid, actor="t", command_key=f"{tag}:i")   # KHONG code_prefix
+        assert instr["transfer_content"] == f"3SCF {oid}"   # legacy compat prefix giu nguyen baseline
     finally:
         await conn.close()

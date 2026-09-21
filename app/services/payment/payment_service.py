@@ -31,6 +31,12 @@ class PaymentError(Exception):
     """Fail-closed. Khong leak secret."""
 
 
+# CA 324-01 §3.3: prefix compatibility CHI cho duong module-OFF (dormant baseline) — giu hanh vi CK M6/M7 pre-322.
+# KHONG dung lam nguon cho module-ON hoac SePay matching (matching theo snapshot instruction). Khi Settings module ON,
+# prefix effective CHI den tu Dashboard (code_prefix cua SePay integration).
+_LEGACY_COMPAT_PREFIX = "3SCF"
+
+
 def transfer_content(order_id: int, prefix: str) -> str:
     """Noi dung CK = "<prefix> <order_id>". CA 322/323: prefix do Dashboard cau hinh (code_prefix cua SePay
     integration), KHONG hard-code. Instruction luu snapshot bat bien; matching theo snapshot (khong regex global)."""
@@ -378,15 +384,26 @@ async def generate_instruction(conn, order_id: int, *, actor: str, command_key: 
             out = dict(ex)
             out["duplicate"] = True
             return out
-    # CA 322/323: resolve effective code_prefix (Dashboard). Fail-closed neu chua cau hinh (khong default).
+    # CA 322/323/324-01: resolve effective code_prefix.
+    #  - caller truyen code_prefix -> dung (validate).
+    #  - Settings module ON -> Dashboard la NGUON DUY NHAT; missing/invalid -> FAIL-CLOSED cho instruction moi.
+    #  - Settings module OFF (dormant) -> LEGACY COMPAT PATH (324 §3.3): giu hanh vi CK M6/M7 baseline, khong lam
+    #    bank-transfer unusable truoc khi PO bat Dashboard. CHI cho module-OFF; KHONG phai source cho module-ON/matching
+    #    (connector OFF khi module OFF -> instruction chi de xac nhan thu cong).
+    from app.config import settings as _settings
     from app.services.settings.integrations import (
         effective_sepay_prefix,
         validate_code_prefix,
     )
-    prefix = validate_code_prefix(code_prefix) if code_prefix is not None else await effective_sepay_prefix(conn)
-    if not prefix:
-        raise PaymentError("chua cau hinh ma thanh toan (code_prefix) — cau hinh SePay integration truoc khi phat "
-                           "huong dan chuyen khoan")
+    if code_prefix is not None:
+        prefix = validate_code_prefix(code_prefix)
+    elif _settings.settings_integrations_enabled:
+        prefix = await effective_sepay_prefix(conn)
+        if not prefix:
+            raise PaymentError("chua cau hinh ma thanh toan (code_prefix) tren Dashboard — cau hinh SePay integration "
+                               "truoc khi phat huong dan chuyen khoan")
+    else:
+        prefix = _LEGACY_COMPAT_PREFIX
     acct = await conn.fetchrow("SELECT * FROM bank_accounts WHERE active")
     if not acct:
         raise PaymentError("chua cau hinh tai khoan nhan tien — chon COD hoac lien he nhan vien")
