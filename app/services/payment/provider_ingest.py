@@ -180,9 +180,20 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
                                     pay["id"])
     if not instr:
         return await _discrepancy("no_current_instruction", order_id=order_id, payment_id=pay["id"])
-    # CA 274-01/275-03: C0 chi auto-confirm instruction TEST; non-test -> shared escalation (order-bound).
+    # CA 274-01/275-03: mac dinh C0 chi auto-confirm instruction TEST. CA 331 NGOAI LE — S0 tester REAL-BANK:
+    # cho instruction thoat (is_test=false) auto-confirm CHI KHI gate day du: connector test-mode ON + live OFF +
+    # provider event mode=test + order thuoc EXACT tester scope PO (SERVER-SIDE resolved identity qua customer_id cua
+    # order, KHONG tin webhook body — 331 §3.6). Nguoc lai -> escalate. is_test van giu trong data/snapshot/UI; KHONG
+    # dung mo S1/live/public.
     if not instr["is_test"]:
-        return await _discrepancy("instruction_not_test", order_id=order_id, payment_id=pay["id"])
+        from app.services.fulfillment.m7_scope import m7_enabled_for
+        order_cid = await conn.fetchval("SELECT customer_id FROM orders WHERE id=$1", order_id)
+        tester_realbank_ok = (bool(settings.m7_sepay_test_connector)
+                              and not bool(settings.sepay_live_enabled)
+                              and row["mode"] == "test"
+                              and m7_enabled_for(order_cid))
+        if not tester_realbank_ok:
+            return await _discrepancy("instruction_not_test", order_id=order_id, payment_id=pay["id"])
     if int(instr["order_id"]) != int(order_id):
         return await _discrepancy("instruction_order_mismatch", order_id=order_id, payment_id=pay["id"])
     # CA 322/323: match theo SNAPSHOT instruction (khong regex/prefix global). Content webhook PHAI chua transfer_content
