@@ -597,3 +597,17 @@ async def load_active_config(conn, provider: str, mode: str) -> dict:
             raise SettingsError(f"active integration thieu secret '{k}' — fail closed")
         secrets[k] = pt
     return {"source": "database", "enabled": True, "config": cp, "secrets": secrets, "integration_id": r["id"]}
+
+
+async def resolve_sepay_test_key(conn) -> str | None:
+    """CA 316-01: SePay Test api_key cho webhook runtime theo PRECEDENCE loader D305 (DB authoritative khi module ON).
+    - module OFF -> env baseline (settings.sepay_test_api_key).
+    - ON + active DB record -> key DB (load_active_config raise neu thieu secret/decrypt loi -> caller fail-closed).
+    - ON + no DB record -> env CHI khi settings_integrations_env_fallback; nguoc lai None (fail-closed reject).
+    KHONG log/tra plaintext; secret chi song trong pham vi verify request cua caller."""
+    cfg = await load_active_config(conn, "sepay", "test")
+    if cfg["source"] == "database":
+        return cfg["secrets"].get("api_key")
+    if cfg["source"] == "env":
+        return settings.sepay_test_api_key or None
+    return None   # source 'none' -> fail closed
