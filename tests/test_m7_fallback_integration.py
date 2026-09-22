@@ -80,7 +80,7 @@ async def test_ghn_fallback_applies_when_enabled(monkeypatch):
             snap = out["quote_snapshot"]
             snap = json.loads(snap) if isinstance(snap, str) else snap
             fee = snap["fee"]
-            for k in ("chargeable_weight_kg", "volumetric_weight_kg", "raw_volume_cm3", "packing_overhead_percent",
+            for k in ("chargeable_weight_kg", "provider_volumetric_weight_kg", "raw_volume_cm3", "packing_overhead_percent",
                       "api_error_reason", "quote_source"):
                 assert k in fee, k
             assert fee["quote_source"] == "fallback_policy"
@@ -292,7 +292,7 @@ async def test_api_quote_ok_used_no_fallback_and_request_snapshot(monkeypatch):
             out = await ship.route_and_quote(conn, oid, actor="t", ghn_result=res)
             assert int(out["delivery_fee_vnd"]) == 33000 and out["quote_source"] == "auto_route"   # API uu tien
             s = _snap(out)
-            assert s["request"]["dims_source"] == "packed_volume"
+            assert s["request"]["dims_source"] == "packed_volume_box"
             assert s["request"]["request_dims_cm"] == [14, 14, 14]
             assert s["request"]["request_fingerprint"] == s["fee"]["request_fingerprint"] == prov.calls[0].fingerprint()
         finally:
@@ -313,7 +313,8 @@ async def test_api_fail_fallback_uses_same_chargeable_inputs(monkeypatch):
         try:
             await _seed_routing(conn)
             await _set_packing(conn, 25)
-            # volumetric > actual: 3 x cube20 = 24000; x=25 -> 30000 -> 6kg; actual 300*3=0.9kg
+            # volumetric > actual: 3 x cube20 = 24000; x=25 -> packed 30000 -> hop gui GHN 32^3=32768 -> 6.5536kg;
+            # actual 300*3=0.9kg. 342-01: W = 32768/5000 (KHONG phai packed 30000/5000=6.0)
             oid = await _mk_order(conn, province="79", ward="26734", weight=300, qty=3, dims=(20, 20, 20))
             for reason in ("ghn_timeout", "ghn_http_429_code_na", "ghn_http_500_code_500", "ghn_schema_total"):
                 prov = _FakeProv(_fail(reason))
@@ -321,9 +322,12 @@ async def test_api_fail_fallback_uses_same_chargeable_inputs(monkeypatch):
                 out = await ship.route_and_quote(conn, oid, actor="t", ghn_result=res)
                 s = _snap(out)
                 assert out["quote_source"] == "fallback_policy", reason
-                assert s["request"]["chargeable_weight_kg"] == s["fee"]["chargeable_weight_kg"] == 6.0
-                assert s["fee"]["weight_basis"] == "volumetric" and s["fee"]["api_error_reason"] == reason
-                assert int(out["delivery_fee_vnd"]) == 40000 + 1 * 7000      # lien >5kg: ceil(6-5)=1
+                req = prov.calls[0]
+                sent_box = req.length_cm * req.width_cm * req.height_cm
+                assert sent_box == 32768 and s["request"]["provider_box_volume_cm3"] == sent_box
+                assert s["request"]["chargeable_weight_kg"] == s["fee"]["chargeable_weight_kg"] == sent_box / 5000
+                assert s["fee"]["weight_basis"] == "provider_volumetric" and s["fee"]["api_error_reason"] == reason
+                assert int(out["delivery_fee_vnd"]) == 40000 + 2 * 7000      # lien >5kg: ceil(6.5536-5)=2
         finally:
             await tr.rollback()
 
@@ -356,5 +360,43 @@ async def test_route_operation_replay_single_provider_effect_and_no_call_missing
             tag2 = await conn.fetchval("SELECT provider FROM fulfillment_route_operations WHERE order_id=$1 "
                                        "AND command_key='k341-b'", oid2)
             assert tag2 == "none"
+        finally:
+            await tr.rollback()
+
+
+@pytest.mark.asyncio
+async def test_342_api_fail_fallback_w_from_sent_box_threshold(monkeypatch):
+    """Vi du CA 342: 2 x cube10, x=10 -> packed 2200 nhung hop gui GHN 14^3=2744 -> W 0.5488kg -> bac 1kg (27000),
+    KHONG phai 0.44kg (25000). API OK va API loi deu ghi cung W tu hop da gui."""
+    from app.config import settings
+    from app.db_pool import get_pool
+    from app.services.fulfillment import conversation as fc
+    from app.services.fulfillment import shipment_service as ship
+    monkeypatch.setattr(settings, "ghn_fallback_enabled", True)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _seed_routing(conn)
+            await _set_packing(conn, 10)
+            oid = await _mk_order(conn, province="79", ward="26734", weight=100, qty=2, dims=(10, 10, 10))  # actual 0.2kg
+            prov = _FakeProv(_fail("ghn_timeout"))
+            res = await fc.prepare_ghn_quote(conn, oid, provider=prov)
+            out = await ship.route_and_quote(conn, oid, actor="t", ghn_result=res)
+            req = prov.calls[0]
+            sent = req.length_cm * req.width_cm * req.height_cm
+            s = _snap(out)
+            assert sent == 2744 and s["fee"]["packed_volume_cm3"] == 2200.0
+            assert s["fee"]["chargeable_weight_kg"] == s["request"]["chargeable_weight_kg"] == sent / 5000
+            assert out["quote_source"] == "fallback_policy" and int(out["delivery_fee_vnd"]) == 27000
+            # API OK: snapshot request cung W tu hop da gui
+            prov_ok = _FakeProv(_ok(31000))
+            res2 = await fc.prepare_ghn_quote(conn, oid, provider=prov_ok)
+            out2 = await ship.route_and_quote(conn, oid, actor="t", ghn_result=res2)
+            s2 = _snap(out2)
+            assert int(out2["delivery_fee_vnd"]) == 31000 and out2["quote_source"] == "auto_route"
+            assert s2["request"]["chargeable_weight_kg"] == sent / 5000
+            assert s2["request"]["provider_box_volume_cm3"] == prov_ok.calls[0].length_cm ** 3 == 2744
         finally:
             await tr.rollback()

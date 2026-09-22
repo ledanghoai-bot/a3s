@@ -80,13 +80,13 @@ def test_chargeable_actual_gt_volumetric():
     # cube 10cm N=1 -> vol 0.2kg; actual 2kg -> chargeable = actual 2kg
     w, r, d = fb.compute_chargeable_weight([_cube(10)], 2000, 0)
     assert r == "ok" and abs(w - 2.0) < 1e-9 and d["weight_basis"] == "actual_weight"
-    assert d["raw_volume_cm3"] == 1000.0 and abs(d["volumetric_weight_kg"] - 0.2) < 1e-9
+    assert d["raw_volume_cm3"] == 1000.0 and abs(d["provider_volumetric_weight_kg"] - 0.2) < 1e-9   # N=1: hop = 10^3
 
 
 def test_chargeable_volumetric_gt_actual():
     # cube 50cm N=1 -> raw 125000 -> vol 25kg; actual 0.5kg -> chargeable = 25kg
     w, r, d = fb.compute_chargeable_weight([_cube(50)], 500, 0)
-    assert r == "ok" and abs(w - 25.0) < 1e-9 and d["weight_basis"] == "volumetric"
+    assert r == "ok" and abs(w - 25.0) < 1e-9 and d["weight_basis"] == "provider_volumetric"
 
 
 def test_n1_no_packing_overhead_applied():
@@ -98,21 +98,22 @@ def test_n1_no_packing_overhead_applied():
 
 
 def test_packing_overhead_x0_vs_xpos_changes_tier():
-    # 2 cube 10cm raw=2000; actual 0.3kg. x=0 -> vol 0.4kg (bac 0.5=25000); x=100 -> vol 0.8kg (bac 1=27000)
+    # 2 cube 10cm raw=2000; actual 0.3kg. 342-01: W tu HOP gui GHN.
+    # x=0 -> packed 2000 -> hop 13^3=2197 -> 0.4394kg (bac 0.5=25000); x=100 -> packed 4000 -> hop 16^3=4096 -> 0.8192kg (bac 1)
     w0, _, d0 = fb.compute_chargeable_weight([_cube(10, q=2)], 300, 0)
     wx, _, dx = fb.compute_chargeable_weight([_cube(10, q=2)], 300, 100)
-    assert d0["packed_volume_cm3"] == 2000.0 and abs(w0 - 0.4) < 1e-9
-    assert dx["packed_volume_cm3"] == 4000.0 and abs(wx - 0.8) < 1e-9
+    assert d0["packed_volume_cm3"] == 2000.0 and d0["provider_box_volume_cm3"] == 2197 and abs(w0 - 2197 / 5000) < 1e-9
+    assert dx["packed_volume_cm3"] == 4000.0 and dx["provider_box_volume_cm3"] == 4096 and abs(wx - 4096 / 5000) < 1e-9
     assert fb.compute_fallback_fee(POLICY, OTHER, w0)[0] == 25000
     assert fb.compute_fallback_fee(POLICY, OTHER, wx)[0] == 27000
 
 
 def test_mixed_products_raw_volume_sum():
-    # [1x cube10=1000] + [3x cube20=3*8000=24000] = 25000; N=4 x=25 -> packed 31250 -> vol 6.25kg
+    # [1x cube10=1000] + [3x cube20=3*8000=24000] = 25000; N=4 x=25 -> packed 31250 -> hop 32^3=32768 -> 6.5536kg
     items = [_cube(10, q=1, pid=1), _cube(20, q=3, pid=2)]
     w, r, d = fb.compute_chargeable_weight(items, 1000, 25)
     assert r == "ok" and d["raw_volume_cm3"] == 25000.0 and d["total_quantity"] == 4
-    assert d["packed_volume_cm3"] == 31250.0 and abs(w - 6.25) < 1e-9
+    assert d["packed_volume_cm3"] == 31250.0 and d["provider_box_volume_cm3"] == 32768 and abs(w - 32768 / 5000) < 1e-9
     assert len(d["product_volumes"]) == 2
 
 
@@ -144,7 +145,8 @@ def test_quote_fallback_end_to_end_lien_tinh():
     assert d["route_class"] == "lien_tinh" and d["fee_vnd"] == 40000
     # snapshot audit day du (340 §1.4)
     for k in ("actual_weight_g", "raw_volume_cm3", "packing_overhead_percent", "packed_volume_cm3",
-              "volumetric_weight_kg", "chargeable_weight_kg", "product_volumes", "weight_basis"):
+              "provider_box_volume_cm3", "provider_volumetric_weight_kg", "chargeable_weight_kg", "product_volumes",
+              "weight_basis", "request_dims_cm", "chargeable_basis_version"):
         assert k in d, k
 
 
@@ -174,15 +176,15 @@ def test_box_dims_n1_uses_actual_product_dims():
     items = [{"product_id": 1, "quantity": 1, "length_cm": 30, "width_cm": 10, "height_cm": 5}]
     dims, reason, d = fb.ghn_request_dims(items, 500, 20)
     assert reason == "ok" and dims == (30, 10, 5)                   # N=1: kich thuoc that, KHONG ap x
-    assert d["request_box_volume_cm3"] == d["packed_volume_cm3"] == 1500.0
-    assert d["dims_source"] == "packed_volume" and d["box_shape_version"] == fb.BOX_SHAPE_VERSION
+    assert d["provider_box_volume_cm3"] == d["packed_volume_cm3"] == 1500.0
+    assert d["dims_source"] == "packed_volume_box" and d["box_shape_version"] == fb.BOX_SHAPE_VERSION
 
 
 def test_box_dims_n_gt_1_cube_ceil_covers_packed_volume():
     # 2 x cube10 = 2000; x=10 -> packed 2200 -> canh nho nhat side^3 >= 2200 la 14 (13^3=2197 < 2200)
     dims, reason, d = fb.ghn_request_dims([_cube(10, q=2)], 300, 10)
     assert reason == "ok" and dims == (14, 14, 14)
-    assert d["request_box_volume_cm3"] >= d["packed_volume_cm3"]
+    assert d["provider_box_volume_cm3"] >= d["packed_volume_cm3"]
     assert 13 ** 3 < d["packed_volume_cm3"]                          # canh NHO NHAT
     # packed dung bang lap phuong -> khong phong to
     dims2, _, _ = fb.ghn_request_dims([_cube(10, q=8)], 300, 0)      # raw 8000 = 20^3
@@ -214,3 +216,45 @@ def test_api_request_and_fallback_share_chargeable_inputs():
 def test_policy_version_mismatch_fail_closed():
     for bad in ({**POLICY, "rounding_version": "other_v9"}, {**POLICY, "packing_version": "other_v9"}):
         assert fb.compute_fallback_fee(bad, OTHER, 2)[:2] == (None, "policy_version_unsupported")
+
+
+# ============================ CA 342-01: W tu THE TICH HOP THUC GUI GHN (ca request lan fallback) ============================
+# actual thap (200g) -> volumetric hop quyet dinh. packed-based (sai, truoc 342) se cho bac thap hon o cac ca "above".
+_MIX = [{"product_id": 1, "quantity": 1, "length_cm": 10, "width_cm": 10, "height_cm": 10},
+        {"product_id": 2, "quantity": 1, "length_cm": 10, "width_cm": 10, "height_cm": 35}]      # raw 4500, N=2
+_CASES_342 = [
+    # (ten, items, x, hop mong doi, phi lien tinh mong doi, phi neu (sai) dung packed)
+    ("0.5 duoi  2xcube10 x=5  packed2100", [_cube(10, q=2)], 5, 13, 25000, 25000),
+    ("0.5 tren  2xcube10 x=10 packed2200", [_cube(10, q=2)], 10, 14, 27000, 25000),   # vi du CA 342
+    ("1kg duoi  mixed    x=5  packed4725", _MIX, 5, 17, 27000, 27000),
+    ("1kg tren  mixed    x=10 packed4950", _MIX, 10, 18, 29000, 27000),
+]
+
+
+def test_342_thresholds_fallback_uses_sent_box_volume():
+    for name, items, x, side, fee_exp, fee_packed in _CASES_342:
+        dims, reason, rd = fb.ghn_request_dims(items, 200, x)
+        assert reason == "ok" and dims == (side, side, side), name
+        sent = dims[0] * dims[1] * dims[2]
+        fee, _, qd = fb.quote_fallback(POLICY, OTHER, items, 200, x)
+        # invariant: fallback W == request W == hop gui GHN / 5000
+        assert qd["chargeable_weight_kg"] == rd["chargeable_weight_kg"] == sent / 5000, name
+        assert qd["provider_box_volume_cm3"] == sent and qd["weight_basis"] == "provider_volumetric", name
+        assert fee == fee_exp, (name, fee)
+        # packed van luu lam input dong goi, KHONG dung tinh W
+        assert qd["packed_volume_cm3"] < sent or qd["packed_volume_cm3"] == sent
+        assert fb.compute_fallback_fee(POLICY, OTHER, qd["packed_volumetric_weight_kg"])[0] == fee_packed, name
+
+
+def test_342_actual_dominates_when_heavier_than_box():
+    fee, _, d = fb.quote_fallback(POLICY, OTHER, [_cube(10, q=2)], 3000, 10)   # hop 14^3 -> 0.5488 < 3kg actual
+    assert d["weight_basis"] == "actual_weight" and d["chargeable_weight_kg"] == 3.0 and fee == 32000
+
+
+def test_342_snapshot_distinguishes_volumes_and_versions():
+    _, _, d = fb.ghn_request_dims([_cube(10, q=2)], 200, 10)
+    assert d["packed_volume_cm3"] == 2200.0 and d["provider_box_volume_cm3"] == 2744
+    assert abs(d["packed_volumetric_weight_kg"] - 0.44) < 1e-9
+    assert d["provider_volumetric_weight_kg"] == 2744 / 5000
+    assert d["box_shape_version"] == fb.BOX_SHAPE_VERSION
+    assert d["chargeable_basis_version"] == fb.CHARGEABLE_BASIS_VERSION == "provider_box_volumetric_v1"

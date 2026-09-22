@@ -20,6 +20,10 @@ PACKING_VERSION = "product_volume_overhead_v1"
 # CA Review 341-01: kich thuoc request GHN dung CHUNG input dong thung voi fallback. N=1 (1 dong, qty 1) -> kich thuoc
 # THAT cua san pham (the tich = packed, chinh xac); N>1 -> hop lap phuong canh nguyen nho nhat co the tich >= packed.
 BOX_SHAPE_VERSION = "single_actual_else_cube_ceil_v1"
+# CA Review 342-01: trong luong quy doi tinh tu THE TICH HOP THUC GUI GHN (L×W×H cua request), KHONG tu packed_volume.
+# W = max(actual, provider_box_volume/5000) dung cho CA request snapshot VA fallback fee. packed_volume chi la input dong goi.
+CHARGEABLE_BASIS_VERSION = "provider_box_volumetric_v1"
+VOLUMETRIC_DIVISOR = 5000.0
 
 
 async def load_policy(conn, policy_version: str = POLICY_VERSION) -> dict | None:
@@ -77,16 +81,25 @@ def compute_chargeable_weight(items: list[dict], actual_weight_g: int | None,
                           "length_cm": float(length), "width_cm": float(width), "height_cm": float(height)})
 
     packed_volume_cm3 = raw_volume_cm3 * (1.0 + x / 100.0) if total_qty > 1 else raw_volume_cm3
-    volumetric_weight_kg = packed_volume_cm3 / 5000.0
+    dims = box_dims(items, packed_volume_cm3)
+    if dims is None:
+        return None, "box_invalid", {}
+    # CA 342-01: volumetric tu hop THUC gui GHN (cung dims request), khong tu packed.
+    provider_box_volume_cm3 = dims[0] * dims[1] * dims[2]
+    provider_volumetric_weight_kg = provider_box_volume_cm3 / VOLUMETRIC_DIVISOR
     actual_weight_kg = actual_weight_g / 1000.0
-    chargeable_weight_kg = max(actual_weight_kg, volumetric_weight_kg)
+    chargeable_weight_kg = max(actual_weight_kg, provider_volumetric_weight_kg)
     detail = {
         "actual_weight_g": int(actual_weight_g), "actual_weight_kg": actual_weight_kg,
         "product_volumes": vol_lines, "total_quantity": total_qty,
         "raw_volume_cm3": raw_volume_cm3, "packing_overhead_percent": x,
-        "packed_volume_cm3": packed_volume_cm3, "volumetric_weight_kg": volumetric_weight_kg,
+        "packed_volume_cm3": packed_volume_cm3,                              # input dong goi (khong dung tinh W)
+        "packed_volumetric_weight_kg": packed_volume_cm3 / VOLUMETRIC_DIVISOR,   # chi tham chieu
+        "request_dims_cm": list(dims), "provider_box_volume_cm3": provider_box_volume_cm3,
+        "provider_volumetric_weight_kg": provider_volumetric_weight_kg,
         "chargeable_weight_kg": chargeable_weight_kg,
-        "weight_basis": "volumetric" if volumetric_weight_kg > actual_weight_kg else "actual_weight",
+        "weight_basis": "provider_volumetric" if provider_volumetric_weight_kg > actual_weight_kg else "actual_weight",
+        "box_shape_version": BOX_SHAPE_VERSION, "chargeable_basis_version": CHARGEABLE_BASIS_VERSION,
     }
     return chargeable_weight_kg, "ok", detail
 
@@ -158,13 +171,9 @@ def ghn_request_dims(items: list[dict], actual_weight_g: int | None, packing_ove
     w_kg, reason, d = compute_chargeable_weight(items, actual_weight_g, packing_overhead_percent)
     if w_kg is None:
         return None, reason, {"dims_source": None, "packing_reason": reason}
-    dims = box_dims(items, d["packed_volume_cm3"])
-    if dims is None:
-        return None, "box_invalid", {"dims_source": None, "packing_reason": "box_invalid"}
-    detail = {**d, "dims_source": "packed_volume", "box_shape_version": BOX_SHAPE_VERSION,
-              "packing_version": PACKING_VERSION, "request_dims_cm": list(dims),
-              "request_box_volume_cm3": dims[0] * dims[1] * dims[2]}
-    return dims, "ok", detail
+    # dims + chargeable tinh 1 LAN trong compute_chargeable_weight -> request va fallback cung W (342-01 invariant).
+    detail = {**d, "dims_source": "packed_volume_box", "packing_version": PACKING_VERSION}
+    return tuple(d["request_dims_cm"]), "ok", detail
 
 
 async def load_packing_inputs(conn, order_id: int) -> tuple[list[dict], float | None]:
