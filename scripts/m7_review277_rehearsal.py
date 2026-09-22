@@ -60,8 +60,10 @@ async def _order(conn, *, ward, weight=300, qty=2, price=100000):
     tag = f"{RUN}-{_SEQ[0]}"
     psid = f"tg:r277-{tag}"
     cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'R','0900000000') RETURNING id", psid)
-    pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
-                              "VALUES($1,'CF',$2,999,$3,'hũ') RETURNING id", f"R277-{tag}", price, weight)
+    # CA 341-01: request GHN dung kich thuoc dong thung -> san pham PHAI co kich thuoc (thieu -> khong goi provider).
+    pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit,"
+                              "length_cm,width_cm,height_cm) VALUES($1,'CF',$2,999,$3,'hũ',10,10,10) RETURNING id",
+                              f"R277-{tag}", price, weight)
     oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "
                               "VALUES($1,'confirmed',$2,'telegram_customer') RETURNING id", cid, qty * price)
     await conn.execute("INSERT INTO order_items(order_id,product_id,quantity,unit_price_vnd) VALUES($1,$2,$3,$4)",
@@ -90,6 +92,9 @@ async def main():  # noqa: C901
     settings.m7_ghn_quote = True
     conn = await asyncpg.connect(DSN)
     GW = "99001"  # ward NGOAI allowlist -> GHN
+    # CA 341-01: packing overhead x phai cau hinh (thieu -> khong goi provider). Luu goc, khoi phuc o finally.
+    _x_orig = await conn.fetchval("SELECT packing_overhead_percent FROM shipping_settings WHERE id=1")
+    await conn.execute("UPDATE shipping_settings SET packing_overhead_percent=10 WHERE id=1")
     try:
         # ===== 277-01 A: crash sau provider response, truoc record_provider -> ambiguous, total GHN==1 =====
         oidA = await _order(conn, ward=GW)
@@ -213,6 +218,7 @@ async def main():  # noqa: C901
         print("RESULT:", "ALL PASS" if not FAILS else f"FAIL {FAILS}")
         return 1 if FAILS else 0
     finally:
+        await conn.execute("UPDATE shipping_settings SET packing_overhead_percent=$1 WHERE id=1", _x_orig)
         from app.db_pool import close_pool
         await close_pool()
         await conn.close()

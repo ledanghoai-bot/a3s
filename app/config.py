@@ -96,7 +96,7 @@ class Settings(BaseSettings):
         "address_resolver_fullscope_telegram_customer", "address_resolver_fullscope_messenger",
         "gate_e_kill_switch", "enable_gate_e_order_wiring", "enable_address_resolver",
         "m7_conversational_fulfillment", "m7_ghn_quote", "m7_sepay_test_connector", "sepay_live_enabled",
-        "settings_integrations_enabled", "settings_integrations_env_fallback",
+        "settings_integrations_enabled", "settings_integrations_env_fallback", "ghn_fallback_enabled",
         mode="before")
     @classmethod
     def _failclosed_bool(cls, v):
@@ -205,6 +205,9 @@ class Settings(BaseSettings):
     m7_tester_customer_ids: str = ""
     # m7_ghn_quote: GHN read-only quote/leadtime (staging). OFF -> route GHN = quote_required (staff bao phi), KHONG loi.
     m7_ghn_quote: bool = False
+    # ghn_fallback_enabled (D340): khi route GHN + API GHN khong dung duoc -> bao gia theo policy GHN_FALLBACK_PO_V2.
+    # OFF (mac dinh, dormant) -> giu quote_required nhu cu. Fail-closed bool.
+    ghn_fallback_enabled: bool = False
     # m7_sepay_test_connector: nhan webhook SePay TEST MODE (Apikey). OFF -> endpoint tra 404. Live (C1) = flag rieng
     # sepay_live_enabled — KHONG duoc bat trong directive 272 (gate FINANCIAL rieng).
     m7_sepay_test_connector: bool = False

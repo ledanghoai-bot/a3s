@@ -645,19 +645,20 @@ async def on_quote_changed(conn, order_id: int, *, actor: str) -> None:
 
 # --------------------------------------------------------------------------
 async def prepare_ghn_quote(conn, order_id: int, provider=None):
-    """Pha 1 (NGOAI tx): neu route = GHN va co weight -> goi provider (HTTP) -> QuoteResult. Khac -> None."""
+    """Pha 1 (NGOAI tx): neu route = GHN va dung duoc request (weight + kich thuoc dong thung D340) -> goi provider
+    (HTTP) -> QuoteResult. Khac -> None (KHONG goi provider). CA 341-01: request tu build_ghn_request (nguon duy nhat)."""
+    from app.services.fulfillment import fallback_quote as _fb
     from app.services.fulfillment import routing as _r
     from app.services.providers import ghn as _ghn
-    from app.services.providers.base import QuoteRequest
     route = await _r.resolve_for_order(conn, order_id)
     if route.source != _r.GHN:
         return None
     weight = await _sh._order_weight(conn, order_id)
     if weight is None:
         return None
-    dims = _ghn.default_dims_cm(weight)
-    req = QuoteRequest(order_id=order_id, province_code=route.province_code or "", ward_code=route.ward_code or "",
-                       weight_g=weight, length_cm=dims[0], width_cm=dims[1], height_cm=dims[2])
+    req, _reason, _detail = await _fb.build_ghn_request(conn, order_id, route, weight)
+    if req is None:
+        return None   # thieu kich thuoc/x -> KHONG goi provider (route_and_quote -> manual)
     prov = provider or _ghn.GhnQuoteProvider()
     return await prov.quote(conn, req)
 

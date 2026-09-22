@@ -46,7 +46,8 @@ async def list_products_full() -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         products = await conn.fetch(
-            "SELECT id, sku, name, description, price_vnd, stock, shipping_weight_g, sales_unit, created_at "
+            "SELECT id, sku, name, description, price_vnd, stock, shipping_weight_g, sales_unit, "
+            "length_cm, width_cm, height_cm, created_at "
             "FROM products ORDER BY id"
         )
         result = []
@@ -84,8 +85,14 @@ async def get_sku_summary_text() -> str:
         return f"He thong hien co {len(rows)} SKU: {items}."
 
 
+def _dim_snapshot(length_cm, width_cm, height_cm) -> dict:
+    return {"length_cm": length_cm, "width_cm": width_cm, "height_cm": height_cm}
+
+
 async def create_product(sku: str, name: str, description: str, price_vnd: int, stock: int,
-                         shipping_weight_g: int | None = None, sales_unit: str | None = None) -> dict:
+                         shipping_weight_g: int | None = None, sales_unit: str | None = None,
+                         length_cm: int | None = None, width_cm: int | None = None,
+                         height_cm: int | None = None, actor: dict | None = None) -> dict:
     """Tao san pham moi + tu dong tao 1 knowledge_chunk RAG rieng cho san pham
     nay ("Lop 2" - issue #8, 17/7). Tinh embedding TRUOC khi mo transaction de
     khong giu connection/transaction mo qua lau trong luc goi model embedding
@@ -104,8 +111,9 @@ async def create_product(sku: str, name: str, description: str, price_vnd: int, 
             async with conn.transaction():
                 product_id = await conn.fetchval(
                     """
-                    INSERT INTO products (sku, name, description, price_vnd, stock, shipping_weight_g, sales_unit)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
+                    INSERT INTO products (sku, name, description, price_vnd, stock, shipping_weight_g, sales_unit,
+                                          length_cm, width_cm, height_cm)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id
                     """,
                     sku,
                     name,
@@ -114,6 +122,9 @@ async def create_product(sku: str, name: str, description: str, price_vnd: int, 
                     stock,
                     shipping_weight_g,
                     su,
+                    length_cm,
+                    width_cm,
+                    height_cm,
                 )
                 await conn.execute(
                     """
@@ -125,15 +136,25 @@ async def create_product(sku: str, name: str, description: str, price_vnd: int, 
                     vec_str,
                     product_id,
                 )
+                # D340 §1.1: kich thuoc san pham co audit (audit_log = version trail). Chi khi co dims + actor.
+                if actor is not None and any(v is not None for v in (length_cm, width_cm, height_cm)) \
+                        and await audit_service.audit_exists(conn):
+                    await audit_service.record(
+                        conn, "staff", "product.dimensions.set",
+                        actor_staff_id=actor.get("id"), actor_ref=actor.get("username"),
+                        entity_type="product", entity_id=str(product_id),
+                        before=None, after=_dim_snapshot(length_cm, width_cm, height_cm))
         except asyncpg.UniqueViolationError:
             raise ValueError(f"SKU '{sku}' da ton tai, dung SKU khac.")
         return {"id": product_id, "sku": sku, "name": name, "description": description,
                 "price_vnd": price_vnd, "stock": stock, "shipping_weight_g": shipping_weight_g,
-                "sales_unit": su, "price_tiers": []}
+                "sales_unit": su, "length_cm": length_cm, "width_cm": width_cm, "height_cm": height_cm,
+                "price_tiers": []}
 
 
 async def update_product(product_id: int, name: str, description: str, price_vnd: int, stock: int,
-                         shipping_weight_g=_UNSET, sales_unit=_UNSET) -> dict:
+                         shipping_weight_g=_UNSET, sales_unit=_UNSET,
+                         length_cm=_UNSET, width_cm=_UNSET, height_cm=_UNSET, actor: dict | None = None) -> dict:
     """Sua san pham - KHONG cho sua `sku` (immutable sau khi tao) vi sku la
     khoa tool dung de tra cuu (search_products/check_stock/create_order) - doi
     sku giua chung co the lam LLM/khach dang dung sku cu bi loi khong tim thay
@@ -166,16 +187,36 @@ async def update_product(product_id: int, name: str, description: str, price_vnd
         su = sales_unit.strip() if isinstance(sales_unit, str) and sales_unit.strip() else None
         params.append(su)
         sets.append(f"sales_unit = ${len(params)}")
+    dims_touched = False
+    for col, val in (("length_cm", length_cm), ("width_cm", width_cm), ("height_cm", height_cm)):
+        if val is not _UNSET:
+            dims_touched = True
+            params.append(val)
+            sets.append(f"{col} = ${len(params)}")
     params.append(product_id)
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            before_dim = None
+            if dims_touched:
+                before_dim = await conn.fetchrow(
+                    "SELECT length_cm, width_cm, height_cm FROM products WHERE id = $1", product_id)
             result = await conn.execute(
                 f"UPDATE products SET {', '.join(sets)} WHERE id = ${len(params)}", *params)
             if result == "UPDATE 0":
                 raise LookupError(f"Khong tim thay san pham id={product_id}")
             final = await conn.fetchrow(
-                "SELECT shipping_weight_g, sales_unit FROM products WHERE id = $1", product_id)
+                "SELECT shipping_weight_g, sales_unit, length_cm, width_cm, height_cm FROM products WHERE id = $1",
+                product_id)
+            # D340 §1.1: audit thay doi kich thuoc (audit_log = version trail).
+            if dims_touched and actor is not None and await audit_service.audit_exists(conn):
+                await audit_service.record(
+                    conn, "staff", "product.dimensions.update",
+                    actor_staff_id=actor.get("id"), actor_ref=actor.get("username"),
+                    entity_type="product", entity_id=str(product_id),
+                    before=_dim_snapshot(before_dim["length_cm"], before_dim["width_cm"], before_dim["height_cm"])
+                    if before_dim else None,
+                    after=_dim_snapshot(final["length_cm"], final["width_cm"], final["height_cm"]))
 
             await conn.execute("DELETE FROM knowledge_chunks WHERE product_id = $1", product_id)
             await conn.execute(
@@ -190,7 +231,8 @@ async def update_product(product_id: int, name: str, description: str, price_vnd
             )
         return {"id": product_id, "name": name, "description": description,
                 "price_vnd": price_vnd, "stock": stock,
-                "shipping_weight_g": final["shipping_weight_g"], "sales_unit": final["sales_unit"]}
+                "shipping_weight_g": final["shipping_weight_g"], "sales_unit": final["sales_unit"],
+                "length_cm": final["length_cm"], "width_cm": final["width_cm"], "height_cm": final["height_cm"]}
 
 
 async def delete_product(product_id: int) -> None:
