@@ -92,13 +92,6 @@ async def _order_weight(conn, order_id: int) -> int | None:
     return _q.order_shipping_weight_g(items) if items else None
 
 
-async def _order_dim_items(conn, order_id: int) -> list[dict]:
-    """Item + kich thuoc san pham (cho volumetric fallback D340). Thieu dims -> caller fail-closed (manual)."""
-    return [dict(r) for r in await conn.fetch(
-        "SELECT oi.product_id, oi.quantity, p.length_cm, p.width_cm, p.height_cm "
-        "FROM order_items oi JOIN products p ON p.id=oi.product_id WHERE oi.order_id=$1", order_id)]
-
-
 def _pre_handover(status: str) -> bool:
     return status in ("pending_prep", "ready_to_ship")
 
@@ -168,50 +161,51 @@ async def route_and_quote(conn, order_id: int, *, actor: str, ghn_result=None, o
             snapshot["fee"] = {"provider": "ghn", "reason": "weight_missing"}
         else:
             # GHN HTTP da goi NGOAI transaction (conversation.prepare_ghn_quote / API 2 pha) -> ghn_result.
-            # Fingerprint request phai khop input hien tai (weight/dims) — khac -> quote_required (khong dung gia cu).
-            from app.services.providers import ghn as _ghn
-            from app.services.providers.base import QUOTE_OK, QuoteRequest, QuoteResult
-            dims = _ghn.default_dims_cm(weight)
-            req = QuoteRequest(order_id=order_id, province_code=route.province_code or "",
-                               ward_code=route.ward_code or "", weight_g=weight, length_cm=dims[0],
-                               width_cm=dims[1], height_cm=dims[2])
-            snapshot["inputs"].update({"length_cm": dims[0], "width_cm": dims[1], "height_cm": dims[2]})
-            res = ghn_result
-            if res is None:
-                from app.config import settings as _st
-                res = QuoteResult(status="quote_required", provider="ghn",
-                                  reason="ghn_disabled" if not _st.m7_ghn_quote else "ghn_no_result",
-                                  request_fingerprint=req.fingerprint())
-            elif res.request_fingerprint != req.fingerprint():
-                res = QuoteResult(status="quote_required", provider="ghn", reason="ghn_fingerprint_mismatch",
-                                  request_fingerprint=req.fingerprint())
-            snapshot["fee"] = res.snapshot()
-            if res.status == QUOTE_OK and res.fee_vnd is not None:
-                fee, fee_status, eta = int(res.fee_vnd), "quoted", res.eta_text
+            # CA 341-01: request dung CHUNG helper build_ghn_request (kich thuoc tu the tich dong thung D340) voi luc goi
+            # HTTP -> fingerprint khop; API quote va fallback dung CUNG chargeable inputs (req_detail).
+            from app.services.fulfillment import fallback_quote as _fb
+            from app.services.providers.base import QUOTE_OK, QuoteResult
+            req, req_reason, req_detail = await _fb.build_ghn_request(conn, order_id, route, weight)
+            snapshot["request"] = req_detail
+            if req is None:
+                # Thieu kich thuoc/x -> KHONG goi GHN (prepare_ghn_quote cung khong goi), fallback KHONG bao phi -> manual.
+                att_reason = "quote"
+                snapshot["fee"] = {"provider": "ghn", "reason": "packing_input_missing", "packing_reason": req_reason}
             else:
-                att_reason = "provider_error" if res.reason.startswith("ghn_") and res.reason not in (
-                    "ghn_disabled", "ghn_not_configured") else "quote"
-                # CA Directive 340: API GHN khong dung duoc + flag fallback ON -> bao gia theo policy V2 (rounding+
-                # volumetric/packing). KHONG retry provider sau ambiguous. Quote API hop le -> KHONG toi day.
-                from app.config import settings as _st_fb
-                if _st_fb.ghn_fallback_enabled:
-                    from app.services.fulfillment import fallback_quote as _fb
-                    from app.services.fulfillment import shipping_settings as _ss
-                    _policy = await _fb.load_policy(conn)
-                    if _policy:
-                        _x = await _ss.get_packing_overhead(conn)
-                        _items = await _order_dim_items(conn, order_id)
-                        _fee, _reason, _detail = _fb.quote_fallback(_policy, route.province_code, _items, weight, _x)
-                        if _fee is not None:
-                            fee, fee_status, eta = int(_fee), "quoted", _q.eta_text(zone)
-                            quote_source_col = "fallback_policy"
-                            policy_version_col = _policy["policy_version"]
-                            snapshot["fee"] = {**snapshot["fee"], **_detail, "fee_vnd": int(_fee),
-                                               "api_error_reason": res.reason}
-                            att_reason = "quote"   # van mo staff_attention (340 §1.4: staff biet la fallback sau loi API)
-                        else:
-                            # fail-closed (thieu dims/weight/x/province) -> manual, KHONG bao so
-                            snapshot["fee"] = {**snapshot["fee"], "fallback_reason": _reason}
+                snapshot["inputs"].update({"length_cm": req.length_cm, "width_cm": req.width_cm,
+                                           "height_cm": req.height_cm})
+                res = ghn_result
+                if res is None:
+                    from app.config import settings as _st
+                    res = QuoteResult(status="quote_required", provider="ghn",
+                                      reason="ghn_disabled" if not _st.m7_ghn_quote else "ghn_no_result",
+                                      request_fingerprint=req.fingerprint())
+                elif res.request_fingerprint != req.fingerprint():
+                    res = QuoteResult(status="quote_required", provider="ghn", reason="ghn_fingerprint_mismatch",
+                                      request_fingerprint=req.fingerprint())
+                snapshot["fee"] = res.snapshot()
+                if res.status == QUOTE_OK and res.fee_vnd is not None:
+                    fee, fee_status, eta = int(res.fee_vnd), "quoted", res.eta_text
+                else:
+                    att_reason = "provider_error" if res.reason.startswith("ghn_") and res.reason not in (
+                        "ghn_disabled", "ghn_not_configured") else "quote"
+                    # CA Directive 340: API GHN khong dung duoc + flag fallback ON -> bao gia theo policy V2. KHONG retry
+                    # provider sau ambiguous. Quote API hop le -> KHONG toi day.
+                    from app.config import settings as _st_fb
+                    if _st_fb.ghn_fallback_enabled:
+                        _policy = await _fb.load_policy(conn)
+                        if _policy:
+                            _fee, _reason, _fdetail = _fb.compute_fallback_fee(
+                                _policy, route.province_code, req_detail["chargeable_weight_kg"])
+                            if _fee is not None:
+                                fee, fee_status, eta = int(_fee), "quoted", _q.eta_text(zone)
+                                quote_source_col = "fallback_policy"
+                                policy_version_col = _policy["policy_version"]
+                                snapshot["fee"] = {**snapshot["fee"], **req_detail, **_fdetail, "fee_vnd": int(_fee),
+                                                   "api_error_reason": res.reason}
+                                att_reason = "quote"   # van mo staff_attention (340 §1.4)
+                            else:
+                                snapshot["fee"] = {**snapshot["fee"], "fallback_reason": _reason}
     else:  # MANUAL_REVIEW
         zone = "unknown"
         att_reason = "address"

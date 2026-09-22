@@ -14,6 +14,12 @@ import json
 import math
 
 POLICY_VERSION = "GHN_FALLBACK_PO_V2"
+# Version CONG THUC do code nay implement (policy DB phai khai bao dung version nay, khac -> fail-closed).
+ROUNDING_VERSION = "ghn_tier_round_up_v1"
+PACKING_VERSION = "product_volume_overhead_v1"
+# CA Review 341-01: kich thuoc request GHN dung CHUNG input dong thung voi fallback. N=1 (1 dong, qty 1) -> kich thuoc
+# THAT cua san pham (the tich = packed, chinh xac); N>1 -> hop lap phuong canh nguyen nho nhat co the tich >= packed.
+BOX_SHAPE_VERSION = "single_actual_else_cube_ceil_v1"
 
 
 async def load_policy(conn, policy_version: str = POLICY_VERSION) -> dict | None:
@@ -112,6 +118,8 @@ def _lien_tinh_fee(spec_lt: dict, w_kg: float) -> int:
 def compute_fallback_fee(policy: dict, dest_province_code: str | None, chargeable_weight_kg: float | None) -> tuple:
     """Tra (fee_vnd|None, reason, detail). reason: 'ok' | 'weight_missing' | 'province_unclassified'.
     dest == shop_province -> noi_tinh; dest hop le khac -> lien_tinh. Thieu W/province -> fail-closed None."""
+    if policy.get("rounding_version") != ROUNDING_VERSION or policy.get("packing_version") != PACKING_VERSION:
+        return None, "policy_version_unsupported", {}
     if chargeable_weight_kg is None or chargeable_weight_kg <= 0:
         return None, "weight_missing", {}
     if not dest_province_code:
@@ -127,6 +135,61 @@ def compute_fallback_fee(policy: dict, dest_province_code: str | None, chargeabl
               "rounding_version": policy["rounding_version"], "packing_version": policy["packing_version"],
               "route_class": route_class, "chargeable_weight_kg": chargeable_weight_kg}
     return int(fee), "ok", detail
+
+
+def box_dims(items: list[dict], packed_volume_cm3: float) -> tuple[int, int, int] | None:
+    """BOX_SHAPE_VERSION. Items da validate (compute_chargeable_weight ok). None neu the tich khong hop le."""
+    if not (isinstance(packed_volume_cm3, (int, float)) and math.isfinite(packed_volume_cm3) and packed_volume_cm3 > 0):
+        return None
+    if len(items) == 1 and items[0].get("quantity") == 1:
+        it = items[0]
+        return (math.ceil(float(it["length_cm"])), math.ceil(float(it["width_cm"])), math.ceil(float(it["height_cm"])))
+    side = max(1, math.ceil(packed_volume_cm3 ** (1.0 / 3.0)))
+    while side ** 3 < packed_volume_cm3:        # chong sai so float
+        side += 1
+    while side > 1 and (side - 1) ** 3 >= packed_volume_cm3:
+        side -= 1
+    return side, side, side
+
+
+def ghn_request_dims(items: list[dict], actual_weight_g: int | None, packing_overhead_percent) -> tuple:
+    """Kich thuoc request GHN tu CUNG input/cong thuc D340 voi fallback. Tra (dims|None, reason, detail).
+    Thieu dims/weight/x -> None (caller: KHONG goi provider, manual)."""
+    w_kg, reason, d = compute_chargeable_weight(items, actual_weight_g, packing_overhead_percent)
+    if w_kg is None:
+        return None, reason, {"dims_source": None, "packing_reason": reason}
+    dims = box_dims(items, d["packed_volume_cm3"])
+    if dims is None:
+        return None, "box_invalid", {"dims_source": None, "packing_reason": "box_invalid"}
+    detail = {**d, "dims_source": "packed_volume", "box_shape_version": BOX_SHAPE_VERSION,
+              "packing_version": PACKING_VERSION, "request_dims_cm": list(dims),
+              "request_box_volume_cm3": dims[0] * dims[1] * dims[2]}
+    return dims, "ok", detail
+
+
+async def load_packing_inputs(conn, order_id: int) -> tuple[list[dict], float | None]:
+    """Item + kich thuoc san pham + x (Shipping Settings). Conn-based (cung transaction caller)."""
+    from app.services.fulfillment import shipping_settings as _ss
+    items = [dict(r) for r in await conn.fetch(
+        "SELECT oi.product_id, oi.quantity, p.length_cm, p.width_cm, p.height_cm "
+        "FROM order_items oi JOIN products p ON p.id=oi.product_id WHERE oi.order_id=$1 ORDER BY oi.id", order_id)]
+    return items, await _ss.get_packing_overhead(conn)
+
+
+async def build_ghn_request(conn, order_id: int, route, weight_g: int | None) -> tuple:
+    """NGUON DUY NHAT dung QuoteRequest GHN (prepare_ghn_quote goi HTTP + route_and_quote kiem fingerprint +
+    route_operation tag provider). Tra (QuoteRequest|None, reason, request_detail). None -> KHONG goi provider."""
+    from app.services.providers.base import QuoteRequest
+    if weight_g is None or weight_g <= 0:
+        return None, "weight_missing", {"dims_source": None, "packing_reason": "weight_missing"}
+    items, x = await load_packing_inputs(conn, order_id)
+    dims, reason, detail = ghn_request_dims(items, weight_g, x)
+    if dims is None:
+        return None, reason, detail
+    req = QuoteRequest(order_id=order_id, province_code=route.province_code or "", ward_code=route.ward_code or "",
+                       weight_g=int(weight_g), length_cm=dims[0], width_cm=dims[1], height_cm=dims[2])
+    detail["request_fingerprint"] = req.fingerprint()
+    return req, "ok", detail
 
 
 def quote_fallback(policy: dict, dest_province_code: str | None, items: list[dict], actual_weight_g: int | None,

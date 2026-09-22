@@ -238,6 +238,11 @@ async def execute(conn, order_id: int, *, actor: str, command_key: str, provider
         route = await _r.resolve_for_order(conn, order_id)
         weight = await _sh._order_weight(conn, order_id)
         will_call_ghn = (route.source == _r.GHN and weight is not None)
+        if will_call_ghn:
+            # CA 341-01: prepare_ghn_quote KHONG goi provider khi thieu kich thuoc/x -> tag 'none' (khong phai ambiguous).
+            from app.services.fulfillment import fallback_quote as _fb
+            _req, _, _ = await _fb.build_ghn_request(conn, order_id, route, weight)
+            will_call_ghn = _req is not None
         prov_tag = "ghn" if will_call_ghn else "none"
         # CA 277-01: ghi 'provider_started' BEN VUNG TRUOC khi goi HTTP.
         async with conn.transaction():

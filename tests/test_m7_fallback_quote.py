@@ -167,3 +167,50 @@ def test_quote_fallback_never_zero():
         for actual in (100, 5000, 30000):
             fee, reason, _ = fb.quote_fallback(POLICY, dest, items, actual, 10)
             assert reason == "ok" and fee and fee > 0
+
+
+# ============================ CA 341-01: request dims GHN tu CUNG input dong thung ============================
+def test_box_dims_n1_uses_actual_product_dims():
+    items = [{"product_id": 1, "quantity": 1, "length_cm": 30, "width_cm": 10, "height_cm": 5}]
+    dims, reason, d = fb.ghn_request_dims(items, 500, 20)
+    assert reason == "ok" and dims == (30, 10, 5)                   # N=1: kich thuoc that, KHONG ap x
+    assert d["request_box_volume_cm3"] == d["packed_volume_cm3"] == 1500.0
+    assert d["dims_source"] == "packed_volume" and d["box_shape_version"] == fb.BOX_SHAPE_VERSION
+
+
+def test_box_dims_n_gt_1_cube_ceil_covers_packed_volume():
+    # 2 x cube10 = 2000; x=10 -> packed 2200 -> canh nho nhat side^3 >= 2200 la 14 (13^3=2197 < 2200)
+    dims, reason, d = fb.ghn_request_dims([_cube(10, q=2)], 300, 10)
+    assert reason == "ok" and dims == (14, 14, 14)
+    assert d["request_box_volume_cm3"] >= d["packed_volume_cm3"]
+    assert 13 ** 3 < d["packed_volume_cm3"]                          # canh NHO NHAT
+    # packed dung bang lap phuong -> khong phong to
+    dims2, _, _ = fb.ghn_request_dims([_cube(10, q=8)], 300, 0)      # raw 8000 = 20^3
+    assert dims2 == (20, 20, 20)
+
+
+def test_request_dims_not_default_weight_table():
+    # truoc 341: default_dims_cm(600) = (20,15,10). Nay theo the tich thuc.
+    dims, _, _ = fb.ghn_request_dims([_cube(8, q=1)], 600, 0)
+    assert dims == (8, 8, 8) and dims != (20, 15, 10)
+
+
+def test_request_dims_missing_inputs_fail_closed():
+    assert fb.ghn_request_dims([{"quantity": 1, "length_cm": None, "width_cm": 1, "height_cm": 1}], 500, 0)[:2] \
+        == (None, "dimension_missing")
+    assert fb.ghn_request_dims([_cube(10)], 500, None)[:2] == (None, "packing_overhead_invalid")
+    assert fb.ghn_request_dims([_cube(10)], None, 0)[:2] == (None, "weight_missing")
+    assert fb.ghn_request_dims([], 500, 0)[:2] == (None, "no_items")
+
+
+def test_api_request_and_fallback_share_chargeable_inputs():
+    items = [_cube(20, q=3)]
+    dims, _, rd = fb.ghn_request_dims(items, 1000, 25)
+    fee, _, qd = fb.quote_fallback(POLICY, OTHER, items, 1000, 25)
+    assert rd["chargeable_weight_kg"] == qd["chargeable_weight_kg"]
+    assert rd["packed_volume_cm3"] == qd["packed_volume_cm3"] and fee is not None
+
+
+def test_policy_version_mismatch_fail_closed():
+    for bad in ({**POLICY, "rounding_version": "other_v9"}, {**POLICY, "packing_version": "other_v9"}):
+        assert fb.compute_fallback_fee(bad, OTHER, 2)[:2] == (None, "policy_version_unsupported")
