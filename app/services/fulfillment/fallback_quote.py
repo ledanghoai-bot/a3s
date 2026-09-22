@@ -53,6 +53,9 @@ def compute_chargeable_weight(items: list[dict], actual_weight_g: int | None,
     Fail-closed 340 §1.5: bat ky san pham thieu kich thuoc hop le / actual thieu-hoac-khong-duong / x khong hop le -> None."""
     if actual_weight_g is None or actual_weight_g <= 0:
         return None, "weight_missing", {}
+    from app.services.fulfillment import shipping_policy as _sp
+    if _sp.is_heavy(actual_weight_g):          # CA 354: >20 kg -> manual, KHONG dims/request/fallback fee
+        return None, _sp.HEAVY_GOODS_REASON, {"heavy_goods": _sp.heavy_detail(actual_weight_g)}
     if packing_overhead_percent is None:
         return None, "packing_overhead_invalid", {}
     try:
@@ -170,7 +173,7 @@ def ghn_request_dims(items: list[dict], actual_weight_g: int | None, packing_ove
     Thieu dims/weight/x -> None (caller: KHONG goi provider, manual)."""
     w_kg, reason, d = compute_chargeable_weight(items, actual_weight_g, packing_overhead_percent)
     if w_kg is None:
-        return None, reason, {"dims_source": None, "packing_reason": reason}
+        return None, reason, {"dims_source": None, "packing_reason": reason, **d}
     # dims + chargeable tinh 1 LAN trong compute_chargeable_weight -> request va fallback cung W (342-01 invariant).
     detail = {**d, "dims_source": "packed_volume_box", "packing_version": PACKING_VERSION}
     return tuple(d["request_dims_cm"]), "ok", detail
@@ -188,9 +191,13 @@ async def load_packing_inputs(conn, order_id: int) -> tuple[list[dict], float | 
 async def build_ghn_request(conn, order_id: int, route, weight_g: int | None) -> tuple:
     """NGUON DUY NHAT dung QuoteRequest GHN (prepare_ghn_quote goi HTTP + route_and_quote kiem fingerprint +
     route_operation tag provider). Tra (QuoteRequest|None, reason, request_detail). None -> KHONG goi provider."""
+    from app.services.fulfillment import shipping_policy as _sp
     from app.services.providers.base import QuoteRequest
     if weight_g is None or weight_g <= 0:
         return None, "weight_missing", {"dims_source": None, "packing_reason": "weight_missing"}
+    if _sp.is_heavy(weight_g):   # CA 354: TRUOC moi truy van/giai ma — khong dung request, khong goi GHN
+        return None, _sp.HEAVY_GOODS_REASON, {"dims_source": None, "packing_reason": _sp.HEAVY_GOODS_REASON,
+                                              "heavy_goods": _sp.heavy_detail(weight_g)}
     items, x = await load_packing_inputs(conn, order_id)
     dims, reason, detail = ghn_request_dims(items, weight_g, x)
     if dims is None:
@@ -207,7 +214,7 @@ def quote_fallback(policy: dict, dest_province_code: str | None, items: list[dic
     Bat ky fail-closed nao (weight/dimension/x/province) -> (None, reason, detail-phan-da-tinh). KHONG bao 0d."""
     w_kg, w_reason, w_detail = compute_chargeable_weight(items, actual_weight_g, packing_overhead_percent)
     if w_kg is None:
-        return None, w_reason, {"fallback_reason": w_reason}
+        return None, w_reason, {"fallback_reason": w_reason, **w_detail}   # CA 354: heavy -> khong fee fallback
     fee, f_reason, f_detail = compute_fallback_fee(policy, dest_province_code, w_kg)
     detail = {**w_detail, **f_detail}
     if fee is None:

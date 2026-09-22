@@ -168,9 +168,14 @@ async def route_and_quote(conn, order_id: int, *, actor: str, ghn_result=None, o
             req, req_reason, req_detail = await _fb.build_ghn_request(conn, order_id, route, weight)
             snapshot["request"] = req_detail
             if req is None:
-                # Thieu kich thuoc/x -> KHONG goi GHN (prepare_ghn_quote cung khong goi), fallback KHONG bao phi -> manual.
+                # Thieu kich thuoc/x HOAC hang nang >20 kg (CA 354) -> KHONG goi GHN (prepare_ghn_quote cung khong goi),
+                # fallback KHONG bao phi -> manual/staff.
                 att_reason = "quote"
-                snapshot["fee"] = {"provider": "ghn", "reason": "packing_input_missing", "packing_reason": req_reason}
+                from app.services.fulfillment import shipping_policy as _sp
+                if req_reason == _sp.HEAVY_GOODS_REASON:
+                    snapshot["fee"] = {"provider": "ghn", **(req_detail.get("heavy_goods") or _sp.heavy_detail(weight))}
+                else:
+                    snapshot["fee"] = {"provider": "ghn", "reason": "packing_input_missing", "packing_reason": req_reason}
             else:
                 snapshot["inputs"].update({"length_cm": req.length_cm, "width_cm": req.width_cm,
                                            "height_cm": req.height_cm})
