@@ -52,6 +52,44 @@ def _cfg() -> dict[str, Any]:
     }
 
 
+def _unconfigured(base: dict, source: str) -> dict:
+    """Cfg fail-closed: thieu token/shop/pickup -> quote() tra ghn_not_configured (khong HTTP)."""
+    return {**base, "token": "", "shop_id": "", "from_district_id": None, "from_ward_code": "", "source": source}
+
+
+async def resolve_quote_cfg(conn) -> dict[str, Any]:
+    """CA Directive 345 §2A: cfg quote GHN theo loader D305 (DB authoritative khi settings_integrations_enabled).
+    - m7_ghn_quote OFF -> cfg env (enabled=False -> quote() tra ghn_disabled), KHONG doc/giai ma secret.
+    - module OFF -> env (baseline).
+    - module ON: integration ghn/staging enabled + day du -> config DB + token giai ma TRONG PHAM VI request;
+      khong co record -> env CHI khi settings_integrations_env_fallback, nguoc lai fail-closed; decrypt/thieu secret/
+      base_url khong phai staging -> fail-closed (ghn_not_configured). Token khong log/cache/snapshot."""
+    base = _cfg()
+    if not base["enabled"]:
+        return {**base, "source": "disabled"}
+    if not settings.settings_integrations_enabled:
+        return {**base, "source": "env"}
+    from app.services.settings import integrations as _S
+    try:
+        lc = await _S.load_active_config(conn, PROVIDER, "staging")
+    except Exception:  # noqa: BLE001 — decrypt/invalid -> fail closed, KHONG fallback env
+        return _unconfigured(base, "db_error")
+    if lc["source"] == "env":
+        return {**base, "source": "env"}
+    if lc["source"] != "database":
+        return _unconfigured(base, "none")
+    cp = lc["config"] or {}
+    b = (cp.get("base_url") or STAGING_BASE).rstrip("/")
+    if b != STAGING_BASE:
+        return _unconfigured(base, "base_not_staging")
+    mr = cp.get("max_retries")
+    return {"enabled": True, "base": b, "token": (lc.get("secrets") or {}).get("token") or "",
+            "shop_id": str(cp.get("shop_id") or ""), "from_district_id": cp.get("from_district_id"),
+            "from_ward_code": cp.get("from_ward_code") or "", "timeout": float(cp.get("timeout_seconds") or 8.0),
+            "retries": int(mr if mr is not None else 2), "light_max_g": int(cp.get("light_max_g") or 20000),
+            "map_version": int(cp.get("address_map_version") or 1), "source": "database"}
+
+
 def service_type_for_weight(weight_g: int, light_max_g: int) -> int:
     return SERVICE_TYPE_LIGHT if weight_g <= light_max_g else SERVICE_TYPE_HEAVY
 
@@ -214,50 +252,6 @@ class GhnQuoteProvider:
                            duration_ms=dur, carrier_ids=carrier_ids, reason="ok", **base)
 
 
-# ---------------- Master data (cache, read-only) ----------------
-
-async def fetch_master_data(conn, *, cfg: dict | None = None, post=None) -> dict[str, int]:
-    """Tai province/district/ward GHN vao carrier_master_data (upsert). Chi ID/ten (khong secret). Tra so dong."""
-    cfg = cfg or _cfg()
-    post = post or _post
-    counts = {"province": 0, "district": 0, "ward": 0}
-    st, js, err, _ = await post(cfg, "/master-data/province", {}, retries=cfg["retries"])
-    if err or st != 200 or not isinstance(js, dict) or js.get("code") != 200:
-        raise RuntimeError(f"ghn master-data province failed: status={st} err={err}")
-    for p in js.get("data") or []:
-        await conn.execute(
-            "INSERT INTO carrier_master_data (provider, kind, key, parent_key, name, payload, fetched_at) "
-            "VALUES ($1,'province',$2,NULL,$3,$4::jsonb,now()) ON CONFLICT (provider, kind, key) DO UPDATE SET "
-            "name=EXCLUDED.name, payload=EXCLUDED.payload, fetched_at=now()",
-            PROVIDER, str(p.get("ProvinceID")), str(p.get("ProvinceName") or ""),
-            json.dumps({"ProvinceName": p.get("ProvinceName"), "Code": p.get("Code"),
-                        "NameExtension": p.get("NameExtension")}))
-        counts["province"] += 1
-        st2, js2, err2, _ = await post(cfg, "/master-data/district", {"province_id": p.get("ProvinceID")},
-                                       retries=cfg["retries"])
-        if err2 or st2 != 200 or not isinstance(js2, dict):
-            continue
-        for d in js2.get("data") or []:
-            await conn.execute(
-                "INSERT INTO carrier_master_data (provider, kind, key, parent_key, name, payload, fetched_at) "
-                "VALUES ($1,'district',$2,$3,$4,$5::jsonb,now()) ON CONFLICT (provider, kind, key) DO UPDATE SET "
-                "parent_key=EXCLUDED.parent_key, name=EXCLUDED.name, payload=EXCLUDED.payload, fetched_at=now()",
-                PROVIDER, str(d.get("DistrictID")), str(p.get("ProvinceID")), str(d.get("DistrictName") or ""),
-                json.dumps({"DistrictName": d.get("DistrictName"), "Code": d.get("Code"),
-                            "NameExtension": d.get("NameExtension"), "Type": d.get("Type")}))
-            counts["district"] += 1
-            st3, js3, err3, _ = await post(cfg, "/master-data/ward", {"district_id": d.get("DistrictID")},
-                                           retries=cfg["retries"])
-            if err3 or st3 != 200 or not isinstance(js3, dict):
-                continue
-            for w in js3.get("data") or []:
-                await conn.execute(
-                    "INSERT INTO carrier_master_data (provider, kind, key, parent_key, name, payload, fetched_at) "
-                    "VALUES ($1,'ward',$2,$3,$4,$5::jsonb,now()) ON CONFLICT (provider, kind, key) DO UPDATE SET "
-                    "parent_key=EXCLUDED.parent_key, name=EXCLUDED.name, payload=EXCLUDED.payload, fetched_at=now()",
-                    PROVIDER, f"{d.get('DistrictID')}:{w.get('WardCode')}", str(d.get("DistrictID")),
-                    str(w.get("WardName") or ""),
-                    json.dumps({"WardCode": w.get("WardCode"), "WardName": w.get("WardName"),
-                                "NameExtension": w.get("NameExtension")}))
-                counts["ward"] += 1
-    return counts
+# ---------------- Master data ----------------
+# CA Directive 345 §2B: snapshot master-data chi qua tool van hanh co pham vi + hard cap
+# (app/services/providers/ghn_master_data.py + scripts/ghn_g1_prep.py). Ham quet toan quoc cu da go (F2).

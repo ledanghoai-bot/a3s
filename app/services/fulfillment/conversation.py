@@ -659,7 +659,8 @@ async def prepare_ghn_quote(conn, order_id: int, provider=None):
     req, _reason, _detail = await _fb.build_ghn_request(conn, order_id, route, weight)
     if req is None:
         return None   # thieu kich thuoc/x -> KHONG goi provider (route_and_quote -> manual)
-    prov = provider or _ghn.GhnQuoteProvider()
+    # CA 345 §2A: cfg theo loader D305 (Dashboard, DB authoritative), fail-closed; token chi trong pham vi request.
+    prov = provider or _ghn.GhnQuoteProvider(await _ghn.resolve_quote_cfg(conn))
     return await prov.quote(conn, req)
 
 
