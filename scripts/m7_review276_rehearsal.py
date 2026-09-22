@@ -58,8 +58,10 @@ async def _order(conn, *, ward, weight=300, qty=2, price=100000):
     tag = f"{RUN}-{_SEQ[0]}"
     psid = f"tg:r276-{tag}"
     cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'R','0900000000') RETURNING id", psid)
-    pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
-                              "VALUES($1,'CF',$2,999,$3,'hũ') RETURNING id", f"R276-{tag}", price, weight)
+    # CA 341-01: request GHN dung kich thuoc dong thung -> san pham PHAI co kich thuoc (thieu -> khong goi provider).
+    pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit,"
+                              "length_cm,width_cm,height_cm) VALUES($1,'CF',$2,999,$3,'hũ',10,10,10) RETURNING id",
+                              f"R276-{tag}", price, weight)
     total = qty * price
     oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "
                               "VALUES($1,'confirmed',$2,'telegram_customer') RETURNING id", cid, total)
@@ -84,6 +86,9 @@ async def _route_source(conn, oid):
 async def main():  # noqa: C901
     settings.m7_ghn_quote = True
     conn = await asyncpg.connect(DSN)
+    # CA 341-01: packing overhead x phai cau hinh (thieu -> khong goi provider). Luu goc, khoi phuc o finally.
+    _x_orig = await conn.fetchval("SELECT packing_overhead_percent FROM shipping_settings WHERE id=1")
+    await conn.execute("UPDATE shipping_settings SET packing_overhead_percent=10 WHERE id=1")
     try:
         # xac dinh 1 ward NGOAI allowlist -> GHN, va ward 24169 -> SELF (browser seed da chung minh)
         GHN_WARD = "99001"
@@ -234,6 +239,7 @@ async def main():  # noqa: C901
         print("RESULT:", "ALL PASS" if not FAILS else f"FAIL {FAILS}")
         return 1 if FAILS else 0
     finally:
+        await conn.execute("UPDATE shipping_settings SET packing_overhead_percent=$1 WHERE id=1", _x_orig)
         from app.db_pool import close_pool
         await close_pool()
         await conn.close()
