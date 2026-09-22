@@ -179,6 +179,68 @@ export default function SettingsPage() {
             Bật GHN quote là gate kế tiếp (ngoài phạm vi màn hình này).</p>
         </div>
       )}
+
+      {/* CA Directive 340 §1.2 — Shipping Settings: packing overhead (độc lập module integrations, endpoint riêng). */}
+      {tab === "shipping" && <PackingSettings can={can} setMsg={setMsg} setErr={setErr} />}
+    </div>
+  );
+}
+
+
+function PackingSettings({ can, setMsg, setErr }) {
+  const [st, setSt] = useState(null);      // {packing_overhead_percent, version, updated_by, updated_at}
+  const [val, setVal] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    try {
+      const d = await apiFetch("/dashboard/shipping-settings");
+      setSt(d);
+      setVal(d.packing_overhead_percent == null ? "" : String(d.packing_overhead_percent));
+    } catch (e) { setErr && setErr(e.message); }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  async function save() {
+    setMsg && setMsg(null); setErr && setErr(null);
+    if (val === "" || Number(val) < 0 || !isFinite(Number(val))) {
+      setErr && setErr("Nhập % đóng thùng ≥ 0."); return;
+    }
+    setBusy(true);
+    try {
+      const r = await apiFetch("/dashboard/shipping-settings", {
+        method: "PUT",
+        body: JSON.stringify({ packing_overhead_percent: Number(val), expected_version: st?.version }),
+      });
+      setSt((s) => ({ ...s, packing_overhead_percent: r.packing_overhead_percent, version: r.version,
+        updated_by: r.updated_by }));
+      setMsg && setMsg("Đã lưu % đóng thùng.");
+    } catch (e) { setErr && setErr(e.message); await load(); } finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ border: "1px solid #e3e6ea", borderRadius: 8, padding: 12, marginTop: 16, background: "#fbfcfd" }}>
+      <b>Hệ số đóng thùng (packing overhead)</b>
+      <div style={{ color: "#555", fontSize: 13, marginBottom: 8 }}>
+        Phần trăm thể tích tăng thêm khi đóng chung nhiều đơn vị (chỉ áp khi đơn có &gt; 1 đơn vị). Dùng để tính
+        trọng lượng quy đổi cho phí giao dự phòng khi GHN không báo giá được. Để trống → phí giao dự phòng chuyển
+        nhân viên (fail-closed).
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="number" min="0" step="0.1" style={{ width: 140 }} placeholder="vd 10 (%)"
+          value={val} onChange={(e) => setVal(e.target.value)} disabled={!can("shipment.manage")} />
+        <span style={{ color: "#555" }}>%</span>
+        {can("shipment.manage") && (
+          <button className="primary" disabled={busy} onClick={save}>{busy ? "Đang lưu…" : "Lưu"}</button>
+        )}
+      </div>
+      <div style={{ color: "#888", fontSize: 12, marginTop: 6 }}>
+        Hiện tại: {st == null ? "…" : (st.packing_overhead_percent == null
+          ? <span style={{ color: "#c00" }}>chưa cấu hình</span>
+          : `${st.packing_overhead_percent}%`)}
+        {st && ` · phiên bản ${st.version}${st.updated_by ? ` · sửa bởi ${st.updated_by}` : ""}`}
+        {!can("shipment.manage") && " · (chỉ xem — cần quyền quản lý vận chuyển để sửa)"}
+      </div>
     </div>
   );
 }

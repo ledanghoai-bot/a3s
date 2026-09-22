@@ -6,7 +6,7 @@ app/api/auth_router.py cho login/logout).
 import asyncpg
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
-from app.api.auth import require_active_session, require_permission
+from app.api.auth import check_permission, require_active_session, require_permission
 from app.config import settings
 from app.services import (
     conversation_log,
@@ -19,6 +19,7 @@ from app.services import orders as orders_service
 from app.services import products as products_service
 from app.services.command import errors as cmd_errors
 from app.services.command import order_gateway, recovery
+from app.services.fulfillment import shipping_settings as shipping_settings_service
 from app.services.handoff import log_note, pause_bot, resume_bot
 
 router = APIRouter(
@@ -447,12 +448,33 @@ def _opt_int(v):
     return n
 
 
+_DIM_KEYS = ("length_cm", "width_cm", "height_cm")
+
+
+def _opt_pos_int(v, field: str):
+    """Parse kich thuoc san pham (cm) tuy chon (D340 §1.1: huu han, DUONG): None/rong -> None; so nguyen > 0 -> int;
+    khac / <= 0 -> 422."""
+    if v in (None, ""):
+        return None
+    try:
+        n = int(v)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail=f"{field} phai la so nguyen (cm) hoac de trong")
+    if n <= 0:
+        raise HTTPException(status_code=422, detail=f"{field} phai la so nguyen duong (cm)")
+    return n
+
+
 @router.post("/products")
-async def create_product_endpoint(body: dict) -> dict:
+async def create_product_endpoint(body: dict, staff: dict = Depends(require_active_session)) -> dict:
     required = ["sku", "name", "price_vnd", "stock"]
     missing = [f for f in required if body.get(f) in (None, "")]
     if missing:
         raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
+    # D340 §1.1: sua kich thuoc san pham -> BAT BUOC quyen catalog.manage (chi khi body co field kich thuoc).
+    dims = {k: _opt_pos_int(body.get(k), k) for k in _DIM_KEYS if k in body}
+    if dims:
+        check_permission(staff, "catalog.manage")
     try:
         return await products_service.create_product(
             sku=body["sku"],
@@ -462,32 +484,42 @@ async def create_product_endpoint(body: dict) -> dict:
             stock=int(body["stock"]),
             shipping_weight_g=_opt_int(body.get("shipping_weight_g")),
             sales_unit=body.get("sales_unit"),
+            actor=staff,
+            **dims,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.patch("/products/{product_id}")
-async def update_product_endpoint(product_id: int, body: dict) -> dict:
+async def update_product_endpoint(product_id: int, body: dict,
+                                  staff: dict = Depends(require_active_session)) -> dict:
     """KHONG nhan `sku` - xem ghi chu trong products.py:update_product ve ly
     do sku la immutable sau khi tao."""
     required = ["name", "price_vnd", "stock"]
     missing = [f for f in required if body.get(f) in (None, "")]
     if missing:
         raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
+    # CA 283-01: chi truyen field khi body CO key do -> omitted (legacy body) giu nguyen; gui ro null/blank -> clear.
+    opt = {}
+    if "shipping_weight_g" in body:
+        opt["shipping_weight_g"] = _opt_int(body.get("shipping_weight_g"))
+    if "sales_unit" in body:
+        opt["sales_unit"] = body.get("sales_unit")
+    # D340 §1.1: sua kich thuoc -> parse (422) roi BAT BUOC quyen catalog.manage (403). Chi khi body co field kich thuoc.
+    dim_keys = [k for k in _DIM_KEYS if k in body]
+    if dim_keys:
+        for k in dim_keys:
+            opt[k] = _opt_pos_int(body.get(k), k)
+        check_permission(staff, "catalog.manage")
     try:
-        # CA 283-01: chi truyen field khi body CO key do -> omitted (legacy body) giu nguyen; gui ro null/blank -> clear.
-        opt = {}
-        if "shipping_weight_g" in body:
-            opt["shipping_weight_g"] = _opt_int(body.get("shipping_weight_g"))
-        if "sales_unit" in body:
-            opt["sales_unit"] = body.get("sales_unit")
         return await products_service.update_product(
             product_id=product_id,
             name=body["name"],
             description=body.get("description", ""),
             price_vnd=int(body["price_vnd"]),
             stock=int(body["stock"]),
+            actor=staff,
             **opt,
         )
     except LookupError as e:
@@ -524,6 +556,37 @@ async def replace_price_tiers_endpoint(
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"product_id": product_id, "price_tiers": updated}
+
+
+# ---------------------------------------------------------------------------
+# Shipping Settings — packing_overhead_percent (CA Directive 340 §1.2)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/shipping-settings")
+async def get_shipping_settings_endpoint() -> dict:
+    """Readback KHONG secret: {packing_overhead_percent, version, updated_by, updated_at}. Moi session xem duoc."""
+    return await shipping_settings_service.get_settings()
+
+
+@router.put("/shipping-settings")
+async def update_shipping_settings_endpoint(
+    body: dict, staff: dict = Depends(require_permission("shipment.manage")),
+) -> dict:
+    """Body: {"packing_overhead_percent": <so >=0>, "expected_version"?: <int>}.
+    RBAC: role quan tri shipping (D340 §1.2) -> BAT BUOC `shipment.manage`. Validate x>=0 + CAS version + audit."""
+    ev = body.get("expected_version")
+    if ev is not None:
+        try:
+            ev = int(ev)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="expected_version phai la so nguyen")
+    try:
+        return await shipping_settings_service.update_packing_overhead(
+            body.get("packing_overhead_percent"), actor=staff, expected_version=ev)
+    except shipping_settings_service.ShippingSettingsError as e:
+        msg = str(e)
+        raise HTTPException(status_code=409 if "version conflict" in msg else 400, detail=msg)
 
 
 # ---------------------------------------------------------------------------
