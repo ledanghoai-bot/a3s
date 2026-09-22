@@ -637,6 +637,25 @@ async def load_active_config(conn, provider: str, mode: str) -> dict:
     return {"source": "database", "enabled": True, "config": cp, "secrets": secrets, "integration_id": r["id"]}
 
 
+async def load_saved_ghn_config(conn) -> dict:
+    """CA Directive 345 §2A.3: cau hinh GHN staging DA LUU (write-only) cho validation/tooling G1 — KHONG phu thuoc
+    `integration.enabled` va KHONG tu enable. Tra {integration_id, enabled, config, token}. Thieu row/field/secret hoac
+    decrypt loi -> SettingsError (fail-closed). Token CHI song trong pham vi caller: khong log/return ra API/evidence."""
+    r = await conn.fetchrow(
+        "SELECT * FROM integrations WHERE provider='ghn' AND mode='staging' AND archived_at IS NULL "
+        "ORDER BY id DESC LIMIT 1")
+    if not r:
+        raise SettingsError("chua co cau hinh GHN staging")
+    cp = json.loads(r["config_public"]) if isinstance(r["config_public"], str) else (r["config_public"] or {})
+    _require_ghn_complete(cp)
+    if (cp.get("base_url") or _GHN_STAGING_BASE).rstrip("/") != _GHN_STAGING_BASE:
+        raise SettingsError("base_url GHN khong phai staging — fail closed")
+    token = await _decrypt_secret(conn, r["id"], "ghn", "token")   # decrypt loi -> raise
+    if not token:
+        raise SettingsError("thieu secret token GHN — fail closed")
+    return {"integration_id": r["id"], "enabled": bool(r["enabled"]), "config": cp, "token": token}
+
+
 async def resolve_sepay_test_key(conn) -> str | None:
     """CA 316-01: SePay Test api_key cho webhook runtime theo PRECEDENCE loader D305 (DB authoritative khi module ON).
     - module OFF -> env baseline (settings.sepay_test_api_key).
