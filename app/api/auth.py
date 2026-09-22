@@ -50,6 +50,19 @@ def require_permission(permission_key: str):
     return _dep
 
 
+def check_permission(staff: dict, permission_key: str) -> None:
+    """Kiem tra quyen NGAY TRONG handler (khong phai dependency) — dung khi chi mot phan cua request can quyen
+    (vd chi khi body co field kich thuoc san pham, D340 §1.1). Cung logic degrade/strict nhu require_permission.
+    Thieu quyen -> 403."""
+    if not staff.get("rbac_provisioned"):
+        if settings.rbac_strict:
+            raise HTTPException(status_code=403,
+                                detail="RBAC strict: chua provision hoac tai khoan chua duoc gan role")
+        return  # dev rollout: degrade
+    if permission_key not in staff.get("permissions", set()):
+        raise HTTPException(status_code=403, detail=f"Thieu quyen: {permission_key}")
+
+
 async def require_active_session(staff: dict = Depends(require_staff_session)) -> dict:
     """Chan khi tai khoan dang o trang thai bat buoc doi mat khau (I-B M0.5, CA §12.4):
     session chi duoc goi /me, logout, change-password; business endpoint bi tu choi."""

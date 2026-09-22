@@ -19,6 +19,10 @@ function ProductForm({ product, onSaved, onCancel }) {
   const [stock, setStock] = useState(product?.stock ?? "");
   const [shippingWeightG, setShippingWeightG] = useState(product?.shipping_weight_g ?? "");
   const [salesUnit, setSalesUnit] = useState(product?.sales_unit || "");
+  // D340 §1.1: kich thuoc san pham (cm) — dung tinh trong luong quy doi khi fallback GHN. Sua kich thuoc can quyen catalog.manage.
+  const [lengthCm, setLengthCm] = useState(product?.length_cm ?? "");
+  const [widthCm, setWidthCm] = useState(product?.width_cm ?? "");
+  const [heightCm, setHeightCm] = useState(product?.height_cm ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -37,6 +41,19 @@ function ProductForm({ product, onSaved, onCancel }) {
       // shipping_weight_g / sales_unit tuy chon: de trong -> gui null (M7 fail-closed -> staff bao phi/kiem so luong)
       const swg = shippingWeightG === "" ? null : Number(shippingWeightG);
       const su = salesUnit.trim() === "" ? null : salesUnit.trim();
+      // Kich thuoc: CHI gui key khi THAY DOI so voi gia tri goc (edit) — tranh moi lan sua deu doi quyen catalog.manage.
+      const norm = (v) => (v === "" ? null : Number(v));
+      const dimFields = { length_cm: lengthCm, width_cm: widthCm, height_cm: heightCm };
+      const dims = {};
+      for (const [k, v] of Object.entries(dimFields)) {
+        const nv = norm(v);
+        if (isEdit) {
+          const orig = product?.[k] ?? null;
+          if (nv !== orig) dims[k] = nv;    // chi gui khi doi
+        } else if (nv !== null) {
+          dims[k] = nv;                     // create: gui kich thuoc da nhap
+        }
+      }
       if (isEdit) {
         await apiFetch(`/dashboard/products/${product.id}`, {
           method: "PATCH",
@@ -47,6 +64,7 @@ function ProductForm({ product, onSaved, onCancel }) {
             stock: Number(stock),
             shipping_weight_g: swg,
             sales_unit: su,
+            ...dims,
           }),
         });
       } else {
@@ -60,6 +78,7 @@ function ProductForm({ product, onSaved, onCancel }) {
             stock: Number(stock),
             shipping_weight_g: swg,
             sales_unit: su,
+            ...dims,
           }),
         });
       }
@@ -116,6 +135,32 @@ function ProductForm({ product, onSaved, onCancel }) {
           value={salesUnit}
           onChange={(e) => setSalesUnit(e.target.value)}
         />
+        <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
+          Kích thước (cm) — dùng tính phí giao dự phòng khi GHN không báo giá (cần quyền quản lý danh mục):
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            type="number"
+            style={{ flex: 1 }}
+            placeholder="Dài (cm)"
+            value={lengthCm}
+            onChange={(e) => setLengthCm(e.target.value)}
+          />
+          <input
+            type="number"
+            style={{ flex: 1 }}
+            placeholder="Rộng (cm)"
+            value={widthCm}
+            onChange={(e) => setWidthCm(e.target.value)}
+          />
+          <input
+            type="number"
+            style={{ flex: 1 }}
+            placeholder="Cao (cm)"
+            value={heightCm}
+            onChange={(e) => setHeightCm(e.target.value)}
+          />
+        </div>
         <div style={{ fontSize: 11, color: "#999" }}>
           Cân nặng + đơn vị để trống → phí giao/số lượng sẽ do nhân viên xử lý tay (M7 fail-closed).
         </div>
@@ -316,6 +361,11 @@ export default function ProductsPage() {
                     {p.shipping_weight_g != null ? `${p.shipping_weight_g}g` : <span style={{ color: "#c00" }}>—</span>}
                     {" / "}
                     {p.sales_unit ? p.sales_unit : <span style={{ color: "#c00" }}>—</span>}
+                    <div style={{ color: "#888" }}>
+                      {p.length_cm != null && p.width_cm != null && p.height_cm != null
+                        ? `${p.length_cm}×${p.width_cm}×${p.height_cm}cm`
+                        : <span style={{ color: "#c00" }}>chưa có kích thước</span>}
+                    </div>
                   </td>
                   <td style={{ fontSize: 12 }}>
                     {p.price_tiers.length === 0
