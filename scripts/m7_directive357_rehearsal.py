@@ -13,6 +13,10 @@ T5 self-zone          -> route SELF -> 0 HTTP (ca 2 mode).
 T6 replay/concurrent  -> ROPS.execute cung command_key voi provider production -> HTTP dung 1 lan.
 T7 heavy >20 kg       -> 20.001 g: 0 decrypt secret, 0 HTTP, 0 provider_quote_log, khong fee (ke ca fallback ON);
                          20.000 g: KHONG bi guard chan.
+T8 (CA Review 359 R359-01) env legacy khong tach mode -> production KHONG duoc dung .env:
+   a) active=production + module OFF + .env legacy day du -> production_env_disallowed, 0 HTTP, 0 decrypt;
+   b) active=production + env_fallback + khong co record DB production -> fail-closed, 0 HTTP;
+   c) active=staging + module OFF -> VAN dung .env (baseline D305 giu nguyen).
 
 Chay tren m5lab (schema >= 071). KHONG credential that, KHONG PII/secret trong output.
 """
@@ -264,6 +268,65 @@ async def main():  # noqa: C901
         finally:
             S.load_active_config = _orig_loader
             settings.ghn_fallback_enabled = False
+
+        # ---- T8 (CA Review 359 R359-01) env legacy KHONG duoc dung cho production ----
+        settings.ghn_active_mode = "production"
+        dec8 = [0]
+        _orig8 = S.load_active_config
+
+        async def counting8(c, provider, mode):
+            dec8[0] += 1
+            return await _orig8(c, provider, mode)
+        S.load_active_config = counting8
+        try:
+            oid8 = await _order(conn, ward=GHN_WARD)
+            # (a) module OFF: .env legacy (staging) co san -> production PHAI fail-closed
+            settings.settings_integrations_enabled = False
+            settings.ghn_base_url = GHN.STAGING_BASE
+            settings.ghn_token = "TOK-ENV-LEGACY"
+            settings.ghn_shop_id = SHOP["staging"]
+            settings.ghn_from_district_id = 1552
+            settings.ghn_from_ward_code = "400105"
+            t8a = Transport()
+            cfg8a = await GHN.resolve_quote_cfg(conn)
+            res8a, _ = await _quote_once(conn, oid8, t8a)
+            ck("T8a active=production + module OFF + .env legacy -> production_env_disallowed, 0 HTTP, 0 decrypt",
+               cfg8a["source"] == "production_env_disallowed" and not cfg8a["token"] and not cfg8a["shop_id"]
+               and cfg8a["from_district_id"] is None and t8a.n == 0 and dec8[0] == 0
+               and res8a is not None and res8a.status != QUOTE_OK,
+               f"source={cfg8a['source']} token={'RONG' if not cfg8a['token'] else 'CO'} http={t8a.n} "
+               f"decrypt={dec8[0]} reason={getattr(res8a, 'reason', None)}")
+
+            # (b) module ON + env_fallback, khong co record DB production -> van fail-closed
+            settings.settings_integrations_enabled = True
+            settings.settings_integrations_env_fallback = True
+            await conn.execute("UPDATE integrations SET enabled=false WHERE provider='ghn' AND mode='production'")
+            t8b = Transport()
+            cfg8b = await GHN.resolve_quote_cfg(conn)
+            res8b, _ = await _quote_once(conn, oid8, t8b)
+            ck("T8b active=production + env_fallback + khong co record DB production -> fail-closed, 0 HTTP",
+               cfg8b["source"] in ("production_env_disallowed", "none") and not cfg8b["token"] and t8b.n == 0
+               and res8b is not None and res8b.status != QUOTE_OK,
+               f"source={cfg8b['source']} token={'RONG' if not cfg8b['token'] else 'CO'} http={t8b.n} "
+               f"reason={getattr(res8b, 'reason', None)}")
+
+            # (c) staging giu baseline D305: module OFF van dung .env
+            settings.settings_integrations_enabled = False
+            settings.ghn_active_mode = "staging"
+            cfg8c = await GHN.resolve_quote_cfg(conn)
+            ck("T8c active=staging + module OFF -> VAN dung .env (baseline D305 khong doi)",
+               cfg8c["source"] == "env" and cfg8c["token"] == "TOK-ENV-LEGACY"
+               and cfg8c["shop_id"] == SHOP["staging"],
+               f"source={cfg8c['source']} shop={cfg8c['shop_id']}")
+        finally:
+            S.load_active_config = _orig8
+            settings.settings_integrations_enabled = True
+            settings.settings_integrations_env_fallback = False
+            settings.ghn_base_url = ""
+            settings.ghn_token = ""
+            settings.ghn_shop_id = ""
+            settings.ghn_from_district_id = None
+            settings.ghn_from_ward_code = ""
 
         print("RESULT:", "ALL PASS" if not FAILS else f"FAIL {FAILS}")
         return 1 if FAILS else 0

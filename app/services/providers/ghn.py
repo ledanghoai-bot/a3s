@@ -66,10 +66,16 @@ async def resolve_quote_cfg(conn) -> dict[str, Any]:
     doan tu token/URL/ShopId; moi luc chi MOT mode.
     - m7_ghn_quote OFF -> cfg env (enabled=False -> quote() tra ghn_disabled), KHONG doc/giai ma secret.
     - mode khong hop le -> fail-closed NGAY (khong cham DB/secret).
-    - module OFF -> env (baseline).
+    - module OFF -> env (baseline D305) CHI cho staging; production -> fail-closed (xem duoi).
     - module ON: integration ghn cua DUNG mode active, enabled + day du -> config DB + token giai ma TRONG PHAM VI
       request; khong co record -> fail-closed; decrypt loi/thieu secret/base_url khong khop endpoint ghim cua mode
-      -> fail-closed (ghn_not_configured). Token khong log/cache/snapshot."""
+      -> fail-closed (ghn_not_configured). Token khong log/cache/snapshot.
+
+    CA Review 359 (R359-01): `.env` la cau hinh LEGACY khong mang mode — khong co gi bao dam token/ShopId/pickup/base
+    trong do thuoc moi truong nao. Vi vay khi mode active = 'production', MOI duong env (module OFF, hoac loader tra
+    source='env' do settings_integrations_env_fallback) deu fail-closed `production_env_disallowed` TRUOC khi dung
+    token/decrypt/HTTP. Production CHI duoc lay cau hinh tu integration record Dashboard dung
+    (provider='ghn', mode='production'), enabled, endpoint ghim, secret rieng. Staging giu nguyen contract D305."""
     base = _cfg()
     mode = str(getattr(settings, "ghn_active_mode", "") or "").strip()
     if not base["enabled"]:
@@ -77,6 +83,8 @@ async def resolve_quote_cfg(conn) -> dict[str, Any]:
     if mode not in MODES:                       # CA 357: mode phai TUONG MINH hop le, khong doan
         return _unconfigured(base, "mode_invalid", mode)
     if not settings.settings_integrations_enabled:
+        if mode == "production":                # R359-01: env legacy khong tach mode -> cam dung cho production
+            return _unconfigured(base, "production_env_disallowed", mode)
         return {**base, "source": "env", "mode": mode}
     from app.services.settings import integrations as _S
     try:
@@ -84,6 +92,8 @@ async def resolve_quote_cfg(conn) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — decrypt/invalid -> fail closed, KHONG fallback env
         return _unconfigured(base, "db_error", mode)
     if lc["source"] == "env":
+        if mode == "production":                # R359-01: env_fallback cung khong duoc ap cho production
+            return _unconfigured(base, "production_env_disallowed", mode)
         return {**base, "source": "env", "mode": mode}
     if lc["source"] != "database":
         return _unconfigured(base, "none", mode)

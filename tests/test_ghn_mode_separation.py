@@ -153,6 +153,75 @@ def test_resolve_cfg_missing_config_or_decrypt_error_fail_closed(monkeypatch):
     assert c["source"] == "db_error" and c["token"] == ""
 
 
+# ============================================= PURE — R359-01: env legacy KHONG duoc dung cho production
+def _env_cfg_legacy(monkeypatch):
+    """Gia lap .env legacy (khong mang mode): token/ShopId/pickup/base cua STAGING nam san trong settings."""
+    monkeypatch.setattr(settings, "ghn_base_url", ghn.STAGING_BASE)
+    monkeypatch.setattr(settings, "ghn_token", "TOK-ENV-LEGACY")
+    monkeypatch.setattr(settings, "ghn_shop_id", SHOP["staging"])
+    monkeypatch.setattr(settings, "ghn_from_district_id", 1552)
+    monkeypatch.setattr(settings, "ghn_from_ward_code", "400105")
+
+
+def test_r359_production_module_off_fail_closed(monkeypatch):
+    """active=production + module OFF -> production_env_disallowed: khong token/ShopId/pickup, khong doc DB/secret."""
+    _env(monkeypatch, "production")
+    _env_cfg_legacy(monkeypatch)
+    monkeypatch.setattr(settings, "settings_integrations_enabled", False)
+    seen = _patch_loader(monkeypatch, {"production": _db_cfg("production")})
+    c = asyncio.run(ghn.resolve_quote_cfg(None))
+    assert c["source"] == "production_env_disallowed" and c["mode"] == "production"
+    assert c["token"] == "" and c["shop_id"] == "" and c["from_district_id"] is None and c["from_ward_code"] == ""
+    assert seen == []                                    # KHONG cham loader/secret
+    # quote() voi cfg nay -> quote_required, KHONG HTTP
+    calls = []
+    conn = _Conn({("production", "66", "24490"): MATCH})
+    res = asyncio.run(ghn.GhnQuoteProvider(c, post=_post(calls)).quote(conn, _req()))
+    assert res.status == "quote_required" and res.reason == "ghn_not_configured" and calls == []
+
+
+def test_r359_production_env_fallback_fail_closed(monkeypatch):
+    """active=production + module ON + env_fallback nhung khong co record DB production -> fail-closed, 0 HTTP."""
+    _env(monkeypatch, "production")
+    _env_cfg_legacy(monkeypatch)
+    monkeypatch.setattr(settings, "settings_integrations_env_fallback", True, raising=False)
+    _patch_loader(monkeypatch, {"production": {"source": "env", "enabled": True, "config": {}, "secrets": {}}})
+    c = asyncio.run(ghn.resolve_quote_cfg(None))
+    assert c["source"] == "production_env_disallowed"
+    assert c["token"] == "" and c["shop_id"] == "" and c["from_district_id"] is None
+    calls = []
+    conn = _Conn({("production", "66", "24490"): MATCH})
+    res = asyncio.run(ghn.GhnQuoteProvider(c, post=_post(calls)).quote(conn, _req()))
+    assert res.status == "quote_required" and calls == []
+
+
+@pytest.mark.parametrize("module_on", [False, True])
+def test_r359_staging_env_baseline_khong_doi(monkeypatch, module_on):
+    """Backward compat D305: staging VAN duoc dung env khi module OFF hoac loader tra source='env'."""
+    _env(monkeypatch, "staging")
+    _env_cfg_legacy(monkeypatch)
+    monkeypatch.setattr(settings, "settings_integrations_enabled", module_on)
+    if module_on:
+        _patch_loader(monkeypatch, {"staging": {"source": "env", "enabled": True, "config": {}, "secrets": {}}})
+    c = asyncio.run(ghn.resolve_quote_cfg(None))
+    assert c["source"] == "env" and c["mode"] == "staging"
+    assert c["token"] == "TOK-ENV-LEGACY" and c["shop_id"] == SHOP["staging"]      # baseline giu nguyen
+
+
+def test_r359_production_record_db_van_quote_duoc(monkeypatch):
+    """Duong DUY NHAT cho production: record Dashboard dung mode -> quote chay binh thuong (transport mock)."""
+    _env(monkeypatch, "production")
+    _env_cfg_legacy(monkeypatch)
+    _patch_loader(monkeypatch, {"production": _db_cfg("production")})
+    c = asyncio.run(ghn.resolve_quote_cfg(None))
+    assert c["source"] == "database" and c["token"] == TOK["production"] and c["shop_id"] == SHOP["production"]
+    assert c["token"] != "TOK-ENV-LEGACY"                  # KHONG lay tu env
+    calls = []
+    conn = _Conn({("production", "66", "24490"): MATCH})
+    res = asyncio.run(ghn.GhnQuoteProvider(c, post=_post(calls)).quote(conn, _req()))
+    assert res.status == QUOTE_OK and all(x["base"] == ghn.PROD_BASE for x in calls)
+
+
 # ================================================================== PURE — quote contract theo mode
 @pytest.mark.parametrize("mode", ["staging", "production"])
 def test_quote_uses_mode_map_and_mode_endpoint(mode):
