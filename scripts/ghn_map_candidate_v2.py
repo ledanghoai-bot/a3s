@@ -34,8 +34,15 @@ from ghn_map_builder import (
     strip_accents,  # noqa: E402  (CUNG ham chan doan da audit o D377)
 )
 
-RULE_VERSION = ("ghn_map_candidate_v2(v1_matched + po_same_district_lowest_ward_id + po_spelling_normalized_match_unique"
-                " + po_record_367_overrides; lineage=vn_province_lineage_2025_v1)")
+RULES = {
+    "v2": ("ghn_map_candidate_v2(v1_matched + po_same_district_lowest_ward_id + po_spelling_normalized_match_unique"
+           " + po_record_367_overrides; lineage=vn_province_lineage_2025_v1)"),
+    # CA Amendment 380: them 2 quy tac hep (A) same_district WardCode KHONG thuan so -> nho nhat theo CHUOI ASCII;
+    # (B) spelling nhieu candidate -> map khi DUNG 1 candidate co ten chuan hoa trung ten hien hanh Alpha3s.
+    "v2.1": ("ghn_map_candidate_v2.1(v2 + po_same_district_lowest_ward_code_string + po_spelling_normalized_continuity;"
+             " CA amendment 380)"),
+}
+RULE_VERSION = RULES["v2.1"]
 
 
 def sha(path):
@@ -51,7 +58,11 @@ def load(p):
         return json.load(fh)
 
 
-def build(results, snap_dir, v1_rows):
+def build(results, snap_dir, v1_rows, rule="v2.1"):
+    if rule not in RULES:
+        raise ValueError(f"rule khong hop le: {rule}")
+    global RULE_VERSION
+    RULE_VERSION = RULES[rule]
     dists = {d["DistrictID"]: d for d in load(os.path.join(snap_dir, "districts.json"))}
     wards = load(os.path.join(snap_dir, "wards.json"))
     wkey = {f"{w['DistrictID']}:{w['WardCode']}": w for w in wards}
@@ -102,6 +113,14 @@ def build(results, snap_dir, v1_rows):
             nonnum = [c["key"] for c in cands if not str(c["key"].split(":")[1]).isdigit()]
             if missing or len(dset) != 1 or not cands:
                 st.update(state="exception", reason=f"same_district_recheck_failed:missing={missing},districts={sorted(dset)}")
+            elif nonnum and rule == "v2.1":
+                # Amendment 380 A: district DA xac nhan lai o tren (len(dset)==1); chon nho nhat theo chuoi ASCII
+                srt = sorted(cands, key=lambda c: str(c["key"].split(":")[1]))
+                did, wc = srt[0]["key"].split(":")
+                ex = {"candidates_sorted": [c["key"] for c in srt], "district_id": int(did), "nonnumeric": nonnum}
+                st.update(state="mapped_same_district_string", reason="po_same_district_lowest_ward_code_string",
+                          selected=srt[0]["key"], **ex)
+                rows.append(row(r, int(did), wc, "po_same_district_lowest_ward_code_string", ex))
             elif nonnum:
                 st.update(state="exception", reason="ward_code_not_numeric_po_rule_undefined", nonnumeric=nonnum)
             else:
@@ -127,7 +146,20 @@ def build(results, snap_dir, v1_rows):
                 st.update(state="mapped_spelling", reason="po_spelling_normalized_match", selected=found[0], **ex)
                 rows.append(row(r, int(did), wc, "po_spelling_normalized_match", ex))
             else:
-                st.update(state="exception", reason="spelling_not_unique_keep_staff", **ex)
+                cont = []
+                if rule == "v2.1":
+                    # Amendment 380 B: DUNG 1 candidate co ten chuan hoa trung ten HIEN HANH Alpha3s (name continuity)
+                    cur = strip_accents(norm_name(r["ward_name"]))
+                    wmap = {f"{w['DistrictID']}:{w['WardCode']}": w for w in scope}
+                    cont = [k for k in found
+                            if cur in {strip_accents(n) for n in names_of(wmap[k].get("WardName"), wmap[k].get("NameExtension"))}]
+                if len(cont) == 1:
+                    did, wc = cont[0].split(":")
+                    st.update(state="mapped_spelling_continuity", reason="po_spelling_normalized_continuity",
+                              selected=cont[0], continuity_hits=cont, **ex)
+                    rows.append(row(r, int(did), wc, "po_spelling_normalized_continuity", {**ex, "continuity_hits": cont}))
+                else:
+                    st.update(state="exception", reason="spelling_not_unique_keep_staff", continuity_hits=cont, **ex)
         elif r["classification"] == "unmatched":
             st.update(state="staff_required", reason="unmatched_no_candidate")
         elif r.get("ambiguity") == "cross_district":
@@ -159,6 +191,12 @@ def verify(states, rows, snap_dir, v1_rows):
             ds = {int(c.split(":")[0]) for c in s["candidates"]}
             if len(ds) != 1 or s["selected"] != s["candidates_sorted"][0]:
                 errs.append(f"{s['ward_code']} same_district vi pham")
+        if s["state"] == "mapped_same_district_string":
+            ds = {int(c.split(":")[0]) for c in s["candidates"]}
+            if len(ds) != 1 or s["selected"] != sorted(s["candidates"], key=lambda c: c.split(":")[1])[0]:
+                errs.append(f"{s['ward_code']} same_district_string vi pham")
+        if s["state"] == "mapped_spelling_continuity" and s.get("continuity_hits") != [s["selected"]]:
+            errs.append(f"{s['ward_code']} spelling_continuity khong duy nhat")
     for v in v1_rows:
         s = by[(v["province_code"], v["ward_code"])]
         if s.get("selected") != f"{v['carrier_district_id']}:{v['carrier_ward_code']}":
@@ -170,15 +208,40 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     for a in ("--results", "--snapshot", "--v1", "--admin", "--lineage", "--out"):
         ap.add_argument(a, required=True)
+    ap.add_argument("--rule", choices=sorted(RULES), default="v2.1")
+    ap.add_argument("--baseline", help="candidate_rows.json cua ban truoc (vd v2 D379) de tinh diff")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
     results = [json.loads(x) for x in open(a.results, encoding="utf-8")]
     v1_rows = load(a.v1)
-    states, rows = build(results, a.snapshot, v1_rows)
+    states, rows = build(results, a.snapshot, v1_rows, rule=a.rule)
     errs = verify(states, rows, a.snapshot, v1_rows)
+    diff = None
+    if a.baseline:
+        def core(x):
+            # noi dung map + reason; KHONG so rule_version (doi theo phien ban, khong phai thay doi mapping)
+            n = {k: v for k, v in json.loads(x["note"]).items() if k != "rule_version"}
+            return (x["carrier_province_id"], x["carrier_district_id"], str(x["carrier_ward_code"]), x["status"],
+                    json.dumps(n, sort_keys=True, ensure_ascii=False))
+        base = {(x["province_code"], x["ward_code"]): x for x in load(a.baseline)}
+        cur = {(x["province_code"], x["ward_code"]): x for x in rows}
+        added = sorted(k for k in cur if k not in base)
+        removed = sorted(k for k in base if k not in cur)
+        changed = sorted(k for k in cur if k in base and core(cur[k]) != core(base[k]))
+        diff = {"baseline_sha256": sha(a.baseline), "baseline_rows": len(base), "rows": len(cur),
+                "added": [{"province_code": k[0], "ward_code": k[1], "reason": json.loads(cur[k]["note"])["reason"],
+                           "selected": f"{cur[k]['carrier_district_id']}:{cur[k]['carrier_ward_code']}"} for k in added],
+                "removed": [list(k) for k in removed], "changed": [list(k) for k in changed]}
+        if removed or changed:
+            errs.append(f"diff vi pham: removed={len(removed)} changed={len(changed)}")
+        with open(os.path.join(a.out, "diff_vs_baseline.json"), "w", encoding="utf-8") as fh:
+            json.dump(diff, fh, ensure_ascii=False, indent=1, sort_keys=True)
     cnt = Counter(s["state"] for s in states)
     exc = Counter(s["reason"] for s in states if s["state"] == "exception")
-    summary = {"rule_version": RULE_VERSION, "wards_total": len(states), "states": dict(cnt), "exception_reasons": dict(exc),
+    summary = {"rule_version": RULE_VERSION, "rule": a.rule, "wards_total": len(states), "states": dict(cnt),
+               "exception_reasons": dict(exc),
+               "diff_vs_baseline": None if diff is None else {"added": len(diff["added"]), "removed": len(diff["removed"]),
+                                                               "changed": len(diff["changed"])},
                "candidate_rows": len(rows), "rows_by_reason": dict(Counter(json.loads(x["note"])["reason"] for x in rows)),
                "verify_errors": errs,
                "inputs_sha256": {"d377_results": sha(a.results), "v1_map": sha(a.v1), "admin_export": sha(a.admin),
@@ -203,8 +266,8 @@ def main(argv=None):
             for s in states:
                 if pred(s):
                     w.writerow({**s, "candidates": " | ".join(s["candidates"])})
-    print(json.dumps({k: summary[k] for k in ("states", "exception_reasons", "candidate_rows", "rows_by_reason",
-                                               "verify_errors")}, ensure_ascii=False))
+    print(json.dumps({k: summary[k] for k in ("rule", "states", "exception_reasons", "candidate_rows", "rows_by_reason",
+                                               "diff_vs_baseline", "verify_errors")}, ensure_ascii=False))
     return 0 if not errs else 1
 
 
