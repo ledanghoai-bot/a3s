@@ -18,6 +18,14 @@ PROVIDER = "ghn"
 ALLOWED_PATHS = frozenset({"/master-data/province", "/master-data/district", "/master-data/ward"})
 DEFAULT_CAP = 10
 MAP_STATUSES = ("matched", "ambiguous", "manual", "unmatched")
+MODES = ("staging", "production")
+
+
+def check_mode(mode: str) -> str:
+    """CA 357 §2.3.1: moi lenh PHAI chi dinh mode hop le (staging|production) — khong mac dinh ngam."""
+    if mode not in MODES:
+        raise ValueError(f"mode phai la {MODES}, nhan {mode!r}")
+    return mode
 
 _PREFIXES = ("thành phố ", "tỉnh ", "quận ", "huyện ", "thị xã ", "thị trấn ", "phường ", "xã ", "tp. ", "tp ")
 
@@ -167,48 +175,51 @@ async def fetch_scoped(cfg: dict, targets: list[dict], *, post, cap: int = DEFAU
 
 
 # ------------------------------------------------------------------ persist snapshot (DB, transaction caller)
-async def _upsert_md(conn, kind: str, key: str, parent: str | None, name: str, payload: dict, ver: str) -> None:
+async def _upsert_md(conn, kind: str, key: str, parent: str | None, name: str, payload: dict, ver: str,
+                     mode: str) -> None:
     await conn.execute(
-        "INSERT INTO carrier_master_data (provider, kind, key, parent_key, name, payload, fetched_at, snapshot_version) "
-        "VALUES ($1,$2,$3,$4,$5,$6::jsonb,now(),$7) ON CONFLICT (provider, kind, key) DO UPDATE SET "
-        "parent_key=EXCLUDED.parent_key, name=EXCLUDED.name, payload=EXCLUDED.payload, fetched_at=now(), "
-        "snapshot_version=EXCLUDED.snapshot_version", PROVIDER, kind, key, parent, name, json.dumps(payload), ver)
+        "INSERT INTO carrier_master_data (provider, mode, kind, key, parent_key, name, payload, fetched_at, "
+        "snapshot_version) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now(),$8) "
+        "ON CONFLICT (provider, mode, kind, key) DO UPDATE SET parent_key=EXCLUDED.parent_key, name=EXCLUDED.name, "
+        "payload=EXCLUDED.payload, fetched_at=now(), snapshot_version=EXCLUDED.snapshot_version",
+        PROVIDER, mode, kind, key, parent, name, json.dumps(payload), ver)
 
 
 async def persist_snapshot(conn, result: dict, *, snapshot_version: str, targets: list[dict], actor: str,
-                           cap: int) -> dict:
+                           cap: int, mode: str) -> dict:
     """Header luon ghi (completed/aborted); master-data CHI khi completed. Audit. Tra counts."""
     from app.services import audit_service
+    check_mode(mode)
     counts = {"province": 0, "district": 0, "ward": 0}
     if result["status"] == "completed":
         for p in result["provinces"]:
             await _upsert_md(conn, "province", str(p.get("ProvinceID")), None, str(p.get("ProvinceName") or ""),
                              {"ProvinceName": p.get("ProvinceName"), "Code": p.get("Code"),
-                              "NameExtension": p.get("NameExtension")}, snapshot_version)
+                              "NameExtension": p.get("NameExtension")}, snapshot_version, mode)
             counts["province"] += 1
         for d in result["districts"]:
             await _upsert_md(conn, "district", str(d.get("DistrictID")), str(d.get("_province_id")),
                              str(d.get("DistrictName") or ""),
                              {"DistrictName": d.get("DistrictName"), "Code": d.get("Code"),
-                              "NameExtension": d.get("NameExtension")}, snapshot_version)
+                              "NameExtension": d.get("NameExtension")}, snapshot_version, mode)
             counts["district"] += 1
         for w in result["wards"]:
             await _upsert_md(conn, "ward", f"{w.get('_district_id')}:{w.get('WardCode')}", str(w.get("_district_id")),
                              str(w.get("WardName") or ""),
                              {"WardCode": w.get("WardCode"), "WardName": w.get("WardName"),
-                              "NameExtension": w.get("NameExtension")}, snapshot_version)
+                              "NameExtension": w.get("NameExtension")}, snapshot_version, mode)
             counts["ward"] += 1
     await conn.execute(
-        "INSERT INTO carrier_master_snapshot (provider, snapshot_version, status, request_count, request_cap, requests, "
-        "scope, report, created_by) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9)",
-        PROVIDER, snapshot_version, result["status"], len(result["calls"]), cap, json.dumps(result["calls"]),
+        "INSERT INTO carrier_master_snapshot (provider, mode, snapshot_version, status, request_count, request_cap, "
+        "requests, scope, report, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10)",
+        PROVIDER, mode, snapshot_version, result["status"], len(result["calls"]), cap, json.dumps(result["calls"]),
         json.dumps(targets), json.dumps({"reason": result.get("reason"), "report": result["report"], "counts": counts}),
         actor)
     if await audit_service.audit_exists(conn):
         await audit_service.record(conn, "staff", "carrier_master.snapshot", actor_ref=actor,
                                    entity_type="carrier_master_snapshot", entity_id=snapshot_version,
-                                   after={"status": result["status"], "request_count": len(result["calls"]),
-                                          "cap": cap, "counts": counts})
+                                   after={"mode": mode, "status": result["status"],
+                                          "request_count": len(result["calls"]), "cap": cap, "counts": counts})
     return counts
 
 
@@ -264,10 +275,10 @@ async def _admin_ward(conn, dataset: str, province_code: str, ward_code: str) ->
     return {"ward_name": w["name"], "province_name": p, "aliases": aliases}
 
 
-async def _ghn_province_scope(conn, province_name: str) -> tuple[int | None, list[dict], str]:
+async def _ghn_province_scope(conn, province_name: str, mode: str) -> tuple[int | None, list[dict], str]:
     """Province GHN (tu snapshot) khop ten tinh -> danh sach phuong GHN cua cac quan da snapshot."""
-    provs = await conn.fetch("SELECT key, name, payload FROM carrier_master_data WHERE provider=$1 AND kind='province'",
-                             PROVIDER)
+    provs = await conn.fetch("SELECT key, name, payload FROM carrier_master_data WHERE provider=$1 AND mode=$2 "
+                             "AND kind='province'", PROVIDER, mode)
     want = norm_name(province_name)
     hits = []
     for p in provs:
@@ -279,8 +290,8 @@ async def _ghn_province_scope(conn, province_name: str) -> tuple[int | None, lis
     pid = hits[0]["key"]
     rows = await conn.fetch(
         "SELECT w.key, w.parent_key, w.name, w.payload FROM carrier_master_data w JOIN carrier_master_data d "
-        "ON d.provider=w.provider AND d.kind='district' AND d.key=w.parent_key "
-        "WHERE w.provider=$1 AND w.kind='ward' AND d.parent_key=$2", PROVIDER, pid)
+        "ON d.provider=w.provider AND d.mode=w.mode AND d.kind='district' AND d.key=w.parent_key "
+        "WHERE w.provider=$1 AND w.mode=$2 AND w.kind='ward' AND d.parent_key=$3", PROVIDER, mode, pid)
     wards = []
     for r in rows:
         pl = json.loads(r["payload"]) if isinstance(r["payload"], str) else (r["payload"] or {})
@@ -289,8 +300,10 @@ async def _ghn_province_scope(conn, province_name: str) -> tuple[int | None, lis
     return int(pid), wards, "ok"
 
 
-async def build_map_rows(conn, addresses: list[tuple[str, str]], *, dataset_version: str | None = None) -> tuple:
+async def build_map_rows(conn, addresses: list[tuple[str, str]], *, mode: str,
+                         dataset_version: str | None = None) -> tuple:
     """Rows cho map_version moi tu snapshot. Bo qua self-zone; dia chi khong hop le -> report (khong row)."""
+    check_mode(mode)
     ds = dataset_version or await _active_dataset(conn)
     rows, report = [], []
     for pc, wc in addresses:
@@ -301,7 +314,7 @@ async def build_map_rows(conn, addresses: list[tuple[str, str]], *, dataset_vers
         if not au:
             report.append({"address": f"{pc}/{wc}", "result": "address_invalid"})
             continue
-        pid, wards, why = await _ghn_province_scope(conn, au["province_name"])
+        pid, wards, why = await _ghn_province_scope(conn, au["province_name"], mode)
         if pid is None:
             dec = {"status": "unmatched", "method": "legacy_alias_candidates", "confidence": None,
                    "carrier_district_id": None, "carrier_ward_code": None, "basis": why, "candidates": []}
@@ -317,13 +330,16 @@ async def build_map_rows(conn, addresses: list[tuple[str, str]], *, dataset_vers
     return rows, report
 
 
-async def latest_map_rows(conn) -> tuple[int | None, list[dict]]:
-    ver = await conn.fetchval("SELECT max(map_version) FROM carrier_address_map WHERE provider=$1", PROVIDER)
+async def latest_map_rows(conn, mode: str) -> tuple[int | None, list[dict]]:
+    check_mode(mode)
+    ver = await conn.fetchval("SELECT max(map_version) FROM carrier_address_map WHERE provider=$1 AND mode=$2",
+                              PROVIDER, mode)
     if ver is None:
         return None, []
     rows = await conn.fetch(
         "SELECT province_code, ward_code, carrier_province_id, carrier_district_id, carrier_ward_code, status, method, "
-        "confidence, note FROM carrier_address_map WHERE provider=$1 AND map_version=$2", PROVIDER, ver)
+        "confidence, note FROM carrier_address_map WHERE provider=$1 AND mode=$2 AND map_version=$3",
+        PROVIDER, mode, ver)
     return ver, [dict(r) for r in rows]
 
 
@@ -334,11 +350,12 @@ def apply_overrides(base_rows: list[dict], overrides: list[dict]) -> list[dict]:
     return list(by.values())
 
 
-async def validate_manual_rows(conn, items: list[dict], *, source_note: str,
+async def validate_manual_rows(conn, items: list[dict], *, source_note: str, mode: str,
                                dataset_version: str | None = None) -> list[dict]:
     """Staff mapping / import tu PO-portal (phuong an B, KHONG network). Moi item: province_code, ward_code,
     carrier_district_id (int>0), carrier_ward_code (chu so), carrier_province_id (tuy chon). Tu choi self-zone/dia chi
     sai; neu snapshot da co quan do ma khong co phuong -> tu choi (mau thuan)."""
+    check_mode(mode)
     if not isinstance(source_note, str) or not source_note.strip():
         raise MapValidationError("can source_note (nguon ID: portal/PO)")
     ds = dataset_version or await _active_dataset(conn)
@@ -360,11 +377,11 @@ async def validate_manual_rows(conn, items: list[dict], *, source_note: str,
             raise MapValidationError(f"{pc}/{wc}: self-zone — khong map GHN")
         if not ds or not await _admin_ward(conn, ds, pc, wc):
             raise MapValidationError(f"{pc}/{wc}: dia chi khong ton tai trong dataset")
-        has_d = await conn.fetchval("SELECT count(*) FROM carrier_master_data WHERE provider=$1 AND kind='ward' "
-                                    "AND parent_key=$2", PROVIDER, str(did))
+        has_d = await conn.fetchval("SELECT count(*) FROM carrier_master_data WHERE provider=$1 AND mode=$2 "
+                                    "AND kind='ward' AND parent_key=$3", PROVIDER, mode, str(did))
         if has_d:
-            ok = await conn.fetchval("SELECT 1 FROM carrier_master_data WHERE provider=$1 AND kind='ward' AND key=$2",
-                                     PROVIDER, f"{did}:{gwc}")
+            ok = await conn.fetchval("SELECT 1 FROM carrier_master_data WHERE provider=$1 AND mode=$2 "
+                                     "AND kind='ward' AND key=$3", PROVIDER, mode, f"{did}:{gwc}")
             if not ok:
                 raise MapValidationError(f"{pc}/{wc}: ward {did}:{gwc} khong co trong snapshot cua quan nay")
             verified = "verified_against_snapshot"
@@ -390,9 +407,10 @@ def _validate_row(r: dict) -> None:
             raise MapValidationError(f"{r['province_code']}/{r['ward_code']}: matched can carrier_district_id + ward")
 
 
-async def write_map_version(conn, rows: list[dict], *, actor: str, source: str) -> int:
+async def write_map_version(conn, rows: list[dict], *, actor: str, source: str, mode: str) -> int:
     """Ghi map_version MOI (append, khong sua version cu). Transaction caller. Audit. Tra version."""
     from app.services import audit_service
+    check_mode(mode)
     if not rows:
         raise MapValidationError("khong co dong nao de ghi")
     keys = [(r["province_code"], r["ward_code"]) for r in rows]
@@ -400,15 +418,15 @@ async def write_map_version(conn, rows: list[dict], *, actor: str, source: str) 
         raise MapValidationError("trung dia chi trong version")
     for r in rows:
         _validate_row(r)
-    await conn.execute("SELECT pg_advisory_xact_lock(hashtext('carrier_address_map:ghn'))")
-    ver = int(await conn.fetchval("SELECT coalesce(max(map_version),0)+1 FROM carrier_address_map WHERE provider=$1",
-                                  PROVIDER))
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"carrier_address_map:ghn:{mode}")
+    ver = int(await conn.fetchval("SELECT coalesce(max(map_version),0)+1 FROM carrier_address_map WHERE provider=$1 "
+                                  "AND mode=$2", PROVIDER, mode))
     for r in rows:
         await conn.execute(
-            "INSERT INTO carrier_address_map (provider, map_version, province_code, ward_code, carrier_province_id, "
-            "carrier_district_id, carrier_ward_code, status, method, confidence, note) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-            PROVIDER, ver, r["province_code"], r["ward_code"], r.get("carrier_province_id"),
+            "INSERT INTO carrier_address_map (provider, mode, map_version, province_code, ward_code, "
+            "carrier_province_id, carrier_district_id, carrier_ward_code, status, method, confidence, note) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+            PROVIDER, mode, ver, r["province_code"], r["ward_code"], r.get("carrier_province_id"),
             r.get("carrier_district_id"), r.get("carrier_ward_code"), r["status"], r.get("method"),
             r.get("confidence"), r.get("note"))
     counts: dict[str, int] = {}
@@ -416,6 +434,46 @@ async def write_map_version(conn, rows: list[dict], *, actor: str, source: str) 
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     if await audit_service.audit_exists(conn):
         await audit_service.record(conn, "staff", "carrier_map.version.create", actor_ref=actor,
-                                   entity_type="carrier_address_map", entity_id=str(ver),
-                                   after={"map_version": ver, "source": source, "counts": counts})
+                                   entity_type="carrier_address_map", entity_id=f"{mode}:{ver}",
+                                   after={"mode": mode, "map_version": ver, "source": source, "counts": counts})
     return ver
+
+
+async def compare_modes(conn, addresses: list[tuple[str, str]], *, base_mode: str = "staging",
+                        target_mode: str = "production") -> dict:
+    """CA 357 §2.3.3: doi chieu master-data + map giua 2 mode (KHONG network, KHONG ghi DB, KHONG doi business data).
+    reusable=True khi MOI dia chi 'matched' o base co dung ID do trong master-data cua target -> map base co the tai
+    dung sau khi evidence xac nhan; lech -> liet ke entry de PO quyet dinh / map version moi."""
+    check_mode(base_mode)
+    check_mode(target_mode)
+    out = {"base_mode": base_mode, "target_mode": target_mode, "master": {}, "addresses": [], "reusable": False}
+    for kind in ("province", "district", "ward"):
+        b = {r["key"]: r["name"] for r in await conn.fetch(
+            "SELECT key, name FROM carrier_master_data WHERE provider=$1 AND mode=$2 AND kind=$3",
+            PROVIDER, base_mode, kind)}
+        t = {r["key"]: r["name"] for r in await conn.fetch(
+            "SELECT key, name FROM carrier_master_data WHERE provider=$1 AND mode=$2 AND kind=$3",
+            PROVIDER, target_mode, kind)}
+        out["master"][kind] = {
+            "base": len(b), "target": len(t),
+            "same_key_and_name": len([k for k in b if k in t and norm_name(b[k]) == norm_name(t[k])]),
+            "missing_in_target": sorted(k for k in b if k not in t)[:20],
+            "name_differs": sorted(k for k in b if k in t and norm_name(b[k]) != norm_name(t[k]))[:20]}
+    _, base_rows = await latest_map_rows(conn, base_mode)
+    by = {(r["province_code"], r["ward_code"]): r for r in base_rows}
+    ok = bool(addresses)
+    for pc, wc in addresses:
+        r = by.get((pc, wc))
+        if not r or r["status"] != "matched":
+            out["addresses"].append({"address": f"{pc}/{wc}", "base_status": (r["status"] if r else "absent"),
+                                     "target": "n/a"})
+            ok = False
+            continue
+        key = f"{r['carrier_district_id']}:{r['carrier_ward_code']}"
+        hit = await conn.fetchval("SELECT name FROM carrier_master_data WHERE provider=$1 AND mode=$2 AND kind='ward' "
+                                  "AND key=$3", PROVIDER, target_mode, key)
+        out["addresses"].append({"address": f"{pc}/{wc}", "base_status": "matched", "carrier": key,
+                                 "target": ("present" if hit else "MISSING"), "target_name": hit})
+        ok = ok and bool(hit)
+    out["reusable"] = ok
+    return out

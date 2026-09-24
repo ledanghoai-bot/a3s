@@ -8,7 +8,12 @@ import { apiFetch } from "../../lib/api";
 import { useAuthGuard } from "../../lib/useAuthGuard";
 import { makeGate } from "./permGate.mjs";
 
-const GHN_STAGING_BASE = "https://dev-online-gateway.ghn.vn/shiip/public-api";
+// CA 357: endpoint GHIM theo mode (server cũng ghim lại — UI không cho nhập URL tuỳ ý).
+const GHN_BASE_BY_MODE = {
+  staging: "https://dev-online-gateway.ghn.vn/shiip/public-api",
+  production: "https://online-gateway.ghn.vn/shiip/public-api",
+};
+const GHN_MODES = ["staging", "production"];
 
 function uuid() {
   try { if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID(); } catch { /* noop */ }
@@ -83,7 +88,8 @@ export default function SettingsPage() {
   }
 
   if (!ready) return null;
-  const ghn = items.find((i) => i.provider === "ghn");
+  // CA 357: mỗi mode có cấu hình RIÊNG (credential/ShopId/pickup/map tách hoàn toàn).
+  const ghnByMode = Object.fromEntries(GHN_MODES.map((m) => [m, items.find((i) => i.provider === "ghn" && i.mode === m)]));
 
   return (
     <div>
@@ -151,24 +157,38 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          <h3>Đơn vị vận chuyển</h3>
-          {ghn ? (
-            <ProviderRow it={ghn} can={can} onManage={() => setSel(ghn)}
-              onTest={() => act(() => apiFetch(`/dashboard/settings/integrations/${ghn.id}/test-connection`, { method: "POST" }), "Đã test kết nối")}
-              onToggle={() => act(() => ghn.enabled
-                ? apiFetch(`/dashboard/settings/integrations/${ghn.id}/disable`, { method: "POST", body: withCmd({ expected_version: ghn.version }) })
-                : apiFetch(`/dashboard/settings/integrations/${ghn.id}/enable`, { method: "POST", body: withCmd({ expected_version: ghn.version }) }),
-                ghn.enabled ? "Đã tắt" : "Đã bật")}
-              busy={busy} />
-          ) : (
-            can("settings.integration.manage_public") && (
-              <button disabled={busy} onClick={() => act(() => apiFetch(`/dashboard/settings/integrations`, {
-                method: "POST", body: withCmd({ kind: "shipping", provider: "ghn", label: "GHN staging", mode: "staging",
-                  config_public: { base_url: GHN_STAGING_BASE } }) }), "Đã tạo GHN staging").then((r) => r && setSel(r))}>
-                + Thêm GHN staging
-              </button>
-            )
-          )}
+          <h3>Đơn vị vận chuyển (GHN)</h3>
+          <p style={{ color: "#555", fontSize: 13, marginTop: 0 }}>
+            Mỗi môi trường có cấu hình riêng: token, ShopId, điểm lấy hàng và bảng map địa chỉ <b>không dùng chung</b>.
+            Môi trường đang chạy do vận hành đặt bằng <code>GHN_ACTIVE_MODE</code> trên server.
+          </p>
+          {GHN_MODES.map((m) => {
+            const it = ghnByMode[m];
+            return (
+              <div key={m} style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
+                  Môi trường <b>{m}</b> · <code>{GHN_BASE_BY_MODE[m]}</code>
+                </div>
+                {it ? (
+                  <ProviderRow it={it} can={can} onManage={() => setSel(it)}
+                    onTest={() => act(() => apiFetch(`/dashboard/settings/integrations/${it.id}/test-connection`, { method: "POST" }), "Đã test kết nối")}
+                    onToggle={() => act(() => it.enabled
+                      ? apiFetch(`/dashboard/settings/integrations/${it.id}/disable`, { method: "POST", body: withCmd({ expected_version: it.version }) })
+                      : apiFetch(`/dashboard/settings/integrations/${it.id}/enable`, { method: "POST", body: withCmd({ expected_version: it.version }) }),
+                      it.enabled ? "Đã tắt" : "Đã bật")}
+                    busy={busy} />
+                ) : (
+                  can("settings.integration.manage_public") && (
+                    <button disabled={busy} onClick={() => act(() => apiFetch(`/dashboard/settings/integrations`, {
+                      method: "POST", body: withCmd({ kind: "shipping", provider: "ghn", label: `GHN ${m}`, mode: m,
+                        config_public: {} }) }), `Đã tạo GHN ${m}`).then((r) => r && setSel(r))}>
+                      + Thêm GHN {m}
+                    </button>
+                  )
+                )}
+              </div>
+            );
+          })}
 
           {sel && sel.provider === "ghn" && (
             <GhnManage it={sel} can={can} busy={busy} onClose={() => setSel(null)} reload={load} setBusy={setBusy}
@@ -287,12 +307,18 @@ function GhnManage({ it, can, busy, onClose, reload, setBusy, setMsg, setErr }) 
   return (
     <div style={{ border: "1px solid #cdd3da", borderRadius: 8, padding: 16, marginTop: 12, background: "#fafbfc" }}>
       <div style={{ display: "flex", justifyContent: "space-between" }}>
-        <h3 style={{ margin: 0 }}>Quản lý GHN staging (#{it.id}, v{it.version}, cfg-rev {it.config_revision})</h3>
+        <h3 style={{ margin: 0 }}>Quản lý GHN {it.mode} (#{it.id}, v{it.version}, cfg-rev {it.config_revision})</h3>
         <button onClick={onClose}>Đóng</button>
       </div>
 
       <fieldset style={{ marginTop: 12 }}><legend>Môi trường</legend>
-        Mode: <b>staging</b> · Base URL (ghim): <code>{cp.base_url || GHN_STAGING_BASE}</code>
+        Mode: <b>{it.mode}</b> · Base URL (ghim theo mode): <code>{cp.base_url || GHN_BASE_BY_MODE[it.mode]}</code>
+        {it.mode === "production" && (
+          <div style={{ color: "#9a6700", marginTop: 6 }}>
+            ⚠ Cấu hình PRODUCTION (shop thật). Token/ShopId/điểm lấy hàng phải của tài khoản production; không dùng
+            lại của staging. Chỉ Test kết nối / Bật khi có closure của CA.
+          </div>
+        )}
       </fieldset>
 
       <fieldset style={{ marginTop: 12 }}><legend>Thông tin đăng nhập (Credentials)</legend>

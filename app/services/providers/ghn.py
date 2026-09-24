@@ -32,6 +32,8 @@ from app.services.safe_log import safe_exc
 PROVIDER = "ghn"
 STAGING_BASE = "https://dev-online-gateway.ghn.vn/shiip/public-api"
 PROD_BASE = "https://online-gateway.ghn.vn/shiip/public-api"
+MODES = ("staging", "production")
+BASE_BY_MODE = {"staging": STAGING_BASE, "production": PROD_BASE}
 SERVICE_TYPE_LIGHT = 2
 SERVICE_TYPE_HEAVY = 5
 _RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
@@ -52,42 +54,49 @@ def _cfg() -> dict[str, Any]:
     }
 
 
-def _unconfigured(base: dict, source: str) -> dict:
-    """Cfg fail-closed: thieu token/shop/pickup -> quote() tra ghn_not_configured (khong HTTP)."""
-    return {**base, "token": "", "shop_id": "", "from_district_id": None, "from_ward_code": "", "source": source}
+def _unconfigured(base: dict, source: str, mode: str | None = None) -> dict:
+    """Cfg fail-closed: thieu/lech token-shop-pickup-mode -> quote() tra ghn_not_configured (khong HTTP)."""
+    return {**base, "token": "", "shop_id": "", "from_district_id": None, "from_ward_code": "", "source": source,
+            "mode": mode}
 
 
 async def resolve_quote_cfg(conn) -> dict[str, Any]:
     """CA Directive 345 §2A: cfg quote GHN theo loader D305 (DB authoritative khi settings_integrations_enabled).
+    CA Directive 357 §2.1: mode active (settings.ghn_active_mode) phai TUONG MINH 'staging'|'production' — khong suy
+    doan tu token/URL/ShopId; moi luc chi MOT mode.
     - m7_ghn_quote OFF -> cfg env (enabled=False -> quote() tra ghn_disabled), KHONG doc/giai ma secret.
+    - mode khong hop le -> fail-closed NGAY (khong cham DB/secret).
     - module OFF -> env (baseline).
-    - module ON: integration ghn/staging enabled + day du -> config DB + token giai ma TRONG PHAM VI request;
-      khong co record -> env CHI khi settings_integrations_env_fallback, nguoc lai fail-closed; decrypt/thieu secret/
-      base_url khong phai staging -> fail-closed (ghn_not_configured). Token khong log/cache/snapshot."""
+    - module ON: integration ghn cua DUNG mode active, enabled + day du -> config DB + token giai ma TRONG PHAM VI
+      request; khong co record -> fail-closed; decrypt loi/thieu secret/base_url khong khop endpoint ghim cua mode
+      -> fail-closed (ghn_not_configured). Token khong log/cache/snapshot."""
     base = _cfg()
+    mode = str(getattr(settings, "ghn_active_mode", "") or "").strip()
     if not base["enabled"]:
-        return {**base, "source": "disabled"}
+        return {**base, "source": "disabled", "mode": mode}
+    if mode not in MODES:                       # CA 357: mode phai TUONG MINH hop le, khong doan
+        return _unconfigured(base, "mode_invalid", mode)
     if not settings.settings_integrations_enabled:
-        return {**base, "source": "env"}
+        return {**base, "source": "env", "mode": mode}
     from app.services.settings import integrations as _S
     try:
-        lc = await _S.load_active_config(conn, PROVIDER, "staging")
+        lc = await _S.load_active_config(conn, PROVIDER, mode)
     except Exception:  # noqa: BLE001 — decrypt/invalid -> fail closed, KHONG fallback env
-        return _unconfigured(base, "db_error")
+        return _unconfigured(base, "db_error", mode)
     if lc["source"] == "env":
-        return {**base, "source": "env"}
+        return {**base, "source": "env", "mode": mode}
     if lc["source"] != "database":
-        return _unconfigured(base, "none")
+        return _unconfigured(base, "none", mode)
     cp = lc["config"] or {}
-    b = (cp.get("base_url") or STAGING_BASE).rstrip("/")
-    if b != STAGING_BASE:
-        return _unconfigured(base, "base_not_staging")
+    b = (cp.get("base_url") or "").rstrip("/")
+    if b != BASE_BY_MODE[mode]:                 # endpoint phai khop DUNG mode active
+        return _unconfigured(base, "base_mode_mismatch", mode)
     mr = cp.get("max_retries")
     return {"enabled": True, "base": b, "token": (lc.get("secrets") or {}).get("token") or "",
             "shop_id": str(cp.get("shop_id") or ""), "from_district_id": cp.get("from_district_id"),
             "from_ward_code": cp.get("from_ward_code") or "", "timeout": float(cp.get("timeout_seconds") or 8.0),
             "retries": int(mr if mr is not None else 2), "light_max_g": int(cp.get("light_max_g") or 20000),
-            "map_version": int(cp.get("address_map_version") or 1), "source": "database"}
+            "map_version": int(cp.get("address_map_version") or 1), "source": "database", "mode": mode}
 
 
 def service_type_for_weight(weight_g: int, light_max_g: int) -> int:
@@ -156,12 +165,14 @@ async def _log(conn, *, order_id: int | None, fp: str, request: dict, response: 
         print(f"[ghn] quote log skipped: {safe_exc(e)}")
 
 
-async def address_lookup(conn, province_code: str, ward_code: str, *, map_version: int) -> dict | None:
-    """Adapter dia chi co version. Chi 'matched' moi dung; ambiguous/manual/unmatched -> None (fail-closed)."""
+async def address_lookup(conn, province_code: str, ward_code: str, *, map_version: int,
+                         mode: str = "staging") -> dict | None:
+    """Adapter dia chi co version + MODE (CA 357: map staging/production tach hoan toan).
+    Chi 'matched' moi dung; ambiguous/manual/unmatched -> None (fail-closed)."""
     row = await conn.fetchrow(
         "SELECT carrier_province_id, carrier_district_id, carrier_ward_code, status, method, confidence "
-        "FROM carrier_address_map WHERE provider=$1 AND map_version=$2 AND province_code=$3 AND ward_code=$4",
-        PROVIDER, map_version, province_code, ward_code)
+        "FROM carrier_address_map WHERE provider=$1 AND mode=$2 AND map_version=$3 AND province_code=$4 "
+        "AND ward_code=$5", PROVIDER, mode, map_version, province_code, ward_code)
     if not row or row["status"] != "matched" or not row["carrier_district_id"] or not row["carrier_ward_code"]:
         return None
     return dict(row)
@@ -199,11 +210,12 @@ class GhnQuoteProvider:
             return QuoteResult(status=QUOTE_REQUIRED, reason="ghn_not_configured", **base)
         if req.weight_g <= 0 or min(req.length_cm, req.width_cm, req.height_cm) <= 0:
             return QuoteResult(status=QUOTE_REQUIRED, reason="invalid_weight_or_dims", **base)
-        addr = await address_lookup(conn, req.province_code, req.ward_code, map_version=cfg["map_version"])
+        addr = await address_lookup(conn, req.province_code, req.ward_code, map_version=cfg["map_version"],
+                                    mode=cfg.get("mode") or "staging")
         if addr is None:
             await _log(conn, order_id=req.order_id, fp=fp, request={"reason": "address_unmapped",
                        "province_code": req.province_code, "ward_code": req.ward_code,
-                       "map_version": cfg["map_version"]}, response=None, status="skipped",
+                       "map_version": cfg["map_version"], "mode": cfg.get("mode")}, response=None, status="skipped",
                        http_status=None, duration_ms=None)
             return QuoteResult(status=QUOTE_REQUIRED, reason="address_unmapped", **base)
         stype = service_type_for_weight(req.weight_g, cfg["light_max_g"])

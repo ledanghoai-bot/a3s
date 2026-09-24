@@ -161,6 +161,7 @@ def test_decide_mapping_rules():
 
 # ---- runtime config (loader D305) ----
 def _base_env(monkeypatch, *, quote=True, module=True):
+    monkeypatch.setattr(settings, "ghn_active_mode", "staging")     # D357: mode active tuong minh
     monkeypatch.setattr(settings, "m7_ghn_quote", quote)
     monkeypatch.setattr(settings, "settings_integrations_enabled", module)
     monkeypatch.setattr(settings, "ghn_token", "")
@@ -217,10 +218,11 @@ def test_resolve_cfg_fail_closed(monkeypatch, kind):
     elif kind == "none":
         _patch_loader(monkeypatch, {"source": "none", "enabled": False, "config": {}, "secrets": {}})
     else:
+        # D357: mode active = staging nhung config mang base production -> base_mode_mismatch (fail-closed)
         bad = {**_DB_CFG, "config": {**_DB_CFG["config"], "base_url": ghn.PROD_BASE}}
         _patch_loader(monkeypatch, bad)
     c = asyncio.run(ghn.resolve_quote_cfg(None))
-    assert c["token"] == "" and c["shop_id"] == "" and c["source"] in ("db_error", "none", "base_not_staging")
+    assert c["token"] == "" and c["shop_id"] == "" and c["source"] in ("db_error", "none", "base_mode_mismatch")
 
 
 class _Conn:
@@ -285,11 +287,13 @@ def test_script_snapshot_dry_run_no_token_no_network(monkeypatch, capsys):
         raise AssertionError("dry-run KHONG duoc doc token / goi mang")
     monkeypatch.setattr(S, "load_saved_ghn_config", boom)
     monkeypatch.setattr(md, "fetch_scoped", boom)
-    args = mod._parser().parse_args(["snapshot", "--target", "Gia Lai=Pleiku", "--target", "Đắk Lắk=Krông Pắc"])
+    args = mod._parser().parse_args(["snapshot", "--mode", "staging", "--target", "Gia Lai=Pleiku",
+                                     "--target", "Đắk Lắk=Krông Pắc"])
     rc = asyncio.run(mod.cmd_snapshot(None, args))
     out = capsys.readouterr().out
     assert rc == 0 and "DRY-RUN" in out and '"planned_requests": 5' in out
-    args = mod._parser().parse_args(["snapshot", "--target", "A=b|c|d|e|f|g|h|i|j|k", "--execute", "--actor", "x"])
+    args = mod._parser().parse_args(["snapshot", "--mode", "staging", "--target", "A=b|c|d|e|f|g|h|i|j|k",
+                                     "--execute", "--actor", "x"])
     assert asyncio.run(mod.cmd_snapshot(None, args)) == 2 and "REFUSED" in capsys.readouterr().out
 
 
@@ -350,13 +354,13 @@ async def test_db_load_saved_config_disabled_no_enable(monkeypatch):
     await tr.start()
     try:
         iid, _ = await _mk_ghn(conn, S)
-        s = await S.load_saved_ghn_config(conn)
+        s = await S.load_saved_ghn_config(conn, "staging")
         assert s["token"] == TOKEN and s["enabled"] is False and s["config"]["shop_id"] == "1234567"
         assert await conn.fetchval("SELECT enabled FROM integrations WHERE id=$1", iid) is False
         # sai khoa ma hoa -> fail-closed
         monkeypatch.setattr(settings, "config_enc_keys", f"k1:{base64.b64encode(b'B'*32).decode()}")
         with pytest.raises(Exception):
-            await S.load_saved_ghn_config(conn)
+            await S.load_saved_ghn_config(conn, "staging")
     finally:
         await tr.rollback()
         await conn.close()
@@ -373,10 +377,10 @@ async def test_db_load_saved_config_incomplete_or_no_secret(monkeypatch):
     try:
         await _mk_ghn(conn, S, cfg={"shop_id": "1"})
         with pytest.raises(S.SettingsError):
-            await S.load_saved_ghn_config(conn)
+            await S.load_saved_ghn_config(conn, "staging")
         await _mk_ghn(conn, S, secret=False)
         with pytest.raises(S.SettingsError):
-            await S.load_saved_ghn_config(conn)
+            await S.load_saved_ghn_config(conn, "staging")
     finally:
         await tr.rollback()
         await conn.close()
@@ -453,14 +457,15 @@ async def test_db_snapshot_persist_build_map_version_audit():
     try:
         await _seed_admin(conn)
         res = await md.fetch_scoped({"token": TOKEN}, TARGETS, post=_fake_post(), cap=10)
-        counts = await md.persist_snapshot(conn, res, snapshot_version="t-snap-1", targets=TARGETS, actor="po", cap=10)
+        counts = await md.persist_snapshot(conn, res, snapshot_version="t-snap-1", targets=TARGETS, actor="po", cap=10,
+                                           mode="staging")
         assert counts == {"province": 2, "district": 4, "ward": 12}
         h = await conn.fetchrow("SELECT status, request_count, request_cap, requests FROM carrier_master_snapshot "
                                 "WHERE snapshot_version='t-snap-1'")
         assert h["status"] == "completed" and h["request_count"] == 5 and h["request_cap"] == 10
         assert TOKEN not in str(h["requests"])
         assert await conn.fetchval("SELECT count(*) FROM carrier_master_data WHERE snapshot_version='t-snap-1'") == 18
-        rows, report = await md.build_map_rows(conn, ADDRS, dataset_version=DSV)
+        rows, report = await md.build_map_rows(conn, ADDRS, mode="staging", dataset_version=DSV)
         by = {f"{r['province_code']}/{r['ward_code']}": r for r in rows}
         assert "66/24169" not in by and {"address": "66/24169", "result": "self_zone_skip"} in report
         assert by["66/24505"]["status"] == "matched" and by["66/24505"]["carrier_ward_code"] == "470206"
@@ -468,29 +473,31 @@ async def test_db_snapshot_persist_build_map_version_audit():
         assert by["66/24490"]["status"] == "ambiguous" and by["66/24490"]["carrier_ward_code"] is None
         assert by["52/23575"]["status"] == "ambiguous"
         prev = await conn.fetchval("SELECT coalesce(max(map_version),0) FROM carrier_address_map WHERE provider='ghn'")
-        v = await md.write_map_version(conn, rows, actor="po", source="snapshot:t-snap-1")
+        v = await md.write_map_version(conn, rows, actor="po", source="snapshot:t-snap-1", mode="staging")
         assert v == prev + 1
         assert await conn.fetchval("SELECT count(*) FROM carrier_address_map WHERE provider='ghn' AND map_version=$1",
                                    v) == 3
+        # D357: audit entity_id = "<mode>:<map_version>"
         assert await conn.fetchval("SELECT count(*) FROM audit_log WHERE action='carrier_map.version.create' "
-                                   "AND entity_id=$1", str(v)) == 1
+                                   "AND entity_id=$1", f'staging:{v}') == 1
         # adapter GHN chi nhan 'matched'
-        assert await ghn.address_lookup(conn, "66", "24505", map_version=v) is not None
-        assert await ghn.address_lookup(conn, "66", "24490", map_version=v) is None
+        assert await ghn.address_lookup(conn, "66", "24505", map_version=v, mode="staging") is not None
+        assert await ghn.address_lookup(conn, "66", "24490", map_version=v, mode="staging") is None
         # staff chon tay cho dia chi ambiguous -> version MOI, version cu giu nguyen
         staff = await md.validate_manual_rows(conn, [{"province_code": "66", "ward_code": "24490",
                                                       "carrier_district_id": 1780, "carrier_ward_code": "470201"}],
-                                              source_note="PO chon", dataset_version=DSV)
+                                              source_note="PO chon", mode="staging", dataset_version=DSV)
         assert json.loads(staff[0]["note"])["basis"] == "verified_against_snapshot"
-        _, latest = await md.latest_map_rows(conn)
-        v2 = await md.write_map_version(conn, md.apply_overrides(latest, staff), actor="po", source="manual:PO")
+        _, latest = await md.latest_map_rows(conn, "staging")
+        v2 = await md.write_map_version(conn, md.apply_overrides(latest, staff), actor="po", source="manual:PO",
+                                       mode="staging")
         assert v2 == v + 1
-        assert await ghn.address_lookup(conn, "66", "24490", map_version=v2) is not None
-        assert await ghn.address_lookup(conn, "66", "24490", map_version=v) is None       # v cu khong doi
+        assert await ghn.address_lookup(conn, "66", "24490", map_version=v2, mode="staging") is not None
+        assert await ghn.address_lookup(conn, "66", "24490", map_version=v, mode="staging") is None       # v cu khong doi
         with pytest.raises(md.MapValidationError):                                        # ward khong co trong snapshot
             await md.validate_manual_rows(conn, [{"province_code": "66", "ward_code": "24490",
                                                   "carrier_district_id": 1780, "carrier_ward_code": "999999"}],
-                                          source_note="x", dataset_version=DSV)
+                                          source_note="x", mode="staging", dataset_version=DSV)
     finally:
         await tr.rollback()
         await conn.close()
@@ -507,7 +514,8 @@ async def test_db_aborted_snapshot_header_only_and_manual_import_option_b():
         n0 = await conn.fetchval("SELECT count(*) FROM carrier_master_data")
         bad = await md.fetch_scoped({}, TARGETS, post=_fake_post(status=401), cap=10)
         assert bad["status"] == "aborted"
-        c = await md.persist_snapshot(conn, bad, snapshot_version="t-snap-bad", targets=TARGETS, actor="po", cap=10)
+        c = await md.persist_snapshot(conn, bad, snapshot_version="t-snap-bad", targets=TARGETS, actor="po", cap=10,
+                                      mode="staging")
         assert c == {"province": 0, "district": 0, "ward": 0}
         assert await conn.fetchval("SELECT count(*) FROM carrier_master_data") == n0
         assert await conn.fetchval("SELECT status FROM carrier_master_snapshot WHERE snapshot_version='t-snap-bad'") \
@@ -515,7 +523,7 @@ async def test_db_aborted_snapshot_header_only_and_manual_import_option_b():
         # Phuong an B: import thu cong, khong snapshot cho quan 1700 -> unverified_manual, 0 request
         rows = await md.validate_manual_rows(conn, [
             {"province_code": "52", "ward_code": "23575", "carrier_district_id": 1700, "carrier_ward_code": "123456",
-             "carrier_province_id": 205, "note": "tra portal"}], source_note="portal GHN staging", dataset_version=DSV)
+             "carrier_province_id": 205, "note": "tra portal"}], source_note="portal GHN staging", mode="staging", dataset_version=DSV)
         assert rows[0]["method"] == "staff" and json.loads(rows[0]["note"])["basis"] == "unverified_manual"
         for bad_item, _why in (({"province_code": "66", "ward_code": "24169", "carrier_district_id": 1,
                                  "carrier_ward_code": "1"}, "self-zone"),
@@ -526,15 +534,15 @@ async def test_db_aborted_snapshot_header_only_and_manual_import_option_b():
                                ({"province_code": "52", "ward_code": "23575", "carrier_district_id": 1,
                                  "carrier_ward_code": "ab"}, "ward code")):
             with pytest.raises(md.MapValidationError):
-                await md.validate_manual_rows(conn, [bad_item], source_note="x", dataset_version=DSV)
+                await md.validate_manual_rows(conn, [bad_item], source_note="x", mode="staging", dataset_version=DSV)
         with pytest.raises(md.MapValidationError):
             await md.validate_manual_rows(conn, rows and [{"province_code": "52", "ward_code": "23575",
                                                             "carrier_district_id": 1, "carrier_ward_code": "1"}],
-                                          source_note="  ", dataset_version=DSV)
+                                          source_note="  ", mode="staging", dataset_version=DSV)
         with pytest.raises(md.MapValidationError):
             await md.write_map_version(conn, [{"province_code": "52", "ward_code": "23575", "status": "matched",
                                                "carrier_district_id": None, "carrier_ward_code": None}],
-                                       actor="po", source="x")
+                                       actor="po", source="x", mode="staging")
     finally:
         await tr.rollback()
         await conn.close()
