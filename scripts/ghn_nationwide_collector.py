@@ -166,15 +166,18 @@ class Runner:
             st, ra, js, err = await self.t.send(level, body)
             ms = int((self.clock() - t0) * 1000)
             ok = st == 200 and isinstance(js, dict) and js.get("code") == 200 and isinstance(js.get("data"), list)
+            # v2: GHN tra 200/code 200 nhung `data` null = cau tra loi XAC DINH "khong co ban ghi" (vd quan dac biet/cu).
+            # Ghi RIENG la ok_empty (0 dong, danh dau empty) — KHONG lan voi du lieu that, KHONG bia ban ghi.
+            empty = st == 200 and isinstance(js, dict) and js.get("code") == 200 and js.get("data") is None
             e = {"ts": utc(), "n_run": self.n, "level": level, "target": target, "attempt": attempt, "status": st,
                  "code": js.get("code") if isinstance(js, dict) else None, "error": err, "ms": ms,
                  "retry_after": ra}
-            if ok:
-                e["outcome"] = "ok"
-                e["rows"] = len(js["data"])
+            if ok or empty:
+                e["outcome"] = "ok" if ok else "ok_empty"
+                e["rows"] = len(js["data"]) if ok else 0
                 ledger(e)
                 self.consec_inconclusive = 0
-                return "ok", js["data"], {"attempts": attempt}
+                return "ok", (js["data"] if ok else []), {"attempts": attempt, "empty": not ok}
             if st in (401, 403):
                 e["outcome"] = "fatal_auth"
                 ledger(e)
@@ -285,7 +288,10 @@ def finalize(st):
             fh.write(b)
         sums[name] = hashlib.sha256(b).hexdigest()
     complete = not incon["district"] and not incon["ward"] and not missing_ward_units and not issues
+    empty_units = {"district": sorted(k for k, v in st["district"].items() if v.get("empty")),
+                   "ward": sorted(k for k, v in st["ward"].items() if v.get("empty"))}
     rep = {"generated": utc(), "counts": {"province": len(provs_s), "district": len(dists_s), "ward": len(wards_s)},
+           "empty_units_ghn_returned_no_rows": empty_units,
            "inconclusive": incon, "missing_ward_units": missing_ward_units, "structural_issues": issues,
            "wardcode_duplicate_across_districts": dup_wardcode_global, "sha256": sums,
            "snapshot_digest": hashlib.sha256(_dump(sums).encode()).hexdigest(),

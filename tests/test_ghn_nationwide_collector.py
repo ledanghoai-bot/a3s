@@ -213,3 +213,24 @@ def test_snapshot_is_deterministic(tmp_path, monkeypatch, n):
     c.finalize(c.load_state())
     r2 = json.loads((tmp_path / "snapshot" / "report.json").read_text(encoding="utf-8"))["sha256"]
     assert r1 == r2
+
+
+def test_empty_data_is_explicit_ok_empty_not_fabricated(tmp_path, monkeypatch):
+    """v2: GHN 200/code 200 + data null (quan dac biet) -> ok_empty 0 dong, danh dau rieng; snapshot complete."""
+    c = _load(tmp_path, monkeypatch)
+    clk = FakeClock()
+
+    class EmptyGHN(FakeGHN):
+        async def send(self, level, body):
+            if level == "ward" and str(body.get("district_id")) == "1443":
+                self.calls.append((level, "1443", self.clk.t))
+                self.clk.t += 0.2
+                return 200, None, {"code": 200, "data": None}, None
+            return await super().send(level, body)
+    fake = EmptyGHN(clk)
+    assert _run(c, fake, clk) == 0
+    e = [x for x in _ledger(tmp_path) if x["target"] == "1443"]
+    assert [x["outcome"] for x in e] == ["ok_empty"] and e[0]["rows"] == 0
+    rep = json.loads((tmp_path / "snapshot" / "report.json").read_text(encoding="utf-8"))
+    assert rep["status"] == "complete" and rep["empty_units_ghn_returned_no_rows"]["ward"] == ["1443"]
+    assert rep["counts"]["ward"] == 2                                             # KHONG them dong gia
