@@ -166,9 +166,12 @@ def test_quote_fallback_manual_when_province_unclassified():
 def test_quote_fallback_never_zero():
     items = [_cube(10, q=2)]
     for dest in (SHOP, OTHER):
-        for actual in (100, 5000, 30000):
+        for actual in (100, 5000, 20000):
             fee, reason, _ = fb.quote_fallback(POLICY, dest, items, actual, 10)
             assert reason == "ok" and fee and fee > 0
+        # CA 354 / PO Record 353: >20 kg -> KHONG bao phi (manual), van khong bao gio 0d
+        fee, reason, _ = fb.quote_fallback(POLICY, dest, items, 30000, 10)
+        assert fee is None and reason == "heavy_goods_manual"
 
 
 # ============================ CA 341-01: request dims GHN tu CUNG input dong thung ============================

@@ -188,6 +188,9 @@ class GhnQuoteProvider:
         cfg = self.cfg
         fp = req.fingerprint()
         base = dict(provider=PROVIDER, request_fingerprint=fp)
+        from app.services.fulfillment import shipping_policy as _sp
+        if _sp.is_heavy(req.weight_g):   # CA 354 (phong thu): >20 kg -> KHONG HTTP, KHONG provider_quote_log
+            return QuoteResult(status=QUOTE_REQUIRED, reason=_sp.HEAVY_GOODS_REASON, **base)
         if not cfg["enabled"]:
             return QuoteResult(status=QUOTE_REQUIRED, reason="ghn_disabled", **base)
         if not cfg["token"] or not cfg["shop_id"] or not cfg["from_district_id"] or not cfg["from_ward_code"]:
