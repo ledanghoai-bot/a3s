@@ -112,6 +112,8 @@ def _as_str(v, name) -> str:
 # required GHN pickup/quote fields cho test/enable (khong bat buoc luc save tung phan).
 _GHN_REQUIRED = ("shop_id", "from_district_id", "from_ward_code", "timeout_seconds", "max_retries",
                  "light_max_g", "address_map_version")
+# Default retry cua test-connection khi config KHONG co max_retries (giu dung gia tri cu cua `or 1`).
+_TEST_CONNECTION_DEFAULT_RETRIES = 1
 
 _CODE_PREFIX_RE = re.compile(r"^[A-Z0-9]{2,12}$")
 
@@ -443,8 +445,12 @@ async def test_connection(conn, integration_id: int, *, actor: str, post=None) -
 
     # ---- PHA 2: probe NGOAI transaction (khong giu DB row-lock) ----
     from app.services.providers import ghn as _ghn
+    # CA Directive 365: default CHI khi max_retries vang mat/None. `or 1` cu bien 0 hop le thanh 1 -> loi retryable
+    # tao HTTP thu hai du Dashboard dat 0. 0 phai giu nguyen = dung MOT attempt.
+    mr = cp.get("max_retries")
     cfg = {"base": ghn_base_for_mode(r["mode"]), "token": token, "shop_id": str(cp["shop_id"]),
-           "timeout": float(cp.get("timeout_seconds") or 8.0), "retries": int(cp.get("max_retries") or 1)}
+           "timeout": float(cp.get("timeout_seconds") or 8.0),
+           "retries": _TEST_CONNECTION_DEFAULT_RETRIES if mr is None else int(mr)}
     _post = post or _ghn._post
     st, js, err, dur = await _post(cfg, "/master-data/province", {}, retries=cfg["retries"])
     if err or st != 200 or not isinstance(js, dict) or js.get("code") != 200:
