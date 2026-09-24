@@ -20,7 +20,7 @@ from app.services.settings import crypto as _c
 
 # provider -> (kind, allowed modes, secret key_names, public-field allowlist)
 _ALLOW = {
-    "ghn":           ("shipping", ("staging",),          ("token",),            ("base_url", "shop_id",
+    "ghn":           ("shipping", ("staging", "production"), ("token",),        ("base_url", "shop_id",
                       "from_district_id", "from_ward_code", "timeout_seconds", "max_retries", "light_max_g",
                       "address_map_version")),
     "self_delivery": ("shipping", ("live",),             (),                    ("note",)),
@@ -30,6 +30,17 @@ _ALLOW = {
 }
 _FIELDS_LAST4_OK = {"account_number"}   # chi field nay duoc phep hien last4 (CA 304-06)
 _GHN_STAGING_BASE = "https://dev-online-gateway.ghn.vn/shiip/public-api"
+_GHN_PRODUCTION_BASE = "https://online-gateway.ghn.vn/shiip/public-api"
+# CA 357 §2.1.2: endpoint GHIM theo mode (Dashboard KHONG cho nhap URL tuy y, KHONG suy dien tu token/ShopId).
+_GHN_BASE_BY_MODE = {"staging": _GHN_STAGING_BASE, "production": _GHN_PRODUCTION_BASE}
+
+
+def ghn_base_for_mode(mode: str) -> str:
+    """Base URL ghim cho mode (staging|production); mode khac -> SettingsError (fail-closed)."""
+    b = _GHN_BASE_BY_MODE.get(mode)
+    if not b:
+        raise SettingsError(f"mode GHN khong hop le: {mode!r}")
+    return b
 
 
 class SettingsError(Exception):
@@ -116,7 +127,7 @@ def validate_code_prefix(v):
     return s
 
 
-def _validate_public(provider: str, config_public: dict) -> dict:
+def _validate_public(provider: str, config_public: dict, mode: str | None = None) -> dict:
     """Chi giu field public trong allowlist + reject unknown/invalid (307-03). Cho phep partial (Save != Enable)."""
     _, _, _, pub_fields = _ALLOW[provider]
     if not isinstance(config_public, dict):
@@ -126,8 +137,8 @@ def _validate_public(provider: str, config_public: dict) -> dict:
         raise SettingsError(f"config_public co field khong hop le: {sorted(unknown)}")
     out = dict(config_public)
     if provider == "ghn":
-        # base_url pin theo mode staging (CA 305-08) — user khong nhap arbitrary host.
-        out["base_url"] = _GHN_STAGING_BASE
+        # base_url GHIM theo mode (CA 305-08 + 357 §2.1.2) — KHONG nhan URL tuy y, KHONG suy dien mode.
+        out["base_url"] = ghn_base_for_mode(mode or "staging")
         # validate type/bound cho tung field CO MAT (partial cho phep).
         if "shop_id" in out:
             out["shop_id"] = _as_str(out["shop_id"], "shop_id")
@@ -275,7 +286,7 @@ async def _lock(conn, integration_id: int, expected_version: int | None):
 async def create_integration(conn, *, kind: str, provider: str, label: str, mode: str,
                              config_public: dict, actor: str, command_key: str) -> dict:
     _validate_provider(kind, provider, mode)
-    cp = _validate_public(provider, config_public or {})
+    cp = _validate_public(provider, config_public or {}, mode)
     fp = _payload_fp("create", None, {"kind": kind, "provider": provider, "mode": mode, "label": label, "cp": cp})
 
     async def _do():
@@ -302,7 +313,7 @@ async def update_public(conn, integration_id: int, *, label: str | None, config_
 
     async def _do():
         r = await _lock(conn, integration_id, expected_version)
-        cp = _validate_public(r["provider"], config_public) if config_public is not None else \
+        cp = _validate_public(r["provider"], config_public, r["mode"]) if config_public is not None else \
             (json.loads(r["config_public"]) if isinstance(r["config_public"], str) else r["config_public"])
         new_label = label if label is not None else r["label"]
         # config doi -> config_revision++ + test cu HET HIEU LUC (CA 304-07). version++ (lifecycle CAS).
@@ -432,7 +443,7 @@ async def test_connection(conn, integration_id: int, *, actor: str, post=None) -
 
     # ---- PHA 2: probe NGOAI transaction (khong giu DB row-lock) ----
     from app.services.providers import ghn as _ghn
-    cfg = {"base": (cp.get("base_url") or _GHN_STAGING_BASE).rstrip("/"), "token": token, "shop_id": str(cp["shop_id"]),
+    cfg = {"base": ghn_base_for_mode(r["mode"]), "token": token, "shop_id": str(cp["shop_id"]),
            "timeout": float(cp.get("timeout_seconds") or 8.0), "retries": int(cp.get("max_retries") or 1)}
     _post = post or _ghn._post
     st, js, err, dur = await _post(cfg, "/master-data/province", {}, retries=cfg["retries"])
@@ -637,23 +648,25 @@ async def load_active_config(conn, provider: str, mode: str) -> dict:
     return {"source": "database", "enabled": True, "config": cp, "secrets": secrets, "integration_id": r["id"]}
 
 
-async def load_saved_ghn_config(conn) -> dict:
+async def load_saved_ghn_config(conn, mode: str) -> dict:
     """CA Directive 345 §2A.3: cau hinh GHN staging DA LUU (write-only) cho validation/tooling G1 — KHONG phu thuoc
     `integration.enabled` va KHONG tu enable. Tra {integration_id, enabled, config, token}. Thieu row/field/secret hoac
     decrypt loi -> SettingsError (fail-closed). Token CHI song trong pham vi caller: khong log/return ra API/evidence."""
+    expected_base = ghn_base_for_mode(mode)      # mode sai -> raise (fail-closed)
     r = await conn.fetchrow(
-        "SELECT * FROM integrations WHERE provider='ghn' AND mode='staging' AND archived_at IS NULL "
-        "ORDER BY id DESC LIMIT 1")
+        "SELECT * FROM integrations WHERE provider='ghn' AND mode=$1 AND archived_at IS NULL "
+        "ORDER BY id DESC LIMIT 1", mode)
     if not r:
-        raise SettingsError("chua co cau hinh GHN staging")
+        raise SettingsError(f"chua co cau hinh GHN {mode}")
     cp = json.loads(r["config_public"]) if isinstance(r["config_public"], str) else (r["config_public"] or {})
     _require_ghn_complete(cp)
-    if (cp.get("base_url") or _GHN_STAGING_BASE).rstrip("/") != _GHN_STAGING_BASE:
-        raise SettingsError("base_url GHN khong phai staging — fail closed")
+    if (cp.get("base_url") or "").rstrip("/") != expected_base:
+        raise SettingsError(f"base_url GHN khong khop mode {mode} — fail closed")
     token = await _decrypt_secret(conn, r["id"], "ghn", "token")   # decrypt loi -> raise
     if not token:
         raise SettingsError("thieu secret token GHN — fail closed")
-    return {"integration_id": r["id"], "enabled": bool(r["enabled"]), "config": cp, "token": token}
+    return {"integration_id": r["id"], "mode": r["mode"], "enabled": bool(r["enabled"]), "config": cp,
+            "token": token}
 
 
 async def resolve_sepay_test_key(conn) -> str | None:

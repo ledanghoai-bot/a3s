@@ -203,7 +203,10 @@ class Settings(BaseSettings):
     #   KHONG dung gate_e_fullscope_* lam M7 scope. Xem app/services/fulfillment/m7_scope.py.
     m7_conversational_scope: str = "off"
     m7_tester_customer_ids: str = ""
-    # m7_ghn_quote: GHN read-only quote/leadtime (staging). OFF -> route GHN = quote_required (staff bao phi), KHONG loi.
+    # ghn_active_mode (CA 357 §2.1.1): mode GHN DUY NHAT dang hoat dong — 'staging' | 'production'. TUONG MINH,
+    # KHONG suy dien tu token/URL/ShopId. Gia tri khac -> runtime fail-closed (ghn_not_configured), khong doan.
+    ghn_active_mode: str = "staging"
+    # m7_ghn_quote: GHN read-only quote/leadtime. OFF -> route GHN = quote_required (staff bao phi), KHONG loi.
     m7_ghn_quote: bool = False
     # ghn_fallback_enabled (D340): khi route GHN + API GHN khong dung duoc -> bao gia theo policy GHN_FALLBACK_PO_V2.
     # OFF (mac dinh, dormant) -> giu quote_required nhu cu. Fail-closed bool.
