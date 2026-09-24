@@ -37,7 +37,7 @@ async def _mk_order(conn, *, items, ward="24169"):
     """items = list[(qty, sales_unit)]. ward 24169 = self-delivery (fee 0)."""
     _SEQ[0] += 1
     tag = f"{RUN}-{_SEQ[0]}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'T','0900000000') RETURNING id",
                               f"tg:m7-273-{tag}")
     total = 0
     oid = await conn.fetchval(

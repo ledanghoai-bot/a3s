@@ -19,7 +19,7 @@ import asyncpg
 
 from app.config import settings
 from app.db_pool import acquire, release
-from app.services import handoff, price_overrides
+from app.services import customer_identity, handoff, price_overrides
 from app.services.safe_log import safe_exc
 
 PHONE_RE = re.compile(r"^(0|\+84)(3|5|7|8|9)\d{8}$")
@@ -203,6 +203,8 @@ async def create_order(
     sku: str,
     quantity: int,
     command_ctx: dict | None = None,
+    origin_channel: str | None = None,
+    created_by_staff_id: int | None = None,
 ) -> dict:
     """Tao don hang THAT trong DB (bang orders + order_items) va tru ton kho.
 
@@ -288,25 +290,28 @@ async def create_order(
                 unit_price = _unit_price_for_quantity(tiers, quantity) or product["price_vnd"]
             total = unit_price * quantity
 
-            customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
-            if customer is None:
-                customer_id = await conn.fetchval(
-                    "INSERT INTO customers (psid, name, phone, address) "
-                    "VALUES ($1, $2, $3, $4) RETURNING id",
-                    psid, customer_name, phone_clean, address,
-                )
-            else:
-                customer_id = customer["id"]
-                await conn.execute(
-                    "UPDATE customers SET name = $1, phone = $2, address = $3 WHERE id = $4",
-                    customer_name, phone_clean, address, customer_id,
-                )
+            # CA 387 / Record 386: kenh TUONG MINH (tham so hoac command_ctx cua orchestrator), khong suy tu psid.
+            # Khach = chu tai khoan, KHONG ghi de ten/SDT/dia chi; nguoi nhan cua DON luu o orders.shipping_*.
+            channel = origin_channel or (command_ctx or {}).get("channel")
+            try:
+                if channel == "dashboard":
+                    if not created_by_staff_id:
+                        raise customer_identity.IdentityError("don Dashboard bat buoc created_by_staff_id")
+                    customer_id = await customer_identity.require_existing(conn, psid)
+                elif channel in customer_identity.MESSAGING_CHANNELS:
+                    customer_id = await customer_identity.ensure_customer(
+                        conn, channel=channel, psid=psid, name=customer_name, phone=phone_clean, address=address)
+                else:
+                    raise customer_identity.IdentityError(f"thieu/khong hop le kenh tao don: {channel!r}")
+            except customer_identity.IdentityError as e:
+                return {"error": f"Khong tao duoc don: {e}"}
 
             order_id = await conn.fetchval(
                 "INSERT INTO orders "
-                "(customer_id, status, total_vnd, shipping_name, shipping_phone, shipping_address) "
-                "VALUES ($1, 'new', $2, $3, $4, $5) RETURNING id",
-                customer_id, total, customer_name, phone_clean, address,
+                "(customer_id, status, total_vnd, shipping_name, shipping_phone, shipping_address, origin_channel, "
+                "created_by_staff_id) VALUES ($1, 'new', $2, $3, $4, $5, $6, $7) RETURNING id",
+                customer_id, total, customer_name, phone_clean, address, channel,
+                created_by_staff_id if channel == "dashboard" else None,
             )
             await conn.execute(
                 "INSERT INTO order_items (order_id, product_id, quantity, unit_price_vnd) "
@@ -376,12 +381,13 @@ async def escalate_to_human(psid: str, reason: str, reason_code: str = "business
         return {"escalated": False, "refused": "unknown_reason", "reason_code": reason_code}
     conn = await acquire()
     try:
-        customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
-        if customer is None:
-            customer_id = await conn.fetchval(
-                "INSERT INTO customers (psid) VALUES ($1) RETURNING id", psid)
-        else:
-            customer_id = customer["id"]
+        # CA 387: khach thuong DA ton tai (tao luc log hoi thoai). Chua co -> chi tao khi co KENH TUONG MINH.
+        customer_id = await customer_identity.get_existing(conn, psid)
+        if customer_id is None:
+            if channel not in customer_identity.MESSAGING_CHANNELS:
+                print("[tools] escalate: khach chua ton tai va khong co kenh tuong minh — khong tao identity")
+                return {"escalated": False, "refused": "customer_unknown", "reason_code": reason_code}
+            customer_id = await customer_identity.ensure_customer(conn, channel=channel, psid=psid)
         conversation = await conn.fetchrow(
             "SELECT id FROM conversations WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 1", customer_id)
         if conversation is None:

@@ -195,7 +195,7 @@ export default function ConversationsPage() {
         <table>
           <thead>
             <tr>
-              <th>Khách</th>
+              <th>Tài khoản</th>
               <th title="Số ghi chú (/note) và phê duyệt (/approve) chưa xử lý">Status</th>
               <th>Tin nhắn gần nhất</th>
               <th>Lúc</th>

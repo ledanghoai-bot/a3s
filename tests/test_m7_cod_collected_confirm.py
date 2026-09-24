@@ -45,7 +45,7 @@ async def test_cod_collected_exact_confirms_and_completes():
     try:
         tag = f"CODT-{int(time.time()*1000)}"
         psid = f"tg:{tag}"
-        cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id", psid)
+        cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'T','0900000000') RETURNING id", psid)
         pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
                                   "VALUES($1,'CF',100000,999,300,'hũ') RETURNING id", tag)
         oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "

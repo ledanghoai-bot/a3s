@@ -30,7 +30,7 @@ async def _seed_routing(conn):
 async def _mk_order(conn, *, province, ward, weight, qty=2, dims=(10, 10, 10)):
     _SEQ[0] += 1
     tag = f"fb340-{_SEQ[0]}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'T','0900000000') RETURNING id",
                               f"tg:{tag}")
     length_cm, width_cm, height_cm = (dims if dims else (None, None, None))
     pid = await conn.fetchval(

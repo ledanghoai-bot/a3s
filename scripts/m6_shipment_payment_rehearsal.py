@@ -45,7 +45,7 @@ def key(label):
 async def _mk_order(conn, *, ward, weight, qty, total):
     _SEQ[0] += 1
     tag = f"{RUN}-{_SEQ[0]}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'Test','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'Test','0900000000') RETURNING id",
                               f"tg:m6-{tag}")
     pid = await conn.fetchval(
         "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g) VALUES($1,'CF',$2,999,$3) "

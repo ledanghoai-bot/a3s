@@ -36,7 +36,7 @@ async def _mk_order(conn, *, ward="24169", qty=2, price=100000, snapshot=True):
     _SEQ[0] += 1
     tag = f"{RUN}-{_SEQ[0]}"
     psid = f"tg:m7g-{tag}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'G','0900000000') RETURNING id", psid)
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'G','0900000000') RETURNING id", psid)
     pid = await conn.fetchval(
         "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) VALUES($1,'CF',$2,999,300,'hũ') "
         "RETURNING id", f"M7G-{tag}", price)

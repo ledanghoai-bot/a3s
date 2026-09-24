@@ -44,7 +44,7 @@ def _db():
 
 
 async def _mk_order(conn, total=200000):
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'HTTP','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'HTTP','0900000000') RETURNING id",
                               f"tg:m6http-{RUN}-{int(time.time()*1000) % 100000}")
     pid = await conn.fetchval(
         "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g) VALUES($1,'CF',$2,999,600) "

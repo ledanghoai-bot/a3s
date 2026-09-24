@@ -22,6 +22,7 @@ from app.services.command import repository as repo
 from app.services.command.envelope import ACTOR_TYPES, CHANNELS, Actor, CommandEnvelope
 from app.services.command.idempotency import build_scope
 from app.services.command.observability import log_event
+from app.services.fulfillment import cancel_cascade
 from app.services.inventory import repository as inv_repo
 from app.services.inventory import service as inv_service
 from app.services.inventory.errors import InventoryError
@@ -41,7 +42,7 @@ class LifecycleReject(Exception):
 
 
 # Domain errors coi là business reject (savepoint rollback -> failed_terminal idempotent).
-_REJECTS = (transitions.IllegalTransition, InventoryError, LifecycleReject)
+_REJECTS = (transitions.IllegalTransition, InventoryError, LifecycleReject, cancel_cascade.CancelBlocked)
 
 
 def _reject_code(e: Exception) -> str:
@@ -68,6 +69,13 @@ def _validate(command_type: str, payload: dict) -> dict:
     if command_type in registry.TRANSITION_ACTION:
         _need(payload, "order_id")
         out = {"order_id": int(payload["order_id"])}
+        if command_type == registry.ORDER_CANCEL:
+            # CA Directive 387 §1/§3: ly do huy BAT BUOC 5-500 ky tu sau trim (server validate, khong tin client).
+            try:
+                out["reason"] = cancel_cascade.normalize_reason(payload.get("reason"))
+            except ValueError as e:
+                raise errors.CommandError(errors.INVALID_ENVELOPE, str(e)) from e
+            return out
         if payload.get("reason"):
             out["reason"] = str(payload["reason"])[:500]
         return out
@@ -281,7 +289,22 @@ async def _do_transition(conn, env):
         correlation_id=env.correlation_id, command_id=env.command_id, reason=p.get("reason"))
     result = {"order_id": order_id, "from_status": res.from_status, "to_status": res.to_status,
               "inventory_effect": res.inventory_effect, "affected_quantity": res.affected_quantity}
+    if env.command_type == registry.ORDER_CANCEL:
+        # CA Directive 387 §4.1: cascade M6/M7 CUNG savepoint -> loi bat ky = rollback ca huy (khong de dang do).
+        result["cascade"] = await cancel_cascade.apply(
+            conn, order_id=order_id, reason=p["reason"], actor=f"{env.actor.type}:{env.actor.id}",
+            command_id=env.command_id, can_exception=await _has_perm(conn, env, "order.cancel.exception"))
+        result["reason"] = p["reason"]
     return result, {"type": "order", "id": order_id}, f"order.{action}", result
+
+
+async def _has_perm(conn, env, perm: str) -> bool:
+    """True neu actor co `perm` (system actor tin cay = True). Dung cho gate phu (khong raise)."""
+    try:
+        await _enforce(conn, env, perm)
+        return True
+    except LifecycleReject:
+        return False
 
 
 async def _do_reservation_extend(conn, env):
@@ -330,8 +353,12 @@ async def _do_reservation_expire(conn, env):
         idempotency_key=f"cmd:{env.command_id}:event:{r['order_id']}:expired",
         correlation_id=env.correlation_id, actor_type="system", actor_id="expiry-worker",
         command_id=env.command_id, reason="reservation TTL expired")
+    # CA Directive 387 §6: huy do het han giu hang cung phai dong M6/M7 (conversation/attention/payment/shipment)
+    # trong CUNG savepoint — khong de don huy ma bot van ghim/nhac. Shipment da ban giao -> CancelBlocked -> reject.
+    cascade = await cancel_cascade.apply(conn, order_id=r["order_id"], reason="reservation TTL expired",
+                                         actor="system:expiry-worker", command_id=env.command_id, can_exception=False)
     result = {"reservation_id": str(rid), "outcome": "expired", "order_id": r["order_id"],
-              "released_quantity": r["quantity_remaining"]}
+              "released_quantity": r["quantity_remaining"], "cascade": cascade}
     return result, {"type": "reservation", "id": str(rid)}, "reservation.expire", result
 
 

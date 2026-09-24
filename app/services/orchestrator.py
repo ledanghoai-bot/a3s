@@ -755,7 +755,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
     try:
         # -1. Dam bao co conversation trong Postgres cho dashboard (issue #8) -
         # doc lai duoc lich su lau dai, khac voi Redis chi giu 24h.
-        conversation_id = await conversation_log.ensure_conversation(sender_id)
+        conversation_id = await conversation_log.ensure_conversation(sender_id, channel=channel)
 
         # -0.5. I-B M4-S0 shadow: quet PII cuc bo (regex thuan, khong model/vendor)
         # de do recall/precision cho gate M4-G1. CHI quan sat — khong doi response/

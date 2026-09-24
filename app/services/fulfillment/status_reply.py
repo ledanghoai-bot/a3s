@@ -21,6 +21,9 @@ _SHIP = {
 
 def format_status(row: dict) -> str:
     oid = row["id"]
+    if row.get("order_status") in ("cancelled", "cancelled_by_exception"):
+        # CA Directive 387: don da huy -> KHONG hien giao hang/huong dan chuyen khoan (tranh khach chuyen tien nham).
+        return f"Dạ đơn #{oid} của anh/chị đã được huỷ."
     parts = [f"Dạ đơn #{oid} của anh/chị hiện {_SHIP.get(row.get('ship_status'), 'đang được xử lý')}"]
     if row.get("ship_status") == "in_transit":
         extra = []

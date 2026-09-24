@@ -34,7 +34,7 @@ async def test_staff_attention_ack_then_silent_ratelimited():
     try:
         tag = f"ACK-{int(time.time()*1000)}"
         psid = f"tg:{tag}"
-        cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'A','0900000000') RETURNING id", psid)
+        cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'A','0900000000') RETURNING id", psid)
         oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "
                                   "VALUES($1,'confirmed',200000,'telegram_customer') RETURNING id", cid)
         await conn.execute("INSERT INTO fulfillment_conversations(order_id,channel,customer_ref,step,policy_version,"
@@ -79,7 +79,7 @@ async def test_staff_ack_cooldown_scoped_to_current_episode():
     try:
         tag = f"EPI-{int(time.time()*1000)}"
         psid = f"tg:{tag}"
-        cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'E','0900000000') RETURNING id", psid)
+        cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'E','0900000000') RETURNING id", psid)
         oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "
                                   "VALUES($1,'confirmed',200000,'telegram_customer') RETURNING id", cid)
         # Episode 1: attention_at = 40 phút trước; đã có 1 staff_ack cũ (trong episode cũ).

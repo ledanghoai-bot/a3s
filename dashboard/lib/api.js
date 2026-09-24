@@ -49,7 +49,12 @@ export async function apiFetch(path, options = {}) {
     let detail = `Lỗi ${res.status}`;
     try {
       const body = await res.json();
-      if (body && body.detail) detail = body.detail;
+      if (body && body.detail) {
+        // detail co the la object {error_code, message} (command/lifecycle API) -> hien message de doc
+        detail = typeof body.detail === "string"
+          ? body.detail
+          : body.detail.message || body.detail.error_code || JSON.stringify(body.detail);
+      }
     } catch {
       // body khong phai JSON, giu detail mac dinh
     }

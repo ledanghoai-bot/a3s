@@ -35,7 +35,7 @@ async def _mk_order(pool, *, total=200000, method="BANK_TRANSFER", in_transit=Fa
     _SEQ[0] += 1
     tag = f"{RUN}-{_SEQ[0]}"
     async with pool.acquire() as conn:
-        cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'C','0900000000') RETURNING id",
+        cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'C','0900000000') RETURNING id",
                                   f"tg:m6cc-{tag}")
         pid = await conn.fetchval(
             "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g) VALUES($1,'CF',$2,999,600) "

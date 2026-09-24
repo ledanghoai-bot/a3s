@@ -13,6 +13,7 @@ from app.config import settings
 from app.db_pool import acquire, release
 from app.services.command import errors, lifecycle, registry
 from app.services.command.envelope import Actor
+from app.services.fulfillment import cancel_cascade
 from app.services.inventory.reconcile import reconcile_inventory
 
 router = APIRouter(prefix="/dashboard", tags=["m2-inventory"])
@@ -58,7 +59,7 @@ def _receipt_or_raise(receipt) -> dict:
     if receipt.outcome == "rejected":
         # business reject -> map error_code sang http (illegal 409, SoD/perm 403, else 422)
         code = receipt.error_code or "rejected"
-        status = 409 if code == "illegal_order_transition" else (
+        status = 409 if code in ("illegal_order_transition", "shipment_handed_off") else (
             403 if code in ("separation_of_duties", "not_unit_head", "staff_required") else (
                 404 if code in ("adjustment_not_found",) else 422))
         raise HTTPException(status, detail={"error_code": code, "receipt": receipt.to_dict()})
@@ -94,6 +95,41 @@ async def order_transition(
     _check_perm(staff, perm)
     env = lifecycle.build_lifecycle_envelope(
         command_type=command_type, payload={"order_id": order_id, "reason": (body or {}).get("reason")},
+        actor=_staff_actor(staff), channel="dashboard", idempotency_key=idempotency_key)
+    try:
+        receipt = await lifecycle.execute_lifecycle(env)
+    except errors.CommandError as e:
+        raise HTTPException(e.http_status, detail={"error_code": e.code, "message": e.message}) from e
+    return _receipt_or_raise(receipt)
+
+
+@router.post("/orders/{order_id}/cancel")
+async def order_cancel(
+    order_id: int, body: dict,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    staff: dict = Depends(require_staff_session),
+) -> dict:
+    """CA Directive 387 §3: DUONG HUY DUY NHAT cho UI (Don hang + Giao & Thu). KHONG gate flag M2 (huy la thao tac van
+    hanh bat buoc; di qua lifecycle command bus: order.cancel/exception RBAC, Idempotency-Key effective-once, 1 DB
+    transaction gom release kho + cascade M6/M7 + order_event/audit ly do). Ly do 5-500 ky tu (server validate lai)."""
+    if not idempotency_key:
+        raise HTTPException(400, "Thieu Idempotency-Key.")
+    reason = (body or {}).get("reason")
+    try:
+        reason = cancel_cascade.normalize_reason(reason)
+    except ValueError as e:
+        raise HTTPException(422, detail={"error_code": "invalid_cancel_reason", "message": str(e)}) from e
+    conn = await acquire()
+    try:
+        st = await conn.fetchval("SELECT status FROM orders WHERE id=$1", order_id)
+    finally:
+        await release(conn)
+    if st is None:
+        raise HTTPException(404, "Khong tim thay don hang")
+    # pre-check HTTP (UX); quyen THAT enforce lai tai command boundary theo matrix (F02).
+    _check_perm(staff, "order.cancel.exception" if st in ("processing", "delivery_failed") else "order.cancel")
+    env = lifecycle.build_lifecycle_envelope(
+        command_type=registry.ORDER_CANCEL, payload={"order_id": order_id, "reason": reason},
         actor=_staff_actor(staff), channel="dashboard", idempotency_key=idempotency_key)
     try:
         receipt = await lifecycle.execute_lifecycle(env)

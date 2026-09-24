@@ -84,7 +84,7 @@ async function load() {
     listEl.className = '';
     listEl.innerHTML = data.map(c => `
       <div class="card">
-        <strong>${c.name || '(chua co ten)'} — ${c.phone || '(chua co sdt)'}</strong>
+        <strong>Tai khoan: ${c.name || '(chua co ten)'} — ${c.phone || '(chua co sdt)'}</strong>
         <div class="meta">PSID: ${c.psid}</div>
         <div class="meta">Ly do: ${c.reason || '(khong ro)'}</div>
         <div class="meta">Luc: ${c.escalated_at || ''}</div>

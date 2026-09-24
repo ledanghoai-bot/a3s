@@ -87,8 +87,10 @@ const SHIP_TRANSITIONS = {
 };
 const SHIP_LABEL = {
   pending_prep: "Chờ chuẩn bị", ready_to_ship: "Sẵn sàng giao", in_transit: "Đang giao",
-  delivered: "Đã giao", delivery_failed: "Giao lỗi", return_pending: "Chờ hoàn",
+  delivered: "Đã giao", delivery_failed: "Giao lỗi", return_pending: "Chờ hoàn", cancelled: "Đã huỷ",
 };
+// CA Directive 387: đơn huỷ chỉ xem lịch sử — khoá thao tác chuẩn bị/thu tiền (server cũng chặn 409).
+const ORDER_CANCELLED = ["cancelled", "cancelled_by_exception"];
 
 function Section({ title, children }) {
   return (
@@ -170,16 +172,31 @@ export default function FulfillmentDetail() {
   const p = d.payment;
   const instr = d.payment_instruction;
   const transitions = sh ? SHIP_TRANSITIONS[sh.status] || [] : [];
+  const cancelled = ORDER_CANCELLED.includes(d.order.status);
+  const locked = busy || cancelled;
 
   return (
     <div>
       <p><a href="/fulfillment">← Về bảng điều phối</a></p>
       <h1>Đơn #{d.order.id}</h1>
+      {cancelled && (
+        <p style={{ background: "#fdecea", color: "#b71c1c", padding: "8px 12px", borderRadius: 6 }}>
+          <b>Đã huỷ</b> — đơn chỉ còn để xem lịch sử, không thao tác giao/thu tiền. Hoàn tiền hoặc hàng đã bàn giao
+          xử lý qua <a href="/fulfillment/attention">hàng đợi cần nhân viên</a>.
+        </p>
+      )}
       {msg && <p style={{ color: "#1e7e34" }}>{msg}</p>}
       {error && <p style={{ color: "#b71c1c" }}>Lỗi: {error}</p>}
 
-      <Section title="Khách & địa chỉ">
-        <Row label="Khách">{d.order.customer_name || "—"}</Row>
+      <Section title="Người nhận & địa chỉ">
+        <Row label="Người nhận">
+          {d.order.customer_name || "—"}{d.order.phone ? ` · ${d.order.phone}` : ""}
+        </Row>
+        <Row label="Tài khoản">
+          {d.order.account_channel === "dashboard"
+            ? "Dashboard — không có kênh nhắn tin khách"
+            : `${d.order.account_name || "(chưa có tên)"} · ${d.order.account_channel || "—"}`}
+        </Row>
         <Row label="Tổng hàng">{vnd(d.order.total_vnd)}</Row>
         <Row label="Địa chỉ">
           {d.address_snapshot
@@ -201,7 +218,7 @@ export default function FulfillmentDetail() {
           <p>Chưa có vận đơn. Báo phí để tạo.</p>
         )}
         <Row label="Báo phí tự động">
-          <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/shipment/quote`), "Đã báo phí tự động")}>
+          <button disabled={locked} onClick={() => act(() => post(`/orders/${orderId}/shipment/quote`), "Đã báo phí tự động")}>
             Tính phí theo địa chỉ
           </button>
         </Row>
@@ -210,7 +227,7 @@ export default function FulfillmentDetail() {
           <input placeholder="gram" value={mq.weight_g} onChange={(e) => setMq({ ...mq, weight_g: e.target.value })} style={{ width: 70 }} />
           <input placeholder="phí VNĐ" value={mq.fee_vnd} onChange={(e) => setMq({ ...mq, fee_vnd: e.target.value })} style={{ width: 90 }} />
           <input placeholder="ETA" value={mq.eta_text} onChange={(e) => setMq({ ...mq, eta_text: e.target.value })} />
-          <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/shipment/manual-quote`, {
+          <button disabled={locked} onClick={() => act(() => post(`/orders/${orderId}/shipment/manual-quote`, {
             zone: mq.zone || undefined,
             weight_g: mq.weight_g === "" ? undefined : Number(mq.weight_g),
             fee_vnd: mq.fee_vnd === "" ? undefined : Number(mq.fee_vnd),
@@ -220,7 +237,7 @@ export default function FulfillmentDetail() {
         <Row label="Hãng / tracking">
           <input placeholder="hãng" value={carrier.carrier} onChange={(e) => setCarrier({ ...carrier, carrier: e.target.value })} />
           <input placeholder="mã vận đơn" value={carrier.tracking_text} onChange={(e) => setCarrier({ ...carrier, tracking_text: e.target.value })} />
-          <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/shipment/carrier`, {
+          <button disabled={locked} onClick={() => act(() => post(`/orders/${orderId}/shipment/carrier`, {
             carrier: carrier.carrier || null, tracking_text: carrier.tracking_text || null,
             expected_version: sh ? sh.version : undefined,
           }), "Đã lưu hãng/tracking")}>Lưu</button>
@@ -228,7 +245,7 @@ export default function FulfillmentDetail() {
         {sh && (
           <Row label="Chuyển trạng thái">
             {transitions.length === 0 ? <i>(trạng thái cuối)</i> : transitions.map((t) => (
-              <button key={t} disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/shipment/status`, {
+              <button key={t} disabled={locked} onClick={() => act(() => post(`/orders/${orderId}/shipment/status`, {
                 to_status: t, expected_version: sh.version,
               }), `Đã chuyển → ${SHIP_LABEL[t] || t}`)}>→ {SHIP_LABEL[t] || t}</button>
             ))}
@@ -244,7 +261,7 @@ export default function FulfillmentDetail() {
             </select>
             <input placeholder="lý do" value={att.reason} onChange={(e) => setAtt({ ...att, reason: e.target.value })} />
             <input type="datetime-local" value={att.next_contact_at} onChange={(e) => setAtt({ ...att, next_contact_at: e.target.value })} />
-            <button disabled={busy} onClick={() => {
+            <button disabled={locked} onClick={() => {
               const payload = {
                 result: att.result, reason: att.reason || null, note: att.note || null,
                 next_contact_at: att.next_contact_at ? new Date(att.next_contact_at).toISOString() : null,
@@ -282,11 +299,11 @@ export default function FulfillmentDetail() {
             <option value="COD">COD (thu khi giao)</option>
             <option value="BANK_TRANSFER">Chuyển khoản</option>
           </select>
-          <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/payment/ensure`, { method }), "Đã tạo/cập nhật thanh toán")}>Lưu</button>
+          <button disabled={locked} onClick={() => act(() => post(`/orders/${orderId}/payment/ensure`, { method }), "Đã tạo/cập nhật thanh toán")}>Lưu</button>
         </Row>
         {p && p.method === "BANK_TRANSFER" && (
           <Row label="Hướng dẫn CK">
-            <button disabled={busy} onClick={() => act(() => post(`/orders/${orderId}/payment/instruction`), "Đã tạo hướng dẫn chuyển khoản")}>Tạo nội dung CK</button>
+            <button disabled={locked} onClick={() => act(() => post(`/orders/${orderId}/payment/instruction`), "Đã tạo hướng dẫn chuyển khoản")}>Tạo nội dung CK</button>
           </Row>
         )}
         {/* CA 267-05: render snapshot instruction + copy từng trường */}
@@ -324,7 +341,7 @@ export default function FulfillmentDetail() {
           )}
           <input placeholder="mã GD (nếu có)" value={ev.reference} onChange={(e) => setEv({ ...ev, reference: e.target.value })} />
           <input placeholder="ghi chú" value={ev.note} onChange={(e) => setEv({ ...ev, note: e.target.value })} />
-          <button disabled={busy} onClick={() => {
+          <button disabled={locked} onClick={() => {
             const payload = {
               kind: ev.kind,
               amount_vnd: ev.kind === "reconciled" ? null : (ev.amount_vnd === "" ? null : Number(ev.amount_vnd)),
@@ -353,7 +370,7 @@ export default function FulfillmentDetail() {
               ))}
             </select>
             <input placeholder="lý do (bắt buộc)" value={corr.note} onChange={(e) => setCorr({ ...corr, note: e.target.value })} />
-            <button disabled={busy} onClick={() => {
+            <button disabled={locked} onClick={() => {
               const payload = {
                 kind: "correction", amount_vnd: corr.amount_vnd === "" ? null : Number(corr.amount_vnd),
                 corrects_event_id: corr.corrects_event_id === "" ? null : Number(corr.corrects_event_id),
@@ -402,7 +419,7 @@ export default function FulfillmentDetail() {
           )}
           <Row label="Hành động">
             {/* CA 275-04: route-quote idempotency key (double-click/ambiguous retry không gọi GHN 2 lần) */}
-            <button disabled={busy} onClick={() => {
+            <button disabled={locked} onClick={() => {
               const { key, consume } = opKey(`route-quote:${orderId}`, {});
               act(() => post(`/orders/${orderId}/shipment/route-quote`, { command_key: key }), "Đã định tuyến lại + báo phí", consume);
             }}>Retry định tuyến/phí</button>
@@ -410,7 +427,7 @@ export default function FulfillmentDetail() {
               const hasOpenAtt = (m7.attention || []).some((a) => a.status === "open");
               return (
                 <>
-                  <button disabled={busy || hasOpenAtt} title={hasOpenAtt ? "Resolve attention trước khi resume" : ""}
+                  <button disabled={locked || hasOpenAtt} title={hasOpenAtt ? "Resolve attention trước khi resume" : ""}
                     onClick={() => act(() => post(`/orders/${orderId}/conversation/resume`), "Đã resume hội thoại")}>
                     Resume hội thoại
                   </button>

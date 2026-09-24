@@ -51,7 +51,7 @@ async def _mk_cod_order(conn, *, ward="24169", weight=300, qty=2, total=200000, 
     _SEQ[0] += 1
     tag = f"{RUN}-{_SEQ[0]}"
     psid = f"tg:cod-{tag}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'Test COD','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'Test COD','0900000000') RETURNING id",
                               psid)
     pid = await conn.fetchval(
         "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) VALUES($1,'CF',$2,999,$3,'hũ') "
@@ -166,7 +166,7 @@ async def main():  # noqa: C901
         # missing due: order khong quote -> ensure_payment due=None
         _SEQ[0] += 1
         tag = f"{RUN}-nodue-{_SEQ[0]}"
-        cidN = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'N','0900000000') RETURNING id",
+        cidN = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'N','0900000000') RETURNING id",
                                    f"tg:{tag}")
         pidN = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
                                    "VALUES($1,'CF',100000,999,300,'hũ') RETURNING id", f"ND-{tag}")

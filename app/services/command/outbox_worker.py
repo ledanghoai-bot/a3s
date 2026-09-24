@@ -81,7 +81,9 @@ def _telegram_admin_text(p: dict) -> str:
             "\U0001F198 3S Coffee - CAN HO TRO (ESCALATION)\n"
             f"Ly do: {p.get('reason_code') or '(khong ro)'}\n"
             f"Kenh: {p.get('channel') or '-'}\n"
-            f"Khach: {p.get('customer_name') or '(chua co ten)'} - SDT {p.get('phone_masked') or '***'}\n"
+            # CA 387 §5: intent -> nguoi nhan (draft); conversation-scoped -> ho so chu tai khoan.
+            f"{'Nguoi nhan' if p.get('has_intent') else 'Tai khoan'}: {p.get('customer_name') or '(chua co ten)'}"
+            f" - SDT {p.get('phone_masked') or '***'}\n"
         )
         if p.get("has_intent"):
             return head + (
@@ -99,7 +101,7 @@ def _telegram_admin_text(p: dict) -> str:
     return (
         "\U0001F6D2 3S Coffee - DON HANG MOI (M1)\n"
         f"Ma don: #{p.get('order_id')}\n"
-        f"Khach: {p.get('customer_name') or '(chua co ten)'} - SDT {p.get('phone_masked') or '***'}\n"
+        f"Nguoi nhan: {p.get('customer_name') or '(chua co ten)'} - SDT {p.get('phone_masked') or '***'}\n"
         f"San pham: {p.get('sku')} x {p.get('quantity')} @ {format_vnd(p.get('unit_price_vnd') or 0)}\n"
         f"Tong: {format_vnd(p.get('total_vnd') or 0)} - Trang thai: {p.get('status', 'new')}\n"
         "(Dia chi/SDT day du: xem dashboard theo ma don tren)"
@@ -269,6 +271,10 @@ async def _is_stale(conn, sc: dict) -> bool:
         return False
     kind, order_id = sc.get("kind"), sc.get("order_id")
     try:
+        # CA Directive 387: don da huy -> moi notify M6/M7 (giao hang/thanh toan/hoi thoai) cua don do la lac hau.
+        if kind in ("shipment", "payment", "fulfillment") and order_id is not None and await conn.fetchval(
+                "SELECT status IN ('cancelled','cancelled_by_exception') FROM orders WHERE id=$1", order_id):
+            return True
         if kind == "shipment":
             expected = sc.get("to_status")
             cur = await conn.fetchval("SELECT status FROM shipments WHERE order_id=$1", order_id)

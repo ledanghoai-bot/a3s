@@ -114,13 +114,11 @@ async def pause_bot(psid: str, reason: str = "Nhan vien chu dong pause tu dashbo
     Cung log vao escalations de nhat quan voi luong escalate qua tool."""
     conn = await acquire()
     try:
-        customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
-        if customer is None:
-            customer_id = await conn.fetchval(
-                "INSERT INTO customers (psid) VALUES ($1) RETURNING id", psid
-            )
-        else:
-            customer_id = customer["id"]
+        # CA 387: duong staff (pause tu dashboard) KHONG co nguon su that ve kenh -> KHONG tao identity moi;
+        # khach chua ton tai -> khong pause duoc (tra False).
+        customer_id = await conn.fetchval("SELECT id FROM customers WHERE psid = $1", psid)
+        if customer_id is None:
+            return False
 
         conversation = await conn.fetchrow(
             "SELECT id FROM conversations WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 1",
@@ -280,7 +278,7 @@ async def notify_admin(psid: str, reason: str, last_message: str) -> None:
     contact = await get_customer_contact(psid)
     contact_line = ""
     if contact.get("name") or contact.get("phone"):
-        contact_line = f"\nKhach: {contact.get('name') or '(chua co ten)'} - {contact.get('phone') or '(chua co sdt)'}"
+        contact_line = f"\nTai khoan:{contact.get('name') or '(chua co ten)'} - {contact.get('phone') or '(chua co sdt)'}"
 
     short_code = await get_short_code(psid)
     code_line = (
@@ -351,7 +349,7 @@ async def notify_admin_new_order(order: dict) -> None:
     text = (
         "\U0001F6D2 3S Coffee - DON HANG MOI\n"
         f"Ma don: #{order.get('order_id')}\n"
-        f"Khach: {order.get('customer_name') or '(chua co ten)'} - "
+        f"Nguoi nhan: {order.get('customer_name') or '(chua co ten)'} - "
         f"{order.get('phone') or '(chua co sdt)'}\n"
         f"Dia chi: {order.get('address') or '(chua co)'}\n"
         f"San pham: {order.get('sku')} x {order.get('quantity')} @ "

@@ -29,7 +29,7 @@ async def _conn():
 async def _seed(conn, *, amount=230000):
     """order + BANK_TRANSFER payment (amount_due) + active TEST bank + instruction test snapshot."""
     tag = f"SPM-{int(time.time()*1000)}-{os.urandom(2).hex()}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'T','0900000000') RETURNING id",
                               f"tg:{tag}")
     pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
                               "VALUES($1,'CF',100000,999,300,'hu') RETURNING id", tag)
@@ -291,7 +291,7 @@ async def test_concurrent_ingest_same_id(monkeypatch):
 async def _seed_ob(conn, *, amount=230000):
     """order + BANK_TRANSFER payment (amount_due) + active TEST bank — KHONG tao instruction (de resolver prefix)."""
     tag = f"TP-{int(time.time()*1000)}-{os.urandom(2).hex()}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'T','0900000000') RETURNING id",
                               f"tg:{tag}")
     pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
                               "VALUES($1,'CF',100000,999,300,'hu') RETURNING id", tag)
@@ -399,7 +399,7 @@ def _m7_tester(monkeypatch, cid):
 async def _seed_realbank(conn, *, amount=170000):
     """order + BANK_TRANSFER + active bank is_test=FALSE (thật) + instruction is_test=false (prefix SEVQR explicit)."""
     tag = f"RB-{int(time.time()*1000)}-{os.urandom(2).hex()}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'T','0900000000') RETURNING id",
                               f"tg:{tag}")
     pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
                               "VALUES($1,'CF',100000,999,300,'hu') RETURNING id", tag)

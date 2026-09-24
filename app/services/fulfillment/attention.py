@@ -11,7 +11,9 @@ from app.services.command import repository as cmd_repo
 
 REASONS = ("address", "quote", "account", "method", "payment_mismatch", "unmatched_webhook",
            "payment_timeout", "large_order_review", "quantity_unit_review",   # CA Amendment 273
-           "provider_error", "other")
+           "provider_error", "other",
+           "refund_required", "order_cancel_exception")                       # CA Directive 387 (huy don)
+CANCEL_REASONS = ("refund_required", "order_cancel_exception")
 ADMIN_EVENT = "fulfillment.staff.notify"
 
 
@@ -58,8 +60,11 @@ async def list_open(conn, *, limit: int = 200) -> list[dict]:
     rows = await conn.fetch(
         "SELECT a.id, a.order_id, a.reason, a.detail, a.created_at, a.created_by, "
         "fc.step AS conversation_step, p.status AS payment_status, p.method AS payment_method, "
-        "s.routing_source, s.fee_status "
+        "s.routing_source, s.fee_status, o.status AS order_status "
         "FROM staff_attention a LEFT JOIN fulfillment_conversations fc ON fc.order_id=a.order_id "
         "LEFT JOIN payments p ON p.order_id=a.order_id LEFT JOIN shipments s ON s.order_id=a.order_id "
-        "WHERE a.status='open' ORDER BY a.created_at LIMIT $1", limit)
+        "LEFT JOIN orders o ON o.id=a.order_id "
+        # CA 387: don da huy chi con hien attention hau-huy (hoan tien / ngoai le shipment)
+        "WHERE a.status='open' AND (o.status IS NULL OR o.status NOT IN ('cancelled','cancelled_by_exception') "
+        "OR a.reason = ANY($2::text[])) ORDER BY a.created_at LIMIT $1", limit, list(CANCEL_REASONS))
     return [dict(r) for r in rows]

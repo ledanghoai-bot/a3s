@@ -5,10 +5,10 @@ Dung asyncpg thuan, cung convention voi cac service khac.
 """
 
 import json
-import uuid
 
 from app.config import settings
 from app.db_pool import acquire, release
+from app.services import customer_identity
 
 _STAGES = ["new", "confirmed", "shipped", "done"]
 
@@ -27,9 +27,8 @@ def validate_transition(current: str, new: str) -> None:
     if new == current:
         return
     if new == "cancelled":
-        if current == "done":
-            raise ValueError("Khong the huy don da giao xong (done).")
-        return
+        # CA Directive 387 §3: huy CHI qua lifecycle cancel service (ly do + cascade M6/M7 + release kho).
+        raise ValueError("Huy don phai qua POST /dashboard/orders/{id}/cancel (ly do bat buoc).")
     if new not in _STAGES:
         raise ValueError(f"Trang thai khong hop le: {new}")
     if current == "cancelled":
@@ -47,7 +46,8 @@ async def list_orders(limit: int = 200) -> list[dict]:
             """
             SELECT
                 o.id, o.status, o.total_vnd, o.shipping_name, o.shipping_phone,
-                o.shipping_address, o.created_at,
+                o.shipping_address, o.created_at, o.origin_channel,
+                cu.name AS account_name, cu.channel AS account_channel,
                 (
                     SELECT json_agg(json_build_object(
                         'sku', p.sku, 'quantity', oi.quantity, 'unit_price_vnd', oi.unit_price_vnd
@@ -57,6 +57,7 @@ async def list_orders(limit: int = 200) -> list[dict]:
                     WHERE oi.order_id = o.id
                 ) AS items
             FROM orders o
+            LEFT JOIN customers cu ON cu.id = o.customer_id
             ORDER BY o.created_at DESC
             LIMIT $1
             """,
@@ -105,6 +106,7 @@ async def create_order_manual(
     unit_price_vnd: int,
     psid: str | None = None,
     command_ctx: dict | None = None,
+    created_by_staff_id: int | None = None,
 ) -> dict:
     """Staff tu tao don qua dashboard, BO QUA toan bo validate bac gia/gioi han
     so luong ma create_order (AI tool) ap dung - dung cho don dam phan dac biet
@@ -138,7 +140,11 @@ async def create_order_manual(
     if unit_price_vnd <= 0:
         return {"error": "Don gia phai lon hon 0."}
 
-    psid_to_use = psid or f"manual:{uuid.uuid4().hex[:12]}"
+    # CA 387 / PO Record 386: don Dashboard KHONG psid -> identity noi bo channel=dashboard gan staff tao don;
+    # co psid (don cho khach cua 1 hoi thoai) -> khach PHAI ton tai san. KHONG ghi de ho so khach.
+    if not created_by_staff_id:
+        return {"error": "Thieu staff tao don (created_by_staff_id) — bat buoc cho don Dashboard."}
+    psid_to_use = psid or customer_identity.new_dashboard_identity(created_by_staff_id)
 
     conn = await acquire()
     try:
@@ -153,28 +159,22 @@ async def create_order_manual(
                     "error": f"Khong du hang: chi con {product['stock']}, can {quantity}."
                 }
 
-            customer = await conn.fetchrow(
-                "SELECT id FROM customers WHERE psid = $1", psid_to_use
-            )
-            if customer is None:
-                customer_id = await conn.fetchval(
-                    "INSERT INTO customers (psid, name, phone, address) "
-                    "VALUES ($1, $2, $3, $4) RETURNING id",
-                    psid_to_use, customer_name, phone, address,
-                )
-            else:
-                customer_id = customer["id"]
-                await conn.execute(
-                    "UPDATE customers SET name = $1, phone = $2, address = $3 WHERE id = $4",
-                    customer_name, phone, address, customer_id,
-                )
+            try:
+                if psid:
+                    customer_id = await customer_identity.require_existing(conn, psid_to_use)
+                else:
+                    customer_id = await customer_identity.ensure_customer(
+                        conn, channel="dashboard", psid=psid_to_use, name=customer_name, phone=phone,
+                        address=address)
+            except customer_identity.IdentityError as e:
+                return {"error": str(e)}
 
             total = unit_price_vnd * quantity
             order_id = await conn.fetchval(
                 "INSERT INTO orders "
-                "(customer_id, status, total_vnd, shipping_name, shipping_phone, shipping_address) "
-                "VALUES ($1, 'new', $2, $3, $4, $5) RETURNING id",
-                customer_id, total, customer_name, phone, address,
+                "(customer_id, status, total_vnd, shipping_name, shipping_phone, shipping_address, origin_channel, "
+                "created_by_staff_id) VALUES ($1, 'new', $2, $3, $4, $5, 'dashboard', $6) RETURNING id",
+                customer_id, total, customer_name, phone, address, created_by_staff_id,
             )
             await conn.execute(
                 "INSERT INTO order_items (order_id, product_id, quantity, unit_price_vnd) "
