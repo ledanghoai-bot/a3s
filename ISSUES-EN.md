@@ -125,6 +125,26 @@ didn't stop correctly after 2 consecutive refusals — fixed with WRONG/RIGHT ex
 **Test results:** End-to-end order creation writes the correct DB record (correct total per price
 tier, correct stock deduction); missing info → the bot stops at the right point, no garbage orders.
 
+**Post-operation fix (Phase I-B, CA Directive 387 → Closure 392, LIVE 2026-09-25, PR #85, main `7368163`):**
+- **Bugs found (PO tester, 09/24):** (1) every new order **overwrote** `customers.name/phone/address` → the Delivery &
+  Payment board (reading names from the customer profile) showed all older orders with the newest recipient name;
+  (2) cancelling in the "Orders" screen only changed `orders.status` → the M7 conversation stayed `staff_attention`
+  and the bot kept replying "waiting for staff" for a cancelled order (#253).
+- **Done:** a single cancel path `POST /dashboard/orders/{id}/cancel` (lifecycle, RBAC `order.cancel` /
+  `order.cancel.exception`, mandatory 5–500 char reason, Idempotency-Key) + same-transaction cascade
+  (`app/services/fulfillment/cancel_cascade.py`: conversation → `cancelled`, resolve attention, not-yet-handed-off
+  shipment → `cancelled`, unpaid payment → `cancelled` + instruction void via append-only
+  `payment_instruction_voids`, paid → `refund_required` attention, one-time stock release); cancelled orders
+  filtered out of bot/worker/outbox/status reply/SePay/M6-M7 actions. Recipient comes from `orders.shipping_*`; all
+  customer-profile overwrites removed. Migration 072: `customers.channel` + `external_chat_id` **required** (ChatID),
+  channel passed explicitly (never inferred from the PSID); Dashboard orders use identity
+  `dashboard:<staff_id>:<nonce>` + `orders.created_by_staff_id`.
+- **Verified:** m5lab 1081 tests pass, CI 1010 pass; migration 072 rehearsal ALL PASS; prod postflight: 0 NULL
+  identity, ids 2/1304 = Messenger (PO confirmed), #253 is history only, no GHN drift.
+- **Not yet tested on Hoài's machine:** a real cancel through the reason dialog on the dashboard (no test order was
+  created at deploy per Directive 391). Still open, out of scope: the orchestrator `escalate_to_human` branch fails when
+  `command_ctx=None`.
+
 ---
 
 ## #7 · Human handoff: bot_paused + staff notification
