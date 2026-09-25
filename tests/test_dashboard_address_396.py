@@ -43,9 +43,11 @@ def test_fingerprint_deterministic_and_sensitive():
     assert "Lê Thánh Tôn" not in DA.fingerprint(a)                                   # khong dia chi tho
 
 
-@pytest.mark.asyncio
-async def test_quote_provider_selection_by_gate(monkeypatch):
-    """Gate OFF -> _DashboardGateOffProvider (KHONG HTTP); ON -> None (provider that). Khong DB: stub execute."""
+def test_quote_provider_selection_by_gate(monkeypatch):
+    """Gate OFF -> _DashboardGateOffProvider (KHONG HTTP); ON -> None (provider that). Khong DB: stub execute.
+    Test SYNC (asyncio.run) — CI chi cai pytest (khong pytest-asyncio), test async khong-DB se fail o CI."""
+    import asyncio
+
     from app.api import m6_fulfillment as M6
     from app.config import settings
     from app.services.fulfillment import route_operation as rops
@@ -81,14 +83,14 @@ async def test_quote_provider_selection_by_gate(monkeypatch):
     monkeypatch.setattr(M6, "guard_order_active", noguard)
     staff = {"id": 1, "username": "t", "rbac_provisioned": True, "permissions": {"shipment.manage"}}
     monkeypatch.setattr(settings, "dashboard_route_quote_enabled", False)
-    r = await M6.shipment_quote(1, {"command_key": "abc"}, staff=staff)
+    r = asyncio.run(M6.shipment_quote(1, {"command_key": "abc"}, staff=staff))
     assert isinstance(seen["provider"], M6._DashboardGateOffProvider) and r["provider_gate"] == "off"
     assert seen["ck"] == "dash:abc" and "quote_snapshot" not in r
     monkeypatch.setattr(settings, "dashboard_route_quote_enabled", True)
-    r = await M6.shipment_quote(1, {"command_key": "abc"}, staff=staff)
+    r = asyncio.run(M6.shipment_quote(1, {"command_key": "abc"}, staff=staff))
     assert seen["provider"] is None and r["provider_gate"] == "on"
     with pytest.raises(HTTPException) as e:
-        await M6.shipment_quote(1, {}, staff=staff)                    # thieu command_key
+        asyncio.run(M6.shipment_quote(1, {}, staff=staff))             # thieu command_key
     assert e.value.status_code == 422
 
 
