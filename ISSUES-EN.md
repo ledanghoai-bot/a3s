@@ -145,6 +145,59 @@ tier, correct stock deduction); missing info → the bot stops at the right poin
   created at deploy per Directive 391). Still open, out of scope: the orchestrator `escalate_to_human` branch fails when
   `command_ctx=None`.
 
+**Post-D392 trial fixes (Phase I-B, CA Review 395 → Directive 396 → Qualification 398 → Directive 399 → Closure 401,
+LIVE 2026-09-25; F1 PR #88 main `c31f5610`, F2 PR #89 main `d720cbca`):**
+- **Bugs found (PO production trial, 25/09):**
+  - **F1, order #254 on Telegram:** GHN had returned the lead time and the system had stored
+    `eta_text = "khoảng 2 ngày (GHN)"`. The quote message carrying the ETA reached the customer. But when the customer
+    asked again ("how long will delivery take?"), the bot replied "no information yet… I'll check and get back to you"
+    with no mechanism to follow up (**an empty promise**). Root causes:
+    - outbox messages were not written to conversation history;
+    - delivery-time questions were not routed to the order-status reply;
+    - the status reply only showed the ETA once the order was `in_transit`;
+    - the LLM had no ETA source, and the system prompt **taught that exact empty-promise template**.
+  - **F2, order #255 on the Dashboard:** the order had only a free-text address and no snapshot, so "quote by address"
+    returned 200 with `zone=unknown` while the UI still reported success (**silent failure**, no log line).
+- **F1 done:**
+  - `app/services/fulfillment/eta_reply.py`: detects ETA/handover questions **before the LLM**. Accented plus
+    unaccented variants, word boundaries, and a list of negative phrases to exclude.
+  - Returns `shipments.eta_text` in every not-yet-delivered state. No real ETA → opens an `eta_question` attention
+    plus a **real** admin notification, and only then tells the customer staff will follow up.
+  - Customer-facing fulfillment messages → written to `messages` with dedupe `outbox:<event_id>`.
+  - The COD confirmation and transfer-instruction messages repeat the ETA.
+  - A guard strips follow-up promises when the turn did not really escalate; the system prompt no longer contains the
+    "check and get back to you" template.
+  - Migration 074 adds reason `eta_question`. Kill switch `M7_ETA_REPLY` (on inside M7 scope, currently tester).
+- **F2 done:**
+  - Read-only address catalog `/dashboard/address-catalog/*`.
+  - Order form: province + ward picked from the catalog, house number/street as free text. Resolve + bind
+    `order_address_snapshot` **in the same transaction** as order creation, on both the legacy and command-bus paths.
+  - Ambiguous address → 409 with candidates; staff confirmation requires a reason and the `address.bind` permission →
+    `staff_confirmed` + audit.
+  - Legacy orders: a "Verify address" button (old text is not parsed).
+  - "Quote by address" without a snapshot → **409 `address_not_verified`**; with a snapshot → the routing/quote pipeline
+    shared with the Bot. `DASHBOARD_ROUTE_QUOTE_ENABLED` is **OFF**, so no GHN HTTP call yet.
+  - The form sends an `Idempotency-Key`.
+- **Verified:**
+  - New tests: F1 60 (including an orchestrator e2e test that does not call the LLM), F2 12.
+  - Full suite on a scratch DB: failure set identical to `main` (15 tests missing environment seed).
+  - Rehearsal of 074 ALL PASS; CI green on both PRs.
+  - Production postflight: before/after snapshot differs only by schema 074; GHN quote log unchanged; an in-container
+    call confirmed 409 `address_not_verified`.
+- **Lessons:**
+  - Async tests that don't need a DB must be written sync with `asyncio.run`, because CI does not install
+    `pytest-asyncio` (PR #89 needed requalification because of this).
+  - A "fake success" (200 plus an unknown state) is more dangerous than an explicit error.
+- **Not yet tested on Hoài's machine:**
+  - A real ETA question over Telegram on a tester order.
+  - Creating a Dashboard order with the new province/ward form, and the "Verify address" button (no test order was
+    created at deploy).
+- **Still open:**
+  - The lazy pool-init race in `app/db_pool.get_pool` (one outbox drain error at worker start after the #88 deploy) —
+    CA asks for a fix before operational expansion.
+  - Enabling a real GHN quote from the Dashboard needs a separate activation.
+  - Asking for the ETA right after order confirmation (before routing) opens an attention.
+
 ---
 
 ## #7 · Human handoff: bot_paused + staff notification
