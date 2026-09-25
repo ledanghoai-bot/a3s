@@ -97,6 +97,7 @@ class Settings(BaseSettings):
         "gate_e_kill_switch", "enable_gate_e_order_wiring", "enable_address_resolver",
         "m7_conversational_fulfillment", "m7_ghn_quote", "m7_sepay_test_connector", "sepay_live_enabled",
         "settings_integrations_enabled", "settings_integrations_env_fallback", "ghn_fallback_enabled",
+        "ghn_shipment_create_bot_enabled", "ghn_shipment_create_dashboard_enabled",
         mode="before")
     @classmethod
     def _failclosed_bool(cls, v):
@@ -211,6 +212,11 @@ class Settings(BaseSettings):
     # ghn_fallback_enabled (D340): khi route GHN + API GHN khong dung duoc -> bao gia theo policy GHN_FALLBACK_PO_V2.
     # OFF (mac dinh, dormant) -> giu quote_required nhu cu. Fail-closed bool.
     ghn_fallback_enabled: bool = False
+    # CA Directive 393: tao van don GHN — gate TACH theo entry point (bot | dashboard), mac dinh OFF (fail-closed bool).
+    # OFF -> intent/preview van validate duoc nhung worker CHAN truoc HTTP (gate_blocked_reason audit). Chi bat qua
+    # directive/PO activation rieng.
+    ghn_shipment_create_bot_enabled: bool = False
+    ghn_shipment_create_dashboard_enabled: bool = False
     # m7_sepay_test_connector: nhan webhook SePay TEST MODE (Apikey). OFF -> endpoint tra 404. Live (C1) = flag rieng
     # sepay_live_enabled — KHONG duoc bat trong directive 272 (gate FINANCIAL rieng).
     m7_sepay_test_connector: bool = False

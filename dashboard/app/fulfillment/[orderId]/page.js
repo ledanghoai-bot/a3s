@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { apiFetch } from "../../../lib/api";
 import { useAuthGuard } from "../../../lib/useAuthGuard";
+import GhnCreatePanel from "./GhnCreatePanel";
 
 function vnd(n) {
   return n == null ? "—" : n.toLocaleString("vi-VN") + "đ";
@@ -281,6 +282,8 @@ export default function FulfillmentDetail() {
           </div>
         )}
       </Section>
+
+      <GhnCreatePanel orderId={orderId} cancelled={cancelled} onChange={load} />
 
       <Section title="Thu tiền">
         {p ? (
