@@ -121,6 +121,23 @@ lúc khi khách từ chối liên tiếp — đã fix bằng ví dụ SAI/ĐÚNG
 **Kết quả test:** Order end-to-end đúng DB (tổng tiền đúng bậc giá, tồn kho trừ đúng); thiếu
 thông tin → bot dừng đúng chỗ, không tạo order rác.
 
+**Sửa lỗi sau vận hành (Phase I-B, CA Directive 387 → Closure 392, LIVE 25/09/2026, PR #85, main `7368163`):**
+- **Bug phát hiện (tester PO, 24/09):** (1) mỗi đơn mới **ghi đè** `customers.name/phone/address` → màn Giao & Thu
+  (đọc tên từ hồ sơ khách) hiện mọi đơn cũ cùng tên người nhận mới nhất; (2) huỷ đơn ở màn "Đơn hàng" chỉ đổi
+  `orders.status` → hội thoại M7 vẫn `staff_attention`, bot tiếp tục trả "chờ nhân viên" cho đơn đã huỷ (#253).
+- **Đã làm:** một đường huỷ duy nhất `POST /dashboard/orders/{id}/cancel` (lifecycle, RBAC `order.cancel` /
+  `order.cancel.exception`, lý do bắt buộc 5–500 ký tự, Idempotency-Key) + cascade cùng transaction
+  (`app/services/fulfillment/cancel_cascade.py`: hội thoại → `cancelled`, resolve attention, shipment chưa bàn giao
+  → `cancelled`, payment chưa có tiền → `cancelled` + void instruction qua bảng append-only
+  `payment_instruction_voids`, có tiền → attention `refund_required`, nhả kho 1 lần); lọc đơn huỷ ở bot/worker/
+  outbox/status reply/SePay/M6-M7 actions. Người nhận lấy theo `orders.shipping_*`, bỏ mọi ghi đè hồ sơ khách.
+  Migration 072: `customers.channel` + `external_chat_id` **bắt buộc** (ChatID), kênh truyền tường minh (không suy
+  từ PSID); đơn Dashboard dùng identity `dashboard:<staff_id>:<nonce>` + `orders.created_by_staff_id`.
+- **Đã verify:** m5lab 1081 test pass, CI 1010 pass; rehearsal migration 072 ALL PASS; postflight prod: 0 NULL
+  identity, id 2/1304 = Messenger (PO xác nhận), #253 chỉ còn lịch sử, GHN không drift.
+- **Chưa test trên máy anh Hoài:** huỷ đơn thật bằng hộp thoại lý do trên dashboard (chưa tạo đơn test khi deploy
+  theo Directive 391). Ngoài phạm vi còn mở: nhánh `escalate_to_human` trong orchestrator lỗi khi `command_ctx=None`.
+
 ---
 
 ## #7 · Human handoff: bot_paused + thông báo nhân viên
