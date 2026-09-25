@@ -339,6 +339,8 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     # --- M5 Gate E: verified-address binding + immutable snapshot TRONG CUNG transaction (CA Directive 190) ---
     # Branch-only, default OFF. Bind loi -> raise -> rollback CA don (fail-closed, khong order mo coi/snapshot le).
     await _maybe_bind_gate_e(conn, env, order_id, customer_id)
+    # --- CA Directive 396 §3.1 (F2): dia chi Dashboard co cau truc -> resolve + bind snapshot CUNG tx. Loi -> rollback.
+    await _maybe_bind_dashboard_address(conn, env, order_id)
 
     # --- M2: reserve ATOMIC khi flag ledger bật; products.stock là MIRROR của balance (CA M2-S2-F01) ---
     # Ledger ON: reserve trên balance rồi materialize stock := available (KHÔNG delta trên giá trị stale
@@ -475,6 +477,25 @@ async def _maybe_bind_gate_e(conn, env: CommandEnvelope, order_id: int, customer
     await order_binding.bind_in_order_tx(
         conn, order_id=order_id, resolution_id=str(rid), actor=(aref or "system"),
         reason="gate-e-order-wiring", ticket=f"GATEE:{env.command_id}")
+
+
+async def _maybe_bind_dashboard_address(conn, env: CommandEnvelope, order_id: int) -> None:
+    """CA Directive 396 §3.1: don Dashboard kem dia chi co cau truc -> resolve + bind snapshot TRONG tx tao don.
+    Kenh TUONG MINH env.channel=='dashboard' (khong suy tu psid). Loi -> CommandError -> tx rollback CA don."""
+    if env.channel != "dashboard" or not env.dashboard_address:
+        return
+    from app.services.address import dashboard_address as _da
+    from app.services.address import resolver as _res
+    _atype, aref, sid = _audit_actor(env)
+    actor = f"staff:{sid}" if sid is not None else (aref or "staff")   # cung dinh danh voi duong legacy
+    try:
+        await _da.resolve_and_bind_in_tx(conn, order_id=order_id, addr=env.dashboard_address,
+                                         actor=actor, ticket=f"DASHADDR:{env.command_id}")
+    except _da.DashboardAddressError as e:
+        raise errors.CommandError(f"address_{e.code}" if not e.code.startswith("address_") else e.code,
+                                  str(e), http_status=409) from e
+    except (order_binding.BindingError, _res.ResolveError) as e:
+        raise errors.CommandError("address_bind_failed", str(e), http_status=409) from e
 
 
 async def _reject_with_intent(conn, env: CommandEnvelope, code: str, detail: str,

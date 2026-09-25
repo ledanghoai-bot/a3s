@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.admin import router as admin_router
 from app.api.auth_router import router as auth_router
 from app.api.dashboard import router as dashboard_router
+from app.api.dashboard_address import router as dashboard_address_router
 from app.api.ghn_shipment_create import router as ghn_shipment_create_router
 from app.api.inventory import router as inventory_router
 from app.api.legal import router as legal_router
@@ -71,6 +72,7 @@ app.include_router(webhook_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(dashboard_router)
+app.include_router(dashboard_address_router)  # Directive 396 F2: danh muc dia chi (Tinh/Phuong) cho form Dashboard
 app.include_router(inventory_router)  # I-B M2: order transitions + inventory + adjustments
 app.include_router(legal_router)  # /privacy /terms /data-deletion (Meta App Review)
 app.include_router(m4_signing_router)  # M4-9: dashboard-triggered signing run (control surface)

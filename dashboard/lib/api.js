@@ -47,8 +47,10 @@ export async function apiFetch(path, options = {}) {
 
   if (!res.ok) {
     let detail = `Lỗi ${res.status}`;
+    let raw = null;
     try {
       const body = await res.json();
+      raw = body ? body.detail : null;
       if (body && body.detail) {
         // detail co the la object {error_code, message} (command/lifecycle API) -> hien message de doc
         detail = typeof body.detail === "string"
@@ -58,7 +60,11 @@ export async function apiFetch(path, options = {}) {
     } catch {
       // body khong phai JSON, giu detail mac dinh
     }
-    throw new Error(detail);
+    // CA 396: giu status + detail goc (vd {error_code, candidates}) cho UI xu ly co cau truc; message giu nhu cu.
+    const err = new Error(detail);
+    err.status = res.status;
+    err.detail = raw;
+    throw err;
   }
 
   if (res.status === 204) return null;

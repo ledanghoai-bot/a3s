@@ -179,15 +179,87 @@ async def detail(order_id: int) -> dict:
 
 
 # ============================ Shipment actions ============================
+class _DashboardGateOffProvider:
+    """CA 396 §3.2: gate dashboard_route_quote_enabled OFF -> KHONG goi GHN HTTP. Tra quote_required tat dinh (cung
+    contract QuoteResult nhu provider that) -> route_and_quote xu ly nhu GHN tat (manual/fallback theo policy)."""
+
+    async def quote(self, conn, req):
+        from app.services.providers.base import QuoteResult
+        return QuoteResult(status="quote_required", provider="ghn", reason=ship.DASHBOARD_GATE_OFF_REASON,
+                           request_fingerprint=req.fingerprint())
+
+
 @router.post("/orders/{order_id}/shipment/quote")
-async def shipment_quote(order_id: int, staff: dict = Depends(require_permission("shipment.manage"))) -> dict:
+async def shipment_quote(order_id: int, body: dict | None = None,
+                         staff: dict = Depends(require_permission("shipment.manage"))) -> dict:
+    """"Tinh phi theo dia chi" (CA Directive 396 §3.2 — thay auto_rule M6):
+    - Don CHUA co order_address_snapshot -> 409 address_not_verified (UI huong dan "Xac minh dia chi"). KHONG con tra
+      200 thanh cong voi zone=unknown.
+    - Co snapshot -> CHUNG pipeline dinh tuyen/bao phi voi Bot (route_operation: idempotent theo command_key,
+      2 pha, ambiguous -> staff). Gate dashboard_route_quote_enabled OFF (mac dinh) -> KHONG GHN HTTP."""
+    ck = _command_key(body or {})
+    from app.services.fulfillment import route_operation as rops
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
             await guard_order_active(conn, order_id, staff)
-            return await ship.auto_quote(conn, order_id, actor=_actor(staff))
+            has_snap = await conn.fetchval("SELECT 1 FROM order_address_snapshot WHERE order_id=$1", order_id)
+        if not has_snap:
+            raise HTTPException(status_code=409, detail={
+                "error_code": "address_not_verified",
+                "message": "Dia chi don chua xac minh — bam 'Xac minh dia chi' (chon Tinh/Phuong-Xa) truoc khi tinh phi"})
+        provider = None if settings.dashboard_route_quote_enabled else _DashboardGateOffProvider()
+        out = await rops.execute(conn, order_id, actor=_actor(staff), command_key=f"dash:{ck.strip()}",
+                                 provider=provider)
+        row = dict(out["shipment"]) if out.get("shipment") else {}
+        row.pop("quote_snapshot", None)
+        row["duplicate"] = out["duplicate"]
+        row["provider_gate"] = "on" if settings.dashboard_route_quote_enabled else "off"
+        return row
+    except (rops.RouteOpConflict, rops.RouteOpInFlight, rops.RouteOpAmbiguous) as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ship.ShipmentError as e:
         raise _map_err(e)
+    finally:
+        await conn.close()
+
+
+@router.post("/orders/{order_id}/address/verify")
+async def verify_order_address(order_id: int, body: dict,
+                               staff: dict = Depends(require_permission("address.bind"))) -> dict:
+    """CA 396 §3.1: "Xac minh dia chi" cho don CU chua snapshot — staff chon Tinh/Phuong-Xa + so nha (KHONG suy tu
+    text cu). Resolve + bind snapshot + cap nhat chuoi hien thi trong MOT transaction. Da co snapshot -> 409."""
+    from app.api import dashboard_address as _dah
+    from app.services import audit_service
+    from app.services.address import dashboard_address as da
+    from app.services.address import order_binding as ob
+    from app.services.address import resolver as res
+    addr = await _dah.prepare(body, staff)
+    display = addr.pop("display_text")
+    conn = await asyncpg.connect(_db_url())
+    try:
+        async with conn.transaction():
+            await guard_order_active(conn, order_id, staff)
+            if await conn.fetchval("SELECT 1 FROM order_address_snapshot WHERE order_id=$1", order_id):
+                raise HTTPException(status_code=409, detail={"error_code": "address_already_verified",
+                                                             "message": "Don da co dia chi xac minh (snapshot bat bien)"})
+            bound = await da.resolve_and_bind_in_tx(conn, order_id=order_id, addr=addr, actor=_actor(staff),
+                                                    ticket=f"DASHADDR:verify:{order_id}")
+            old = await conn.fetchval("SELECT shipping_address FROM orders WHERE id=$1", order_id)
+            if old != display:
+                await conn.execute("UPDATE orders SET shipping_address=$2 WHERE id=$1", order_id, display)
+            await audit_service.record(conn, actor_type="cli", action="order.address_verified", actor_ref=_actor(staff),
+                                       entity_type="orders", entity_id=str(order_id), before=None,
+                                       after={"resolution_id": bound["resolution_id"],
+                                              "verification": bound["verification"],
+                                              "shipping_address_updated": old != display},
+                                       reason=(addr.get("staff_confirm") or {}).get("reason") or "dashboard verify")
+        return {"order_id": order_id, "verification": bound["verification"], "resolution_id": bound["resolution_id"],
+                "shipping_address": display}
+    except da.DashboardAddressError as e:
+        raise _dah.http_error(e) from e
+    except (ob.BindingError, res.ResolveError) as e:
+        raise HTTPException(status_code=409, detail={"error_code": "address_bind_failed", "message": str(e)}) from e
     finally:
         await conn.close()
 

@@ -98,6 +98,7 @@ class Settings(BaseSettings):
         "m7_conversational_fulfillment", "m7_ghn_quote", "m7_sepay_test_connector", "sepay_live_enabled",
         "settings_integrations_enabled", "settings_integrations_env_fallback", "ghn_fallback_enabled",
         "ghn_shipment_create_bot_enabled", "ghn_shipment_create_dashboard_enabled",
+        "dashboard_route_quote_enabled",
         mode="before")
     @classmethod
     def _failclosed_bool(cls, v):
@@ -220,6 +221,10 @@ class Settings(BaseSettings):
     # directive/PO activation rieng.
     ghn_shipment_create_bot_enabled: bool = False
     ghn_shipment_create_dashboard_enabled: bool = False
+    # CA Directive 396 §3.2 (F2): "Tinh phi theo dia chi" tren Dashboard di CHUNG pipeline dinh tuyen/bao phi voi Bot.
+    # OFF (mac dinh, dormant) -> KHONG goi GHN HTTP tu Dashboard (route GHN -> quote_required/fallback theo policy).
+    # Bat = activation rieng (CA review + PO). Fail-closed bool.
+    dashboard_route_quote_enabled: bool = False
     # m7_sepay_test_connector: nhan webhook SePay TEST MODE (Apikey). OFF -> endpoint tra 404. Live (C1) = flag rieng
     # sepay_live_enabled — KHONG duoc bat trong directive 272 (gate FINANCIAL rieng).
     m7_sepay_test_connector: bool = False

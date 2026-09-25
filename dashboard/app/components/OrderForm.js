@@ -2,6 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { apiFetch } from "../../lib/api";
+import AddressPicker, { EMPTY_ADDRESS, addressComplete, addressPayload, addressText } from "./AddressPicker";
+
+// CA 396 §3.1: Idempotency-Key cho moi lan submit (header bat buoc khi reliable command gate ON; vo hai khi OFF).
+function newIdemKey() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "ord-" + Date.now() + "-" + Math.random().toString(36).slice(2, 12);
+}
 
 // Component tao don dung chung (issue #8 - nang cap chon "goi bot" / "NV tao don"):
 // - psid duoc truyen vao: dung trong khung chat 1 hoi thoai cu the, co ca 2 nut.
@@ -12,7 +19,6 @@ export default function OrderForm({ psid = null, onCreated }) {
   const [form, setForm] = useState({
     customer_name: "",
     phone: "",
-    address: "",
     sku: "",
     quantity: "",
     unit_price_vnd: "",
@@ -22,6 +28,11 @@ export default function OrderForm({ psid = null, onCreated }) {
   const [success, setSuccess] = useState(null);
   const [agentNotes, setAgentNotes] = useState([]);
   const [draftLoaded, setDraftLoaded] = useState(false);
+  // CA 396 §3.1: dia chi co cau truc (Tinh/Phuong tu danh muc + so nha); dia chi luu cu chi hien de doi chieu.
+  const [addr, setAddr] = useState(EMPTY_ADDRESS);
+  const [candidates, setCandidates] = useState(null);
+  const [savedAddress, setSavedAddress] = useState("");
+  const [idemKey, setIdemKey] = useState(newIdemKey);
 
   useEffect(() => {
     apiFetch("/dashboard/products")
@@ -43,12 +54,12 @@ export default function OrderForm({ psid = null, onCreated }) {
           ...f,
           customer_name: draft.customer?.name || f.customer_name,
           phone: draft.customer?.phone || f.phone,
-          address: draft.customer?.address || f.address,
           quantity: draft.active_override ? String(draft.active_override.quantity) : f.quantity,
           unit_price_vnd: draft.active_override
             ? String(draft.active_override.unit_price_vnd)
             : f.unit_price_vnd,
         }));
+        setSavedAddress(draft.customer?.address || "");
         setAgentNotes(draft.notes || []);
         setDraftLoaded(true);
       })
@@ -57,6 +68,12 @@ export default function OrderForm({ psid = null, onCreated }) {
 
   function update(field, value) {
     setForm((f) => ({ ...f, [field]: value }));
+    setIdemKey(newIdemKey());
+  }
+
+  function updateAddr(v) {
+    setAddr(v);
+    setIdemKey(newIdemKey());
   }
 
   function formatVnd(n) {
@@ -67,8 +84,8 @@ export default function OrderForm({ psid = null, onCreated }) {
     setError(null);
     setSuccess(null);
 
-    if (!form.customer_name || !form.phone || !form.address || !form.sku || !form.quantity) {
-      setError("Điền đủ tên, SĐT, địa chỉ, sản phẩm, số lượng.");
+    if (!form.customer_name || !form.phone || !addressComplete(addr) || !form.sku || !form.quantity) {
+      setError("Điền đủ tên, SĐT, Tỉnh + Phường/Xã + số nhà, sản phẩm, số lượng.");
       return;
     }
     if (mode === "manual" && !form.unit_price_vnd) {
@@ -86,7 +103,7 @@ export default function OrderForm({ psid = null, onCreated }) {
         body = {
           customer_name: form.customer_name,
           phone: form.phone,
-          address: form.address,
+          address: addressText(addr),
           sku: form.sku,
           quantity: Number(form.quantity),
         };
@@ -95,7 +112,7 @@ export default function OrderForm({ psid = null, onCreated }) {
         body = {
           customer_name: form.customer_name,
           phone: form.phone,
-          address: form.address,
+          address: addressPayload(addr),
           sku: form.sku,
           quantity: Number(form.quantity),
           unit_price_vnd: Number(form.unit_price_vnd),
@@ -105,18 +122,25 @@ export default function OrderForm({ psid = null, onCreated }) {
         body = {
           customer_name: form.customer_name,
           phone: form.phone,
-          address: form.address,
+          address: addressPayload(addr),
           sku: form.sku,
           quantity: Number(form.quantity),
           unit_price_vnd: Number(form.unit_price_vnd),
         };
       }
 
-      const result = await apiFetch(path, { method: "POST", body: JSON.stringify(body) });
+      const headers = mode === "manual" ? { "Idempotency-Key": idemKey } : {};
+      const result = await apiFetch(path, { method: "POST", body: JSON.stringify(body), headers });
       setSuccess(`Đã tạo đơn #${result.order_id} — tổng ${formatVnd(result.total_vnd)}`);
-      setForm({ customer_name: "", phone: "", address: "", sku: "", quantity: "", unit_price_vnd: "" });
+      setForm({ customer_name: "", phone: "", sku: "", quantity: "", unit_price_vnd: "" });
+      setAddr(EMPTY_ADDRESS);
+      setCandidates(null);
+      setIdemKey(newIdemKey());
       if (onCreated) onCreated(result);
     } catch (err) {
+      if (err.detail && err.detail.error_code === "address_needs_staff_confirmation") {
+        setCandidates(err.detail.candidates || []);
+      }
       setError(err.message);
     } finally {
       setBusy(false);
@@ -165,11 +189,12 @@ export default function OrderForm({ psid = null, onCreated }) {
           onChange={(e) => update("customer_name", e.target.value)}
         />
         <input placeholder="SĐT" value={form.phone} onChange={(e) => update("phone", e.target.value)} />
-        <input
-          placeholder="Địa chỉ giao hàng"
-          value={form.address}
-          onChange={(e) => update("address", e.target.value)}
-        />
+        {savedAddress && (
+          <div style={{ fontSize: 12, color: "#555" }}>
+            Địa chỉ đã lưu của khách (chỉ để đối chiếu, KHÔNG tự điền): {savedAddress}
+          </div>
+        )}
+        <AddressPicker value={addr} onChange={updateAddr} candidates={candidates} disabled={busy} />
         <select value={form.sku} onChange={(e) => update("sku", e.target.value)}>
           <option value="">-- Chọn sản phẩm --</option>
           {products.map((p) => (
