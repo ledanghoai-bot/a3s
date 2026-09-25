@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 
 import asyncpg
 
 from app.config import settings
 from app.db_pool import acquire, release
-from app.services import audit_service
+from app.services import audit_service, customer_identity
 from app.services.address import order_binding
 from app.services.command import errors, order_intent, order_intent_service
 from app.services.command import receipt as receipt_mod
@@ -292,28 +291,43 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
 
     total = unit_price * qty
 
-    # --- Customer upsert ATOMIC (psid hoac manual:<uuid>) ---
-    # ON CONFLICT (psid) DO UPDATE: 2 đơn đồng thời của khách MỚI (khác idempotency key) không còn
-    # đâm nhau ở customers.psid UNIQUE -> cả hai tạo đơn đúng. FINDING 1 (adversarial self-review).
-    customer_psid = p.get("psid") or f"manual:{uuid.uuid4().hex[:12]}"
+    # --- Customer (CA Directive 387 §5 / PO Record 386) ---
+    # Khach = CHU TAI KHOAN kenh nhan tin: tao lan dau, KHONG ghi de ten/SDT/dia chi boi nguoi nhan cua don sau (nguoi
+    # nhan luu o orders.shipping_*). Kenh TUONG MINH tu envelope. ensure_customer = ON CONFLICT (psid) DO NOTHING (an
+    # toan 2 don dong thoi cua khach moi — FINDING 1 cu van giu). Don Dashboard: khach da co (tu hoi thoai) -> dung
+    # identity that; khong psid -> identity noi bo channel=dashboard gan staff tao don.
     name, phone, address = p["customer_name"], p["phone"], p["address"]
-    customer_id = await conn.fetchval(
-        "INSERT INTO customers (psid, name, phone, address) VALUES ($1,$2,$3,$4) "
-        "ON CONFLICT (psid) DO UPDATE SET name=EXCLUDED.name, phone=EXCLUDED.phone, "
-        "address=EXCLUDED.address RETURNING id",
-        customer_psid, name, phone, address,
-    )
+    created_by_staff_id = None
+    try:
+        if env.channel == "dashboard":
+            created_by_staff_id = _audit_actor(env)[2]
+            if created_by_staff_id is None:
+                raise customer_identity.IdentityError("don Dashboard bat buoc staff actor (created_by_staff_id)")
+            if p.get("psid"):
+                customer_id = await customer_identity.require_existing(conn, p["psid"])
+            else:
+                customer_id = await customer_identity.ensure_customer(
+                    conn, channel="dashboard", psid=customer_identity.new_dashboard_identity(created_by_staff_id),
+                    name=name, phone=phone, address=address)
+        else:
+            if not p.get("psid"):
+                raise customer_identity.IdentityError(f"don kenh {env.channel} bat buoc psid/ChatID")
+            customer_id = await customer_identity.ensure_customer(
+                conn, channel=env.channel, psid=p["psid"], name=name, phone=phone, address=address)
+    except customer_identity.IdentityError as e:
+        raise errors.CommandError(errors.INVALID_ENVELOPE, str(e)) from e
 
     # --- Order + items + stock ---
     # M3-S2: UTM chi ghi khi flag bat (OFF = hanh vi cu, cot NULL); gia tri da validate o registry.
     utm = (p.get("utm") or {}) if settings.m3_utm_attribution else {}
     order_id = await conn.fetchval(
         "INSERT INTO orders (customer_id, status, total_vnd, shipping_name, shipping_phone, "
-        "shipping_address, origin_channel, utm_source, utm_medium, utm_campaign, utm_content, utm_term) "
-        "VALUES ($1,'new',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id",
+        "shipping_address, origin_channel, utm_source, utm_medium, utm_campaign, utm_content, utm_term, "
+        "created_by_staff_id) "
+        "VALUES ($1,'new',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id",
         customer_id, total, name, phone, address, env.channel,
         utm.get("utm_source"), utm.get("utm_medium"), utm.get("utm_campaign"),
-        utm.get("utm_content"), utm.get("utm_term"),
+        utm.get("utm_content"), utm.get("utm_term"), created_by_staff_id,
     )
     order_item_id = await conn.fetchval(
         "INSERT INTO order_items (order_id, product_id, quantity, unit_price_vnd) VALUES ($1,$2,$3,$4) "

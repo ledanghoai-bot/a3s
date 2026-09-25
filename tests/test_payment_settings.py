@@ -226,7 +226,7 @@ async def test_bank_clear_explicit_historical_immutable(monkeypatch):
     oid = None
     try:
         tag = f"BC-{int(_t.time()*1000)}"
-        cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+        cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'T','0900000000') RETURNING id",
                                   f"tg:{tag}")
         pidp = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
                                    "VALUES($1,'CF',100000,999,300,'hu') RETURNING id", tag)

@@ -13,6 +13,7 @@ const SHIP_LABEL = {
   delivered: "Đã giao",
   delivery_failed: "Giao lỗi",
   return_pending: "Chờ hoàn",
+  cancelled: "Đã huỷ",
 };
 const PAY_LABEL = {
   awaiting: "Chờ thanh toán",
@@ -21,7 +22,10 @@ const PAY_LABEL = {
   confirmed: "Đã xác nhận",
   reconciled: "Đã đối soát",
   discrepancy: "Lệch — cần xử lý",
+  cancelled: "Đã huỷ",
 };
+// CA Directive 387: đơn huỷ chỉ còn để xem lịch sử — không nằm trong hàng đợi chuẩn bị/thu tiền.
+const ORDER_CANCELLED = ["cancelled", "cancelled_by_exception"];
 const FEE_LABEL = { quoted: "Đã báo phí", quote_required: "Cần báo phí", unknown: "Chưa xác định" };
 
 function vnd(n) {
@@ -54,6 +58,7 @@ export default function FulfillmentBoard() {
   const [error, setError] = useState(null);
   const [shipFilter, setShipFilter] = useState("");
   const [payFilter, setPayFilter] = useState("");
+  const [showCancelled, setShowCancelled] = useState(false);
 
   useEffect(() => {
     if (ready) load();
@@ -100,6 +105,10 @@ export default function FulfillmentBoard() {
             ))}
           </select>
         </label>
+        <label>
+          <input type="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} />{" "}
+          Hiện đơn đã huỷ
+        </label>
         <button onClick={load}>Làm mới</button>
       </div>
       {error && <p style={{ color: "#b71c1c" }}>Lỗi: {error}</p>}
@@ -112,7 +121,7 @@ export default function FulfillmentBoard() {
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "2px solid #ddd" }}>
               <th>Mã đơn</th>
-              <th>Khách</th>
+              <th>Người nhận</th>
               <th>Tổng hàng</th>
               <th>Giao</th>
               <th>Phí</th>
@@ -122,10 +131,24 @@ export default function FulfillmentBoard() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
-              <tr key={r.order_id} style={{ borderBottom: "1px solid #eee" }}>
-                <td>#{r.order_id}</td>
-                <td>{r.customer_name || "—"}</td>
+            {rows.filter((r) => showCancelled || !ORDER_CANCELLED.includes(r.order_status)).map((r) => (
+              <tr key={r.order_id} style={{ borderBottom: "1px solid #eee",
+                                            opacity: ORDER_CANCELLED.includes(r.order_status) ? 0.6 : 1 }}>
+                <td>
+                  #{r.order_id}
+                  {ORDER_CANCELLED.includes(r.order_status) && (
+                    <div><Tag text="Đã huỷ" tone="bad" /></div>
+                  )}
+                </td>
+                <td>
+                  {r.customer_name || "—"}
+                  {r.recipient_phone && <div style={{ fontSize: 12, color: "#888" }}>{r.recipient_phone}</div>}
+                  {r.account_channel === "dashboard" ? (
+                    <div style={{ fontSize: 11, color: "#a60" }}>Dashboard — không có kênh nhắn tin khách</div>
+                  ) : r.account_name && r.account_name !== r.customer_name ? (
+                    <div style={{ fontSize: 11, color: "#999" }}>Tài khoản: {r.account_name}</div>
+                  ) : null}
+                </td>
                 <td>{vnd(r.total_vnd)}</td>
                 <td><Tag text={SHIP_LABEL[r.shipment_status] || "Chưa tạo"} tone={shipTone(r.shipment_status)} /></td>
                 <td>{FEE_LABEL[r.fee_status] || "—"}{r.delivery_fee_vnd != null ? ` (${vnd(r.delivery_fee_vnd)})` : ""}</td>

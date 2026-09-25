@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import require_active_session, require_permission
 from app.config import settings
+from app.services.fulfillment import cancel_cascade
 from app.services.fulfillment import shipment_service as ship
 from app.services.payment import payment_service as pay
 
@@ -48,6 +49,24 @@ def _require(staff: dict, perm: str | None) -> None:
         return
     if perm not in staff.get("permissions", set()):
         raise HTTPException(status_code=403, detail=f"Thieu quyen: {perm}")
+
+
+def _has_perm(staff: dict, perm: str) -> bool:
+    if not staff.get("rbac_provisioned"):
+        return not settings.rbac_strict
+    return perm in staff.get("permissions", set())
+
+
+async def guard_order_active(conn, order_id: int, staff: dict, *, exception_ok: bool = False) -> None:
+    """CA Directive 387 §4.2/§6: don DA HUY khong con la workflow hanh dong duoc (chuan bi/thu tien/bao phi/QR).
+    FOR SHARE (trong tx cua action) -> tuan tu hoa voi lenh huy (FOR UPDATE orders). Ngoai le: nguoi co
+    order.cancel.exception van thao tac shipment/evidence (xu ly hang da ban giao / hoan tien) khi exception_ok."""
+    st = await conn.fetchval("SELECT status FROM orders WHERE id=$1 FOR SHARE", order_id)
+    if st in cancel_cascade.CANCELLED_ORDER_STATUSES:
+        if exception_ok and _has_perm(staff, "order.cancel.exception"):
+            return
+        raise HTTPException(status_code=409, detail={"error_code": "order_cancelled",
+                                                     "message": f"Don #{order_id} da huy — khong con thao tac duoc"})
 
 
 def _map_err(e: Exception) -> HTTPException:
@@ -100,7 +119,11 @@ async def board(shipment_status: str | None = None, payment_status: str | None =
     conn = await asyncpg.connect(_db_url())
     try:
         rows = await conn.fetch(
-            "SELECT o.id AS order_id, o.status AS order_status, o.total_vnd, cu.name AS customer_name, "
+            # CA Directive 387 §5: nguoi nhan THEO DON; ho so khach (chu tai khoan) chi fallback khi don legacy rong.
+            "SELECT o.id AS order_id, o.status AS order_status, o.total_vnd, "
+            "COALESCE(NULLIF(o.shipping_name,''), cu.name) AS customer_name, "
+            "COALESCE(NULLIF(o.shipping_phone,''), cu.phone) AS recipient_phone, "
+            "cu.name AS account_name, cu.channel AS account_channel, "
             "s.status AS shipment_status, s.carrier, s.zone, s.delivery_fee_vnd, s.fee_status, s.eta_text, "
             "p.method AS payment_method, p.status AS payment_status, p.amount_due_vnd, o.created_at "
             "FROM orders o JOIN customers cu ON cu.id=o.customer_id "
@@ -117,7 +140,10 @@ async def detail(order_id: int) -> dict:
     conn = await asyncpg.connect(_db_url())
     try:
         order = await conn.fetchrow(
-            "SELECT o.id, o.status, o.total_vnd, o.created_at, cu.name AS customer_name, cu.phone "
+            "SELECT o.id, o.status, o.total_vnd, o.created_at, "
+            "COALESCE(NULLIF(o.shipping_name,''), cu.name) AS customer_name, "
+            "COALESCE(NULLIF(o.shipping_phone,''), cu.phone) AS phone, o.shipping_address, "
+            "cu.name AS account_name, cu.channel AS account_channel, o.origin_channel "
             "FROM orders o JOIN customers cu ON cu.id=o.customer_id WHERE o.id=$1", order_id)
         if not order:
             raise HTTPException(status_code=404, detail="order khong ton tai")
@@ -140,8 +166,10 @@ async def detail(order_id: int) -> dict:
                 "FROM payment_events WHERE payment_id=$1 ORDER BY occurred_at, id", p["id"])]
             # instruction moi nhat (neu co) — UI hien lai snapshot + copy sau reload
             instruction = await conn.fetchrow(
-                "SELECT bank_snapshot, account_number_snapshot, holder_snapshot, transfer_content, amount_vnd, "
-                "is_test, created_at FROM payment_instructions WHERE payment_id=$1 ORDER BY id DESC LIMIT 1", p["id"])
+                "SELECT pi.bank_snapshot, pi.account_number_snapshot, pi.holder_snapshot, pi.transfer_content, "
+                "pi.amount_vnd, pi.is_test, pi.created_at, v.voided_at FROM payment_instructions pi "
+                "LEFT JOIN payment_instruction_voids v ON v.instruction_id=pi.id "
+                "WHERE pi.payment_id=$1 ORDER BY pi.id DESC LIMIT 1", p["id"])
         return {"order": dict(order), "address_snapshot": dict(snap) if snap else None,
                 "shipment": dict(sh) if sh else None, "attempts": attempts,
                 "payment": dict(p) if p else None, "payment_events": events,
@@ -156,6 +184,7 @@ async def shipment_quote(order_id: int, staff: dict = Depends(require_permission
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff)
             return await ship.auto_quote(conn, order_id, actor=_actor(staff))
     except ship.ShipmentError as e:
         raise _map_err(e)
@@ -169,6 +198,7 @@ async def shipment_manual_quote(order_id: int, body: dict,
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff)
             return await ship.set_manual_quote(
                 conn, order_id, actor=_actor(staff), zone=body.get("zone"),
                 weight_g=_money(body, "weight_g"),
@@ -186,6 +216,7 @@ async def shipment_carrier(order_id: int, body: dict,
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff, exception_ok=True)
             return await ship.set_carrier(conn, order_id, actor=_actor(staff),
                                           carrier=body.get("carrier"), tracking_text=body.get("tracking_text"),
                                           expected_version=body.get("expected_version"))
@@ -203,6 +234,7 @@ async def shipment_status(order_id: int, body: dict,
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff, exception_ok=True)
             return await ship.change_status(conn, order_id, body["to_status"], actor=_actor(staff),
                                             expected_version=body.get("expected_version"))
     except ship.ShipmentError as e:
@@ -221,6 +253,7 @@ async def shipment_attempt(order_id: int, body: dict,
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff, exception_ok=True)
             return await ship.record_attempt(conn, order_id, actor=_actor(staff), command_key=command_key,
                                              result=body["result"], reason=body.get("reason"),
                                              note=body.get("note"), next_contact_at=next_contact_at)
@@ -238,6 +271,7 @@ async def payment_ensure(order_id: int, body: dict, staff: dict = Depends(requir
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff)
             await pay.ensure_payment(conn, order_id, method=body["method"], actor=_actor(staff))
             await pay.sync_amount_due_if_unsettled(conn, order_id, actor=_actor(staff))
             return dict(await conn.fetchrow("SELECT * FROM payments WHERE order_id=$1", order_id))
@@ -272,6 +306,7 @@ async def payment_evidence(order_id: int, body: dict, staff: dict = Depends(requ
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff, exception_ok=True)
             return await pay.record_evidence(
                 conn, order_id, kind=kind, amount_vnd=amount_vnd, recorded_by=_actor(staff),
                 command_key=command_key, reference=body.get("reference"), note=body.get("note"),
@@ -287,6 +322,7 @@ async def payment_instruction(order_id: int, staff: dict = Depends(require_activ
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff)
             return await pay.generate_instruction(conn, order_id, actor=_actor(staff))
     except pay.PaymentError as e:
         raise _map_err(e)

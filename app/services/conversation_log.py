@@ -12,9 +12,10 @@ deu chay o MOI tin nhan), nen duoc uu tien chuyen sang pool truoc.
 """
 
 from app.db_pool import get_pool
+from app.services import customer_identity
 
 
-async def ensure_conversation(psid: str) -> int:
+async def ensure_conversation(psid: str, channel: str | None = None) -> int:
     """Lay hoac tao customer + conversation cho 1 psid, tra ve conversation_id.
 
     Don gian hoa: moi khach chi giu 1 conversation "dang hoat dong" (lay ban ghi
@@ -23,13 +24,14 @@ async def ensure_conversation(psid: str) -> int:
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        customer = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
-        if customer is None:
-            customer_id = await conn.fetchval(
-                "INSERT INTO customers (psid) VALUES ($1) RETURNING id", psid
-            )
-        else:
-            customer_id = customer["id"]
+        # CA 387: tao khach MOI chi khi caller truyen KENH TUONG MINH (orchestrator/webhook/listener). Duong staff
+        # (ghi chu, price override) khong co nguon su that ve kenh -> khach phai ton tai san (require_existing).
+        customer_id = await customer_identity.get_existing(conn, psid)
+        if customer_id is None:
+            if channel in customer_identity.MESSAGING_CHANNELS:
+                customer_id = await customer_identity.ensure_customer(conn, channel=channel, psid=psid)
+            else:
+                customer_id = await customer_identity.require_existing(conn, psid)
 
         conversation = await conn.fetchrow(
             "SELECT id FROM conversations WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 1",

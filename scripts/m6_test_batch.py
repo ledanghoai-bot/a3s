@@ -58,7 +58,7 @@ async def create(conn, batch: str, n: int, *, bank_fixture: bool = False) -> lis
     for seq in range(1, n + 1):
         psid = f"{_prefix(batch)}{seq}"
         cid = await conn.fetchval(
-            "INSERT INTO customers(psid,name,phone) VALUES($1,$2,'0900000000') RETURNING id",
+            "INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, $2,'0900000000') RETURNING id",
             psid, f"TEST batch {batch} #{seq}")
         pid = await conn.fetchval(
             "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g) VALUES($1,'CF test',150000,999,600) "

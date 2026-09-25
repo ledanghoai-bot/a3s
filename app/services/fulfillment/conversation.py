@@ -7,6 +7,7 @@ Buoc (fulfillment_conversations.step):
   awaiting_transfer : CK — instruction bat bien + VietQR da gui; han 15 phut, nhac t+7/t+13 (CA Amend 273).
   staff_attention   : ngoai le (phi/dia chi/tai khoan/method/payment_timeout/mismatch/large_order/unit) -> nhan vien.
   completed         : payment confirmed (shop xac nhan hoac provider auto-confirm).
+  cancelled         : don bi huy qua lifecycle (CA Directive 387) — terminal, khong nhac/khong bao phi/khong ack.
 
 Moi transition ghi fulfillment_conversation_events (UNIQUE order_id+command_key): duplicate inbound/outbox/retry ->
 replay tra reply cu, KHONG tao payment/instruction/QR/reminder thu 2. AI KHONG goi module nay de "quyet dinh":
@@ -27,6 +28,9 @@ from app.services.payment import payment_service as _pay
 
 ROUTING, AWAITING_METHOD, COD_HANDOFF = "routing", "awaiting_method", "cod_handoff"
 AWAITING_TRANSFER, STAFF_ATTENTION, COMPLETED = "awaiting_transfer", "staff_attention", "completed"
+# CA Directive 387: don bi huy -> hoi thoai ket thuc (terminal), bot/worker khong con chon.
+CANCELLED = "cancelled"
+TERMINAL_STEPS = (COMPLETED, CANCELLED)
 MAX_METHOD_PROMPTS = 3
 # CA Review 292-02: khi đơn đang chờ nhân viên, bot trả 1 acknowledgement XÁC ĐỊNH (không im hoàn toàn), RATE-LIMIT
 # 1 lần / cooldown để retry/nhiều tin không spam; không đưa tin sang LLM, không đổi order/payment/shipment.
@@ -257,8 +261,10 @@ async def get(conn, order_id: int, *, lock: bool = False) -> dict | None:
 async def get_by_customer(conn, customer_ref: str, *, lock: bool = False) -> dict | None:
     """Hoi thoai fulfillment MO gan nhat cua khach (theo psid) — cho orchestrator bat reply."""
     row = await conn.fetchrow(
-        "SELECT * FROM fulfillment_conversations WHERE customer_ref=$1 AND step IN ($2,$3,$4,$5) "
-        "ORDER BY updated_at DESC, id DESC LIMIT 1" + (" FOR UPDATE" if lock else ""),
+        "SELECT fc.* FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
+        "WHERE fc.customer_ref=$1 AND fc.step IN ($2,$3,$4,$5) "
+        "AND o.status NOT IN ('cancelled','cancelled_by_exception') "   # CA 387: don huy khong con ghim bot
+        "ORDER BY fc.updated_at DESC, fc.id DESC LIMIT 1" + (" FOR UPDATE OF fc" if lock else ""),
         customer_ref, AWAITING_METHOD, AWAITING_TRANSFER, COD_HANDOFF, STAFF_ATTENTION)
     return dict(row) if row else None
 
@@ -405,6 +411,9 @@ async def escalate(conn, order_id: int, *, reason: str, actor: str, detail: dict
     fc = await get(conn, order_id, lock=True)
     if not fc:
         return None
+    if fc["step"] == CANCELLED:
+        # CA 387: don da huy -> KHONG escalate/khong notify khach (attention huy do cascade tu mo neu can).
+        return {"step": CANCELLED, "reason": reason, "attention_id": None, "already": True}
     if fc["step"] == COMPLETED:
         # CA 275-03: KHONG mo lai hoi thoai da completed (don da thanh toan/xong) — chi mo attention cho staff.
         aid = await _att.open_attention(conn, order_id, reason=reason, detail=detail, created_by=actor)
@@ -533,8 +542,10 @@ async def run_due(conn, *, now: datetime | None = None, actor: str = "m7:worker"
     now = now or datetime.now(timezone.utc)
     stats = {"reminded": 0, "escalated": 0, "completed": 0, "skipped_scope": 0}
     rows = await conn.fetch(
-        "SELECT * FROM fulfillment_conversations WHERE step=$1 AND transfer_started_at IS NOT NULL "
-        "ORDER BY transfer_started_at LIMIT 100 FOR UPDATE SKIP LOCKED", AWAITING_TRANSFER)
+        "SELECT fc.* FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
+        "WHERE fc.step=$1 AND fc.transfer_started_at IS NOT NULL "
+        "AND o.status NOT IN ('cancelled','cancelled_by_exception') "   # CA 387
+        "ORDER BY fc.transfer_started_at LIMIT 100 FOR UPDATE OF fc SKIP LOCKED", AWAITING_TRANSFER)
     for r in rows:
         fc = dict(r)
         oid, iid = fc["order_id"], fc["instruction_id"]
@@ -591,7 +602,7 @@ async def on_payment_confirmed(conn, order_id: int, *, actor: str = "payment") -
     LIEN QUAN THANH TOAN ('payment_timeout'/'payment_mismatch') — KHONG phat notify (payment service da phat
     'payment.confirmed.notify' 1 lan). CA 274-02: late valid confirm resolve handoff, khong tao mau thuan."""
     fc = await get(conn, order_id, lock=True)
-    if not fc or fc["step"] in (COMPLETED,):
+    if not fc or fc["step"] in TERMINAL_STEPS:
         return
     now = datetime.now(timezone.utc)
     await _set_step(conn, fc, step=COMPLETED, completed_at=now)
@@ -673,7 +684,8 @@ async def run_routing(*, limit: int = 25, provider=None) -> dict:
     try:
         rows = await conn.fetch(
             "SELECT fc.order_id, o.customer_id FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
-            "WHERE fc.step=$1 ORDER BY fc.created_at LIMIT $2", ROUTING, limit)
+            "WHERE fc.step=$1 AND o.status NOT IN ('cancelled','cancelled_by_exception') "   # CA 387
+            "ORDER BY fc.created_at LIMIT $2", ROUTING, limit)
         for _r in rows:
             oid = _r["order_id"]
             # CA Directive 286: customer khong con eligible (removed mid-flow / khong tester) -> KHONG advance/send.

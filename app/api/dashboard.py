@@ -240,6 +240,8 @@ async def create_order_via_bot(
         address=body["address"],
         sku=body["sku"],
         quantity=int(body["quantity"]),
+        origin_channel="dashboard",
+        created_by_staff_id=staff["id"],
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -277,6 +279,7 @@ async def create_order_manual_for_conversation(
         quantity=int(body["quantity"]),
         unit_price_vnd=int(body["unit_price_vnd"]),
         psid=psid,
+        created_by_staff_id=staff["id"],
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -314,6 +317,7 @@ async def create_order_manual_standalone(
         quantity=int(body["quantity"]),
         unit_price_vnd=int(body["unit_price_vnd"]),
         psid=None,
+        created_by_staff_id=staff["id"],
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -412,6 +416,12 @@ async def patch_order_status(order_id: int, body: dict) -> dict:
     new_status = body.get("status")
     if not new_status:
         raise HTTPException(status_code=422, detail="Thieu truong 'status' trong body")
+    if new_status in ("cancelled", "cancelled_by_exception"):
+        # CA Directive 387 §3: endpoint cu KHONG con set 'cancelled' truc tiep (bo qua ly do/cascade/kho) ->
+        # dung POST /dashboard/orders/{id}/cancel (lifecycle, ly do bat buoc).
+        raise HTTPException(status_code=409, detail={
+            "error_code": "use_cancel_endpoint",
+            "message": "Huy don phai qua POST /dashboard/orders/{id}/cancel (ly do bat buoc)."})
     try:
         return await orders_service.update_order_status(order_id, new_status)
     except LookupError as e:

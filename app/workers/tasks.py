@@ -85,7 +85,7 @@ async def _process_message_inner(event: dict) -> None:
         # chinh la tin nhan THAT cua nhan vien/sep tu tay reply qua Messenger
         # Inbox. "Timetrap": chinh cai cua so bot_paused=TRUE la dieu kien loc,
         # khong can them cot timestamp rieng.
-        conversation_id = await conversation_log.ensure_conversation(psid)
+        conversation_id = await conversation_log.ensure_conversation(psid, channel="messenger")
         await conversation_log.log_message(conversation_id, "agent", text)
         print(f"[worker] Da ghi tin nhan that cua nhan vien cho {psid} (luc dang paused).")
         return
@@ -100,7 +100,7 @@ async def _process_message_inner(event: dict) -> None:
     # len nhan vien. NHUNG van ghi log tin khach de khong mat doan hoi thoai
     # trong dashboard (issue #8 - nang cap hien thi day du luc handover).
     if await is_bot_paused(sender_id):
-        conversation_id = await conversation_log.ensure_conversation(sender_id)
+        conversation_id = await conversation_log.ensure_conversation(sender_id, channel="messenger")
         await conversation_log.log_message(conversation_id, "customer", text)
         print(f"[worker] Bot dang paused cho {sender_id}, chi log, khong tra loi (nhan vien dang xu ly).")
         return

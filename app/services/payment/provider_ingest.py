@@ -167,6 +167,10 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
     if not pay:
         exists = bool(await conn.fetchval("SELECT 1 FROM orders WHERE id=$1", order_id))
         return await _unmatched("order_or_payment_not_found", order_id=order_id, order_exists=exists)
+    # CA Directive 387: tien ve cho don DA HUY (instruction da void) -> KHONG auto-confirm, KHONG mo lai hoi thoai;
+    # giu ledger provider_event + attention 'refund_required' cho staff hoan tien (idempotent theo (order, reason)).
+    if await conn.fetchval("SELECT status IN ('cancelled','cancelled_by_exception') FROM orders WHERE id=$1", order_id):
+        return await _unmatched("order_cancelled", order_id=order_id, payment_id=pay["id"], att_reason="refund_required")
     if pay["method"] != "BANK_TRANSFER":
         # CA 275-03: event gan don COD (order-bound) -> shared escalation, khong de conversation ket o awaiting.
         return await _discrepancy("payment_not_bank_transfer", order_id=order_id, payment_id=pay["id"])
@@ -180,6 +184,9 @@ async def process(conn, row_id: int, *, actor: str = "m7:provider") -> str:
                                     pay["id"])
     if not instr:
         return await _discrepancy("no_current_instruction", order_id=order_id, payment_id=pay["id"])
+    if await conn.fetchval("SELECT 1 FROM payment_instruction_voids WHERE instruction_id=$1", instr["id"]):
+        # CA 387: instruction da void -> khong bao gio match
+        return await _unmatched("instruction_voided", order_id=order_id, payment_id=pay["id"], att_reason="refund_required")
     # CA 274-01/275-03: mac dinh C0 chi auto-confirm instruction TEST. CA 331 NGOAI LE — S0 tester REAL-BANK:
     # cho instruction thoat (is_test=false) auto-confirm CHI KHI gate day du: connector test-mode ON + live OFF +
     # provider event mode=test + order thuoc EXACT tester scope PO (SERVER-SIDE resolved identity qua customer_id cua

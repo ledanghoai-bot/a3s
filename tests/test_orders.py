@@ -21,16 +21,14 @@ class TestValidTransitions:
         validate_transition("new", "new")
         validate_transition("done", "done")
 
-    def test_huy_tu_bat_ky_buoc_nao_truoc_done(self):
-        validate_transition("new", "cancelled")
-        validate_transition("confirmed", "cancelled")
-        validate_transition("shipped", "cancelled")
 
 
 class TestInvalidTransitions:
-    def test_khong_the_huy_don_da_giao_xong(self):
-        with pytest.raises(ValueError, match="da giao xong"):
-            validate_transition("done", "cancelled")
+    def test_huy_khong_con_qua_duong_legacy(self):
+        # CA Directive 387 §3: huy chi qua lifecycle cancel service (ly do bat buoc + cascade)
+        for cur in ("new", "confirmed", "shipped", "done"):
+            with pytest.raises(ValueError, match="cancel"):
+                validate_transition(cur, "cancelled")
 
     def test_khong_the_chuyen_nguoc(self):
         with pytest.raises(ValueError, match="chuyen nguoc"):

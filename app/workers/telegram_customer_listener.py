@@ -91,7 +91,7 @@ async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text
     # (app/workers/tasks.py) - neu dang bot_paused thi CHI log, khong tra loi,
     # tranh chong len nhan vien.
     if await is_bot_paused(sender_id):
-        conversation_id = await conversation_log.ensure_conversation(sender_id)
+        conversation_id = await conversation_log.ensure_conversation(sender_id, channel="telegram_customer")
         await conversation_log.log_message(conversation_id, "customer", text)
         print(f"[telegram_customer_listener] Bot dang paused cho {sender_id}, chi log.")
         return

@@ -113,7 +113,7 @@ async def _seed(conn, weight, qty=1, province="79", ward="26734", tag="354"):
                        "VALUES ('ghn', 1, $1, $2, 202, 1442, '20108', 'matched', 'staff') ON CONFLICT DO NOTHING",
                        province, ward)
     await conn.execute("UPDATE shipping_settings SET packing_overhead_percent=10 WHERE id=1")
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'T','0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'T','0900000000') RETURNING id",
                               f"tg:hg-{tag}-{weight}-{uuid.uuid4().hex[:10]}")
     pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,length_cm,width_cm,"
                               "height_cm) VALUES($1,'CF',100000,999,$2,10,10,11) RETURNING id",

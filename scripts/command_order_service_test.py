@@ -227,8 +227,8 @@ async def main() -> int:  # noqa: C901
                            "VALUES ('3S-TEST2','Test2','t',200000,1000) "
                            "ON CONFLICT (sku) DO UPDATE SET stock=1000")
         cid_ovr = await conn.fetchval(
-            "INSERT INTO customers (psid,name,phone,address) "
-            "VALUES ('psid-ovr','O','0912345678','x') "
+            "INSERT INTO customers (psid, channel, external_chat_id, name,phone,address) "
+            "VALUES ('psid-ovr', 'telegram_customer', 'psid-ovr', 'O','0912345678','x') "
             "ON CONFLICT (psid) DO UPDATE SET name='O' RETURNING id")
         await conn.execute("DELETE FROM price_overrides WHERE customer_id=$1", cid_ovr)
         await conn.execute("INSERT INTO price_overrides (customer_id,quantity,unit_price_vnd,note) "

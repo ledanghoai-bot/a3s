@@ -138,9 +138,12 @@ async def _notify_customer(conn, order, to_status: str, command_id) -> None:
     tmpl = _CUSTOMER_NOTIFY.get(to_status)
     if tmpl is None or order["customer_id"] is None:
         return
-    psid = await conn.fetchval("SELECT psid FROM customers WHERE id=$1", order["customer_id"])
-    if not psid:
+    # CA Directive 387 / Record 386: dich = kenh TUONG MINH cua tai khoan (customers.channel) va phai KHOP kenh don;
+    # identity channel=dashboard (ChatID noi bo) -> KHONG BAO GIO enqueue tin khach.
+    cust = await conn.fetchrow("SELECT psid, channel FROM customers WHERE id=$1", order["customer_id"])
+    if cust is None or not cust["psid"] or cust["channel"] != ch:
         return
+    psid = cust["psid"]
     if settings.m3_outbound_dispatcher:
         # M3-S5: qua dispatcher — consent check + approved template lúc GỬI. Cùng dedupe_key ->
         # dedupe/at-least-once M1 giữ nguyên (AC-M3-06); template seed 032 = đúng text M2.

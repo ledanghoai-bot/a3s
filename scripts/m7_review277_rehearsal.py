@@ -59,7 +59,7 @@ async def _order(conn, *, ward, weight=300, qty=2, price=100000):
     _SEQ[0] += 1
     tag = f"{RUN}-{_SEQ[0]}"
     psid = f"tg:r277-{tag}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'R','0900000000') RETURNING id", psid)
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'R','0900000000') RETURNING id", psid)
     # CA 341-01: request GHN dung kich thuoc dong thung -> san pham PHAI co kich thuoc (thieu -> khong goi provider).
     pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit,"
                               "length_cm,width_cm,height_cm) VALUES($1,'CF',$2,999,$3,'hũ',10,10,10) RETURNING id",

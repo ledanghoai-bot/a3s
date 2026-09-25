@@ -18,10 +18,13 @@ const REASON_LABEL = {
   method: "Phương thức",
   provider_error: "Lỗi nhà vận chuyển",
   other: "Khác",
+  refund_required: "Đơn huỷ — cần hoàn tiền",
+  order_cancel_exception: "Đơn huỷ — hàng đã bàn giao",
 };
 
 function tone(reason) {
-  if (reason === "payment_mismatch" || reason === "unmatched_webhook") return "bad";
+  if (reason === "payment_mismatch" || reason === "unmatched_webhook" || reason === "refund_required" ||
+      reason === "order_cancel_exception") return "bad";
   if (reason === "payment_timeout" || reason === "large_order_review") return "warn";
   return "neutral";
 }

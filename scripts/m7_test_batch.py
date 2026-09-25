@@ -54,7 +54,7 @@ async def _bank_id(conn, batch: str) -> int:
 
 async def _mk_order(conn, batch: str, seq: int, *, seed_transfer: bool) -> int:
     psid = f"{_prefix(batch)}{seq}"
-    cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,$2,'0900000000') RETURNING id",
+    cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, $2,'0900000000') RETURNING id",
                               psid, f"TEST m7 {batch} #{seq}")
     pid = await conn.fetchval(
         "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "

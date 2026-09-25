@@ -35,7 +35,7 @@ async def main():
         await conn.execute("INSERT INTO delivery_zones(province_code,ward_code,zone) VALUES('66','24169','bmt_inner') "
                            "ON CONFLICT DO NOTHING")
         psid = f"tg:m7smoke-{RUN}"
-        cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'SMOKE','0900000000') RETURNING id",
+        cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'SMOKE','0900000000') RETURNING id",
                                   psid)
         pid = await conn.fetchval("INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g,sales_unit) "
                                   "VALUES($1,'CF',200000,999,300,'hũ') RETURNING id", f"M7SMOKE-{RUN}")

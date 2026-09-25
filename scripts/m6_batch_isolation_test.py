@@ -51,7 +51,7 @@ async def main():
            f"{mid['account_number'] if mid else None}")
 
         # order ngoai batch dung account active -> instruction tro dung account PO
-        cid = await conn.fetchval("INSERT INTO customers(psid,name,phone) VALUES($1,'EXT','0900000000') RETURNING id",
+        cid = await conn.fetchval("INSERT INTO customers (psid, channel, external_chat_id, name,phone) VALUES ($1, 'telegram_customer', $1, 'EXT','0900000000') RETURNING id",
                                   f"tg:ext-{RUN}")
         pid = await conn.fetchval(
             "INSERT INTO products(sku,name,price_vnd,stock,shipping_weight_g) VALUES($1,'CF',200000,999,600) "

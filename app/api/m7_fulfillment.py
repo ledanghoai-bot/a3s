@@ -11,6 +11,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import require_active_session, require_permission
+from app.api.m6_fulfillment import guard_order_active
 from app.config import settings
 from app.services.fulfillment import attention as att
 from app.services.fulfillment import conversation as fc
@@ -139,6 +140,7 @@ async def route_quote(order_id: int, body: dict | None = None,
         raise HTTPException(status_code=422, detail="thieu command_key (idempotency key tu client)")
     conn = await asyncpg.connect(_db_url())
     try:
+        await guard_order_active(conn, order_id, staff)   # CA 387: don huy -> KHONG goi GHN/route
         out = await rops.execute(conn, order_id, actor=_actor(staff), command_key=ck.strip())
         row = dict(out["shipment"]) if out.get("shipment") else {}
         if "quote_snapshot" in row:
@@ -166,6 +168,7 @@ async def conversation_resume(order_id: int, staff: dict = Depends(require_permi
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff)
             out = await fc.resume(conn, order_id, actor=_actor(staff))
         if out is None:
             raise HTTPException(status_code=400, detail="hoi thoai khong o staff_attention hoac khong ton tai")
@@ -186,6 +189,7 @@ async def instruction_qr(order_id: int, body: dict, staff: dict = Depends(requir
     conn = await asyncpg.connect(_db_url())
     try:
         async with conn.transaction():
+            await guard_order_active(conn, order_id, staff)
             row = await pay.generate_instruction(conn, order_id, actor=_actor(staff), command_key=ck.strip())
         if row.get("qr_payload"):
             row["qr_svg_data_uri"] = vq.svg_data_uri(row["qr_payload"])
