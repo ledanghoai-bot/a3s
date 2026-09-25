@@ -12,7 +12,8 @@ from app.services.command import repository as cmd_repo
 REASONS = ("address", "quote", "account", "method", "payment_mismatch", "unmatched_webhook",
            "payment_timeout", "large_order_review", "quantity_unit_review",   # CA Amendment 273
            "provider_error", "other",
-           "refund_required", "order_cancel_exception")                       # CA Directive 387 (huy don)
+           "refund_required", "order_cancel_exception",                       # CA Directive 387 (huy don)
+           "shipment_create")                                                  # CA Directive 393 (van don GHN)
 CANCEL_REASONS = ("refund_required", "order_cancel_exception")
 ADMIN_EVENT = "fulfillment.staff.notify"
 

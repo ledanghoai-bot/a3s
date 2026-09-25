@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.admin import router as admin_router
 from app.api.auth_router import router as auth_router
 from app.api.dashboard import router as dashboard_router
+from app.api.ghn_shipment_create import router as ghn_shipment_create_router
 from app.api.inventory import router as inventory_router
 from app.api.legal import router as legal_router
 from app.api.m4_signer_access import router as m4_signer_access_router
@@ -81,6 +82,7 @@ app.include_router(m5_review_router)  # M5 Phase 3 (Directive 112): staff review
 app.include_router(m5_order_binding_router)  # M5 Phase 4 (Directive 116): order snapshot binding (shadow/dormant)
 app.include_router(m6_fulfillment_router)  # M6 (Directive 265): delivery & payment/COD dashboard
 app.include_router(m7_fulfillment_router)  # M7 (Directive 272): conversational fulfillment dashboard (attention/QR/provider)
+app.include_router(ghn_shipment_create_router)  # Directive 393: GHN shipment create (review/confirm; gate OFF)
 app.include_router(m7_webhooks_router)  # M7-C0 (Directive 272): SePay test webhook (flag OFF -> 404)
 app.include_router(settings_router)  # Directive 305: Shop Settings integrations (dormant; module flag OFF)
 app.include_router(payment_settings_router)  # Directive 306: Payment Settings + SePay S0 (dormant; module flag OFF)

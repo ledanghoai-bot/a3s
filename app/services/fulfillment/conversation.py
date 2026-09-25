@@ -8,6 +8,7 @@ Buoc (fulfillment_conversations.step):
   staff_attention   : ngoai le (phi/dia chi/tai khoan/method/payment_timeout/mismatch/large_order/unit) -> nhan vien.
   completed         : payment confirmed (shop xac nhan hoac provider auto-confirm).
   cancelled         : don bi huy qua lifecycle (CA Directive 387) — terminal, khong nhac/khong bao phi/khong ack.
+  ship_confirm      : (gate bot GHN create ON) da gui tom tat giao hang, cho khach nhan "XAC NHAN GIAO" (Directive 393).
 
 Moi transition ghi fulfillment_conversation_events (UNIQUE order_id+command_key): duplicate inbound/outbox/retry ->
 replay tra reply cu, KHONG tao payment/instruction/QR/reminder thu 2. AI KHONG goi module nay de "quyet dinh":
@@ -31,6 +32,9 @@ AWAITING_TRANSFER, STAFF_ATTENTION, COMPLETED = "awaiting_transfer", "staff_atte
 # CA Directive 387: don bi huy -> hoi thoai ket thuc (terminal), bot/worker khong con chon.
 CANCELLED = "cancelled"
 TERMINAL_STEPS = (COMPLETED, CANCELLED)
+# CA Directive 393 §2.1: cho khach XAC NHAN CUOI (don/dia chi/phi/phuong thuc) truoc khi tao yeu cau van don GHN.
+# Chi vao buoc nay khi gate ghn_shipment_create_bot_enabled ON (mac dinh OFF -> hanh vi cu nguyen trang).
+SHIP_CONFIRM = "ship_confirm"
 MAX_METHOD_PROMPTS = 3
 # CA Review 292-02: khi đơn đang chờ nhân viên, bot trả 1 acknowledgement XÁC ĐỊNH (không im hoàn toàn), RATE-LIMIT
 # 1 lần / cooldown để retry/nhiều tin không spam; không đưa tin sang LLM, không đổi order/payment/shipment.
@@ -128,7 +132,8 @@ def staff_text(order_id: int, reason: str) -> str:
            "address": "Địa chỉ giao cần nhân viên kiểm tra lại",
            "account": "Thông tin nhận chuyển khoản cần nhân viên xác nhận",
            "method": "Em chưa rõ phương thức thanh toán anh/chị chọn",
-           "provider_error": "Hệ thống tính phí vận chuyển tạm gián đoạn"}.get(reason, "Đơn cần nhân viên hỗ trợ")
+           "provider_error": "Hệ thống tính phí vận chuyển tạm gián đoạn",
+           "shipment_create": "Việc tạo vận đơn giao hàng cần nhân viên kiểm tra"}.get(reason, "Đơn cần nhân viên hỗ trợ")
     return (f"Dạ đơn #{order_id} đã được ghi nhận. {why}, nhân viên shop sẽ liên hệ anh/chị sớm để hoàn tất ạ. "
             "Đơn vẫn được giữ cho anh/chị.")
 
@@ -177,6 +182,49 @@ async def _large_order_decision(conn, order_id: int, policy: dict) -> tuple[str 
 def cod_text(order_id: int, total_vnd: int | None) -> str:
     return (f"Dạ em đã ghi nhận đơn #{order_id} thanh toán khi nhận hàng (COD), tổng {_vnd(total_vnd)}. "
             "Bộ phận giao hàng sẽ liên hệ anh/chị khi giao. Cảm ơn anh/chị ạ!")
+
+
+_SHIP_CONFIRM_RE = re.compile(
+    r"\b(?:x[aá]c\s*nh[aậ]n|[đd][oồ]ng\s*[yý])\s+(?:giao(?:\s*h[aà]ng)?|t[aạ]o\s*v[aậ]n\s*[đd][oơ]n)\b", re.IGNORECASE)
+
+
+def is_ship_confirmation(text: str) -> bool:
+    """Xac nhan CUOI tuong minh ("xac nhan giao" / "dong y giao" / "xac nhan tao van don"), khong phu dinh."""
+    t = (text or "").strip()
+    return bool(_SHIP_CONFIRM_RE.search(t)) and not _NEGATION_RE.search(t)
+
+
+def ship_offer_text(order_id: int, snap: dict) -> str:
+    r, pay, q = snap["recipient"], snap["payment"], snap["quote"]
+    pay_line = (f"thu hộ COD {_vnd(pay['cod_amount_vnd'])} khi nhận hàng" if pay["method"] == "COD"
+                else "đã chuyển khoản (shop đã xác nhận)")
+    return (f"Dạ để shop tạo vận đơn GHN cho đơn #{order_id}, anh/chị kiểm tra giúp em:\n"
+            f"- Người nhận: {r['name']} ({r['phone']})\n- Địa chỉ: {r['address_text']}\n"
+            f"- Phí giao GHN: {_vnd(q['fee_vnd'])}\n- Thanh toán: {pay_line}\n"
+            "Nếu đúng, anh/chị nhắn \"XÁC NHẬN GIAO\". Cần sửa thông tin, anh/chị nhắn cho shop nhé.")
+
+
+def ship_accepted_text(order_id: int) -> str:
+    return (f"Dạ shop đã nhận xác nhận, đang tạo vận đơn GHN cho đơn #{order_id}. "
+            "Khi có mã vận đơn shop sẽ báo anh/chị ạ.")
+
+
+async def _ship_offer(conn, order_id: int):
+    """(text, fingerprint) neu gate bot ON va don du dieu kien; None -> giu hanh vi cu. Loi -> None (fail-closed)."""
+    from app.config import settings as _st
+    if not _st.ghn_shipment_create_bot_enabled:
+        return None
+    from app.services.fulfillment import ghn_shipment_create as _gsc
+    try:
+        async with conn.transaction():   # savepoint: loi danh gia khong lam hong tx COD/thanh toan
+            ev = await _gsc.evaluate(conn, order_id, source="bot")
+    except Exception as e:  # noqa: BLE001 — offer loi khong duoc lam vo luong COD/thanh toan
+        from app.services.safe_log import safe_exc
+        print(f"[m7] ship offer order {order_id} loi: {safe_exc(e)}")
+        return None
+    if not ev["eligible"]:
+        return None
+    return ship_offer_text(order_id, ev["snapshot"]), ev["fingerprint"]
 
 
 def instruction_text(order_id: int, instr: dict, *, wait_minutes: int) -> str:
@@ -262,10 +310,10 @@ async def get_by_customer(conn, customer_ref: str, *, lock: bool = False) -> dic
     """Hoi thoai fulfillment MO gan nhat cua khach (theo psid) — cho orchestrator bat reply."""
     row = await conn.fetchrow(
         "SELECT fc.* FROM fulfillment_conversations fc JOIN orders o ON o.id=fc.order_id "
-        "WHERE fc.customer_ref=$1 AND fc.step IN ($2,$3,$4,$5) "
+        "WHERE fc.customer_ref=$1 AND fc.step IN ($2,$3,$4,$5,$6) "
         "AND o.status NOT IN ('cancelled','cancelled_by_exception') "   # CA 387: don huy khong con ghim bot
         "ORDER BY fc.updated_at DESC, fc.id DESC LIMIT 1" + (" FOR UPDATE OF fc" if lock else ""),
-        customer_ref, AWAITING_METHOD, AWAITING_TRANSFER, COD_HANDOFF, STAFF_ATTENTION)
+        customer_ref, AWAITING_METHOD, AWAITING_TRANSFER, COD_HANDOFF, STAFF_ATTENTION, SHIP_CONFIRM)
     return dict(row) if row else None
 
 
@@ -354,9 +402,15 @@ async def _to_cod(conn, fc, *, command_key: str, source: str, actor: str) -> str
     order_id = fc["order_id"]
     pay = await _pay.ensure_payment(conn, order_id, method="COD", actor=actor)
     text = cod_text(order_id, pay.get("amount_due_vnd"))
-    await _set_step(conn, fc, step=COD_HANDOFF, method="COD", transfer_deadline_at=None)
-    await _journal(conn, order_id, command_key=command_key, source=source, from_step=fc["step"], to_step=COD_HANDOFF,
-                   detail={"payment_id": pay["id"], "amount_due_vnd": pay.get("amount_due_vnd")}, reply_text=text)
+    detail = {"payment_id": pay["id"], "amount_due_vnd": pay.get("amount_due_vnd")}
+    offer = await _ship_offer(conn, order_id)          # CA 393: chi khi gate bot ON
+    to = COD_HANDOFF
+    if offer:
+        to, text = SHIP_CONFIRM, f"{text}\n\n{offer[0]}"
+        detail["ship_offer_fingerprint"] = offer[1]
+    await _set_step(conn, fc, step=to, method="COD", transfer_deadline_at=None)
+    await _journal(conn, order_id, command_key=command_key, source=source, from_step=fc["step"], to_step=to,
+                   detail=detail, reply_text=text)
     return text
 
 
@@ -516,6 +570,8 @@ async def handle_customer_text(conn, customer_ref: str, text: str, *, command_ke
                                       created_by=actor)
             return reply
         return None
+    if step == SHIP_CONFIRM:
+        return await _handle_ship_confirm(conn, fc, text, command_key=command_key, actor=actor)
     if step == COD_HANDOFF and m == "BANK_TRANSFER":
         pay = await conn.fetchrow("SELECT status, amount_received_vnd FROM payments WHERE order_id=$1", order_id)
         if pay and pay["status"] == "awaiting" and int(pay["amount_received_vnd"] or 0) == 0:
@@ -529,6 +585,42 @@ async def handle_customer_text(conn, customer_ref: str, text: str, *, command_ke
                                   created_by=actor)
         return reply
     return None
+
+
+async def _handle_ship_confirm(conn, fc, text: str, *, command_key: str, actor: str):
+    """CA 393 §2.1: xac nhan CUOI cua khach -> yeu cau tao van don (prepare, KHONG goi provider). Fingerprint luc gui
+    tom tat PHAI khop du lieu hien tai (phi/dia chi/phuong thuc doi -> khong tao, chuyen staff). Tin khac -> None."""
+    order_id, step = fc["order_id"], fc["step"]
+    if not is_ship_confirmation(text):
+        return None
+    from app.services.fulfillment import ghn_shipment_create as _gsc
+    offer_fp = await conn.fetchval(
+        "SELECT detail->>'ship_offer_fingerprint' FROM fulfillment_conversation_events WHERE order_id=$1 "
+        "AND detail ? 'ship_offer_fingerprint' ORDER BY id DESC LIMIT 1", order_id)
+    cust_id = await conn.fetchval("SELECT customer_id FROM orders WHERE id=$1", order_id)
+    back = COD_HANDOFF if fc.get("method") == "COD" else COMPLETED
+    try:
+        async with conn.transaction():   # savepoint: loi prepare khong lam hong tx cua luot khach
+            rc = await _gsc.prepare(conn, order_id, source="bot", command_key=f"bot:{order_id}:{command_key}",
+                                    actor=f"customer:{fc['customer_ref']}", customer_id=cust_id,
+                                    confirm_fingerprint=offer_fp)
+    except _gsc.ShipmentCreateError as e:
+        reply = staff_text(order_id, "shipment_create")
+        await _set_step(conn, fc, step=STAFF_ATTENTION, attention_reason="shipment_create",
+                        attention_at=datetime.now(timezone.utc))
+        await _journal(conn, order_id, command_key=command_key, source="customer", from_step=step,
+                       to_step=STAFF_ATTENTION, detail={"reason": "shipment_create", "code": e.code,
+                                                        "blockers": e.blockers[:8]}, reply_text=reply)
+        await _att.open_attention(conn, order_id, reason="shipment_create",
+                                  detail={"why": "bot_confirm_rejected", "code": e.code, "blockers": e.blockers[:8]},
+                                  created_by=actor)
+        return reply
+    reply = ship_accepted_text(order_id)
+    await _set_step(conn, fc, step=back, **({"completed_at": datetime.now(timezone.utc)} if back == COMPLETED else {}))
+    await _journal(conn, order_id, command_key=command_key, source="customer", from_step=step, to_step=back,
+                   detail={"ship_create_operation_id": rc["operation"]["id"], "duplicate": rc["duplicate"]},
+                   reply_text=reply)
+    return reply
 
 
 # --------------------------------------------------------------------------
@@ -605,13 +697,26 @@ async def on_payment_confirmed(conn, order_id: int, *, actor: str = "payment") -
     if not fc or fc["step"] in TERMINAL_STEPS:
         return
     now = datetime.now(timezone.utc)
-    await _set_step(conn, fc, step=COMPLETED, completed_at=now)
-    await _journal(conn, order_id, command_key=f"paid:{fc['version']}", source="provider" if actor.startswith("provider")
-                   else "staff", from_step=fc["step"], to_step=COMPLETED, detail={"by": actor}, reply_text=None)
     for row in await conn.fetch(
             "SELECT id FROM staff_attention WHERE order_id=$1 AND status='open' "
             "AND reason IN ('payment_timeout','payment_mismatch')", order_id):
         await _att.resolve(conn, row["id"], resolved_by="system", note=f"auto: payment confirmed ({actor})")
+    offer = await _ship_offer(conn, order_id)          # CA 393: chi khi gate bot ON (sau khi resolve attention TT)
+    if offer:
+        fc2 = await _set_step(conn, fc, step=SHIP_CONFIRM, completed_at=now)
+        await _journal(conn, order_id, command_key=f"paid:{fc['version']}", source="provider"
+                       if actor.startswith("provider") else "staff", from_step=fc["step"], to_step=SHIP_CONFIRM,
+                       detail={"by": actor, "ship_offer_fingerprint": offer[1]}, reply_text=None)
+        await _enqueue_customer(conn, fc2, event_type=EV_PROMPT, dedupe_key=f"fc_ship_offer:{order_id}:{fc2['version']}",
+                                text=offer[0], stale_check={"kind": "fulfillment", "order_id": order_id,
+                                                            "step": SHIP_CONFIRM})
+        await audit_service.record(conn, actor_type="system", action="fulfillment.ship_offer", actor_ref=actor,
+                                   entity_type="fulfillment_conversations", entity_id=str(fc["id"]),
+                                   after={"order_id": order_id})
+        return
+    await _set_step(conn, fc, step=COMPLETED, completed_at=now)
+    await _journal(conn, order_id, command_key=f"paid:{fc['version']}", source="provider" if actor.startswith("provider")
+                   else "staff", from_step=fc["step"], to_step=COMPLETED, detail={"by": actor}, reply_text=None)
     await audit_service.record(conn, actor_type="system", action="fulfillment.conversation_completed",
                                actor_ref=actor, entity_type="fulfillment_conversations", entity_id=str(fc["id"]),
                                after={"order_id": order_id})

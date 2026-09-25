@@ -58,6 +58,12 @@ async def apply(conn, *, order_id: int, reason: str, actor: str, command_id: str
     if handed_off and not can_exception:
         raise CancelBlocked("shipment_handed_off",
                             f"Shipment da o trang thai '{sh['status']}' — can quyen order.cancel.exception", 409)
+    # ---- Van don GHN (CA Directive 393 §5): truoc dispatch -> cancelled_before_dispatch (khong HTTP); da dispatch/
+    # tao/khong chac chan -> KHONG gia vo huy GHN: chan huy thuong (raise), exception -> giu provider state + attention.
+    from app.services.fulfillment import ghn_shipment_create as _gsc
+    ghn = await _gsc.on_order_cancel(conn, order_id, reason=reason, actor=actor, can_exception=can_exception)
+    out["ghn_create"] = ghn
+    ghn_dispatched = bool(ghn and ghn.get("kept"))
 
     # ---- Conversation M7 ----
     fc = await conv.get(conn, order_id, lock=True)
@@ -76,14 +82,15 @@ async def apply(conn, *, order_id: int, reason: str, actor: str, command_id: str
 
     # ---- Shipment ----
     if sh:
-        if sh["status"] in SHIPMENT_CANCELLABLE:
+        if sh["status"] in SHIPMENT_CANCELLABLE and not ghn_dispatched:
             await conn.execute("UPDATE shipments SET status='cancelled', cancelled_at=now(), version=version+1, "
                                "updated_at=now() WHERE id=$1", sh["id"])
             out["shipment"] = {"from": sh["status"], "to": "cancelled"}
-        elif handed_off:
+        elif handed_off or ghn_dispatched:
             aid = await attention.open_attention(
                 conn, order_id, reason="order_cancel_exception",
-                detail={"shipment_status": sh["status"], "reason": reason, "by": actor}, created_by=actor)
+                detail={"shipment_status": sh["status"], "reason": reason, "by": actor,
+                        "ghn_create": ghn}, created_by=actor)
             out["shipment"] = {"from": sh["status"], "to": sh["status"], "kept": "handed_off_exception"}
             if aid:
                 out["attention_opened"].append({"id": aid, "reason": "order_cancel_exception"})

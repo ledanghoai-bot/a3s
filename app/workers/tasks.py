@@ -263,6 +263,18 @@ async def m7_provider_events_job(ctx) -> None:
         print(f"[m7-provider] loi (bo qua vong nay): {safe_exc(e)}")
 
 
+async def ghn_shipment_create_job(ctx) -> None:
+    """CA Directive 393: dispatch operation tao van don GHN. Gate TACH theo source (bot|dashboard), mac dinh OFF ->
+    worker CHAN TRUOC HTTP (ghi gate_blocked_reason 1 lan). Timeout/mat response -> doi soat, KHONG blind retry."""
+    try:
+        from app.services.fulfillment import ghn_shipment_create as _gsc
+        stats = await _gsc.run_dispatch_once()
+        if stats.get("http_calls") or stats.get("unknown") or stats.get("terminal") or stats.get("cancelled"):
+            print(f"[ghn-create] {stats}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ghn-create] loi (bo qua vong nay): {safe_exc(e)}")
+
+
 class WorkerSettings:
     functions = [process_message, m4_signing_execute]
     # I-B M1: cron drain outbox moi 10 giay (poller). Producer chi sinh event khi flag BAT.
@@ -278,6 +290,8 @@ class WorkerSettings:
         cron(m7_routing_job, second={5, 15, 25, 35, 45, 55}, run_at_startup=False),
         cron(m7_due_job, second={30}, run_at_startup=False),
         cron(m7_provider_events_job, second={3, 13, 23, 33, 43, 53}, run_at_startup=False),
+        # Directive 393: tao van don GHN 20s. Gate OFF -> khong HTTP (chi ghi gate_blocked_reason).
+        cron(ghn_shipment_create_job, second={8, 28, 48}, run_at_startup=False),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20

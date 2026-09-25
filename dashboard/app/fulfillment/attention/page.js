@@ -20,6 +20,7 @@ const REASON_LABEL = {
   other: "Khác",
   refund_required: "Đơn huỷ — cần hoàn tiền",
   order_cancel_exception: "Đơn huỷ — hàng đã bàn giao",
+  shipment_create: "Tạo vận đơn GHN cần kiểm tra",
 };
 
 function tone(reason) {
