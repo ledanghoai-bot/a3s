@@ -179,9 +179,20 @@ async def _large_order_decision(conn, order_id: int, policy: dict) -> tuple[str 
     return None, total
 
 
-def cod_text(order_id: int, total_vnd: int | None) -> str:
-    return (f"Dạ em đã ghi nhận đơn #{order_id} thanh toán khi nhận hàng (COD), tổng {_vnd(total_vnd)}. "
-            "Bộ phận giao hàng sẽ liên hệ anh/chị khi giao. Cảm ơn anh/chị ạ!")
+def _eta_line(eta_text: str | None) -> str:
+    # CA Directive 396 §2.2: lap lai ETA (chi ETA that, khong placeholder) trong tin xac nhan COD / huong dan CK.
+    return f" Dự kiến giao: {eta_text}." if eta_text else ""
+
+
+async def _real_eta(conn, order_id: int) -> str | None:
+    from app.services.fulfillment import eta_reply as _eta
+    row = await conn.fetchrow("SELECT fee_status, eta_text FROM shipments WHERE order_id=$1", order_id)
+    return row["eta_text"].strip() if row and _eta.has_real_eta(dict(row)) else None
+
+
+def cod_text(order_id: int, total_vnd: int | None, eta_text: str | None = None) -> str:
+    return (f"Dạ em đã ghi nhận đơn #{order_id} thanh toán khi nhận hàng (COD), tổng {_vnd(total_vnd)}."
+            f"{_eta_line(eta_text)} Bộ phận giao hàng sẽ liên hệ anh/chị khi giao. Cảm ơn anh/chị ạ!")
 
 
 _SHIP_CONFIRM_RE = re.compile(
@@ -227,14 +238,15 @@ async def _ship_offer(conn, order_id: int):
     return ship_offer_text(order_id, ev["snapshot"]), ev["fingerprint"]
 
 
-def instruction_text(order_id: int, instr: dict, *, wait_minutes: int) -> str:
+def instruction_text(order_id: int, instr: dict, *, wait_minutes: int, eta_text: str | None = None) -> str:
     test = "\n⚠️ TEST — KHÔNG CHUYỂN TIỀN (tài khoản thử nghiệm)" if instr.get("is_test") else ""
     qr = "\nEm gửi kèm mã VietQR để anh/chị quét (đúng số tiền + nội dung)." if instr.get("qr_payload") else ""
     return (f"Dạ anh/chị chuyển khoản giúp em theo thông tin:\n"
             f"Ngân hàng: {instr['bank_snapshot']}\nSố TK: {instr['account_number_snapshot']}\n"
             f"Chủ TK: {instr['holder_snapshot']}\nSố tiền: {_vnd(instr['amount_vnd'])}\n"
             f"Nội dung: {instr['transfer_content']}{test}{qr}\n"
-            f"Shop giữ đơn trong {wait_minutes} phút. Khi ghi nhận được tiền, hệ thống sẽ báo lại anh/chị ạ.")
+            f"Shop giữ đơn trong {wait_minutes} phút. Khi ghi nhận được tiền, hệ thống sẽ báo lại anh/chị ạ."
+            + (f"\n{_eta_line(eta_text).strip()}" if eta_text else ""))
 
 
 def reminder_text(order_id: int, instr: dict) -> str:
@@ -401,7 +413,7 @@ async def _to_cod(conn, fc, *, command_key: str, source: str, actor: str) -> str
     # (tranh gui 2 lan). Chi worker-context (advance_routing/run_due/escalate) moi dung outbox.
     order_id = fc["order_id"]
     pay = await _pay.ensure_payment(conn, order_id, method="COD", actor=actor)
-    text = cod_text(order_id, pay.get("amount_due_vnd"))
+    text = cod_text(order_id, pay.get("amount_due_vnd"), await _real_eta(conn, order_id))
     detail = {"payment_id": pay["id"], "amount_due_vnd": pay.get("amount_due_vnd")}
     offer = await _ship_offer(conn, order_id)          # CA 393: chi khi gate bot ON
     to = COD_HANDOFF
@@ -435,7 +447,7 @@ async def _to_transfer(conn, fc, *, command_key: str, source: str, actor: str) -
     # CA 273 §3: moc thoi gian tu payment_instruction.created_at ĐÃ COMMIT (không phải now() lúc transition).
     started = instr["created_at"]
     deadline = started + timedelta(minutes=wait)
-    text = instruction_text(order_id, instr, wait_minutes=wait)
+    text = instruction_text(order_id, instr, wait_minutes=wait, eta_text=await _real_eta(conn, order_id))
     fc2 = await _set_step(conn, fc, step=AWAITING_TRANSFER, method="BANK_TRANSFER", instruction_id=instr["id"],
                           policy_version=policy["version"], transfer_started_at=started,
                           transfer_deadline_at=deadline)

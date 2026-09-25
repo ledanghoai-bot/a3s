@@ -209,6 +209,9 @@ class Settings(BaseSettings):
     ghn_active_mode: str = "staging"
     # m7_ghn_quote: GHN read-only quote/leadtime. OFF -> route GHN = quote_required (staff bao phi), KHONG loi.
     m7_ghn_quote: bool = False
+    # m7_eta_reply (CA Directive 396 F1): khach hoi thoi gian giao/ban giao -> tra ETA tat dinh tu shipment (hoac
+    # escalate THAT khi chua co ETA). Chi chay trong M7 scope (master + tester). Mac dinh ON; kill switch = false.
+    m7_eta_reply: bool = True
     # ghn_fallback_enabled (D340): khi route GHN + API GHN khong dung duoc -> bao gia theo policy GHN_FALLBACK_PO_V2.
     # OFF (mac dinh, dormant) -> giu quote_required nhu cu. Fail-closed bool.
     ghn_fallback_enabled: bool = False

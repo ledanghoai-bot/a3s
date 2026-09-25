@@ -826,6 +826,39 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             await conversation_log.log_message(conversation_id, "bot", reply)
             return reply
 
+        # CA Directive 396 §2 (F1): khach HOI thoi gian giao / thoi diem ban giao -> tra TAT DINH tu shipment da commit
+        # (moi step chua giao xong, ke ca dang cho nhan vien), TRUOC M7/LLM. Tin co chon phuong thuc / bao da chuyen
+        # -> nhuong M7 (tin COD/CK tu lap ETA). Chua co ETA -> escalate THAT. Loi -> bo qua (khong vo reply).
+        if (settings.m7_conversational_fulfillment and settings.m7_eta_reply
+                and channel in ("telegram_customer", "messenger")):
+            _eta_msg = None
+            try:
+                from app.db_pool import acquire as _acq
+                from app.db_pool import release as _rel
+                from app.services.fulfillment import conversation as _fc
+                from app.services.fulfillment import eta_reply as _eta
+                from app.services.fulfillment import m7_scope as _m7s
+                if (_eta.classify(text) and _fc.parse_method(text) == "none"
+                        and not _fc.is_transfer_reported(text)):
+                    _c = await _acq()
+                    try:
+                        if await _m7s.enabled_for_psid(_c, sender_id):
+                            async with _c.transaction():
+                                _eta_msg = await _eta.handle(_c, sender_id, text)
+                    finally:
+                        await _rel(_c)
+            except Exception as e:  # noqa: BLE001
+                print(f"[orchestrator] ETA reply skipped: {safe_exc(e)}")
+                _eta_msg = None
+            if _eta_msg:
+                history = await _get_history(redis, sender_id)
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": _eta_msg})
+                await _save_history(redis, sender_id, history)
+                await conversation_log.log_message(conversation_id, "customer", text)
+                await conversation_log.log_message(conversation_id, "bot", _eta_msg)
+                return _eta_msg
+
         # M7 (Directive 272 §3.1): hoi thoai fulfillment sau chot don — reply TAT DINH tu state machine (COD/CK/
         # bao da chuyen/doi method). None -> khong lien quan -> luong cu. command_key = provider_message_id ->
         # duplicate inbound tra reply cu, KHONG tao payment/instruction/QR thu 2. Loi -> bo qua (khong vo reply).
@@ -1160,6 +1193,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
         _tok_out = 0
         _n_iter = 0
         _route_signal = None  # 216-04: 'clarify' | 'escalate' phat hien tu tool-result
+        _escalated_turn = False  # CA 396: luot nay co escalation THAT (escalate_to_human thanh cong / dia chi)
         _server_reply = None  # CA 233-02: server-rendered reply (summary) dung nguyen, khong qua LLM
         _summary_persisted = False  # CA 234-03: summary bot row da persist in-tx -> end KHONG log lai
         finish_reason = None
@@ -1243,6 +1277,8 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                                              command_ctx=cmd_ctx)
                 _tool_ms += (perf_counter() - _t_tool) * 1000.0
                 if isinstance(result, dict):  # 216-04: nhan dien route clarify/escalate tu tool-result
+                    if result.get("escalated") is True or result.get("address_unresolved_escalated"):
+                        _escalated_turn = True
                     if result.get("address_needs_clarification"):
                         _route_signal = "clarify"
                     elif result.get("address_unresolved_escalated"):
@@ -1383,6 +1419,18 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
             else:  # none — baseless claim. Dinh chinh trung thuc, KHONG escalate.
                 reply = ("Dạ hiện hệ thống chưa ghi nhận đơn nào cho anh/chị ạ. Anh/chị cho em xin lại "
                          "thông tin đơn (sản phẩm, số lượng, người nhận, SĐT, địa chỉ) để em lên đơn giúp nhé.")
+
+        # CA Directive 396 §2.2: cam hua follow-up suong ("kiem tra va bao lai"...) khi luot nay KHONG escalate that.
+        # Bo qua reply server-rendered/receipt (khong do LLM viet). Loi guard -> giu reply (khong vo luong).
+        if not _server_reply and not created_order_ids:
+            try:
+                from app.services.command import reply_guard as _rg
+                _guarded = _rg.strip_empty_promise(reply, _escalated_turn)
+                if _guarded != reply:
+                    print(f"[orchestrator] empty-promise guard {_corr(sender_id)} reply_len={len(reply)}")
+                    reply = _guarded
+            except Exception as e:  # noqa: BLE001
+                print(f"[orchestrator] empty-promise guard skipped: {safe_exc(e)}")
 
         # CA 226-03b: order-proposal chua du thong tin (khach dat don, LLM chua tao order + chua co open
         # intent) -> tao COLLECTING durable de lifecycle bat dau tu proposal DAU TIEN. Non-order/status chat

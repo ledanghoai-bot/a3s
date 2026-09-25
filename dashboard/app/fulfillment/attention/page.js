@@ -21,6 +21,7 @@ const REASON_LABEL = {
   refund_required: "Đơn huỷ — cần hoàn tiền",
   order_cancel_exception: "Đơn huỷ — hàng đã bàn giao",
   shipment_create: "Tạo vận đơn GHN cần kiểm tra",
+  eta_question: "Khách hỏi thời gian giao — chưa có ETA",
 };
 
 function tone(reason) {
