@@ -138,6 +138,56 @@ thông tin → bot dừng đúng chỗ, không tạo order rác.
 - **Chưa test trên máy anh Hoài:** huỷ đơn thật bằng hộp thoại lý do trên dashboard (chưa tạo đơn test khi deploy
   theo Directive 391). Ngoài phạm vi còn mở: nhánh `escalate_to_human` trong orchestrator lỗi khi `command_ctx=None`.
 
+**Sửa lỗi sau chạy thử D392 (Phase I-B, CA Review 395 → Directive 396 → Qualification 398 → Directive 399 → Closure
+401, LIVE 25/09/2026; F1 PR #88 main `c31f5610`, F2 PR #89 main `d720cbca`):**
+- **Bug phát hiện (PO chạy thử prod 25/09):**
+  - **F1, đơn #254 Telegram:** GHN đã trả thời gian giao và hệ thống đã lưu `eta_text = "khoảng 2 ngày (GHN)"`. Tin
+    báo phí có ETA đã tới khách. Nhưng khi khách hỏi lại "Thời gian giao hàng tầm bao lâu e?", bot trả lời "chưa có
+    thông tin… kiểm tra và báo lại" mà không có cơ chế báo lại (**hứa suông**). Nguyên nhân:
+    - tin outbox không được ghi vào lịch sử hội thoại;
+    - câu hỏi về thời gian giao không được đưa vào phần trả lời trạng thái đơn;
+    - phần trả lời trạng thái chỉ hiện ETA khi đơn đã `in_transit`;
+    - LLM không có nguồn ETA, còn system prompt lại **dạy đúng mẫu câu hứa suông**.
+  - **F2, đơn #255 Dashboard:** đơn chỉ có địa chỉ free-text, không có snapshot, nên "Tính phí theo địa chỉ" trả 200
+    với `zone=unknown` mà UI vẫn báo thành công (**lỗi im lặng**, không có dòng log nào).
+- **Đã làm F1:**
+  - `app/services/fulfillment/eta_reply.py`: nhận diện câu hỏi ETA/bàn giao **trước LLM**. Giữ dấu + biến thể không
+    dấu, có ranh giới từ, có danh sách câu phủ định để loại trừ.
+  - Trả `shipments.eta_text` ở mọi trạng thái chưa giao xong. Chưa có ETA thật → mở attention `eta_question` +
+    báo admin **thật**, rồi mới nói "đã chuyển nhân viên".
+  - Tin fulfillment gửi khách → ghi `messages` với dedupe `outbox:<event_id>`.
+  - Tin xác nhận COD và hướng dẫn chuyển khoản lặp lại ETA.
+  - Guard chặn câu hứa follow-up khi lượt đó không escalate thật; system prompt bỏ mẫu câu "kiểm tra và báo lại".
+  - Migration 074 thêm reason `eta_question`. Kill switch `M7_ETA_REPLY` (bật trong M7 scope, hiện là tester).
+- **Đã làm F2:**
+  - Danh mục địa chỉ chỉ đọc `/dashboard/address-catalog/*`.
+  - Form tạo đơn: Tỉnh + Phường/Xã chọn từ danh mục, Số nhà/đường nhập tự do. Resolve + bind `order_address_snapshot`
+    **trong cùng transaction** tạo đơn, ở cả đường legacy lẫn command bus.
+  - Địa chỉ mơ hồ → 409 kèm candidates; nhân viên xác nhận phải nhập lý do và có quyền `address.bind` →
+    `staff_confirmed` + audit.
+  - Đơn cũ: nút "Xác minh địa chỉ" (không parse text cũ).
+  - "Tính phí theo địa chỉ" chưa có snapshot → **409 `address_not_verified`**; có snapshot → pipeline định tuyến/báo
+    phí chung với Bot. `DASHBOARD_ROUTE_QUOTE_ENABLED` **OFF** nên chưa gọi GHN HTTP.
+  - Form gửi `Idempotency-Key`.
+- **Đã verify:**
+  - Test mới: F1 60 test (gồm e2e orchestrator không gọi LLM), F2 12 test.
+  - Full suite DB scratch: tập fail trùng khít `main` (15 test thiếu seed môi trường).
+  - Rehearsal 074 ALL PASS; CI xanh cả hai PR.
+  - Postflight prod: snapshot trước/sau chỉ khác schema 074; quote log GHN không đổi; gọi trong container xác nhận
+    409 `address_not_verified`.
+- **Bài học:**
+  - Test async không cần DB phải viết sync + `asyncio.run`, vì CI không cài `pytest-asyncio` (PR #89 phải qualify lại
+    vì lỗi này).
+  - Lỗi "thành công giả" (200 + trạng thái unknown) nguy hiểm hơn lỗi báo rõ.
+- **Chưa test trên máy anh Hoài:**
+  - Hỏi ETA thật qua Telegram với đơn tester.
+  - Tạo đơn Dashboard bằng form Tỉnh/Phường mới, và nút "Xác minh địa chỉ" (không tạo đơn test khi deploy).
+- **Còn mở:**
+  - Race khởi tạo pool `app/db_pool.get_pool` (1 lỗi drain outbox lúc worker khởi động sau deploy #88) — CA yêu cầu
+    sửa trước khi mở rộng vận hành.
+  - Bật Dashboard quote gọi GHN thật cần activation riêng.
+  - Hỏi ETA ngay sau chốt đơn (trước khi định tuyến) sẽ mở attention.
+
 ---
 
 ## #7 · Human handoff: bot_paused + thông báo nhân viên
