@@ -46,9 +46,44 @@ UPDATE outbox_events o
    SET status='delivering', attempt_count=attempt_count+1,
        lease_owner=$2, lease_expires_at=now() + ($3 * interval '1 second')
   FROM c WHERE o.id=c.id
-RETURNING o.id, o.command_id, o.destination, o.dedupe_key, o.payload,
+RETURNING o.id, o.command_id, o.event_type, o.destination, o.dedupe_key, o.payload,
           o.attempt_count, o.max_attempts
 """
+
+# CA Directive 396 §2.1: tin fulfillment GUI KHACH (da giao thanh cong) -> ghi vao lich su hoi thoai `messages`
+# (role 'bot', dedupe 'outbox:<event_id>') de bot/staff thay dung dieu da noi voi khach (vd ETA trong tin bao phi).
+# CHI destination kenh khach; tin staff noi bo (telegram_admin) KHONG ghi. order.receipt.customer da duoc ghi
+# rieng (dedupe order_receipt:<id>, CA 233-05) -> khong ghi lai.
+_HISTORY_DESTINATIONS = (OUTBOX_DEST_MESSENGER, OUTBOX_DEST_TELEGRAM_CUSTOMER)
+_HISTORY_EVENT_PREFIXES = ("fulfillment.", "shipment.", "payment.")
+_HISTORY_EVENT_TYPES = ("order.status.customer",)
+
+
+def is_history_event(event_type: str | None, destination: str | None) -> bool:
+    et = event_type or ""
+    return destination in _HISTORY_DESTINATIONS and (
+        et.startswith(_HISTORY_EVENT_PREFIXES) or et in _HISTORY_EVENT_TYPES)
+
+
+async def persist_customer_history(conn, event_id, event_type: str | None, destination: str | None,
+                                   payload: dict) -> bool:
+    """Ghi tin da gui khach vao `messages` (exactly-once theo outbox event). True neu ghi moi.
+    Khong tao customer/conversation moi (khach phai ton tai san). Loi -> caller nuot (khong chan delivery)."""
+    if not is_history_event(event_type, destination):
+        return False
+    text, ref = payload.get("text"), payload.get("customer_ref")
+    if not text or not ref:
+        return False
+    conv_id = await conn.fetchval(
+        "SELECT c.id FROM conversations c JOIN customers cu ON cu.id=c.customer_id WHERE cu.psid=$1 "
+        "ORDER BY c.created_at DESC LIMIT 1", str(ref))
+    if conv_id is None:
+        return False
+    rid = await conn.fetchval(
+        "INSERT INTO messages(conversation_id, role, content, dedupe_key) VALUES($1,'bot',$2,$3) "
+        "ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id",
+        conv_id, text, f"outbox:{event_id}")
+    return rid is not None
 
 
 @dataclass
@@ -370,6 +405,12 @@ async def _send_and_record(conn, ev, send_fn) -> str:
             "WHERE id=$1 AND status='delivering' AND lease_owner=$3",
             ev["id"], sr.provider_message_id, WORKER_ID,
         )
+        # CA 396 §2.1: tin da thuc su toi khach -> ghi lich su. Ghi ca khi CAS 0 dong (event bi reclaim trong luc
+        # gui nhung tin DA di): dedupe outbox:<id> dam bao retry/redeliver khong ghi trung.
+        try:
+            await persist_customer_history(conn, ev["id"], ev.get("event_type"), ev["destination"], payload)
+        except Exception as e:  # noqa: BLE001 — lich su khong duoc chan delivery
+            print(f"[outbox_worker] history persist skipped: {safe_exc(e)}")
         return "delivered"
     if decision == "retry":
         backoff = R.backoff_seconds(attempt_no)

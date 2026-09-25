@@ -61,3 +61,34 @@ def shadow_evaluate(reply_claims_order: bool, order_ids) -> dict:
         "has_receipt": has_receipt,
         "consistent": (not reply_claims_order) or has_receipt,
     }
+
+
+# CA Directive 396 §2.2 (F1): cam cau HUA follow-up ("kiem tra va bao lai", "phan hoi lai"...) khi luot do KHONG tao
+# escalation/attention that — khach cho mot loi hua khong co co che thuc hien (evidence don #254 msg 1813/1815).
+# Giu dau + bien the khong dau, ranh gioi tu (CLAUDE.md §6).
+_FOLLOWUP_PROMISE_RE = re.compile(
+    r"\b(?:b[aá]o\s*l[aạ]i|ph[aả]n\s*h[oồ]i\s*(?:l[aạ]i|b[aạ]n|anh|ch[iị]|s[oớ]m|ngay)"
+    r"|ki[eể]m\s*tra\s*(?:(?:v[aà]|r[oồ]i)\s*)?(?:b[aá]o|nh[aắ]n|g[uử]i)"
+    r"|li[eê]n\s*h[eệ]\s*l[aạ]i|s[eẽ]\s*(?:b[aá]o|nh[aắ]n)\s*(?:l[aạ]i|cho|anh|ch[iị]|b[aạ]n|ngay)"
+    r"|khi\s*n[aà]o\s*c[oó]\s*th[oô]ng\s*tin)\b",
+    re.IGNORECASE)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+|\n+")
+
+NO_PROMISE_OFFER = ("Nếu anh/chị cần, anh/chị nhắn \"gặp nhân viên\" để em chuyển nhân viên shop hỗ trợ "
+                    "trực tiếp nhé ạ.")
+NO_PROMISE_REPLY = ("Dạ phần này em chưa có thông tin chính xác để trả lời anh/chị ngay ạ. " + NO_PROMISE_OFFER)
+
+
+def has_followup_promise(reply: str) -> bool:
+    return bool(_FOLLOWUP_PROMISE_RE.search(reply or ""))
+
+
+def strip_empty_promise(reply: str, escalated: bool) -> str:
+    """Luot DA escalate that -> giu nguyen. Chua -> bo cau hua, them loi moi gap nhan vien (khong hua).
+    Khong con noi dung -> NO_PROMISE_REPLY. Thuan tuy (unit-testable)."""
+    if escalated or not has_followup_promise(reply):
+        return reply
+    kept = [s for s in _SENTENCE_SPLIT_RE.split(reply.strip()) if s.strip() and not has_followup_promise(s)]
+    if not kept or len(" ".join(kept)) < 12:
+        return NO_PROMISE_REPLY
+    return (" ".join(kept).rstrip() + " " + NO_PROMISE_OFFER).strip()

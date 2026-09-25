@@ -13,7 +13,8 @@ REASONS = ("address", "quote", "account", "method", "payment_mismatch", "unmatch
            "payment_timeout", "large_order_review", "quantity_unit_review",   # CA Amendment 273
            "provider_error", "other",
            "refund_required", "order_cancel_exception",                       # CA Directive 387 (huy don)
-           "shipment_create")                                                  # CA Directive 393 (van don GHN)
+           "shipment_create",                                                  # CA Directive 393 (van don GHN)
+           "eta_question")                                                     # CA Directive 396 (khach hoi ETA)
 CANCEL_REASONS = ("refund_required", "order_cancel_exception")
 ADMIN_EVENT = "fulfillment.staff.notify"
 
