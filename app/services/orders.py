@@ -107,8 +107,12 @@ async def create_order_manual(
     psid: str | None = None,
     command_ctx: dict | None = None,
     created_by_staff_id: int | None = None,
+    dashboard_address: dict | None = None,
 ) -> dict:
-    """Staff tu tao don qua dashboard, BO QUA toan bo validate bac gia/gioi han
+    """dashboard_address (CA Directive 396 F2): dia chi co cau truc -> resolve + bind order_address_snapshot TRONG
+    CUNG transaction tao don; loi -> rollback ca don, tra {"error", "error_code", "candidates"?}.
+
+    Staff tu tao don qua dashboard, BO QUA toan bo validate bac gia/gioi han
     so luong ma create_order (AI tool) ap dung - dung cho don dam phan dac biet
     hoac don khong qua Messenger (dien thoai, tai quay). Van kiem tra ton kho
     that de khong ban vuot so luong dang co.
@@ -184,8 +188,16 @@ async def create_order_manual(
             await conn.execute(
                 "UPDATE products SET stock = stock - $1 WHERE id = $2", quantity, product["id"]
             )
+            verification = None
+            if dashboard_address:
+                # CA 396 §3.1: resolve + bind CUNG tx; loi -> raise -> rollback CA don (khong don mo coi).
+                from app.services.address import dashboard_address as _da
+                bound = await _da.resolve_and_bind_in_tx(
+                    conn, order_id=order_id, addr=dashboard_address,
+                    actor=f"staff:{created_by_staff_id}", ticket=f"DASHADDR:order:{order_id}")
+                verification = bound["verification"]
 
-        return {
+        out = {
             "order_id": order_id,
             "psid": psid_to_use,
             "sku": sku,
@@ -193,5 +205,17 @@ async def create_order_manual(
             "unit_price_vnd": unit_price_vnd,
             "total_vnd": total,
         }
+        if verification:
+            out["address_verification"] = verification
+        return out
+    except Exception as e:  # noqa: BLE001 — chi map loi dia chi; loi khac raise nguyen
+        from app.services.address import dashboard_address as _da
+        from app.services.address import order_binding as _ob
+        from app.services.address import resolver as _res
+        if isinstance(e, _da.DashboardAddressError):
+            return {"error": str(e), "error_code": f"address_{e.code}", "candidates": e.candidates}
+        if isinstance(e, (_ob.BindingError, _res.ResolveError)):
+            return {"error": str(e), "error_code": "address_bind_failed"}
+        raise
     finally:
         await release(conn)

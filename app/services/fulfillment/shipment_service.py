@@ -18,6 +18,9 @@ from app.services import audit_service
 from app.services.fulfillment import quote as _q
 
 POLICY_VERSION = "robanme-giao-nhan-2026-09"
+# CA Directive 396 §3.2: Dashboard quote voi gate dashboard_route_quote_enabled OFF -> provider KHONG goi HTTP, tra
+# quote_required voi ly do nay (KHONG phai loi provider -> attention 'quote', khong 'provider_error').
+DASHBOARD_GATE_OFF_REASON = "ghn_dashboard_gate_off"
 
 
 def _fingerprint(*parts) -> str:
@@ -193,7 +196,7 @@ async def route_and_quote(conn, order_id: int, *, actor: str, ghn_result=None, o
                     fee, fee_status, eta = int(res.fee_vnd), "quoted", res.eta_text
                 else:
                     att_reason = "provider_error" if res.reason.startswith("ghn_") and res.reason not in (
-                        "ghn_disabled", "ghn_not_configured") else "quote"
+                        "ghn_disabled", "ghn_not_configured", DASHBOARD_GATE_OFF_REASON) else "quote"
                     # CA Directive 340: API GHN khong dung duoc + flag fallback ON -> bao gia theo policy V2. KHONG retry
                     # provider sau ambiguous. Quote API hop le -> KHONG toi day.
                     from app.config import settings as _st_fb

@@ -62,6 +62,10 @@ class CommandEnvelope:
     # duplicate sach. order_intent_id: intent server-owned (orchestrator cap) de commit atomic at-most-once.
     verified_address_fingerprint: str | None = None
     order_intent_id: str | None = None
+    # CA Directive 396 §3.1 (F2): dia chi Dashboard CO CAU TRUC (province/ward code + street + staff_confirm) —
+    # REQUEST-SCOPED, KHONG persist (giong verified_resolution_id). Identity tat dinh vao request_hash qua
+    # verified_address_fingerprint. order_service resolve+bind TRONG tx tao don (channel='dashboard').
+    dashboard_address: dict | None = None
 
     def validate(self) -> None:
         if self.channel not in CHANNELS:
@@ -114,16 +118,25 @@ def build_order_create_envelope(
     verified_resolution_id: str | None = None,
     verified_address_fingerprint: str | None = None,
     order_intent_id: str | None = None,
+    dashboard_address: dict | None = None,
 ) -> CommandEnvelope:
     """Dung envelope order.create v1 tu input tho + trusted context. Validate + hash.
     Raise CommandError khi payload/channel/actor invalid (KHONG tao order).
 
     verified_resolution_id (M5 §6.C): resolution request-scoped de Gate E bind; KHONG anh huong
-    request_hash/stored_payload."""
+    request_hash/stored_payload.
+    dashboard_address (CA 396 F2): chi channel='dashboard'; fingerprint tat dinh vao request_hash (cung key +
+    dia chi khac -> CONFLICT), dia chi tho KHONG persist."""
     if channel not in CHANNELS:
         raise errors.CommandError(errors.INVALID_ENVELOPE, f"channel khong hop le: {channel}")
     if actor.type not in ACTOR_TYPES or not actor.id:
         raise errors.CommandError(errors.INVALID_ENVELOPE, "actor khong hop le.")
+    if dashboard_address is not None:
+        if channel != "dashboard":
+            raise errors.CommandError(errors.INVALID_ENVELOPE, "dashboard_address chi cho channel dashboard")
+        if not verified_address_fingerprint:
+            from app.services.address import dashboard_address as _da
+            verified_address_fingerprint = _da.fingerprint(dashboard_address)
 
     normalized = registry.validate_order_create_payload(raw_payload)
     hash_input = registry.order_create_hash_input(normalized)
@@ -169,6 +182,7 @@ def build_order_create_envelope(
         verified_resolution_id=verified_resolution_id,
         verified_address_fingerprint=verified_address_fingerprint,
         order_intent_id=order_intent_id,
+        dashboard_address=dashboard_address,
     )
     env.validate()
     return env

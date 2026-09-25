@@ -88,11 +88,12 @@ async def create_order_command(
 async def create_order_http(
     *, actor_id, idempotency_key: str | None, customer_name: str, phone: str, address: str,
     sku: str, quantity: int, unit_price_vnd: int | None = None, psid: str | None = None,
-    conversation_id: int | None = None,
+    conversation_id: int | None = None, dashboard_address: dict | None = None,
 ) -> tuple[int, dict, float | None]:
     """HTTP variant cho dashboard endpoints (§10.2). Tra (status_code, body, retry_after_seconds).
     Actor = staff (dashboard). Bat buoc Idempotency-Key. Map:
-    201 first success / 200 duplicate / 202 in_progress / 409 conflict / 422 reject/validation / 400 key."""
+    201 first success / 200 duplicate / 202 in_progress / 409 conflict / 422 reject/validation / 400 key.
+    dashboard_address (CA 396 F2): dia chi co cau truc -> resolve+bind snapshot trong tx tao don."""
     raw: dict = {"customer_name": customer_name, "phone": phone, "address": address,
                  "sku": sku, "quantity": quantity}
     if unit_price_vnd is not None:
@@ -104,6 +105,7 @@ async def create_order_http(
         env = build_order_create_envelope(
             raw_payload=raw, actor=Actor("staff", str(actor_id)), channel="dashboard",
             idempotency_key=idempotency_key, conversation_id=conversation_id,
+            dashboard_address=dashboard_address,
         )
         rec = await order_service.execute_order_create(env)
     except errors.CommandError as e:

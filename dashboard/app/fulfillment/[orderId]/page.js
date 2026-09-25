@@ -12,6 +12,7 @@ import { useParams } from "next/navigation";
 import { apiFetch } from "../../../lib/api";
 import { useAuthGuard } from "../../../lib/useAuthGuard";
 import GhnCreatePanel from "./GhnCreatePanel";
+import AddressPicker, { EMPTY_ADDRESS, addressComplete, addressPayload } from "../../components/AddressPicker";
 
 function vnd(n) {
   return n == null ? "—" : n.toLocaleString("vi-VN") + "đ";
@@ -126,6 +127,10 @@ export default function FulfillmentDetail() {
   const [att, setAtt] = useState({ result: "failed", reason: "", note: "", next_contact_at: "" });
   const [bank, setBank] = useState({ bank: "", account_number: "", holder_name: "", branch: "", bin: "" });
   const [m7, setM7] = useState(null); // CA 274-04: hội thoại/route/QR/provider M7
+  // CA 396 §3.1/§3.2: xác minh địa chỉ đơn cũ (chọn Tỉnh/Phường từ danh mục) + tính phí chỉ khi đã có snapshot.
+  const [showVerify, setShowVerify] = useState(false);
+  const [vAddr, setVAddr] = useState(EMPTY_ADDRESS);
+  const [vCands, setVCands] = useState(null);
 
   useEffect(() => {
     if (ready) load();
@@ -165,6 +170,44 @@ export default function FulfillmentDetail() {
   const post = (path, body) =>
     apiFetch(`/dashboard/fulfillment${path}`, { method: "POST", body: JSON.stringify(body || {}) });
 
+  // CA 396 §3.2: KHÔNG còn báo "thành công" khi chưa tính được phí. 409 address_not_verified -> mở Xác minh địa chỉ.
+  async function quoteByAddress() {
+    setBusy(true);
+    setMsg(null);
+    setError(null);
+    try {
+      const r = await post(`/orders/${orderId}/shipment/quote`, { command_key: newUuid() });
+      setMsg(r.fee_status === "quoted"
+        ? `Đã báo phí: ${vnd(r.delivery_fee_vnd)}${r.eta_text ? ` · ${r.eta_text}` : ""}`
+        : `Chưa tính phí tự động được (${r.fee_status}) — đã chuyển hàng đợi nhân viên, báo phí thủ công bên dưới.`);
+      await load();
+    } catch (err) {
+      if (err.detail && err.detail.error_code === "address_not_verified") setShowVerify(true);
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verifyAddress() {
+    setBusy(true);
+    setMsg(null);
+    setError(null);
+    try {
+      await post(`/orders/${orderId}/address/verify`, addressPayload(vAddr));
+      setShowVerify(false);
+      setVAddr(EMPTY_ADDRESS);
+      setVCands(null);
+      setMsg("Đã xác minh địa chỉ — bấm \"Tính phí theo địa chỉ\" để báo phí.");
+      await load();
+    } catch (err) {
+      if (err.detail && err.detail.error_code === "address_needs_staff_confirmation") setVCands(err.detail.candidates || []);
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!ready) return null;
   if (error && !d) return <p style={{ color: "#b71c1c" }}>Lỗi: {error}</p>;
   if (!d) return <p>Đang tải…</p>;
@@ -200,11 +243,33 @@ export default function FulfillmentDetail() {
         </Row>
         <Row label="Tổng hàng">{vnd(d.order.total_vnd)}</Row>
         <Row label="Địa chỉ">
-          {d.address_snapshot
-            ? [d.address_snapshot.street_text, d.address_snapshot.ward_name, d.address_snapshot.district_name,
-               d.address_snapshot.province_name].filter(Boolean).join(", ")
-            : "Chưa có địa chỉ đã xác minh"}
+          {d.address_snapshot ? (
+            <>
+              {[d.address_snapshot.street_text, d.address_snapshot.ward_name, d.address_snapshot.district_name,
+                d.address_snapshot.province_name].filter(Boolean).join(", ") || d.order.shipping_address}
+              {" "}<span style={{ color: "#1e7e34" }}>✓ đã xác minh (mã phường/xã {d.address_snapshot.ward_code})</span>
+            </>
+          ) : (
+            <>
+              <span style={{ color: "#b71c1c" }}>Chưa có địa chỉ đã xác minh</span>
+              {d.order.shipping_address ? ` — nhập tự do: ${d.order.shipping_address}` : ""}{" "}
+              {!cancelled && (
+                <button disabled={locked} onClick={() => setShowVerify(!showVerify)}>Xác minh địa chỉ</button>
+              )}
+            </>
+          )}
         </Row>
+        {!d.address_snapshot && showVerify && !cancelled && (
+          <div style={{ maxWidth: 480, margin: "6px 0 10px" }}>
+            <p style={{ fontSize: 12, color: "#555", margin: "0 0 6px" }}>
+              Chọn Tỉnh + Phường/Xã từ danh mục và nhập số nhà/đường (hệ thống không tự đoán từ địa chỉ nhập tự do).
+            </p>
+            <AddressPicker value={vAddr} onChange={setVAddr} candidates={vCands} disabled={busy} />
+            <button style={{ marginTop: 6 }} disabled={busy || !addressComplete(vAddr)} onClick={verifyAddress}>
+              Lưu địa chỉ đã xác minh
+            </button>
+          </div>
+        )}
       </Section>
 
       <Section title="Giao hàng">
@@ -219,9 +284,10 @@ export default function FulfillmentDetail() {
           <p>Chưa có vận đơn. Báo phí để tạo.</p>
         )}
         <Row label="Báo phí tự động">
-          <button disabled={locked} onClick={() => act(() => post(`/orders/${orderId}/shipment/quote`), "Đã báo phí tự động")}>
+          <button disabled={locked} onClick={quoteByAddress}>
             Tính phí theo địa chỉ
           </button>
+          {!d.address_snapshot && <span style={{ fontSize: 12, color: "#555" }}> (cần xác minh địa chỉ trước)</span>}
         </Row>
         <Row label="Báo phí thủ công">
           <input placeholder="zone" value={mq.zone} onChange={(e) => setMq({ ...mq, zone: e.target.value })} style={{ width: 90 }} />

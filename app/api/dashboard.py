@@ -257,16 +257,31 @@ async def create_order_manual_for_conversation(
     """'NV tao don' gan voi 1 hoi thoai co san - bo qua toan bo validate bac
     gia/gioi han so luong cua create_order (AI tool), staff tu nhap don gia
     va tu chiu trach nhiem. I-B M1 (Slice 7): flag BAT -> command service (staff-priced)."""
+    return await _create_manual_order(body, response, staff, idempotency_key, psid=psid)
+
+
+_ADDR_HTTP = {"address_needs_staff_confirmation": 409, "address_dataset_unavailable": 409,
+              "address_bind_failed": 409, "address_invalid_address": 422, "address_invalid_confirmation": 422}
+
+
+async def _create_manual_order(body: dict, response: Response, staff: dict, idempotency_key: str | None,
+                               *, psid: str | None) -> dict:
+    """CA Directive 396 §3.1 (F2): dia chi BAT BUOC co cau truc (body.address = {province_code, ward_code,
+    street_text, staff_confirm?}) -> precheck (409 + candidates neu can staff xac nhan) -> tao don va resolve+bind
+    order_address_snapshot TRONG CUNG transaction (ca duong legacy lan command bus)."""
+    from app.api import dashboard_address as _dah
     required = ["customer_name", "phone", "address", "sku", "quantity", "unit_price_vnd"]
     missing = [f for f in required if not body.get(f)]
     if missing:
         raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
+    addr = await _dah.prepare(body["address"], staff)
+    display = addr.pop("display_text")
     if settings.m1_reliable_order_command:
         status, out, retry_after = await order_gateway.create_order_http(
             actor_id=staff["id"], idempotency_key=idempotency_key,
-            customer_name=body["customer_name"], phone=body["phone"], address=body["address"],
+            customer_name=body["customer_name"], phone=body["phone"], address=display,
             sku=body["sku"], quantity=int(body["quantity"]),
-            unit_price_vnd=int(body["unit_price_vnd"]), psid=psid)
+            unit_price_vnd=int(body["unit_price_vnd"]), psid=psid, dashboard_address=addr)
         response.status_code = status
         if retry_after:
             response.headers["Retry-After"] = str(int(retry_after))
@@ -274,14 +289,21 @@ async def create_order_manual_for_conversation(
     result = await orders_service.create_order_manual(
         customer_name=body["customer_name"],
         phone=body["phone"],
-        address=body["address"],
+        address=display,
         sku=body["sku"],
         quantity=int(body["quantity"]),
         unit_price_vnd=int(body["unit_price_vnd"]),
         psid=psid,
         created_by_staff_id=staff["id"],
+        dashboard_address=addr,
     )
     if "error" in result:
+        code = result.get("error_code")
+        if code in _ADDR_HTTP:
+            detail = {"error_code": code, "message": result["error"]}
+            if result.get("candidates"):
+                detail["candidates"] = result["candidates"]
+            raise HTTPException(status_code=_ADDR_HTTP[code], detail=detail)
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
@@ -295,33 +317,7 @@ async def create_order_manual_standalone(
     """Khu vuc tao don HOAN TOAN DOC LAP, khong gan voi hoi thoai Messenger nao
     (vd don qua dien thoai/tai quay) - issue #8. Tu sinh psid gia 'manual:...'.
     I-B M1 (Slice 7): flag BAT -> command service (staff-priced, Idempotency-Key header)."""
-    required = ["customer_name", "phone", "address", "sku", "quantity", "unit_price_vnd"]
-    missing = [f for f in required if not body.get(f)]
-    if missing:
-        raise HTTPException(status_code=422, detail=f"Thieu truong: {', '.join(missing)}")
-    if settings.m1_reliable_order_command:
-        status, out, retry_after = await order_gateway.create_order_http(
-            actor_id=staff["id"], idempotency_key=idempotency_key,
-            customer_name=body["customer_name"], phone=body["phone"], address=body["address"],
-            sku=body["sku"], quantity=int(body["quantity"]),
-            unit_price_vnd=int(body["unit_price_vnd"]), psid=None)
-        response.status_code = status
-        if retry_after:
-            response.headers["Retry-After"] = str(int(retry_after))
-        return out
-    result = await orders_service.create_order_manual(
-        customer_name=body["customer_name"],
-        phone=body["phone"],
-        address=body["address"],
-        sku=body["sku"],
-        quantity=int(body["quantity"]),
-        unit_price_vnd=int(body["unit_price_vnd"]),
-        psid=None,
-        created_by_staff_id=staff["id"],
-    )
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
+    return await _create_manual_order(body, response, staff, idempotency_key, psid=None)
 
 
 @router.get("/commands/{command_id}/receipt")
