@@ -772,7 +772,7 @@ async def on_quote_changed(conn, order_id: int, *, actor: str) -> None:
 
 
 # --------------------------------------------------------------------------
-async def prepare_ghn_quote(conn, order_id: int, provider=None):
+async def prepare_ghn_quote(conn, order_id: int, provider=None, trace: dict | None = None):
     """Pha 1 (NGOAI tx): neu route = GHN va dung duoc request (weight + kich thuoc dong thung D340) -> goi provider
     (HTTP) -> QuoteResult. Khac -> None (KHONG goi provider). CA 341-01: request tu build_ghn_request (nguon duy nhat)."""
     from app.services.fulfillment import fallback_quote as _fb
@@ -789,7 +789,12 @@ async def prepare_ghn_quote(conn, order_id: int, provider=None):
         return None   # thieu kich thuoc/x -> KHONG goi provider (route_and_quote -> manual)
     # CA 345 §2A: cfg theo loader D305 (Dashboard, DB authoritative), fail-closed; token chi trong pham vi request.
     prov = provider or _ghn.GhnQuoteProvider(await _ghn.resolve_quote_cfg(conn))
-    return await prov.quote(conn, req)
+    # CA 404 §2C: gan trace (command_key / route_operation_id) cho provider_quote_log cua lan goi nay.
+    tok = _ghn.QUOTE_TRACE.set(trace or {"trace_key": f"order:{order_id}"})
+    try:
+        return await prov.quote(conn, req)
+    finally:
+        _ghn.QUOTE_TRACE.reset(tok)
 
 
 async def run_routing(*, limit: int = 25, provider=None) -> dict:
@@ -811,7 +816,8 @@ async def run_routing(*, limit: int = 25, provider=None) -> dict:
                 continue
             stats["claimed"] += 1
             try:
-                ghn_res = await prepare_ghn_quote(conn, oid, provider=provider)
+                ghn_res = await prepare_ghn_quote(conn, oid, provider=provider,
+                                                  trace={"trace_key": f"m7_routing:{oid}"})
                 async with conn.transaction():
                     out = await advance_routing(conn, oid, ghn_result=ghn_res)
                 if out is not None:

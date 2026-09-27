@@ -18,6 +18,24 @@ from app.services import audit_service
 from app.services.fulfillment import quote as _q
 
 POLICY_VERSION = "robanme-giao-nhan-2026-09"
+
+# CA Directive 404 §2B: nhan nghiep vu cho zone, nhat quan voi routing_source. `zone` luu 'unknown' cho GHN ngoai tinh
+# 66 la gia tri KY THUAT (bang phi noi bo khong ap) — KHONG doi du lieu/tien/ETA/map, chi hien thi.
+FEE_STATUS_LABELS = {"quoted": "đã báo phí", "quote_required": "cần báo phí", "unknown": "chưa xác định phí"}
+
+
+def zone_label(routing_source: str | None, zone: str | None) -> str:
+    if routing_source == "GHN":
+        return "GHN trong tỉnh (ngoài khu vực tự giao)" if zone == "province" else "GHN ngoài khu vực tự giao"
+    if routing_source == "SELF_DELIVERY" or zone == "bmt_inner":
+        return "Tự giao nội thành BMT"
+    if routing_source == "MANUAL_REVIEW":
+        return "Cần kiểm tra địa chỉ"
+    return {"province": "Trong tỉnh (bảng phí nội bộ)"}.get(zone, "Chưa xác định khu vực")
+
+
+def fee_label(fee_status: str | None) -> str:
+    return FEE_STATUS_LABELS.get(fee_status or "", "chưa xác định phí")
 # CA Directive 396 §3.2: Dashboard quote voi gate dashboard_route_quote_enabled OFF -> provider KHONG goi HTTP, tra
 # quote_required voi ly do nay (KHONG phai loi provider -> attention 'quote', khong 'provider_error').
 DASHBOARD_GATE_OFF_REASON = "ghn_dashboard_gate_off"
