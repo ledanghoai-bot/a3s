@@ -198,6 +198,38 @@ LIVE 2026-09-25; F1 PR #88 main `c31f5610`, F2 PR #89 main `d720cbca`):**
   - Enabling a real GHN quote from the Dashboard needs a separate activation.
   - Asking for the ETA right after order confirmation (before routing) opens an attention.
 
+**GHN shipment create from Bot + Dashboard — DORMANT (Phase I-B, CA Directive 393 → Review 394 → Closure 397,
+deployed 2026-09-25, PR #87, main `64b93688`):**
+- **Done:**
+  - One shared lifecycle `app/services/fulfillment/ghn_shipment_create.py` for 2 entry points. The bot only creates
+    a request after the customer explicitly types "XÁC NHẬN GIAO" and the summary fingerprint matches current data.
+    Dashboard: `shipment.ghn.create` permission, preview, then re-type the order id to confirm.
+  - Only the worker calls the provider (adapter `app/services/providers/ghn_create.py`), behind gates **split** by
+    source `GHN_SHIPMENT_CREATE_BOT_ENABLED` / `GHN_SHIPMENT_CREATE_DASHBOARD_ENABLED` — **both OFF**.
+  - Timeout/lost response → `unknown_reconciliation_required` + staff, **no blind retry**. Every retry reconciles by
+    `client_order_code` first. Cancel: not sent → `cancelled_before_dispatch`; sent → normal cancel blocked.
+  - Migration 073: operations with an immutable snapshot + append-only attempts.
+- **Verified:** 27 new tests, lab full suite 1108; prod postflight: 0 operations, gates OFF, no GHN call.
+- **Not done / activation conditions:** GHN create/lookup contract, idempotency, 429/4xx/5xx errors, production
+  pickup/shift, create policy v1, reconciliation runbook — need CA/PO sign-off (gaps G1–G10). Dashboard also depends on F2.
+
+**M7 quote reliability (Phase I-B, CA Directive 404 → Review 406 → Requalification 407 → Directive 408 → Review 410 →
+Addendum 411 → Review 412 → Closure 413, LIVE 2026-09-27, PR #91, main `c15ac60d`):**
+- **Bug:** the post-deploy log of D399 showed `InterfaceError: Pool.release() ... is not a member of this pool`.
+  Cause: `app/db_pool.get_pool()` had no lock, so after a restart several cron jobs each created a pool and
+  connections were returned to the wrong pool.
+- **Done:**
+  - The pool is created exactly once (lock); `release()` returns to **the pool that issued it**, no fallback (loud error).
+  - `close_pool()` keeps ownership until release, `get_pool()` waits for close; >10s → terminate (Review 406).
+  - Business zone label "GHN ngoài khu vực tự giao" instead of `unknown — quoted` (display only).
+  - Migration 075: `provider_quote_log.trace_key/route_operation_id/endpoint/response_class/http_attempts`; trace by
+    `command_key` via `GET /dashboard/fulfillment/quote-trace` and `scripts/m7_quote_trace.py`.
+- **Verified:** regression reproduces the exact prod error on old code; lab full suite 1192. Soak 6/6 on prod (PO let
+  Dev run it on test data): 3 quotes = 6 HTTP, replay/self-delivery/unmapped ward all 0 HTTP, quote after restart OK,
+  outbox delivered exactly once, 0 pool errors.
+- **Lessons / backlog:** Dashboard orders on the legacy path decrement `products.stock` directly and cancelling
+  **does not restore stock** while the M2 ledger is OFF (test order #257 had to be restored by hand, audit #5025, an
+  exception for test data only). Must be fixed before opening to real customers if the legacy path stays in use.
 ---
 
 ## #7 · Human handoff: bot_paused + staff notification

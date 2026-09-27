@@ -183,10 +183,43 @@ thông tin → bot dừng đúng chỗ, không tạo order rác.
   - Hỏi ETA thật qua Telegram với đơn tester.
   - Tạo đơn Dashboard bằng form Tỉnh/Phường mới, và nút "Xác minh địa chỉ" (không tạo đơn test khi deploy).
 - **Còn mở:**
-  - Race khởi tạo pool `app/db_pool.get_pool` (1 lỗi drain outbox lúc worker khởi động sau deploy #88) — CA yêu cầu
-    sửa trước khi mở rộng vận hành.
+  - ~~Race khởi tạo pool `app/db_pool.get_pool` (1 lỗi drain outbox lúc worker khởi động sau deploy #88)~~ — **đã
+    sửa ở D404** (xem mục dưới).
   - Bật Dashboard quote gọi GHN thật cần activation riêng.
   - Hỏi ETA ngay sau chốt đơn (trước khi định tuyến) sẽ mở attention.
+
+
+**Tạo vận đơn GHN từ Bot + Dashboard — DORMANT (Phase I-B, CA Directive 393 → Review 394 → Closure 397, deploy
+25/09/2026, PR #87, main `64b93688`):**
+- **Đã làm:**
+  - Một lifecycle chung `app/services/fulfillment/ghn_shipment_create.py` cho 2 entry point. Bot chỉ tạo yêu cầu sau
+    khi khách nhắn tường minh "XÁC NHẬN GIAO" và fingerprint tóm tắt khớp dữ liệu hiện tại. Dashboard: quyền
+    `shipment.ghn.create`, xem trước rồi nhập lại mã đơn để xác nhận.
+  - Chỉ worker gọi provider (adapter `app/services/providers/ghn_create.py`), sau gate **tách** theo nguồn
+    `GHN_SHIPMENT_CREATE_BOT_ENABLED` / `GHN_SHIPMENT_CREATE_DASHBOARD_ENABLED` — **cả hai OFF**.
+  - Timeout/mất response → `unknown_reconciliation_required` + staff, **không retry mù**. Mọi retry đều đối soát
+    `client_order_code` trước. Huỷ đơn: chưa gửi → `cancelled_before_dispatch`; đã gửi → chặn huỷ thường.
+  - Migration 073: operation có snapshot bất biến + attempt append-only.
+- **Đã verify:** 27 test mới, full suite lab 1108; postflight prod: 0 operation, gate OFF, không gọi GHN.
+- **Chưa làm / điều kiện activation:** hợp đồng GHN create/lookup, idempotency, lỗi 429/4xx/5xx, pickup/ca lấy
+  hàng production, policy create v1, runbook đối soát — cần CA/PO chốt (gap G1–G10). Dashboard còn phụ thuộc F2.
+
+**Độ tin cậy báo phí M7 (Phase I-B, CA Directive 404 → Review 406 → Requalification 407 → Directive 408 → Review 410
+→ Addendum 411 → Review 412 → Closure 413, LIVE 27/09/2026, PR #91, main `c15ac60d`):**
+- **Bug:** log sau deploy D399 có `InterfaceError: Pool.release() ... is not a member of this pool`. Nguyên nhân:
+  `app/db_pool.get_pool()` không khoá, nên sau restart nhiều cron cùng tạo pool và connection bị trả nhầm pool.
+- **Đã làm:**
+  - Pool khởi tạo đúng 1 lần (lock); `release()` trả về **đúng pool đã cấp**, không fallback (báo lỗi rõ).
+  - `close_pool()` giữ owner tới khi release, `get_pool()` chờ đóng xong; quá 10s → terminate (Review 406).
+  - Nhãn zone nghiệp vụ "GHN ngoài khu vực tự giao" thay cho `unknown — quoted` (chỉ hiển thị).
+  - Migration 075: `provider_quote_log.trace_key/route_operation_id/endpoint/response_class/http_attempts`; tra vết
+    theo `command_key` qua `GET /dashboard/fulfillment/quote-trace` và `scripts/m7_quote_trace.py`.
+- **Đã verify:** regression tái hiện đúng lỗi prod trên code cũ; full suite lab 1192. Soak 6/6 trên prod (PO cho
+  Dev tự chạy trên dữ liệu test): 3 lần báo phí = 6 HTTP, replay/tự giao/phường chưa map đều 0 HTTP, báo phí sau
+  restart OK, outbox gửi đúng 1 lần, 0 lỗi pool.
+- **Bài học / backlog:** đơn Dashboard đường legacy trừ thẳng `products.stock`, huỷ đơn **không hoàn kho** khi M2
+  ledger OFF (đơn test #257 phải hoàn tay, audit #5025, ngoại lệ chỉ cho dữ liệu test). Cần xử lý trước khi mở khách
+  thật nếu còn dùng đường legacy.
 
 ---
 
