@@ -42,6 +42,8 @@ FEE_ENDPOINT = "/v2/shipping-order/fee"
 # CA Directive 404 §2C: trace context (command_key / route_operation_id) cho provider_quote_log — caller dat quanh
 # lan goi quote; KHONG doi contract provider. Khong token/secret/PII.
 QUOTE_TRACE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("ghn_quote_trace", default=None)
+# CA Review 406: dem so HTTP request THAT (moi attempt trong _post, gom retry + leadtime) cua 1 lan quote logic.
+QUOTE_HTTP_ATTEMPTS: contextvars.ContextVar[list | None] = contextvars.ContextVar("ghn_quote_http", default=None)
 
 
 def _cfg() -> dict[str, Any]:
@@ -148,6 +150,9 @@ async def _post(cfg: dict, path: str, body: dict, *, retries: int) -> tuple[int 
     last_err, last_status, last_json = "", None, None
     for attempt in range(retries + 1):
         try:
+            ctr = QUOTE_HTTP_ATTEMPTS.get()
+            if ctr is not None:
+                ctr[0] += 1
             async with httpx.AsyncClient(timeout=httpx.Timeout(cfg["timeout"], connect=3.0)) as client:
                 resp = await client.post(url, headers=_headers(cfg), json=body)
             last_status = resp.status_code
@@ -175,11 +180,12 @@ async def _log(conn, *, order_id: int | None, fp: str, request: dict, response: 
     try:
         await conn.execute(
             "INSERT INTO provider_quote_log (provider, order_id, request_fingerprint, request, response, status, "
-            "http_status, duration_ms, trace_key, route_operation_id, endpoint, response_class) "
-            "VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,$10,$11,$12)",
+            "http_status, duration_ms, trace_key, route_operation_id, endpoint, response_class, http_attempts) "
+            "VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13)",
             PROVIDER, order_id, fp, json.dumps(_redact(request)),
             json.dumps(response) if response is not None else None, status, http_status, duration_ms,
-            tr.get("trace_key"), tr.get("route_operation_id"), endpoint, response_class or status)
+            tr.get("trace_key"), tr.get("route_operation_id"), endpoint, response_class or status,
+            (QUOTE_HTTP_ATTEMPTS.get() or [0])[0])
     except Exception as e:  # noqa: BLE001 — log khong duoc lam vo quote
         print(f"[ghn] quote log skipped: {safe_exc(e)}")
 
@@ -215,6 +221,13 @@ class GhnQuoteProvider:
         self._post = post or _post   # inject de test/replay fixture
 
     async def quote(self, conn, req: QuoteRequest) -> QuoteResult:
+        tok = QUOTE_HTTP_ATTEMPTS.set([0])     # CA 406: dem HTTP that cua lan quote nay (khong log secret)
+        try:
+            return await self._quote(conn, req)
+        finally:
+            QUOTE_HTTP_ATTEMPTS.reset(tok)
+
+    async def _quote(self, conn, req: QuoteRequest) -> QuoteResult:
         cfg = self.cfg
         fp = req.fingerprint()
         base = dict(provider=PROVIDER, request_fingerprint=fp)

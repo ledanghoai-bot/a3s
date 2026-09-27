@@ -4,7 +4,12 @@ Chuoi doi chieu: route operation (command_key) -> order -> address snapshot (id/
 (shipments.routing_*) -> provider_quote_log (endpoint, response_class, http, duration, trace) -> outbox cua don quanh
 thoi diem do -> audit shipment.route_quote. Chap nhan: command_key goc (m7 route-quote), co tien to `dash:` (Dashboard
 F2) va `m7_routing:<order_id>` / `order:<order_id>` (luong bot/worker, khong co route operation).
-KHONG tra: token, so tai khoan, request/response body, SDT/ten/dia chi text, payload outbox.
+KHONG tra: token, so tai khoan, request/response body, SDT/ten/dia chi text, payload outbox, actor_ref (username/ChatID
+co the la dinh danh), dedupe_key nguyen dang (chi tra `dedupe_kind` = tien to truoc ':').
+
+CA Review 406 — hai so dem KHAC nhau:
+- `logical_quote_attempts`: so dong provider_quote_log co endpoint = so lan quote LOGIC da goi provider.
+- `http_requests`: tong `http_attempts` = so HTTP request THAT (gom retry fee + leadtime); NULL o ban ghi truoc 075.
 """
 from __future__ import annotations
 
@@ -37,7 +42,7 @@ async def trace(conn, command_key: str) -> dict:
             order_ids = []
     logs = [dict(r) for r in await conn.fetch(
         "SELECT id, order_id, trace_key, route_operation_id, endpoint, response_class, status, http_status, "
-        "duration_ms, request_fingerprint, created_at FROM provider_quote_log "
+        "http_attempts, duration_ms, request_fingerprint, created_at FROM provider_quote_log "
         "WHERE trace_key = ANY($1::text[]) OR route_operation_id = ANY($2::bigint[]) ORDER BY id",
         keys, [o["id"] for o in ops])]
     orders = []
@@ -53,14 +58,15 @@ async def trace(conn, command_key: str) -> dict:
             "routing_ward_code, zone, fee_status, delivery_fee_vnd, eta_text, quote_provider, quote_source, "
             "quote_rule_version, quoted_at FROM shipments WHERE order_id=$1", oid)
         t0 = min([x["created_at"] for x in ops if x["order_id"] == oid] or [o["created_at"]]) - timedelta(minutes=1)
-        outbox = [_row(r, ("id", "event_type", "destination", "status", "attempt_count", "dedupe_key", "created_at",
+        outbox = [_row(r, ("id", "event_type", "destination", "status", "attempt_count", "dedupe_kind", "created_at",
                            "delivered_at"))
                   for r in await conn.fetch(
-                      "SELECT id::text AS id, event_type, destination, status, attempt_count, dedupe_key, created_at, "
+                      "SELECT id::text AS id, event_type, destination, status, attempt_count, "
+                      "split_part(dedupe_key, ':', 1) AS dedupe_kind, created_at, "
                       "delivered_at FROM outbox_events WHERE payload->>'order_id' = $1 AND created_at >= $2 "
                       "ORDER BY created_at LIMIT 50", str(oid), t0)]
-        audits = [_row(r, ("id", "action", "actor_ref", "created_at")) for r in await conn.fetch(
-            "SELECT id, action, actor_ref, created_at FROM audit_log WHERE action='shipment.route_quote' "
+        audits = [_row(r, ("id", "action", "actor_type", "created_at")) for r in await conn.fetch(
+            "SELECT id, action, actor_type, created_at FROM audit_log WHERE action='shipment.route_quote' "
             "AND entity_type='shipments' AND entity_id=$1 AND created_at >= $2 ORDER BY id", str(sh["id"]) if sh
             else "-", t0)]
         shd = None
@@ -74,5 +80,6 @@ async def trace(conn, command_key: str) -> dict:
             "quote_logs": [_row(x, x.keys()) for x in logs if x["order_id"] == oid],
         })
     return {"command_key": key, "matched_keys": keys, "route_operations": [_row(o, o.keys()) for o in ops],
-            "orders": orders, "provider_calls": sum(1 for x in logs if x["endpoint"]),
+            "orders": orders, "logical_quote_attempts": sum(1 for x in logs if x["endpoint"]),
+            "http_requests": sum(int(x["http_attempts"] or 0) for x in logs),
             "quote_log_count": len(logs)}

@@ -108,7 +108,7 @@ async def test_route_quote_trace_links_command_key_to_quote_log_once():
         assert (lg["trace_key"], lg["route_operation_id"], lg["endpoint"], lg["response_class"], lg["status"]) == \
             (key, op_id, "/v2/shipping-order/fee+leadtime", "ok", "ok")
         t = await qt.trace(conn, key)
-        assert t["provider_calls"] == 1 and len(t["route_operations"]) == 1 and t["route_operations"][0]["id"] == op_id
+        assert t["logical_quote_attempts"] == 1 and len(t["route_operations"]) == 1 and t["route_operations"][0]["id"] == op_id
         o = t["orders"][0]
         assert o["order"]["id"] == oid and o["address_snapshot"]["ward_code"] == "26734"
         assert o["route_decision"]["routing_source"] == "GHN" and o["route_decision"]["fee_status"] == "quoted"
@@ -117,6 +117,7 @@ async def test_route_quote_trace_links_command_key_to_quote_log_once():
         blob = json.dumps(t, default=str, ensure_ascii=False)
         assert "SECRET-TOKEN-404" not in blob and "0912345678" not in blob and "Lê Lợi" not in blob
         assert "123456" not in blob
+        assert '"actor_ref"' not in blob and '"dedupe_key"' not in blob and "tg:q404" not in blob
     finally:
         await tr.rollback()
         await pool.release(conn)
@@ -135,7 +136,7 @@ async def test_self_delivery_trace_zero_provider_and_bot_path_trace():
         key = f"k404-self-{oid}"
         await ro.execute(conn, oid, actor="t", command_key=key, provider=prov)
         t = await qt.trace(conn, key)
-        assert calls == [] and t["provider_calls"] == 0 and t["quote_log_count"] == 0
+        assert calls == [] and t["logical_quote_attempts"] == 0 and t["http_requests"] == 0 and t["quote_log_count"] == 0
         assert t["orders"][0]["route_decision"]["routing_source"] == "SELF_DELIVERY"
         assert t["route_operations"][0]["provider"] == "none"
         # luong bot/worker: trace_key m7_routing:<order>
@@ -144,12 +145,58 @@ async def test_self_delivery_trace_zero_provider_and_bot_path_trace():
         res = await fc.prepare_ghn_quote(conn, oid2, provider=prov2, trace={"trace_key": f"m7_routing:{oid2}"})
         assert res.status == "ok" and calls2.count("/v2/shipping-order/fee") == 1
         t2 = await qt.trace(conn, f"m7_routing:{oid2}")
-        assert t2["provider_calls"] == 1 and t2["orders"][0]["order"]["id"] == oid2
+        assert t2["logical_quote_attempts"] == 1 and t2["orders"][0]["order"]["id"] == oid2
         # mac dinh (khong truyen trace) -> order:<id>
         oid3 = await _seed(conn, province="79", ward="26736")
         prov3, _ = _provider()
         await fc.prepare_ghn_quote(conn, oid3, provider=prov3)
         assert await conn.fetchval("SELECT trace_key FROM provider_quote_log WHERE order_id=$1", oid3) == f"order:{oid3}"
+    finally:
+        await tr.rollback()
+        await pool.release(conn)
+
+
+@dbonly
+@pytest.mark.asyncio
+async def test_http_attempts_counts_real_requests_including_retry(monkeypatch):
+    """CA Review 406: 1 dong log = 1 quote LOGIC; http_attempts = so HTTP THAT (fee 503 -> retry 200 + leadtime = 3)."""
+    import httpx
+
+    from app.services.fulfillment import quote_trace as qt
+    from app.services.fulfillment import route_operation as ro
+    from app.services.providers import ghn
+    seen = {"fee": 0, "leadtime": 0, "auth_headers": set()}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth_headers"].add(request.headers.get("Token"))
+        if request.url.path.endswith("/fee"):
+            seen["fee"] += 1
+            if seen["fee"] == 1:
+                return httpx.Response(503, json={"code": 503})
+            return httpx.Response(200, json={"code": 200, "data": {"total": 41000}})
+        seen["leadtime"] += 1
+        return httpx.Response(200, json={"code": 200, "data": {"leadtime": int(time.time()) + 3 * 86400}})
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(ghn.httpx, "AsyncClient",
+                        lambda *a, **k: real_client(*a, transport=httpx.MockTransport(handler), **k))
+
+    async def no_sleep(*a, **k):
+        return None
+    monkeypatch.setattr(ghn.asyncio, "sleep", no_sleep)
+    pool, conn, tr = await _tx()
+    try:
+        oid = await _seed(conn, province="79", ward="26737")
+        cfg = {"enabled": True, "base": "https://dev-online-gateway.ghn.vn/shiip/public-api",
+               "token": "SECRET-TOKEN-404", "shop_id": "123456", "from_district_id": 1552, "from_ward_code": "400105",
+               "timeout": 2, "retries": 1, "light_max_g": 20000, "map_version": MAPV, "mode": "staging"}
+        key = f"k404-http-{oid}"
+        await ro.execute(conn, oid, actor="t", command_key=key, provider=ghn.GhnQuoteProvider(cfg))
+        assert (seen["fee"], seen["leadtime"]) == (2, 1)
+        row = await conn.fetchrow("SELECT http_attempts, response_class, request::text AS req FROM provider_quote_log "
+                                  "WHERE trace_key=$1", key)
+        assert row["http_attempts"] == 3 and row["response_class"] == "ok" and "SECRET-TOKEN-404" not in row["req"]
+        t = await qt.trace(conn, key)
+        assert t["logical_quote_attempts"] == 1 and t["http_requests"] == 3
     finally:
         await tr.rollback()
         await pool.release(conn)

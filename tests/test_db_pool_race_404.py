@@ -23,6 +23,8 @@ def _reset():
     P._pool = None
     if hasattr(P, "_owner"):          # ban cu (truoc sua) khong co -> test van chay de TAI HIEN loi
         P._owner.clear()
+    if hasattr(P, "_close_done"):
+        P._close_done = None
 
 
 @pytest.fixture
@@ -164,3 +166,117 @@ async def test_release_returns_to_owner_pool_after_pool_swap():
     await P.release(c2)
     await old.close()
     await P.close_pool()
+
+
+# ============================ CA Review 406: vong doi DONG pool ============================
+@dbonly
+@pytest.mark.asyncio
+async def test_close_pool_with_borrowed_connection_and_concurrent_get_pool(pool_count):
+    """close_pool() khi con connection dang muon + get_pool() dong thoi: KHONG treo, KHONG tra nham pool, pool moi
+    chi duoc tao SAU khi pool cu dong xong (khong 2 pool song song)."""
+    _reset()
+    order = []
+    c = await P.acquire()
+    old = P._pool
+
+    async def closer():
+        await P.close_pool()
+        order.append("closed")
+
+    async def newcomer():
+        await asyncio.sleep(0.05)                 # vao luc pool cu dang dong
+        pool = await P.get_pool()
+        order.append("new_pool")
+        c2 = await P.acquire()
+        await c2.fetchval("SELECT 1")
+        await P.release(c2)
+        return pool
+
+    async def borrower():
+        await asyncio.sleep(0.3)                  # van dang giu connection khi close bat dau
+        await c.fetchval("SELECT 1")
+        await P.release(c)                        # phai tra ve pool CU (owner), khong phai pool moi
+        order.append("released_old")
+
+    res = await asyncio.wait_for(asyncio.gather(closer(), newcomer(), borrower(), return_exceptions=True), 15)
+    assert [r for r in res if isinstance(r, Exception)] == [], res
+    assert order.index("released_old") < order.index("closed") < order.index("new_pool")
+    assert res[1] is not old and pool_count["n"] == 2 and P._owner == {}
+    await P.close_pool()
+
+
+@dbonly
+@pytest.mark.asyncio
+async def test_close_pool_bounded_when_holder_waits_for_get_pool():
+    """Coroutine giu connection roi cho get_pool() trong luc dong (co the deadlock) -> close qua timeout -> terminate,
+    get_pool tiep tuc; tong the ket thuc co han."""
+    _reset()
+    c = await P.acquire()
+
+    async def holder():
+        await asyncio.sleep(0.05)
+        pool = await P.get_pool()                 # cho close xong (close lai cho connection nay) -> timeout pha vo
+        await P.release(c)                        # pool cu da terminate -> bo qua co log, khong raise
+        return pool
+
+    res = await asyncio.wait_for(asyncio.gather(P.close_pool(timeout=0.5), holder(), return_exceptions=True), 15)
+    assert [r for r in res if isinstance(r, Exception)] == [], res
+    assert res[1] is P._pool and P._owner == {}
+    await P.close_pool()
+
+
+@dbonly
+@pytest.mark.asyncio
+async def test_release_unknown_connection_fails_loudly():
+    import asyncpg
+    _reset()
+    c = await asyncpg.connect(os.environ["DATABASE_URL"].replace("+asyncpg", ""))
+    try:
+        with pytest.raises(RuntimeError, match="khong ro pool"):
+            await P.release(c)
+    finally:
+        await c.close()
+
+
+@dbonly
+@pytest.mark.asyncio
+async def test_drain_active_during_shutdown_delivers_once_no_loss():
+    """Worker dang drain (dang gui, giu connection) thi shutdown close_pool(): close CHO drain xong; event delivered
+    DUNG 1 lan; drain sau restart khong gui lai."""
+    from app.services.command import outbox_worker as ow
+    from app.services.command.outbox_worker import SendResult
+    dedupe = f"d404-shutdown-{uuid.uuid4().hex}"
+    ev_id = await _insert_event(dedupe)
+    _reset()
+    sent = {"n": 0}
+    started = asyncio.Event()
+
+    async def slow_send(destination, payload):
+        if payload.get("detail_text") == "d404" and not started.is_set():
+            started.set()
+        if payload.get("detail_text") == "d404":
+            await asyncio.sleep(0.5)
+        return SendResult(ok=True, http_status=200, provider_message_id="m")
+
+    orig = ow._send_and_record
+
+    async def counting(conn, ev, send_fn):
+        if ev["dedupe_key"] == dedupe:
+            sent["n"] += 1
+        return await orig(conn, ev, send_fn)
+    ow._send_and_record = counting
+    try:
+        drain = asyncio.create_task(ow.run_once(send_fn=slow_send))
+        await asyncio.wait_for(started.wait(), 10)
+        await asyncio.wait_for(P.close_pool(), 15)          # shutdown trong luc drain dang giu connection
+        ev_at_close = await _event(ev_id)                   # close CHO drain gui + ghi xong roi moi dong
+        assert ev_at_close["status"] == "delivered"
+        await asyncio.wait_for(drain, 15)                   # phan con lai cua vong drain (reconcile) ket thuc sach
+        assert drain.exception() is None
+        ev = await _event(ev_id)
+        assert ev["status"] == "delivered" and ev["attempt_count"] == 1
+        await ow.run_once(send_fn=slow_send)                # restart: pool moi, khong gui lai
+        assert sent["n"] == 1
+    finally:
+        ow._send_and_record = orig
+        await P.close_pool()
