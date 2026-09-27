@@ -124,13 +124,20 @@ async def board(shipment_status: str | None = None, payment_status: str | None =
             "COALESCE(NULLIF(o.shipping_name,''), cu.name) AS customer_name, "
             "COALESCE(NULLIF(o.shipping_phone,''), cu.phone) AS recipient_phone, "
             "cu.name AS account_name, cu.channel AS account_channel, "
-            "s.status AS shipment_status, s.carrier, s.zone, s.delivery_fee_vnd, s.fee_status, s.eta_text, "
+            "s.status AS shipment_status, s.carrier, s.zone, s.routing_source, s.delivery_fee_vnd, s.fee_status, "
+            "s.eta_text, "
             "p.method AS payment_method, p.status AS payment_status, p.amount_due_vnd, o.created_at "
             "FROM orders o JOIN customers cu ON cu.id=o.customer_id "
             "LEFT JOIN shipments s ON s.order_id=o.id LEFT JOIN payments p ON p.order_id=o.id "
             "WHERE ($1::text IS NULL OR s.status=$1) AND ($2::text IS NULL OR p.status=$2) "
             "ORDER BY o.created_at DESC LIMIT $3", shipment_status, payment_status, limit)
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("shipment_status"):   # CA 404 §2B: nhan zone nghiep vu (khong hien 'unknown' cho GHN ngoai tinh)
+                d["zone_label"] = ship.zone_label(d.get("routing_source"), d.get("zone"))
+            out.append(d)
+        return out
     finally:
         await conn.close()
 
@@ -170,8 +177,12 @@ async def detail(order_id: int) -> dict:
                 "pi.amount_vnd, pi.is_test, pi.created_at, v.voided_at FROM payment_instructions pi "
                 "LEFT JOIN payment_instruction_voids v ON v.instruction_id=pi.id "
                 "WHERE pi.payment_id=$1 ORDER BY pi.id DESC LIMIT 1", p["id"])
+        shd = dict(sh) if sh else None
+        if shd:   # CA 404 §2B
+            shd["zone_label"] = ship.zone_label(shd.get("routing_source"), shd.get("zone"))
+            shd["fee_label"] = ship.fee_label(shd.get("fee_status"))
         return {"order": dict(order), "address_snapshot": dict(snap) if snap else None,
-                "shipment": dict(sh) if sh else None, "attempts": attempts,
+                "shipment": shd, "attempts": attempts,
                 "payment": dict(p) if p else None, "payment_events": events,
                 "payment_instruction": dict(instruction) if instruction else None}
     finally:

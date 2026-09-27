@@ -250,7 +250,8 @@ async def execute(conn, order_id: int, *, actor: str, command_key: str, provider
         if ps is None:
             raise RouteOpInFlight("thao tac bi request khac tiep quan (start) — thu lai sau")
         try:
-            ghn_res = await _fc.prepare_ghn_quote(conn, order_id, provider=provider)
+            ghn_res = await _fc.prepare_ghn_quote(conn, order_id, provider=provider,
+                                                  trace={"trace_key": command_key, "route_operation_id": op["id"]})
         except Exception as e:  # noqa: BLE001 — provider call raised -> ket qua khong chac chan -> AMBIGUOUS (at-most-once)
             async with conn.transaction():
                 await mark_failed(conn, op["id"], error_code="provider_ambiguous", expected_owner=owner)

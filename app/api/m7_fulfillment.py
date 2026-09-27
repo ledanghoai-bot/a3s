@@ -231,3 +231,16 @@ async def routing_allowlist() -> dict:
         return {"active_version": await _r.active_version(conn), "versions": vers, "wards": wards}
     finally:
         await conn.close()
+
+
+# ============================ Quote trace (CA Directive 404 §2C) ============================
+@router.get("/quote-trace")
+async def quote_trace(command_key: str, staff: dict = Depends(require_permission("shipment.manage"))) -> dict:
+    """Tra vet 1 lan bao phi tu command_key: order -> snapshot -> route decision -> GHN endpoint/response class ->
+    quote log -> route operation -> outbox. Read-only, redacted (khong token/so TK/PII/payload)."""
+    from app.services.fulfillment import quote_trace as qt
+    conn = await asyncpg.connect(_db_url())
+    try:
+        return await qt.trace(conn, command_key)
+    finally:
+        await conn.close()

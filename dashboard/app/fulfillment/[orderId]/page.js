@@ -276,7 +276,7 @@ export default function FulfillmentDetail() {
         {sh ? (
           <>
             <Row label="Trạng thái"><b>{SHIP_LABEL[sh.status] || sh.status}</b> (phiên bản {sh.version})</Row>
-            <Row label="Khu vực / Phí">{sh.zone} — {sh.fee_status}{sh.delivery_fee_vnd != null ? ` (${vnd(sh.delivery_fee_vnd)})` : ""}</Row>
+            <Row label="Khu vực / Phí">{sh.zone_label || sh.zone} — {sh.fee_label || sh.fee_status}{sh.delivery_fee_vnd != null ? ` (${vnd(sh.delivery_fee_vnd)})` : ""}</Row>
             <Row label="ETA">{sh.eta_text || "—"}{sh.eta_start_source ? ` · mốc: ${sh.eta_start_source}` : ""}</Row>
             <Row label="Hãng / Mã">{sh.carrier || "—"} / {sh.tracking_text || "—"}</Row>
           </>

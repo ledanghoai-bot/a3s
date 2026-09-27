@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import random
 import time
@@ -37,6 +38,12 @@ BASE_BY_MODE = {"staging": STAGING_BASE, "production": PROD_BASE}
 SERVICE_TYPE_LIGHT = 2
 SERVICE_TYPE_HEAVY = 5
 _RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+FEE_ENDPOINT = "/v2/shipping-order/fee"
+# CA Directive 404 §2C: trace context (command_key / route_operation_id) cho provider_quote_log — caller dat quanh
+# lan goi quote; KHONG doi contract provider. Khong token/secret/PII.
+QUOTE_TRACE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("ghn_quote_trace", default=None)
+# CA Review 406: dem so HTTP request THAT (moi attempt trong _post, gom retry + leadtime) cua 1 lan quote logic.
+QUOTE_HTTP_ATTEMPTS: contextvars.ContextVar[list | None] = contextvars.ContextVar("ghn_quote_http", default=None)
 
 
 def _cfg() -> dict[str, Any]:
@@ -143,6 +150,9 @@ async def _post(cfg: dict, path: str, body: dict, *, retries: int) -> tuple[int 
     last_err, last_status, last_json = "", None, None
     for attempt in range(retries + 1):
         try:
+            ctr = QUOTE_HTTP_ATTEMPTS.get()
+            if ctr is not None:
+                ctr[0] += 1
             async with httpx.AsyncClient(timeout=httpx.Timeout(cfg["timeout"], connect=3.0)) as client:
                 resp = await client.post(url, headers=_headers(cfg), json=body)
             last_status = resp.status_code
@@ -164,13 +174,18 @@ async def _post(cfg: dict, path: str, body: dict, *, retries: int) -> tuple[int 
 
 
 async def _log(conn, *, order_id: int | None, fp: str, request: dict, response: dict | None, status: str,
-               http_status: int | None, duration_ms: int | None) -> None:
+               http_status: int | None, duration_ms: int | None, response_class: str | None = None,
+               endpoint: str | None = None) -> None:
+    tr = QUOTE_TRACE.get() or {}
     try:
         await conn.execute(
             "INSERT INTO provider_quote_log (provider, order_id, request_fingerprint, request, response, status, "
-            "http_status, duration_ms) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8)",
+            "http_status, duration_ms, trace_key, route_operation_id, endpoint, response_class, http_attempts) "
+            "VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13)",
             PROVIDER, order_id, fp, json.dumps(_redact(request)),
-            json.dumps(response) if response is not None else None, status, http_status, duration_ms)
+            json.dumps(response) if response is not None else None, status, http_status, duration_ms,
+            tr.get("trace_key"), tr.get("route_operation_id"), endpoint, response_class or status,
+            (QUOTE_HTTP_ATTEMPTS.get() or [0])[0])
     except Exception as e:  # noqa: BLE001 — log khong duoc lam vo quote
         print(f"[ghn] quote log skipped: {safe_exc(e)}")
 
@@ -206,6 +221,13 @@ class GhnQuoteProvider:
         self._post = post or _post   # inject de test/replay fixture
 
     async def quote(self, conn, req: QuoteRequest) -> QuoteResult:
+        tok = QUOTE_HTTP_ATTEMPTS.set([0])     # CA 406: dem HTTP that cua lan quote nay (khong log secret)
+        try:
+            return await self._quote(conn, req)
+        finally:
+            QUOTE_HTTP_ATTEMPTS.reset(tok)
+
+    async def _quote(self, conn, req: QuoteRequest) -> QuoteResult:
         cfg = self.cfg
         fp = req.fingerprint()
         base = dict(provider=PROVIDER, request_fingerprint=fp)
@@ -216,7 +238,7 @@ class GhnQuoteProvider:
             return QuoteResult(status=QUOTE_REQUIRED, reason="ghn_disabled", **base)
         if not cfg["token"] or not cfg["shop_id"] or not cfg["from_district_id"] or not cfg["from_ward_code"]:
             await _log(conn, order_id=req.order_id, fp=fp, request={"reason": "not_configured"}, response=None,
-                       status="skipped", http_status=None, duration_ms=None)
+                       status="skipped", http_status=None, duration_ms=None, response_class="skipped_not_configured")
             return QuoteResult(status=QUOTE_REQUIRED, reason="ghn_not_configured", **base)
         if req.weight_g <= 0 or min(req.length_cm, req.width_cm, req.height_cm) <= 0:
             return QuoteResult(status=QUOTE_REQUIRED, reason="invalid_weight_or_dims", **base)
@@ -226,7 +248,7 @@ class GhnQuoteProvider:
             await _log(conn, order_id=req.order_id, fp=fp, request={"reason": "address_unmapped",
                        "province_code": req.province_code, "ward_code": req.ward_code,
                        "map_version": cfg["map_version"], "mode": cfg.get("mode")}, response=None, status="skipped",
-                       http_status=None, duration_ms=None)
+                       http_status=None, duration_ms=None, response_class="skipped_address_unmapped")
             return QuoteResult(status=QUOTE_REQUIRED, reason="address_unmapped", **base)
         stype = service_type_for_weight(req.weight_g, cfg["light_max_g"])
         body = {
@@ -241,19 +263,21 @@ class GhnQuoteProvider:
                        "service_type_id": stype, "map_version": cfg["map_version"]}
         if err or status is None:
             await _log(conn, order_id=req.order_id, fp=fp, request=body, response={"error": err},
-                       status="timeout" if err == "timeout" else "error", http_status=status, duration_ms=dur)
+                       status="timeout" if err == "timeout" else "error", http_status=status, duration_ms=dur,
+                       response_class=f"transport_{err}", endpoint=FEE_ENDPOINT)
             return QuoteResult(status=QUOTE_REQUIRED, reason=f"ghn_{err}", http_status=status, duration_ms=dur,
                                carrier_ids=carrier_ids, **base)
         data = (js or {}).get("data") if isinstance(js, dict) else None
         if status != 200 or not isinstance(js, dict) or js.get("code") != 200 or not isinstance(data, dict):
             await _log(conn, order_id=req.order_id, fp=fp, request=body, response=js if isinstance(js, dict) else
-                       {"raw": str(js)[:300]}, status="error", http_status=status, duration_ms=dur)
+                       {"raw": str(js)[:300]}, status="error", http_status=status, duration_ms=dur,
+                       response_class=f"http_{status}", endpoint=FEE_ENDPOINT)
             return QuoteResult(status=QUOTE_REQUIRED, reason=f"ghn_http_{status}_code_{(js or {}).get('code') if isinstance(js, dict) else 'na'}",
                                http_status=status, duration_ms=dur, carrier_ids=carrier_ids, **base)
         total = data.get("total")
         if isinstance(total, bool) or not isinstance(total, int) or total < 0:
             await _log(conn, order_id=req.order_id, fp=fp, request=body, response=js, status="error",
-                       http_status=status, duration_ms=dur)
+                       http_status=status, duration_ms=dur, response_class="schema_total", endpoint=FEE_ENDPOINT)
             return QuoteResult(status=QUOTE_REQUIRED, reason="ghn_schema_total", http_status=status,
                                duration_ms=dur, carrier_ids=carrier_ids, **base)
         # Leadtime (best-effort; loi -> None, KHONG lam quote that bai)
@@ -270,7 +294,8 @@ class GhnQuoteProvider:
                      if k in data}
         await _log(conn, order_id=req.order_id, fp=fp, request=body,
                    response={"fee": data, "leadtime": (ltj or {}).get("data") if isinstance(ltj, dict) else None},
-                   status="ok", http_status=status, duration_ms=dur)
+                   status="ok", http_status=status, duration_ms=dur,
+                   response_class="ok" if lt_days else "ok_no_leadtime", endpoint=f"{FEE_ENDPOINT}+leadtime")
         eta = f"khoảng {lt_days} ngày (GHN)" if lt_days else "GHN sẽ báo thời gian giao"
         return QuoteResult(status=QUOTE_OK, fee_vnd=int(total), breakdown=breakdown, leadtime_days=lt_days,
                            eta_text=eta, provider_ref=None, service_type_id=stype, http_status=status,

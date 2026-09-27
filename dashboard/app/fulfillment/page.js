@@ -151,7 +151,10 @@ export default function FulfillmentBoard() {
                 </td>
                 <td>{vnd(r.total_vnd)}</td>
                 <td><Tag text={SHIP_LABEL[r.shipment_status] || "Chưa tạo"} tone={shipTone(r.shipment_status)} /></td>
-                <td>{FEE_LABEL[r.fee_status] || "—"}{r.delivery_fee_vnd != null ? ` (${vnd(r.delivery_fee_vnd)})` : ""}</td>
+                <td>
+                  {FEE_LABEL[r.fee_status] || "—"}{r.delivery_fee_vnd != null ? ` (${vnd(r.delivery_fee_vnd)})` : ""}
+                  {r.zone_label && <div style={{ fontSize: 11, color: "#888" }}>{r.zone_label}</div>}
+                </td>
                 <td><Tag text={PAY_LABEL[r.payment_status] || "Chưa tạo"} tone={payTone(r.payment_status)} /></td>
                 <td>{vnd(r.amount_due_vnd)}</td>
                 <td><a href={`/fulfillment/${r.order_id}`}>Mở →</a></td>
