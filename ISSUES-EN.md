@@ -193,8 +193,8 @@ LIVE 2026-09-25; F1 PR #88 main `c31f5610`, F2 PR #89 main `d720cbca`):**
   - Creating a Dashboard order with the new province/ward form, and the "Verify address" button (no test order was
     created at deploy).
 - **Still open:**
-  - The lazy pool-init race in `app/db_pool.get_pool` (one outbox drain error at worker start after the #88 deploy) —
-    CA asks for a fix before operational expansion.
+  - ~~The lazy pool-init race in `app/db_pool.get_pool` (one outbox drain error at worker start after the #88 deploy)~~
+    — **fixed in D404** (see below).
   - Enabling a real GHN quote from the Dashboard needs a separate activation.
   - Asking for the ETA right after order confirmation (before routing) opens an attention.
 
