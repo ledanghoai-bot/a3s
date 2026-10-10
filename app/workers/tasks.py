@@ -15,7 +15,7 @@ from app.services.command import outbox_worker
 from app.services.handoff import is_bot_paused
 from app.services.messenger import send_text, try_take_thread_control
 from app.services.orchestrator import handle_message
-from app.services.safe_log import safe_exc
+from app.services.safe_log import mask_ref, safe_exc
 
 DEDUP_TTL_SECONDS = 24 * 60 * 60  # 24h - du lon hon cua so retry cua Meta
 DEAD_LETTER_KEY = "dead_letter:messages"
@@ -87,7 +87,7 @@ async def _process_message_inner(event: dict) -> None:
         # khong can them cot timestamp rieng.
         conversation_id = await conversation_log.ensure_conversation(psid, channel="messenger")
         await conversation_log.log_message(conversation_id, "agent", text)
-        print(f"[worker] Da ghi tin nhan that cua nhan vien cho {psid} (luc dang paused).")
+        print(f"[worker] Da ghi tin nhan that cua nhan vien cho {mask_ref(psid)} (luc dang paused).")
         return
 
     # Tin nhan thuong tu khach
@@ -102,7 +102,7 @@ async def _process_message_inner(event: dict) -> None:
     if await is_bot_paused(sender_id):
         conversation_id = await conversation_log.ensure_conversation(sender_id, channel="messenger")
         await conversation_log.log_message(conversation_id, "customer", text)
-        print(f"[worker] Bot dang paused cho {sender_id}, chi log, khong tra loi (nhan vien dang xu ly).")
+        print(f"[worker] Bot dang paused cho {mask_ref(sender_id)}, chi log, khong tra loi (nhan vien dang xu ly).")
         return
 
     # Handover Protocol: giu quyen so huu thread truoc Page Inbox mac dinh cua Meta, de bot nhan

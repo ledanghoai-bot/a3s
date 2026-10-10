@@ -433,6 +433,32 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
         nút Tiếp im lặng không chuyển). Tổng quan 4/4 phần tick xanh. **ĐÃ GỬI 03/9/2026 (anh
         Hoài bấm Gửi) — trạng thái "Đang xem xét", Meta báo xem xét trong ~10 ngày, hiện không
         cần làm gì thêm; kết quả về qua email + Hộp thư thông báo Developer Console.**
+      - **CA Directive 405 — xóa dữ liệu (DSR) + khai báo trợ lý tự động (candidate 10/10/2026, branch
+        `feat/d405-dsr-disclosure` off main `c15ac60`, CHƯA deploy — chờ CA review):**
+        - **Bug phát hiện:** (1) xóa dữ liệu bỏ sót `customers.external_chat_id` (migration 072) → PSID/ChatID thật
+          còn lại + cùng người nhắn lại bị `UniqueViolation uq_customers_channel_chat`, bot im; (2) **mới, nặng hơn:**
+          `command_executions.conversation_id` và `order_intents.conversation_id` là FK tới `conversations` không
+          ON DELETE → khách từng đặt đơn qua chat thì lệnh xóa **rollback toàn bộ** (`ForeignKeyViolation`), không
+          xóa gì, request `failed`; (3) khai báo "trợ lý tự động" ở tin đầu Messenger chỉ là chỉ dẫn cho LLM.
+        - **Đã làm:** `data_deletion.py` — `SELECT … FOR UPDATE`; psid **và** external_chat_id → `deleted:<code>`;
+          trong cùng transaction gỡ FK + tombstone/bỏ PII ở `command_executions`, `order_intents` (intent mở →
+          CANCELLED), `outbox_events` (tin tới khách chưa gửi → cancelled; bỏ tên/địa chỉ/tin ở thông báo staff),
+          `fulfillment_conversations.customer_ref`; Redis thêm `nlu_state`/`del_pending`/`addr_clarify:*` + lọc
+          `dead_letter:messages`. Outbox worker: ref tombstone → hủy, không gọi provider. Orchestrator:
+          `handle_message` thành lớp bọc điểm xuất cuối — tin đầu phiên (chưa có `chat:<id>`) trên kênh trong
+          `DISCLOSURE_REQUIRED_CHANNELS` → chèn câu cố định "Dạ em là trợ lý tự động của 3S Coffee. Khi cần, em sẽ
+          chuyển anh/chị cho nhân viên ạ." (không lặp nếu đã có "trợ lý tự động"), đồng bộ lại Redis + dòng DB.
+          Log paused-path mask PSID/ChatID. Script chỉ đọc `scripts/d405_dsr_footprint.py` (quét mọi bảng + Redis,
+          `--legacy`). `docs/DSR-RUNBOOK-VI.md` v1.1.0 (+§2b tồn dư kho bất biến).
+        - **Đã verify:** 14 test mới `tests/test_dsr_disclosure_405.py` (DB+Redis thật: Messenger đủ footprint →
+          cùng PSID tạo customer mới, Telegram, callback Meta + lặp + chữ ký sai, 2 yêu cầu xóa đồng thời, xóa đồng
+          thời tin mới, outbox tombstone; khai báo ở **tin gửi ra qua worker**: chào, hỏi giá, nhánh trả lời sớm,
+          lỗi LLM, phiên mới sau hết hạn, lượt sau, Telegram không chèn). Chạy trên code cũ: 5 test DSR fail đúng
+          lỗi FK. Full suite DB scratch 1191 pass, 15 fail trùng khít baseline `main` (GHN 393 + COD — thiếu seed
+          môi trường). Ruff sạch. Legacy §2.5: 0 hàng (prod 27/09).
+        - **Chưa test trên máy anh Hoài / production:** E2E DSR trên tài khoản test Berry Hill sau deploy (D405 §4.1);
+          tồn dư kho bất biến (audit_log, order_events, address_resolution, GHN snapshot…) **chờ CA quyết định**;
+          callback Meta nhận `user_id` app-scoped (không phải PSID) nếu Meta thực sự gọi → hiện no-op an toàn.
 - [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).

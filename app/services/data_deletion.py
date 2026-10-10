@@ -10,11 +10,19 @@ Chinh sach xoa (khop trang /privacy):
   - XOA HAN noi dung hoi thoai: messages + escalations + conversations.
   - AN DANH don hang: bo shipping_name/phone/address (giu don + item cho nghia
     vu ke toan, dung cam ket "phan bat buoc luu se duoc an danh").
-  - AN DANH customer: bo name/phone/address, doi psid -> 'deleted:<code>' de
-    cat lien ket voi PSID that (giu lai dong de khoa ngoai orders con hop le).
-  - XOA cache Redis: chat:<psid>, profile:<psid>.
+  - AN DANH customer: bo name/phone/address, doi CA psid LAN external_chat_id ->
+    'deleted:<code>' (CA Directive 405 §2.1) de cat lien ket voi PSID/ChatID that
+    (giu lai dong de khoa ngoai orders con hop le) va de cung ChatID nhan lai tao
+    duoc customer moi (khong vuong uq_customers_channel_chat).
+  - Kho van hanh con giu dinh danh (CA 405 §2.4): command_executions (actor/scope/
+    ten), order_intents (draft ten/SDT/dia chi), outbox_events (customer_ref/ten/
+    dia chi/tin gan nhat; tin chua gui toi khach -> huy), fulfillment_conversations
+    (customer_ref) -> tombstone/bo truong PII trong CUNG transaction.
+  - XOA cache Redis: chat/profile/nlu_state/del_pending/addr_clarify:<psid> + loc
+    raw event cua khach khoi dead_letter:messages.
 
-Khoa ngoai KHONG co ON DELETE CASCADE -> phai xoa dung thu tu (con truoc cha).
+Khoa ngoai KHONG co ON DELETE CASCADE -> phai xoa dung thu tu (con truoc cha);
+command_executions/order_intents tro toi conversations -> go lien ket truoc khi xoa.
 """
 
 import base64
@@ -28,6 +36,7 @@ import redis.asyncio as aioredis
 
 from app.config import settings
 from app.db_pool import get_pool
+from app.services.customer_identity import tombstone
 from app.services.safe_log import mask_ref, safe_exc
 
 # Domain cong khai (khop {$DOMAIN} trong Caddy) - dung dung URL trang thai tra ve
@@ -97,6 +106,99 @@ def _tag_count(command_tag: str) -> int:
         return 0
 
 
+# Intent con mo (khop index oi_one_open_per_conversation, migration 058) -> huy khi khach xoa du lieu.
+_OPEN_INTENT_STATES = ["COLLECTING", "ADDRESS_CHECK", "NEEDS_CLARIFICATION", "READY_TO_COMMIT", "COMMITTING",
+                       "RETRYING"]
+# Truong PII trong payload outbox (order.created / order.escalated / handoff.escalated / dispatcher params).
+_OUTBOX_PII_KEYS = ["customer_name", "address", "last_message"]
+_DEAD_LETTER_KEY = "dead_letter:messages"  # = app.workers.tasks.DEAD_LETTER_KEY (khong import worker vao service)
+
+
+async def _scrub_operational_stores(conn, *, cid: int, psid: str, tomb: str, conv_ids: list[int],
+                                    order_ids: list[int], summary: dict) -> None:
+    """CA 405 §2.4: tach dinh danh khoi kho van hanh mutable — CHAY TRUOC khi xoa conversations (go FK
+    command_executions/order_intents -> conversations, neu khong ca transaction rollback)."""
+    conv_txt = [str(c) for c in conv_ids]
+    order_txt = [str(o) for o in order_ids]
+    intent_txt = [str(r["id"]) for r in await conn.fetch(
+        "SELECT id FROM order_intents WHERE customer_id = $1", cid)]
+    # Outbox: tin CHUA gui toi chinh khach -> huy (khong gui cho nguoi da xoa); recovery chi replay dead_lettered.
+    r = await conn.execute(
+        "UPDATE outbox_events SET status = 'cancelled', cancelled_at = now(), last_error_code = 'data_deletion', "
+        "lease_owner = NULL, lease_expires_at = NULL "
+        "WHERE payload->>'customer_ref' = $1 AND status IN ('pending', 'retry_scheduled', 'dead_lettered')",
+        psid)
+    summary["outbox_cancelled"] = _tag_count(r)
+    # Tin toi khach (moi trang thai): ref -> tombstone, bo noi dung tin/params (co the chua ten/dia chi).
+    r = await conn.execute(
+        "UPDATE outbox_events SET payload = (payload - 'text' - 'params' - $2::text[]) "
+        "|| jsonb_build_object('customer_ref', $3::text) WHERE payload->>'customer_ref' = $1",
+        psid, _OUTBOX_PII_KEYS, tomb)
+    scrubbed = _tag_count(r)
+    # Thong bao staff gan voi khach (lenh/don/hoi thoai/intent cua khach): giu de van hanh, bo ten/dia chi/tin.
+    r = await conn.execute(
+        "UPDATE outbox_events SET payload = payload - $1::text[] "
+        "WHERE payload ?| $1::text[] AND ("
+        "  command_id IN (SELECT id FROM command_executions WHERE customer_id = $2)"
+        "  OR payload->>'customer_id' = $6"
+        "  OR payload->>'conversation_id' = ANY($3::text[])"
+        "  OR payload->>'order_id' = ANY($4::text[])"
+        "  OR payload->>'intent_id' = ANY($5::text[]))",
+        _OUTBOX_PII_KEYS, cid, conv_txt, order_txt, intent_txt, str(cid))
+    summary["outbox_scrubbed"] = scrubbed + _tag_count(r)
+    # Command bus: actor/scope/causation = psid that -> tombstone; bo ten (request_payload allowlist); go FK.
+    r = await conn.execute(
+        "UPDATE command_executions SET conversation_id = NULL, "
+        "actor_id = CASE WHEN actor_id = $2 THEN $3 ELSE actor_id END, "
+        "causation_id = CASE WHEN causation_id = $2 THEN $3 ELSE causation_id END, "
+        "idempotency_scope = CASE WHEN right(idempotency_scope, length($2) + 1) = ':' || $2 "
+        "  THEN left(idempotency_scope, length(idempotency_scope) - length($2)) || $3 ELSE idempotency_scope END, "
+        "request_payload = request_payload - 'customer_name' - 'phone_masked' - 'psid' "
+        "WHERE customer_id = $1 OR conversation_id = ANY($4::bigint[])",
+        cid, psid, tomb, conv_ids)
+    summary["commands_scrubbed"] = _tag_count(r)
+    # Order intent: bo draft ten/SDT/dia chi + go FK; intent con mo -> CANCELLED (identity cu khong con).
+    r = await conn.execute(
+        "UPDATE order_intents SET conversation_id = NULL, draft_customer_name = NULL, draft_phone = NULL, "
+        "draft_address = NULL, "
+        "terminal_reason = CASE WHEN state = ANY($2::text[]) THEN 'data_deletion' ELSE terminal_reason END, "
+        "state_version = CASE WHEN state = ANY($2::text[]) THEN state_version + 1 ELSE state_version END, "
+        "state = CASE WHEN state = ANY($2::text[]) THEN 'CANCELLED' ELSE state END "
+        "WHERE customer_id = $1 OR conversation_id = ANY($3::bigint[])",
+        cid, _OPEN_INTENT_STATES, conv_ids)
+    summary["order_intents_scrubbed"] = _tag_count(r)
+    # M7 hoi thoai fulfillment: customer_ref -> tombstone (worker nhac/deadline khong con gui toi ChatID that).
+    r = await conn.execute(
+        "UPDATE fulfillment_conversations SET customer_ref = $2, updated_at = now() "
+        "WHERE customer_ref = $1 OR order_id = ANY($3::bigint[])",
+        psid, tomb, order_ids)
+    summary["fulfillment_refs_tombstoned"] = _tag_count(r)
+
+
+async def _clear_redis(psid: str, summary: dict) -> None:
+    redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        deleted = await redis.delete(f"chat:{psid}", f"profile:{psid}")
+        summary["profile_cache_cleared"] = bool(deleted)
+        extra = [f"nlu_state:{psid}", f"del_pending:{psid}"]
+        async for k in redis.scan_iter(match=f"addr_clarify:{psid}:*", count=200):
+            extra.append(k)
+        summary["redis_keys_deleted"] = deleted + await redis.delete(*extra)
+        # dead-letter giu raw webhook event (sender/recipient + text) -> bo dung cac event cua khach nay.
+        removed = 0
+        for raw in await redis.lrange(_DEAD_LETTER_KEY, 0, -1):
+            try:
+                ev = (json.loads(raw) or {}).get("event") or {}
+            except (ValueError, AttributeError):
+                continue
+            ids = {(ev.get("sender") or {}).get("id"), (ev.get("recipient") or {}).get("id")}
+            if psid in ids:
+                removed += await redis.lrem(_DEAD_LETTER_KEY, 0, raw)
+        summary["dead_letters_removed"] = removed
+    finally:
+        await redis.aclose()
+
+
 async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
     """Xoa/an danh toan bo du lieu cua 1 psid trong 1 transaction (Postgres) +
     xoa cache Redis. Idempotent: khong co customer thi la no-op. Tra ve summary
@@ -108,15 +210,31 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
         "escalations_deleted": 0,
         "orders_anonymized": 0,
         "m4_samples_deleted": 0,
+        "outbox_cancelled": 0,
+        "outbox_scrubbed": 0,
+        "commands_scrubbed": 0,
+        "order_intents_scrubbed": 0,
+        "fulfillment_refs_tombstoned": 0,
         "profile_cache_cleared": False,
+        "redis_keys_deleted": 0,
+        "dead_letters_removed": 0,
     }
+    tomb = tombstone(confirmation_code)
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            cust = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1", psid)
+            # FOR UPDATE: 2 yeu cau xoa dong thoi cung psid -> yeu cau sau doi, doc lai thay psid da tombstone
+            # -> no-op (idempotent, khong tombstone 2 lan).
+            cust = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1 FOR UPDATE", psid)
             if cust is not None:
                 summary["customer_found"] = True
                 cid = cust["id"]
+                conv_ids = [r["id"] for r in await conn.fetch(
+                    "SELECT id FROM conversations WHERE customer_id = $1", cid)]
+                order_ids = [r["id"] for r in await conn.fetch(
+                    "SELECT id FROM orders WHERE customer_id = $1", cid)]
+                await _scrub_operational_stores(conn, cid=cid, psid=psid, tomb=tomb, conv_ids=conv_ids,
+                                                order_ids=order_ids, summary=summary)
                 # Con truoc: messages + escalations -> conversations
                 r = await conn.execute(
                     "DELETE FROM messages WHERE conversation_id IN "
@@ -155,21 +273,17 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
                     cid,
                 )
                 summary["orders_anonymized"] = _tag_count(r)
-                # An danh customer + cat lien ket PSID that
+                # An danh customer + cat lien ket PSID/ChatID that (CA 405 §2.1: psid VA external_chat_id cung
+                # tombstone theo yeu cau -> giu NOT NULL + UNIQUE(channel, external_chat_id), ChatID cu tu do).
                 await conn.execute(
                     "UPDATE customers SET name = NULL, phone = NULL, address = NULL, "
-                    "psid = $2 WHERE id = $1",
+                    "current_address_resolution_id = NULL, psid = $2, external_chat_id = $2 WHERE id = $1",
                     cid,
-                    f"deleted:{confirmation_code}",
+                    tomb,
                 )
 
-    # Redis (ngoai transaction DB). sender_id Messenger = psid (khong prefix).
-    redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
-    try:
-        deleted = await redis.delete(f"chat:{psid}", f"profile:{psid}")
-        summary["profile_cache_cleared"] = bool(deleted)
-    finally:
-        await redis.aclose()
+    # Redis (ngoai transaction DB). sender_id = psid (Messenger: PSID; Telegram: 'tg:<chat_id>').
+    await _clear_redis(psid, summary)
     return summary
 
 

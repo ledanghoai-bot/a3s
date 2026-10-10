@@ -457,6 +457,36 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
         (Hoài clicked Submit) — status "In review", Meta says most submissions are reviewed
         within ~10 days, nothing to do for now; result arrives via email + the Developer Console
         notification inbox.**
+      - **CA Directive 405 — data deletion (DSR) + automated-assistant disclosure (candidate 2026-10-10, branch
+        `feat/d405-dsr-disclosure` off main `c15ac60`, NOT deployed — awaiting CA review):**
+        - **Bugs found:** (1) deletion left `customers.external_chat_id` (migration 072) → the real PSID/ChatID
+          survived and the same person messaging again hit `UniqueViolation uq_customers_channel_chat`, bot silent;
+          (2) **new, more severe:** `command_executions.conversation_id` and `order_intents.conversation_id` are FKs
+          to `conversations` without ON DELETE → for any customer who ordered via chat the deletion **rolled back
+          entirely** (`ForeignKeyViolation`), nothing deleted, request `failed`; (3) the first-message Messenger
+          disclosure was only an LLM instruction.
+        - **Done:** `data_deletion.py` — `SELECT … FOR UPDATE`; psid **and** external_chat_id → `deleted:<code>`;
+          in the same transaction detach FKs + tombstone/strip PII in `command_executions`, `order_intents` (open
+          intents → CANCELLED), `outbox_events` (unsent customer messages → cancelled; staff notices lose name/
+          address/last message), `fulfillment_conversations.customer_ref`; Redis also `nlu_state`/`del_pending`/
+          `addr_clarify:*` + filter `dead_letter:messages`. Outbox worker: tombstoned ref → cancel, no provider call.
+          Orchestrator: `handle_message` is now a wrapper at the final output point — first message of a session
+          (no `chat:<id>`) on a `DISCLOSURE_REQUIRED_CHANNELS` channel gets the fixed sentence "Dạ em là trợ lý tự
+          động của 3S Coffee. Khi cần, em sẽ chuyển anh/chị cho nhân viên ạ." (not repeated if the reply already says
+          "trợ lý tự động"), then Redis + DB row are re-synced. Paused-path logs mask PSID/ChatID. Read-only script
+          `scripts/d405_dsr_footprint.py` (scans every table + Redis, `--legacy`). `docs/DSR-RUNBOOK-VI.md` v1.1.0
+          (+§2b residual immutable stores).
+        - **Verified:** 14 new tests `tests/test_dsr_disclosure_405.py` (real DB+Redis: full Messenger footprint →
+          same PSID creates a new customer, Telegram, Meta callback + repeat + bad signature, concurrent deletions,
+          deletion concurrent with a new message, tombstoned outbox; disclosure checked on the **message sent by the
+          worker**: greeting, price question, early deterministic branch, LLM error, new session after expiry, later
+          turn, Telegram unchanged). Against the old code the 5 DSR tests fail with the FK error. Full suite on
+          scratch DB 1191 pass, 15 fail identical to `main` baseline (GHN 393 + COD — missing env seed). Ruff clean.
+          Legacy §2.5: 0 rows (prod 2026-09-27).
+        - **Not yet tested on Hoài's machine / production:** DSR E2E on the Berry Hill test account after deploy
+          (D405 §4.1); residual immutable stores (audit_log, order_events, address_resolution, GHN snapshot…)
+          **await a CA decision**; the Meta callback carries an app-scoped `user_id` (not a PSID) if Meta ever calls
+          it → currently a safe no-op.
 - [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).

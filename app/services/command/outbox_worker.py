@@ -22,6 +22,7 @@ from app.config import settings
 from app.db_pool import acquire, release
 from app.services.command import retry as R
 from app.services.command.receipt import format_vnd
+from app.services.customer_identity import is_tombstone
 from app.services.messenger import GRAPH_URL
 from app.services.safe_log import safe_exc
 
@@ -361,6 +362,13 @@ async def _send_and_record(conn, ev, send_fn) -> str:
     if sc and await _is_stale(conn, sc):
         await conn.execute(
             "UPDATE outbox_events SET status='cancelled', cancelled_at=now(), last_error_code='superseded_stale', "
+            "lease_owner=NULL, lease_expires_at=NULL WHERE id=$1 AND status='delivering' AND lease_owner=$2",
+            ev["id"], WORKER_ID)
+        return "cancelled"
+    # CA Directive 405: khach da xoa du lieu (ref tombstone) -> KHONG BAO GIO gui; huy, khong goi provider.
+    if isinstance(payload, dict) and is_tombstone(payload.get("customer_ref")):
+        await conn.execute(
+            "UPDATE outbox_events SET status='cancelled', cancelled_at=now(), last_error_code='recipient_deleted', "
             "lease_owner=NULL, lease_expires_at=NULL WHERE id=$1 AND status='delivering' AND lease_owner=$2",
             ev["id"], WORKER_ID)
         return "cancelled"
