@@ -16,6 +16,7 @@ Luong:
 import hashlib
 import json
 import unicodedata
+import uuid
 from pathlib import Path
 from time import perf_counter
 
@@ -958,8 +959,11 @@ async def _handle_message_core(sender_id: str, text: str, channel: str = "messen
                     # _m7=None -> roi xuong luong M5/M6/LLM binh thuong (KHONG M7 effect, KHONG SILENT).
                     if await _m7s.enabled_for_psid(_c, sender_id):
                         async with _c.transaction():
+                            # CA 415 §3.3: command_key luu o journal/payment_events BAT BIEN -> KHONG dung
+                            # PSID/ChatID lam fallback; thieu provider id -> key mot-lan (khong dedupe gia).
                             _m7 = await _fc.handle_customer_text(
-                                _c, sender_id, text, command_key=f"msg:{provider_message_id or sender_id}")
+                                _c, sender_id, text,
+                                command_key=f"msg:{provider_message_id or 'noid:' + uuid.uuid4().hex}")
                 finally:
                     await _rel(_c)
                 _m7_silent = _m7 is _fc.SILENT
@@ -1351,7 +1355,7 @@ async def _handle_message_core(sender_id: str, text: str, channel: str = "messen
                         "actor_type": "customer",
                         "actor_id": sender_id,
                         "conversation_id": conversation_id,
-                        "causation_id": pmid,
+                        "causation_id": provider_message_id,  # CA 415: khong fallback PSID vao so bat bien
                         "provider_message_id": pmid,
                     }
                 _t_tool = perf_counter()

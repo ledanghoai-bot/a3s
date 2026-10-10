@@ -109,7 +109,7 @@ async def verify_and_link(*, psid: str, channel: str | None, province_proposal, 
         from app.services import m5_scope
         if not (m5_scope.resolver_fullscope(channel) or cid in _pilot_scope()):
             return {"skipped": "out_of_pilot_scope"}
-        idem = f"lv:{psid}:{event_id}"
+        idem = f"lv:c{cid}:{event_id}"  # CA 415 §3.3: ID noi bo, khong PSID trong key bat bien
         linked = False
         async with conn.transaction():
             # C4: khoa hang customer -> serialize quyet dinh latest-event + update pointer giua cac event

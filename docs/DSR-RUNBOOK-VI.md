@@ -3,10 +3,10 @@
 ```yaml
 document: DSR-RUNBOOK
 owner: PO (điều phối) / Dev (thực thi kỹ thuật)
-version: 1.1.0
+version: 1.2.0
 status: living-document
 created: 2026-07-28 (I-B M3-S0)
-updated: 2026-10-10 (CA Directive 405 — tombstone external_chat_id + kho vận hành M1-M7; §2b tồn dư bất biến)
+updated: 2026-10-10 (CA Directive 405 + CA Review 415 — tombstone, kho vận hành M1-M7, hàm DSR quyền hẹp 077, ma trận §2b)
 source_of_truth: Scalffold V2.0 §13.12–13.13; code thực data_deletion.py tại base 9b49628; luật 91/2025/QH15
 scope_note: Gateway sẽ là DSR orchestrator dài hạn; giai đoạn này Alpha3S vận hành thủ công theo runbook
 ```
@@ -36,7 +36,7 @@ giữ lại và căn cứ) → lưu audit tuân thủ (opaque reference).
 | 4 | `orders` | UPDATE shipping_name/phone/address = NULL (ẩn danh, giữ số liệu P11) | ✅ tự động |
 | 5 | `customers` | name/phone/address/current_address_resolution_id = NULL; **psid VÀ external_chat_id** → `deleted:<code>` (D405: cùng ChatID nhắn lại tạo customer mới, không vướng `uq_customers_channel_chat`); `SELECT … FOR UPDATE` → 2 yêu cầu đồng thời chỉ tombstone 1 lần | ✅ tự động |
 | 6 | Redis `chat:`, `profile:`, `nlu_state:`, `del_pending:`, `addr_clarify:{psid}:*` | DELETE | ✅ tự động (D405 thêm 3 key cuối) |
-| 7 | `data_deletion_requests` | ghi nhận request/status (không chứa psid sau khi cắt) | ✅ |
+| 7 | `data_deletion_requests` | ghi nhận request/status (received → completed / failed / `redis_pending`). Không chứa psid; `subject_hmac` (HMAC khoá server) CHỈ tồn tại khi `redis_pending`, về NULL khi hoàn tất | ✅ |
 | 8 | Chống tái tạo sau xóa | orchestrator không log/lưu sau xóa (`orchestrator.py:154-156`) | ✅ |
 | 9 | Redis **dead-letter** `dead_letter:messages` (webhook event thô) | LREM mọi event có sender/recipient = psid (D405) + TTL 7 ngày (M3-S4) | ✅ tự động |
 | 10 | Container stdout logs | có thể còn PII đã in trước đó | ❌ GAP → S4 (chặn từ nguồn) + log-rotate hạ tầng |
@@ -55,22 +55,54 @@ giữ lại và căn cứ) → lưu audit tuân thủ (opaque reference).
 Kiểm tra footprint (chỉ đọc, output mask): `DSR_REF=<psid> python scripts/d405_dsr_footprint.py` quét MỌI bảng
 public (`row::text`) + Redis (key, arq job, dead-letter); `--legacy` đếm customer tombstone psid nhưng còn ChatID thật.
 
-### 2b. Tồn dư đã biết — kho bất biến/append-only (báo CA theo D405 §2.4, CHƯA xử lý)
+### 2b. Ma trận DSR đầy đủ (CA Review 415 §3.1) — kho bất biến/append-only + bản sao ngoài DB active
 
-Chỉ phát sinh với khách đã đặt đơn/xác minh địa chỉ/qua M7; trigger hoặc REVOKE chặn UPDATE nên cần quyết định CA
-(hàm SECURITY DEFINER cho DSR, hoặc ngừng ghi psid thô từ nguồn) trước khi sửa:
+**Đường xử lý kho bất biến:** hàm `dsr_anonymize_identity` (migration 077). Đặc điểm:
+- `SECURITY DEFINER`, owner là role NOLOGIN `alpha3s_dsr`, chỉ có quyền UPDATE trên đúng các cột định danh.
+- Trigger bất biến chỉ cho qua khi `current_user = alpha3s_dsr`. DELETE vẫn bị cấm, cột nghiệp vụ không có quyền sửa.
+- Chỉ chạy được khi customer **đã tombstone trong cùng transaction**, nên không dùng được để sửa sổ của khách đang hoạt động.
+- Tự ghi audit `dsr.anonymize`; nội dung là số dòng đã xử lý, không có định danh.
+- Đầu vào là PSID/ChatID (thay bằng tombstone) và các giá trị tên/SĐT/địa chỉ cũ. Các giá trị này dùng để quét trường
+  JSON và ghi chú tự do, thay bằng nhãn `[đã ẩn theo yêu cầu xóa dữ liệu]`.
 
-| Kho | Trường còn định danh |
-|---|---|
-| `audit_log` (REVOKE UPDATE/DELETE) | actor_ref = psid / `customer:<psid>` (đơn bot, GHN create) |
-| `order_events`, `inventory_movements` (append-only + REVOKE) | actor_id = psid (đơn bot khi M2 ledger bật) |
-| `address_resolution` (bất biến) | idempotency_key `lv:<psid>:<event>`; street_text/raw_* |
-| `order_address_snapshot`, `address_change_log` (bất biến) | địa chỉ giao hàng |
-| `ghn_shipment_create_operations.request_snapshot` (frozen) | recipient tên/SĐT/địa chỉ |
-| `fulfillment_conversation_events`, `payment_events` (m6_forbid_mutate) | command_key `msg:<sender_id>` khi thiếu provider message id |
-| `provider_events.raw` (SePay) | nội dung/diễn giải chuyển khoản (có thể chứa tên người trả) |
-| `price_overrides.note` | ghi chú staff tự do |
-| Tin Telegram admin đã gửi (handoff) | PSID/tên/SĐT/tin gần nhất — nằm ở Telegram, app không xóa được |
+**A. Kho active do Alpha3S kiểm soát — xử lý tự động trong transaction DSR.** Người chịu trách nhiệm: Dev (đường code).
+
+| Kho | Định danh | Nguồn phát sinh | Giữ chứng từ? | Cách xử lý |
+|---|---|---|---|---|
+| `audit_log` | actor_ref/before/after: PSID, `customer:<psid>` (dữ liệu cũ), tên | đơn bot, GHN prepare, staff | Có (vết kiểm toán) | Thay ID bằng tombstone, PII bằng nhãn. Sau sửa nguồn chỉ ghi `customer:<id nội bộ>` |
+| `order_events`, `inventory_movements` | actor_id/causation_id/idempotency_key: PSID | đơn bot (M2 ledger) | Có (sổ đơn/kho) | Thay bằng tombstone. Giữ nguyên số lượng/trạng thái/số dòng. Sau sửa nguồn ghi `customer:<id>` |
+| `address_resolution` | street_text, raw_*, key `lv:<psid>:…` | live-verify, Dashboard | Giữ **mã hành chính** | Địa chỉ chi tiết và input thô → NULL; key → tombstone. Sau sửa nguồn key là `lv:c<id>:…` |
+| `order_address_snapshot` | street_text | Gate E / Dashboard | Giữ mã + tên tỉnh/phường | street_text → NULL |
+| `address_change_log` | customer_ref, giá trị cũ/mới | (dormant) | Không | Thay ref; giá trị → NULL |
+| `address_confirmation_request/outbox` | bound_ref/payload | (dormant, staff CLI) | Không | Thay ID bằng tombstone |
+| `ghn_shipment_create_operations` | snapshot: tên/SĐT/địa chỉ người nhận; note | bot/Dashboard tạo vận đơn | Giữ mã đơn GHN, khối lượng, phí, mã vùng | recipient → `{name:null, address_text:null, phone:"***xyz"}`; note → nhãn |
+| `ghn_shipment_create_attempts` | actor `customer:<psid>` (cũ) | worker | Có | Thay bằng tombstone |
+| `fulfillment_conversation_events` | reply_text (tin bot), command_key `msg:<psid>` (cũ), detail | M7 | Giữ bước/thời điểm | reply_text → NULL (như `messages`); ID → tombstone; PII → nhãn. Sau sửa nguồn: không fallback PSID |
+| `payment_events`, `shipment_delivery_attempts` | command_key/recorded_by chứa PSID; note tự do | M6/M7, staff | Có (tiền/giao hàng) | ID → tombstone; note → nhãn. **Giữ** số tiền, `reference` (mã giao dịch ngân hàng) |
+| `provider_events.raw` (SePay) | content/description (thường chứa tên người chuyển) | webhook SePay | Giữ số tiền, mã tham chiếu, thời gian | content/description → `[dsr]` |
+| `staff_attention` | detail/resolution_note | M7/staff | Có | ID/PII trong detail → tombstone/nhãn; resolution_note → nhãn |
+| `price_overrides.note` | ghi chú tự do | staff | Không | → nhãn |
+| `pii_slots` | giá trị mã hoá | M4 (dormant) | Không | DELETE |
+| Các mục §2 #1–#21 | (xem bảng trên) | | | Xử lý bằng code app trong cùng transaction |
+
+**B. Giữ lại có căn cứ — sau DSR không còn định danh trực tiếp.** Người quyết định: PO/legal.
+
+| Dữ liệu giữ | Căn cứ | Ghi chú |
+|---|---|---|
+| `orders` (số tiền, món, thời gian, trạng thái; `shipping_*` = NULL), `payments`, `payment_events` (số tiền, mã giao dịch NH), `shipments` (phí, mã vùng, mã vận đơn), GHN operation | Nghĩa vụ kế toán/thuế, đối soát với GHN và ngân hàng | Thời hạn lưu cụ thể **PO/legal chốt** (chưa cấu hình ở trung tâm) |
+| SĐT dạng `***xyz` trong snapshot GHN | Đối soát vận đơn với GHN | **Quyết định PO/CA:** giữ 3 số cuối hay xoá hẳn |
+| `consent_records` (evidence_ref mờ), `data_deletion_requests` (mã, trạng thái), audit `dsr.anonymize` | Chứng minh tuân thủ (P11) | Không chứa định danh |
+| Dòng `customers` đã tombstone | Giữ khoá ngoại của đơn | Không có tên/SĐT/địa chỉ/PSID |
+
+**C. Bản sao ngoài DB active — không hứa xoá nếu ngoài quyền kiểm soát của app.**
+
+| Bản sao | Định danh | Kiểm soát | Xử lý |
+|---|---|---|---|
+| Redis | chat/profile/nlu_state/del_pending/addr_clarify, dead-letter | App | Xoá ngay; lỗi → `redis_pending` + worker 5 phút (§2 #6, #9). TTL tối đa 7 ngày |
+| Backup `pg_dump` | toàn bộ DB tại thời điểm backup | App/hạ tầng (VPS) | Hết hạn theo vòng **14 bản/ngày**. **Cấm restore dữ liệu đã xoá về hệ active** (restore-non-resurrection) |
+| Log container stdout | PSID/ChatID ở log cũ (trước khi mask) | Hạ tầng | Log mới đã mask. Log cũ mất khi container được tạo lại. **Chưa cấu hình xoay vòng log** (`json-file`, không có `max-size`) → đề xuất cấu hình, chờ PO |
+| Meta (hộp thư Page), Telegram (chat khách + tin admin có PSID/tên/SĐT/tin gần nhất) | hội thoại | Nền tảng | Không xoá được từ app. Khách tự xoá phía nền tảng. Ghi trong chính sách quyền riêng tư |
+| GHN (vận đơn), SePay/ngân hàng (sao kê), DeepSeek (input LLM) | người nhận, người chuyển, nội dung chat | Nhà cung cấp | Theo chính sách của họ (VDR-001). Không hứa xoá |
 
 ## 3. Checklist thao tác thủ công (access/correction — tới khi tự động hóa)
 
@@ -87,7 +119,9 @@ Chỉ phát sinh với khách đã đặt đơn/xác minh địa chỉ/qua M7; t
 |---|---|---|
 | 1 | ~~Dead-letter không nằm trong deletion propagation~~ | ✅ D405 |
 | 2 | ~~Outbox payload cũ chứa PII~~ (phần gắn với khách đã xóa) | ✅ D405 |
-| 2b | Kho bất biến còn định danh (§2b) | **CA quyết định** (sau D405) |
+| 2b | ~~Kho bất biến còn định danh~~ → hàm DSR quyền hẹp (077), ma trận §2b | ✅ CA 415 |
+| 7 | Thời hạn lưu chứng từ kế toán + giữ SĐT `***xyz` trong snapshot GHN | PO/legal |
+| 8 | Xoay vòng log container (`max-size`) | PO/hạ tầng |
 | 3 | Restore-non-resurrection chưa có test | S6/S7 (AC-M3-07) |
 | 4 | Rút consent per-purpose chưa chuẩn hóa | **S3** |
 | 5 | SLA pháp lý chưa cấu hình central | PO/legal |

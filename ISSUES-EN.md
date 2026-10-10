@@ -503,6 +503,28 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
           no-op; customer messages again → new message sent, blocked one stays cancelled). Without the guard 6
           tests fail. Full suite 1200 pass, 15 fail identical to `main` baseline.
         - **Not yet tested in production:** needs real Messenger events (Meta not delivering since approval 10/10).
+      - **CA Review 415 (REQUEST CHANGES) — DSR covers immutable stores (same PR #93, separate commit):**
+        - **Finding:** after DSR, PSID/address/name remained in audit_log, order_events/inventory_movements, address_*,
+          GHN snapshot, M7 journal, payment/SePay events, staff notes — stores blocked by triggers/REVOKE. Whole-DB scan of
+          one full customer journey: the previous candidate left **21 traces / 15 tables** after deletion.
+        - **Done:** migration **077**: NOLOGIN role `alpha3s_dsr` + `SECURITY DEFINER dsr_anonymize_identity`
+          (**column-level** UPDATE grants, triggers allow only `current_user = alpha3s_dsr`, runs only when the customer
+          is already tombstoned in the same transaction, self-audits `dsr.anonymize`); IDs → tombstone, name/phone/
+          address → NULL or a marker, GHN recipient → `***xyz`; keeps admin-unit codes, amounts, order/waybill codes,
+          ledger row counts. **Source fixes:** bot-order audit/ledger write `customer:<internal id>`; GHN actor
+          `customer:<id>`; live-verify key `lv:c<id>:…`; M7 command_key and causation_id no longer fall back to the PSID;
+          admin listener log masked. **Redis failure after DB commit:** 3 retries → `redis_pending` + `subject_hmac`
+          (server-keyed HMAC, NULL once done); a repeat request or the 5-minute worker completes it. Status page gets the
+          new label + escapes the code (reflected XSS fix). Full store matrix `docs/DSR-RUNBOOK-VI.md` v1.2.0 §2b;
+          rollback `scripts/rollback_077_dsr_definer.sql`.
+        - **Verified:** `tests/test_dsr_e2e_415.py` 4 tests — real command-bus order, address, M7/payment/SePay, GHN,
+          ledger, legacy rows with raw PSID → delete → scan EVERY table: **0 traces**, business ledgers unchanged; the
+          function refuses a non-tombstoned customer, triggers still block normal UPDATE, `alpha3s_app` cannot UPDATE
+          ledgers; Redis failure → worker/repeat request completes. 27 DSR/disclosure/24h tests pass; full suite 1204
+          pass, 15 fail identical to baseline; GHN 393 14/14 pass on a fresh DB once `packing_overhead_percent` is set;
+          077 rollback rehearsal OK.
+        - **Awaiting PO/legal:** accounting retention period; keeping `***xyz` phone in the GHN snapshot; container log
+          rotation (prod has no `max-size`).
 - [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).

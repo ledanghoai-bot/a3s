@@ -474,6 +474,26 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
           worker khác → no-op; khách nhắn lại → tin mới gửi được, tin đã chặn không sống lại). Bỏ chốt → 6 test
           fail. Full suite 1200 pass, 15 fail trùng baseline `main`.
         - **Chưa test production:** cần event Messenger thật (Meta chưa giao event sau duyệt 10/10).
+      - **CA Review 415 (REQUEST CHANGES) — DSR phủ kho bất biến (cùng PR #93, commit riêng):**
+        - **Finding:** sau DSR vẫn còn PSID/địa chỉ/tên ở audit_log, order_events/inventory_movements, address_*,
+          GHN snapshot, journal M7, payment/SePay events, ghi chú staff — các kho bị trigger/REVOKE chặn sửa. Quét toàn
+          DB trên một hành trình khách đầy đủ: bản trước còn **21 dấu vết / 15 bảng** sau khi xoá.
+        - **Đã làm:** migration **077**: role NOLOGIN `alpha3s_dsr` + hàm `SECURITY DEFINER dsr_anonymize_identity`
+          (quyền UPDATE theo **cột**, trigger chỉ cho qua khi `current_user = alpha3s_dsr`, chỉ chạy khi customer đã
+          tombstone trong cùng transaction, tự audit `dsr.anonymize`); ID → tombstone, tên/SĐT/địa chỉ → NULL hoặc nhãn,
+          GHN recipient → `***xyz`; giữ mã hành chính, số tiền, mã đơn/vận đơn, số dòng sổ. **Sửa nguồn:** audit/ledger
+          đơn bot ghi `customer:<id nội bộ>`; actor GHN `customer:<id>`; key live-verify `lv:c<id>:…`; command_key M7
+          không fallback PSID; causation_id không fallback PSID; log listener admin mask. **Redis lỗi sau commit DB:**
+          thử lại 3 lần → `redis_pending` + `subject_hmac` (HMAC khoá server, NULL khi xong); yêu cầu lặp hoặc worker
+          5 phút hoàn tất. Trang trạng thái thêm nhãn mới + escape mã (vá XSS phản chiếu). Ma trận kho đầy đủ
+          `docs/DSR-RUNBOOK-VI.md` v1.2.0 §2b; rollback `scripts/rollback_077_dsr_definer.sql`.
+        - **Đã verify:** `tests/test_dsr_e2e_415.py` 4 test — đơn qua command bus thật, địa chỉ, M7/payment/SePay, GHN,
+          ledger, dữ liệu cũ có PSID thô → xoá → quét MỌI bảng: **0 dấu vết**, sổ nghiệp vụ giữ nguyên; hàm từ chối
+          khách chưa tombstone, trigger vẫn chặn UPDATE thường, `alpha3s_app` không UPDATE được ledger; Redis lỗi →
+          worker/yêu cầu lặp hoàn tất. 27 test DSR/disclosure/24h pass; full suite 1204 pass, 15 fail trùng baseline;
+          GHN 393 pass 14/14 trên DB mới khi đặt `packing_overhead_percent`; rollback 077 rehearsal OK.
+        - **Chờ PO/legal:** thời hạn lưu chứng từ kế toán; giữ SĐT `***xyz` trong snapshot GHN; xoay vòng log container
+          (prod chưa có `max-size`).
 - [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).

@@ -25,6 +25,7 @@ Khoa ngoai KHONG co ON DELETE CASCADE -> phai xoa dung thu tu (con truoc cha);
 command_executions/order_intents tro toi conversations -> go lien ket truoc khi xoa.
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -72,19 +73,30 @@ def parse_signed_request(signed_request: str, app_secret: str) -> dict | None:
     return data
 
 
-async def _record_request(confirmation_code: str, status: str) -> None:
+async def _record_request(confirmation_code: str, status: str, subject_hmac: str | None = None) -> None:
+    """subject_hmac CHI ghi khi status='redis_pending' (de retry tim lai key Redis); moi status khac -> NULL."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO data_deletion_requests (confirmation_code, status, completed_at)
-            VALUES ($1, $2, CASE WHEN $2 = 'completed' THEN now() ELSE NULL END)
+            INSERT INTO data_deletion_requests (confirmation_code, status, completed_at, subject_hmac)
+            VALUES ($1, $2, CASE WHEN $2 = 'completed' THEN now() ELSE NULL END,
+                    CASE WHEN $2 = 'redis_pending' THEN $3 ELSE NULL END)
             ON CONFLICT (confirmation_code)
-            DO UPDATE SET status = EXCLUDED.status, completed_at = EXCLUDED.completed_at
+            DO UPDATE SET status = EXCLUDED.status, completed_at = EXCLUDED.completed_at,
+                          subject_hmac = EXCLUDED.subject_hmac
             """,
             confirmation_code,
             status,
+            subject_hmac,
         )
+
+
+def subject_hmac(ref: str) -> str:
+    """CA 415 §3.5: dinh danh GIA DANH (HMAC khoa server) cua psid — chi de ghep lai request redis_pending voi key Redis
+    cua chinh khach do, KHONG dao nguoc duoc neu khong co khoa. Khong bao gio luu psid tho."""
+    key = hashlib.sha256(("a3s-dsr-v1|" + (settings.meta_app_secret or "")).encode()).digest()
+    return hmac.new(key, ref.encode(), hashlib.sha256).hexdigest()
 
 
 async def get_status(confirmation_code: str) -> dict | None:
@@ -199,6 +211,95 @@ async def _clear_redis(psid: str, summary: dict) -> None:
         await redis.aclose()
 
 
+async def _collect_pii(conn, cid: int) -> list[str]:
+    """Ten/SDT/dia chi cua khach o ho so + nguoi nhan cac don + draft intent (ca bien the SDT chi chu so)."""
+    rows = await conn.fetch(
+        "SELECT name AS a, phone AS b, address AS c FROM customers WHERE id = $1 "
+        "UNION ALL SELECT shipping_name, shipping_phone, shipping_address FROM orders WHERE customer_id = $1 "
+        "UNION ALL SELECT draft_customer_name, draft_phone, draft_address FROM order_intents WHERE customer_id = $1",
+        cid)
+    vals: list[str] = []
+    for r in rows:
+        for v in (r["a"], r["b"], r["c"]):
+            if isinstance(v, str) and v.strip():
+                vals.append(v.strip())
+        if isinstance(r["b"], str):
+            digits = "".join(ch for ch in r["b"] if ch.isdigit())
+            if digits:
+                vals.append(digits)
+    return [v for v in dict.fromkeys(vals) if len(v) >= 5]
+
+
+_REDIS_ATTEMPTS = 3
+_REDIS_KEY_PREFIXES = ("chat:", "profile:", "nlu_state:", "del_pending:", "addr_clarify:")
+
+
+async def _clear_redis_with_retry(psid: str, summary: dict) -> bool:
+    for attempt in range(1, _REDIS_ATTEMPTS + 1):
+        try:
+            await _clear_redis(psid, summary)
+            return True
+        except Exception as e:  # noqa: BLE001 - DB da commit; Redis loi -> thu lai roi chuyen redis_pending
+            print(f"[data_deletion] Redis cleanup loi lan {attempt}/{_REDIS_ATTEMPTS} "
+                  f"psid={mask_ref(psid)}: {safe_exc(e)}")
+            if attempt < _REDIS_ATTEMPTS:
+                await asyncio.sleep(0.2 * attempt)
+    return False
+
+
+async def _complete_redis_pending(conn, hmacs: list[str] | None, by: str) -> int:
+    """Danh dau request redis_pending (cua cac subject_hmac nay, hoac TAT CA khi hmacs=None) da xong Redis."""
+    r = await conn.execute(
+        "UPDATE data_deletion_requests SET status = 'completed', completed_at = now(), subject_hmac = NULL, "
+        "detail = coalesce(detail, '{}'::jsonb) || jsonb_build_object('redis_completed_by', $2::text) "
+        "WHERE status = 'redis_pending' AND ($1::text[] IS NULL OR subject_hmac = ANY($1::text[]))", hmacs, by)
+    return _tag_count(r)
+
+
+def _ref_of_key(key: str) -> str | None:
+    for p in _REDIS_KEY_PREFIXES:
+        if key.startswith(p):
+            rest = key[len(p):]
+            if p == "addr_clarify:":  # addr_clarify:<sender_id>:<fp> (sender_id co the chua ':' — 'tg:<id>')
+                rest = rest.rsplit(":", 1)[0] if ":" in rest else ""
+            return rest or None
+    return None
+
+
+async def retry_redis_pending() -> dict:
+    """Worker (cron): hoan tat Redis cleanup cho request 'redis_pending' (DB da xoa, customer da tombstone) MA KHONG can
+    psid tho — quet key Redis/dead-letter, ghep theo subject_hmac. Quet tron 1 luot thanh cong -> moi key cua cac khach
+    dang cho da bi xoa (hoac khong con) -> danh dau completed. Redis van loi -> giu redis_pending, luot sau thu lai."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT subject_hmac FROM data_deletion_requests "
+                                "WHERE status = 'redis_pending' AND subject_hmac IS NOT NULL")
+    targets = {r["subject_hmac"] for r in rows}
+    if not targets:
+        return {"pending": 0}
+    stats = {"pending": len(targets), "keys_deleted": 0, "dead_letters_removed": 0}
+    redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        for p in _REDIS_KEY_PREFIXES:
+            async for k in redis.scan_iter(match=f"{p}*", count=500):
+                ref = _ref_of_key(k)
+                if ref and subject_hmac(ref) in targets:
+                    stats["keys_deleted"] += await redis.delete(k)
+        for raw in await redis.lrange(_DEAD_LETTER_KEY, 0, -1):
+            try:
+                ev = (json.loads(raw) or {}).get("event") or {}
+            except (ValueError, AttributeError):
+                continue
+            ids = {(ev.get("sender") or {}).get("id"), (ev.get("recipient") or {}).get("id")}
+            if any(i and subject_hmac(str(i)) in targets for i in ids):
+                stats["dead_letters_removed"] += await redis.lrem(_DEAD_LETTER_KEY, 0, raw)
+    finally:
+        await redis.aclose()
+    async with pool.acquire() as conn:
+        stats["completed"] = await _complete_redis_pending(conn, sorted(targets), "worker")
+    return stats
+
+
 async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
     """Xoa/an danh toan bo du lieu cua 1 psid trong 1 transaction (Postgres) +
     xoa cache Redis. Idempotent: khong co customer thi la no-op. Tra ve summary
@@ -225,7 +326,8 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
         async with conn.transaction():
             # FOR UPDATE: 2 yeu cau xoa dong thoi cung psid -> yeu cau sau doi, doc lai thay psid da tombstone
             # -> no-op (idempotent, khong tombstone 2 lan).
-            cust = await conn.fetchrow("SELECT id FROM customers WHERE psid = $1 FOR UPDATE", psid)
+            cust = await conn.fetchrow(
+                "SELECT id, external_chat_id FROM customers WHERE psid = $1 FOR UPDATE", psid)
             if cust is not None:
                 summary["customer_found"] = True
                 cid = cust["id"]
@@ -233,6 +335,8 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
                     "SELECT id FROM conversations WHERE customer_id = $1", cid)]
                 order_ids = [r["id"] for r in await conn.fetch(
                     "SELECT id FROM orders WHERE customer_id = $1", cid)]
+                # Gia tri PII (ten/SDT/dia chi) TRUOC khi null — de ham DSR quet ca truong JSON/tu do o kho bat bien.
+                pii = await _collect_pii(conn, cid)
                 await _scrub_operational_stores(conn, cid=cid, psid=psid, tomb=tomb, conv_ids=conv_ids,
                                                 order_ids=order_ids, summary=summary)
                 # Con truoc: messages + escalations -> conversations
@@ -281,9 +385,13 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
                     cid,
                     tomb,
                 )
-
-    # Redis (ngoai transaction DB). sender_id = psid (Messenger: PSID; Telegram: 'tg:<chat_id>').
-    await _clear_redis(psid, summary)
+                # CA 415 §3.2: kho bat bien/append-only (audit, so don/kho, dia chi, GHN snapshot, journal M7, payment/
+                # provider events...) -> DUONG QUYEN HEP duy nhat: ham SECURITY DEFINER (migration 077) chi chay khi
+                # customer DA tombstone trong CUNG transaction nay; tu ghi audit 'dsr.anonymize'. Loi -> rollback ca DSR.
+                refs = [r for r in dict.fromkeys([psid, cust["external_chat_id"]]) if r]
+                imm = await conn.fetchval("SELECT dsr_anonymize_identity($1, $2::text[], $3, $4, $5::text[])",
+                                          cid, refs, tomb, confirmation_code, pii)
+                summary["immutable_anonymized"] = json.loads(imm) if isinstance(imm, str) else imm
     return summary
 
 
@@ -292,16 +400,31 @@ async def process_deletion(psid: str) -> dict:
     {confirmation_code, summary} (summary=None neu loi).
 
     Xoa chay inline (nhanh voi 1 khach) nen khi tra ve thi du lieu da xoa xong.
-    Loi khi xoa -> danh dau 'failed' nhung VAN tra code (callback/khach van can)."""
+    Loi khi xoa DB -> danh dau 'failed' (transaction rollback, khong xoa gi) nhung VAN tra code.
+    CA 415 §3.5: DB da commit nhung Redis loi (sau retry) -> 'redis_pending' + subject_hmac; lan goi lai cung psid
+    (callback lap / khach nhan lai) hoac worker retry_redis_pending hoan tat Redis va chuyen 'completed'."""
     confirmation_code = secrets.token_hex(8)
     await _record_request(confirmation_code, "received")
     summary = None
     try:
         summary = await _delete_customer_data(psid, confirmation_code)
-        await _record_request(confirmation_code, "completed")
     except Exception as e:  # noqa: BLE001 - khong duoc lam vo response callback/chat
         print(f"[data_deletion] Loi xoa du lieu psid={mask_ref(psid)}: {safe_exc(e)}")
         await _record_request(confirmation_code, "failed")
+        return {"confirmation_code": confirmation_code, "summary": None}
+    redis_ok = await _clear_redis_with_retry(psid, summary)
+    summary["redis_pending"] = not redis_ok
+    if not redis_ok:
+        await _record_request(confirmation_code, "redis_pending", subject_hmac(psid))
+        return {"confirmation_code": confirmation_code, "summary": summary}
+    await _record_request(confirmation_code, "completed")
+    # Request truoc cua CUNG subject con redis_pending (DB da xoa) -> Redis vua don xong -> hoan tat luon.
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            summary["pending_completed"] = await _complete_redis_pending(conn, [subject_hmac(psid)], "repeat_request")
+    except Exception as e:  # noqa: BLE001
+        print(f"[data_deletion] Khong cap nhat duoc request redis_pending: {safe_exc(e)}")
     return {"confirmation_code": confirmation_code, "summary": summary}
 
 

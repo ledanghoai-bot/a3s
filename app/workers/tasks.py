@@ -132,6 +132,18 @@ async def deliver_outbox_job(ctx) -> None:
         print(f"[outbox] drain loi (bo qua vong nay): {safe_exc(e)}")
 
 
+async def dsr_redis_retry_job(ctx) -> None:
+    """CA Review 415 §3.5: hoan tat Redis cleanup cho yeu cau xoa du lieu 'redis_pending' (DB da xoa). Khong co request
+    cho -> no-op (1 SELECT). Loi duoc bao ve, KHONG lam sap worker; luot sau thu lai."""
+    from app.services import data_deletion
+    try:
+        stats = await data_deletion.retry_redis_pending()
+        if stats.get("pending"):
+            print(f"[dsr] redis retry {stats}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[dsr] redis retry loi (bo qua vong nay): {safe_exc(e)}")
+
+
 async def expire_reservations_job(ctx) -> None:
     """I-B M2 (Slice 6): sweep reservation đến hạn mỗi 60s -> command reservation.expire (§11.2).
     Flag M2 TẮT -> no-op. Lỗi được bảo vệ, KHÔNG làm sập worker; reservation không bị bỏ quên."""
@@ -292,6 +304,8 @@ class WorkerSettings:
         cron(m7_provider_events_job, second={3, 13, 23, 33, 43, 53}, run_at_startup=False),
         # Directive 393: tao van don GHN 20s. Gate OFF -> khong HTTP (chi ghi gate_blocked_reason).
         cron(ghn_shipment_create_job, second={8, 28, 48}, run_at_startup=False),
+        # CA Review 415 §3.5: DSR Redis cleanup con treo (redis_pending) — 5 phut/lan.
+        cron(dsr_redis_retry_job, minute=set(range(0, 60, 5)), second={40}, run_at_startup=False),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20
