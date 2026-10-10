@@ -3,10 +3,10 @@
 ```yaml
 document: DSR-RUNBOOK
 owner: PO (điều phối) / Dev (thực thi kỹ thuật)
-version: 1.2.0
+version: 1.3.0
 status: living-document
 created: 2026-07-28 (I-B M3-S0)
-updated: 2026-10-10 (CA Directive 405 + CA Review 415 — tombstone, kho vận hành M1-M7, hàm DSR quyền hẹp 077, ma trận §2b)
+updated: 2026-10-11 (CA 405 + 415 + 416 — tombstone, kho vận hành M1-M7, hàm DSR quyền hẹp 077 tự lấy định danh + giới hạn theo liên kết, khoá HMAC riêng, ma trận §2b)
 source_of_truth: Scalffold V2.0 §13.12–13.13; code thực data_deletion.py tại base 9b49628; luật 91/2025/QH15
 scope_note: Gateway sẽ là DSR orchestrator dài hạn; giai đoạn này Alpha3S vận hành thủ công theo runbook
 ```
@@ -36,7 +36,7 @@ giữ lại và căn cứ) → lưu audit tuân thủ (opaque reference).
 | 4 | `orders` | UPDATE shipping_name/phone/address = NULL (ẩn danh, giữ số liệu P11) | ✅ tự động |
 | 5 | `customers` | name/phone/address/current_address_resolution_id = NULL; **psid VÀ external_chat_id** → `deleted:<code>` (D405: cùng ChatID nhắn lại tạo customer mới, không vướng `uq_customers_channel_chat`); `SELECT … FOR UPDATE` → 2 yêu cầu đồng thời chỉ tombstone 1 lần | ✅ tự động |
 | 6 | Redis `chat:`, `profile:`, `nlu_state:`, `del_pending:`, `addr_clarify:{psid}:*` | DELETE | ✅ tự động (D405 thêm 3 key cuối) |
-| 7 | `data_deletion_requests` | ghi nhận request/status (received → completed / failed / `redis_pending`). Không chứa psid; `subject_hmac` (HMAC khoá server) CHỈ tồn tại khi `redis_pending`, về NULL khi hoàn tất | ✅ |
+| 7 | `data_deletion_requests` | ghi nhận request/status (received → completed / failed / `redis_pending`). Không chứa psid; `subject_hmac` (HMAC khoá `DSR_HMAC_KEY` riêng, kèm `detail.hmac_key_id`) CHỈ tồn tại khi `redis_pending`, về NULL khi hoàn tất | ✅ |
 | 8 | Chống tái tạo sau xóa | orchestrator không log/lưu sau xóa (`orchestrator.py:154-156`) | ✅ |
 | 9 | Redis **dead-letter** `dead_letter:messages` (webhook event thô) | LREM mọi event có sender/recipient = psid (D405) + TTL 7 ngày (M3-S4) | ✅ tự động |
 | 10 | Container stdout logs | có thể còn PII đã in trước đó | ❌ GAP → S4 (chặn từ nguồn) + log-rotate hạ tầng |
@@ -57,13 +57,35 @@ public (`row::text`) + Redis (key, arq job, dead-letter); `--legacy` đếm cust
 
 ### 2b. Ma trận DSR đầy đủ (CA Review 415 §3.1) — kho bất biến/append-only + bản sao ngoài DB active
 
-**Đường xử lý kho bất biến:** hàm `dsr_anonymize_identity` (migration 077). Đặc điểm:
+**Đường xử lý kho bất biến:** hàm `dsr_erase_subject(customer_id, code)` (migration 077, sửa theo CA Review 416).
+Đặc điểm:
 - `SECURITY DEFINER`, owner là role NOLOGIN `alpha3s_dsr`, chỉ có quyền UPDATE trên đúng các cột định danh.
 - Trigger bất biến chỉ cho qua khi `current_user = alpha3s_dsr`. DELETE vẫn bị cấm, cột nghiệp vụ không có quyền sửa.
-- Chỉ chạy được khi customer **đã tombstone trong cùng transaction**, nên không dùng được để sửa sổ của khách đang hoạt động.
+- **Caller không truyền định danh hay PII nào.** Hàm tự đọc PSID/ChatID/tên/SĐT/địa chỉ từ chính dòng customer (khoá
+  `FOR UPDATE`), người nhận các đơn và draft của customer đó, rồi tự tombstone customer.
+- Bắt buộc có yêu cầu xoá `received` chưa gắn subject. Mỗi mã xác nhận chỉ dùng **một lần** (`detail.subject_bound`).
+  Từ chối khi customer đã tombstone, mã không tồn tại, hoặc mã đã dùng.
+- **Mọi UPDATE giới hạn bằng liên kết chắc chắn** với subject:
+  - `customer_id`, `order_id`, `payment_id`, `shipment_id`, `operation_id`, `resolution_id`;
+  - `entity_type:entity_id` của audit;
+  - so khớp **bằng nguyên trường** `actor_ref` với định danh duy nhất của subject.
+
+  Không dùng giá trị PII làm khoá sở hữu, không dùng `LIKE`/wildcard. Tên/SĐT/địa chỉ chỉ được **thay bên trong** các
+  dòng đã liên kết, bằng nhãn `[đã ẩn theo yêu cầu xóa dữ liệu]`. Đã kiểm bằng test: hai khách trùng địa chỉ, tên chứa
+  `%`/`_`, toàn bộ dòng của khách kia giữ nguyên byte-for-byte.
 - Tự ghi audit `dsr.anonymize`; nội dung là số dòng đã xử lý, không có định danh.
-- Đầu vào là PSID/ChatID (thay bằng tombstone) và các giá trị tên/SĐT/địa chỉ cũ. Các giá trị này dùng để quét trường
-  JSON và ghi chú tự do, thay bằng nhãn `[đã ẩn theo yêu cầu xóa dữ liệu]`.
+
+**Khoá HMAC cho `redis_pending` (CA 416):**
+- Dùng `DSR_HMAC_KEY` riêng, ≥ 32 ký tự, **bắt buộc đặt trên VPS trước khi deploy**. Không dùng chung `META_APP_SECRET`.
+- Mỗi request lưu `detail.hmac_key_id` (12 hex đầu sha256 của khoá).
+- **Xoay khoá:**
+  1. đặt khoá mới vào `DSR_HMAC_KEY`, chuyển khoá cũ sang `DSR_HMAC_KEY_PREVIOUS`, rồi restart api + worker;
+  2. chờ truy vấn sau trả về 0:
+     `SELECT count(*) FROM data_deletion_requests WHERE status='redis_pending' AND detail->>'hmac_key_id'='<id cũ>'`;
+  3. xoá `DSR_HMAC_KEY_PREVIOUS`.
+- **Thiếu khoá:** request vẫn để `redis_pending` với `hmac_unavailable` và không có hmac đoán được. Worker cảnh báo
+  "unmatchable". Cách xử lý: đặt khoá rồi để khách/Meta gửi lại yêu cầu (đường yêu cầu lặp); hoặc chờ TTL Redis (tối đa
+  7 ngày) rồi staff đánh dấu kèm ghi chú.
 
 **A. Kho active do Alpha3S kiểm soát — xử lý tự động trong transaction DSR.** Người chịu trách nhiệm: Dev (đường code).
 

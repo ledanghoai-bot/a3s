@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     meta_verify_token: str = "change-me"
     meta_app_secret: str = ""
     page_access_token: str = ""
+    # CA Review 416: khoa HMAC RIENG cho DSR (subject_hmac cua request redis_pending) — BAT BUOC >= 32 ky tu, KHONG dung
+    # chung META_APP_SECRET. Rotation: dua khoa cu sang DSR_HMAC_KEY_PREVIOUS cho toi khi khong con request redis_pending
+    # mang hmac_key_id cu (runbook DSR §2b-C), roi xoa.
+    dsr_hmac_key: str = ""
+    dsr_hmac_key_previous: str = ""
 
     # Ha tang
     database_url: str = "postgresql+asyncpg://alpha3s:alpha3s@db:5432/alpha3s"

@@ -525,6 +525,25 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
           077 rollback rehearsal OK.
         - **Awaiting PO/legal:** accounting retention period; keeping `***xyz` phone in the GHN snapshot; container log
           rotation (prod has no `max-size`).
+      - **CA Review 416 (REQUEST CHANGES) — the DSR function must not touch other customers:**
+        - **Finding:** (1) the previous 077 function updated `audit_log` table-wide by name/address **values** (and `LIKE`
+          treats `%`/`_` as wildcards) → deleting customer A rewrote audit rows of customer B sharing the address —
+          **reproduced** on head `6ec04ef`; (2) the privileged function accepted arbitrary PSID/PII from the caller;
+          (3) the HMAC used `META_APP_SECRET`/empty string, no rotation story.
+        - **Done:** new `dsr_erase_subject(customer_id, code)` — **takes no identifiers/PII**; reads them from the
+          customer row locked `FOR UPDATE` + that customer's orders/drafts; requires a `received` request not yet bound
+          (one code = one use); refuses tombstoned customers; tombstones itself. Every UPDATE is bounded by **linkage**
+          (customer/order/payment/shipment/operation/resolution/audit `entity_type:entity_id`, whole-field `actor_ref`);
+          no `LIKE`; PII is only replaced inside linked rows. The app calls it BEFORE nulling fields itself. Dedicated
+          `DSR_HMAC_KEY` (≥32) + `DSR_HMAC_KEY_PREVIOUS` for rotation, requests store `hmac_key_id`; missing key →
+          `redis_pending` + `hmac_unavailable` (no guessable HMAC), worker warns. `.env.example` + runbook v1.3.0.
+        - **Verified:** two customers sharing an address, name with `%`/`_` → every row of customer B + an unrelated
+          audit row unchanged byte-for-byte (on the old 077: FAILS exactly as found); the function refuses a random code /
+          a used code / a tombstoned customer; `alpha3s_app` cannot UPDATE audit/order_events/inventory, no PUBLIC
+          EXECUTE; key rotation + missing key. Fresh DB 001..077: 29/29 DSR/disclosure/24h tests; full suite 1206 pass,
+          15 fail identical to baseline; GHN 393 27/27 (fresh DB, packing 10%); whole-DB scan of one journey 41 → 0;
+          077 rollback rehearsal OK.
+        - **Before deploy (PO):** set `DSR_HMAC_KEY` in the VPS `.env`.
 - [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).

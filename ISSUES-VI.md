@@ -494,6 +494,23 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
           GHN 393 pass 14/14 trên DB mới khi đặt `packing_overhead_percent`; rollback 077 rehearsal OK.
         - **Chờ PO/legal:** thời hạn lưu chứng từ kế toán; giữ SĐT `***xyz` trong snapshot GHN; xoay vòng log container
           (prod chưa có `max-size`).
+      - **CA Review 416 (REQUEST CHANGES) — hàm DSR không được chạm khách khác:**
+        - **Finding:** (1) hàm 077 cũ sửa `audit_log` toàn bảng theo **giá trị** tên/địa chỉ (+ `LIKE` coi `%`/`_` là
+          wildcard) → xoá khách A sửa audit khách B trùng địa chỉ — **tái hiện được** trên head `6ec04ef`; (2) hàm quyền
+          cao nhận PSID/PII tuỳ ý từ caller; (3) HMAC dùng `META_APP_SECRET`/chuỗi rỗng, chưa có rotation.
+        - **Đã làm:** hàm mới `dsr_erase_subject(customer_id, code)` — **không nhận định danh/PII**; tự đọc từ dòng customer
+          khoá `FOR UPDATE` + đơn/draft của chính customer; bắt buộc yêu cầu `received` chưa gắn subject (1 code = 1 lần);
+          từ chối khách đã tombstone; tự tombstone. Mọi UPDATE giới hạn theo **liên kết** (customer/order/payment/shipment/
+          operation/resolution/`entity_type:entity_id` audit, `actor_ref` bằng nguyên trường); không `LIKE`; PII chỉ thay
+          bên trong dòng đã liên kết. App gọi hàm TRƯỚC khi tự null các trường. Khoá `DSR_HMAC_KEY` riêng (≥32) +
+          `DSR_HMAC_KEY_PREVIOUS` cho rotation, request lưu `hmac_key_id`; thiếu khoá → `redis_pending` + `hmac_unavailable`
+          (không hmac đoán được), worker cảnh báo. `.env.example` + runbook v1.3.0.
+        - **Đã verify:** test hai khách trùng địa chỉ, tên chứa `%`/`_` → toàn bộ dòng khách B + audit không liên kết giữ
+          nguyên byte-for-byte (trên 077 cũ: FAIL đúng finding); hàm từ chối code ngẫu nhiên / code đã dùng / khách đã
+          tombstone; `alpha3s_app` không UPDATE được audit/order_events/inventory, không có EXECUTE cho PUBLIC; rotation
+          khoá + thiếu khoá. DB mới 001..077: 29/29 test DSR/disclosure/24h; full suite 1206 pass, 15 fail trùng baseline;
+          GHN 393 27/27 (DB mới, packing 10%); quét toàn DB hành trình 1 khách 41 → 0; rollback 077 rehearsal OK.
+        - **Trước deploy (PO):** đặt `DSR_HMAC_KEY` trên VPS `.env`.
 - [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).

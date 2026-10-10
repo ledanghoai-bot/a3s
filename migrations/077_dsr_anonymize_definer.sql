@@ -1,17 +1,20 @@
--- 077 — CA Review 415 §3.2: duong DSR QUYEN HEP cho kho bat bien/append-only.
+-- 077 — CA Review 415 §3.2 + CA Review 416: duong DSR QUYEN HEP cho kho bat bien/append-only.
 -- Van de: audit_log/order_events/inventory_movements/address_*/ghn_shipment_create_*/fulfillment_conversation_events/
 -- payment_events/shipment_delivery_attempts bi trigger (va REVOKE cho alpha3s_app) cam UPDATE -> sau khi khach xoa du
 -- lieu van con PSID/ChatID/dia chi/ten nguoi nhan trong DB active.
 -- Giai phap (KHONG mo quyen UPDATE chung):
 --   1. Role NOLOGIN `alpha3s_dsr` — khong ai dang nhap/khong role ung dung nao la thanh vien.
---   2. Ham SECURITY DEFINER `dsr_anonymize_identity(...)` (OWNER alpha3s_dsr) la duong DUY NHAT; chi chay khi customer
---      DA tombstone (psid = external_chat_id = p_tomb) TRONG CUNG transaction voi DSR cua app -> khong the dung de sua
---      so cua khach dang hoat dong. Ghi audit_log 'dsr.anonymize' (counts, khong dinh danh).
+--   2. Ham SECURITY DEFINER `dsr_erase_subject(p_customer_id, p_code)` (OWNER alpha3s_dsr) la duong DUY NHAT.
+--      CA 416: caller KHONG truyen dinh danh/PII — ham TU doc PSID/ChatID/ten/SDT/dia chi tu chinh dong customer (khoa
+--      FOR UPDATE), don va draft cua customer do; bat buoc co yeu cau xoa `received` chua gan subject (1 code = 1 lan);
+--      tu tombstone customer. Moi UPDATE gioi han bang LIEN KET chac chan (customer_id/order_id/payment_id/shipment_id/
+--      operation_id/resolution_id/entity_id cua chinh subject, hoac so khop BANG nguyen truong voi dinh danh duy nhat).
+--      KHONG dung gia tri PII lam khoa so huu, KHONG LIKE/wildcard. Gia tri PII chi duoc THAY BEN TRONG dong da lien ket.
 --   3. Quyen cua alpha3s_dsr: SELECT + UPDATE THEO COT (chi cot dinh danh), DELETE pii_slots, INSERT audit_log.
 --   4. Trigger bat bien them DUNG 1 ngoai le: TG_OP='UPDATE' AND current_user='alpha3s_dsr'. DELETE van cam; cac cot
 --      nghiep vu (so tien/trang thai/ma van don/ma don...) KHONG duoc cap quyen nen khong doi duoc.
--- Giu toan ven so: thay PSID/ChatID bang tombstone 'deleted:<code>' (cung gia tri voi customers.psid), dia chi chi tiet/
--- ten/SDT -> NULL hoac '***xyz'; giu ma hanh chinh, ma don, ma van don, so tien, thoi gian.
+-- Giu toan ven so: thay PSID/ChatID bang tombstone 'deleted:<code>', dia chi chi tiet/ten/SDT -> NULL, nhan hoac
+-- '***xyz'; giu ma hanh chinh, ma don, ma van don, so tien, thoi gian.
 -- transactional: true
 
 DO $$
@@ -22,8 +25,18 @@ BEGIN
 END $$;
 GRANT USAGE ON SCHEMA public TO alpha3s_dsr;
 
+-- ---------------------------------------------------------------- yeu cau xoa (CA 415 §3.5 + CA 416)
+-- subject_hmac: HMAC(DSR_HMAC_KEY, psid) CHI ton tai khi status='redis_pending'; detail.hmac_key_id = id khoa (rotation).
+ALTER TABLE data_deletion_requests ADD COLUMN IF NOT EXISTS subject_hmac TEXT;
+ALTER TABLE data_deletion_requests ADD COLUMN IF NOT EXISTS detail JSONB;
+CREATE INDEX IF NOT EXISTS idx_ddr_redis_pending ON data_deletion_requests (status) WHERE status = 'redis_pending';
+
 -- ---------------------------------------------------------------- quyen theo cot
-GRANT SELECT ON customers, orders, payments, shipments TO alpha3s_dsr;
+GRANT SELECT ON orders, order_items, payments, payment_instructions, shipments, command_executions, outbox_events,
+  fulfillment_conversations, inventory_reservations, address_review_queue, order_intents TO alpha3s_dsr;
+GRANT SELECT, UPDATE (psid, external_chat_id, name, phone, address, current_address_resolution_id) ON customers
+  TO alpha3s_dsr;
+GRANT SELECT, UPDATE (detail) ON data_deletion_requests TO alpha3s_dsr;
 GRANT SELECT, INSERT ON audit_log TO alpha3s_dsr;
 DO $$ BEGIN EXECUTE format('GRANT USAGE ON SEQUENCE %s TO alpha3s_dsr', pg_get_serial_sequence('audit_log', 'id')); END $$;
 GRANT SELECT, UPDATE (actor_ref, before, after) ON audit_log TO alpha3s_dsr;
@@ -129,107 +142,163 @@ BEGIN
 END;
 $$;
 
--- ---------------------------------------------------------------- helper thay dinh danh (ranh gioi ky tu)
--- Thay moi lan xuat hien cua tung ref (khong dinh lien chu/so khac) bang tomb. Ref ngan (<5) bi bo qua (tranh thay nham).
-CREATE OR REPLACE FUNCTION dsr_scrub_text(t text, refs text[], tomb text) RETURNS text
+
+-- ---------------------------------------------------------------- helper (khong LIKE/wildcard; khop ranh gioi ky tu)
+-- Thay moi lan xuat hien cua tung gia tri (khong dinh lien chu/so khac) bang repl. Gia tri ngan (<5) bi bo qua.
+CREATE OR REPLACE FUNCTION dsr_scrub_text(t text, vals text[], repl text) RETURNS text
 LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE r text; esc text;
 BEGIN
-  IF t IS NULL THEN RETURN NULL; END IF;
-  FOREACH r IN ARRAY refs LOOP
+  IF t IS NULL OR vals IS NULL THEN RETURN t; END IF;
+  FOREACH r IN ARRAY vals LOOP
     CONTINUE WHEN r IS NULL OR length(r) < 5 OR position(r IN t) = 0;
     esc := regexp_replace(r, '([.^$*+?()\[\]{}|\\-])', '\\\1', 'g');
-    t := regexp_replace(t, '(^|[^0-9A-Za-z])' || esc || '(?=$|[^0-9A-Za-z])', '\1' || tomb, 'g');
+    t := regexp_replace(t, '(^|[^0-9A-Za-z])' || esc || '(?=$|[^0-9A-Za-z])', '\1' || repl, 'g');
   END LOOP;
   RETURN t;
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION dsr_scrub_json(j jsonb, refs text[], tomb text) RETURNS jsonb
+CREATE OR REPLACE FUNCTION dsr_scrub_json(j jsonb, vals text[], repl text) RETURNS jsonb
 LANGUAGE sql IMMUTABLE AS $$
-  SELECT CASE WHEN j IS NULL THEN NULL ELSE dsr_scrub_text(j::text, refs, tomb)::jsonb END
+  SELECT CASE WHEN j IS NULL THEN NULL ELSE dsr_scrub_text(j::text, vals, repl)::jsonb END
 $$;
 
--- ---------------------------------------------------------------- ham DSR (duong duy nhat)
-CREATE OR REPLACE FUNCTION dsr_anonymize_identity(p_customer_id bigint, p_refs text[], p_tomb text, p_code text,
-                                                  p_pii text[] DEFAULT '{}')
+-- Co chua it nhat 1 gia tri (so khop chuoi con bang position — KHONG pattern, '%'/'_' la ky tu thuong).
+CREATE OR REPLACE FUNCTION dsr_has_any(t text, vals text[]) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT t IS NOT NULL AND vals IS NOT NULL
+     AND EXISTS (SELECT 1 FROM unnest(vals) v WHERE v IS NOT NULL AND length(v) >= 5 AND position(v IN t) > 0)
+$$;
+
+-- ---------------------------------------------------------------- ham DSR (duong duy nhat, CA 416)
+CREATE OR REPLACE FUNCTION dsr_erase_subject(p_customer_id bigint, p_code text)
 RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
-  v_orders bigint[]; v_orders_txt text[]; v_refs text[]; v_res uuid[]; v_like text[]; v_pii text[];
-  v_like_pii text[];
-  c_mark CONSTANT text := '[đã ẩn theo yêu cầu xóa dữ liệu]';
+  c record;
+  v_tomb text; v_refs text[]; v_actor text[]; v_pii text[]; v_all text[];
+  v_orders bigint[]; v_ot text[]; v_pay bigint[]; v_ship bigint[]; v_ops bigint[]; v_cmds uuid[]; v_res uuid[];
+  v_req uuid[]; v_ent text[];
   n int; v_out jsonb := '{}'::jsonb;
+  c_mark CONSTANT text := '[đã ẩn theo yêu cầu xóa dữ liệu]';
 BEGIN
-  -- Dieu kien: chi cho customer DA tombstone bang dung p_tomb (cung transaction DSR) -> khong sua so khach dang song.
-  IF p_tomb IS NULL OR p_tomb NOT LIKE 'deleted:%' OR p_code IS NULL OR p_tomb <> 'deleted:' || p_code THEN
-    RAISE EXCEPTION 'dsr_anonymize_identity: tombstone khong hop le';
+  -- (1) Bat buoc co yeu cau xoa that: code dung dinh dang, status 'received', CHUA gan subject (1 code = 1 lan).
+  IF p_code IS NULL OR p_code !~ '^[0-9a-f]{16}$' THEN
+    RAISE EXCEPTION 'dsr_erase_subject: confirmation code khong hop le';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM customers WHERE id = p_customer_id AND psid = p_tomb AND external_chat_id = p_tomb) THEN
-    RAISE EXCEPTION 'dsr_anonymize_identity: customer % chua tombstone trong transaction nay', p_customer_id;
+  PERFORM 1 FROM data_deletion_requests
+   WHERE confirmation_code = p_code AND status = 'received' AND NOT coalesce(detail ? 'subject_bound', false)
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'dsr_erase_subject: khong co yeu cau xoa hop le (received, chua dung) cho code nay';
   END IF;
-  SELECT coalesce(array_agg(DISTINCT x), '{}') INTO v_refs FROM unnest(p_refs) x WHERE x IS NOT NULL AND length(x) >= 5;
-  IF cardinality(v_refs) = 0 THEN
-    RAISE EXCEPTION 'dsr_anonymize_identity: thieu ref';
+  -- (2) Dinh danh/PII GOC doc TU CHINH dong customer (khoa) — caller khong cap gia tri nao.
+  SELECT id, psid, external_chat_id, name, phone, address, current_address_resolution_id INTO c
+    FROM customers WHERE id = p_customer_id FOR UPDATE;
+  IF NOT FOUND OR left(c.psid, 8) = 'deleted:' OR left(c.external_chat_id, 8) = 'deleted:' THEN
+    RAISE EXCEPTION 'dsr_erase_subject: customer % khong ton tai hoac da xoa', p_customer_id;
   END IF;
-  SELECT coalesce(array_agg('%' || x || '%'), '{}') INTO v_like FROM unnest(v_refs) x;
-  -- PII gia tri (ten/SDT/dia chi cu cua khach) -> chi dung de quet truong JSON/tu do; thay bang c_mark.
-  SELECT coalesce(array_agg(DISTINCT x), '{}') INTO v_pii FROM unnest(p_pii) x WHERE x IS NOT NULL AND length(x) >= 5;
-  SELECT coalesce(array_agg(id), '{}') INTO v_orders FROM orders WHERE customer_id = p_customer_id;
-  SELECT coalesce(array_agg(x::text), '{}') INTO v_orders_txt FROM unnest(v_orders) x;
+  v_tomb := 'deleted:' || p_code;
+  v_refs := ARRAY(SELECT DISTINCT x FROM unnest(ARRAY[c.psid, c.external_chat_id]) x WHERE x IS NOT NULL AND length(x) >= 5);
+  v_actor := ARRAY(SELECT DISTINCT y FROM unnest(v_refs) r, unnest(ARRAY[r, 'customer:' || r]) y);
+  SELECT coalesce(array_agg(id), '{}') INTO v_orders FROM orders WHERE customer_id = c.id;
+  v_ot := ARRAY(SELECT x::text FROM unnest(v_orders) x);
+  -- PII cua subject (ho so + nguoi nhan cac don + draft) — CHI dung de THAY ben trong dong DA lien ket o duoi.
+  SELECT coalesce(array_agg(DISTINCT btrim(v)), '{}') INTO v_pii FROM (
+      SELECT unnest(ARRAY[c.name, c.phone, c.address, regexp_replace(coalesce(c.phone, ''), '\D', '', 'g')]) v
+      UNION ALL
+      SELECT unnest(ARRAY[shipping_name, shipping_phone, shipping_address,
+                          regexp_replace(coalesce(shipping_phone, ''), '\D', '', 'g')]) FROM orders WHERE customer_id = c.id
+      UNION ALL
+      SELECT unnest(ARRAY[draft_customer_name, draft_phone, draft_address,
+                          regexp_replace(coalesce(draft_phone, ''), '\D', '', 'g')]) FROM order_intents
+       WHERE customer_id = c.id) s
+   WHERE v IS NOT NULL AND length(btrim(v)) >= 5;
+  v_all := v_refs || v_pii;
 
-  SELECT coalesce(array_agg('%' || x || '%'), '{}') INTO v_like_pii FROM unnest(v_pii) x;
+  -- (3) Tap LIEN KET chac chan cua subject.
+  SELECT coalesce(array_agg(id), '{}') INTO v_pay FROM payments WHERE order_id = ANY (v_orders);
+  SELECT coalesce(array_agg(id), '{}') INTO v_ship FROM shipments WHERE order_id = ANY (v_orders);
+  SELECT coalesce(array_agg(id), '{}') INTO v_ops FROM ghn_shipment_create_operations
+   WHERE order_id = ANY (v_orders) OR initiator_customer_id = c.id;
+  SELECT coalesce(array_agg(id), '{}') INTO v_cmds FROM command_executions WHERE customer_id = c.id;
+  SELECT coalesce(array_agg(DISTINCT rid), '{}') INTO v_res FROM (
+      SELECT id AS rid FROM address_resolution
+       WHERE (subject_type = 'customer' AND subject_id = c.id::text)
+          OR (subject_type = 'order' AND subject_id = ANY (v_ot))
+      UNION SELECT resolution_id FROM order_address_snapshot WHERE order_id = ANY (v_orders)
+      UNION SELECT verified_address_id FROM orders WHERE id = ANY (v_orders)
+      UNION SELECT c.current_address_resolution_id) s WHERE rid IS NOT NULL;
+  SELECT coalesce(array_agg(id), '{}') INTO v_req FROM address_confirmation_request WHERE resolution_id = ANY (v_res);
+  v_ent := ARRAY(
+      SELECT 'order:' || x FROM unnest(v_ot) x
+      UNION ALL SELECT 'orders:' || x FROM unnest(v_ot) x
+      UNION ALL SELECT 'customers:' || c.id
+      UNION ALL SELECT 'payments:' || x FROM unnest(v_pay) x
+      UNION ALL SELECT 'shipments:' || x FROM unnest(v_ship) x
+      UNION ALL SELECT 'ghn_shipment_create_operations:' || x FROM unnest(v_ops) x
+      UNION ALL SELECT 'command:' || x FROM unnest(v_cmds) x
+      UNION ALL SELECT 'address_resolution:' || x FROM unnest(v_res) x
+      UNION ALL SELECT 'address_confirmation_request:' || x FROM unnest(v_req) x
+      UNION ALL SELECT 'order_address_snapshot:' || id FROM order_address_snapshot WHERE order_id = ANY (v_orders)
+      UNION ALL SELECT 'payment_instructions:' || id FROM payment_instructions WHERE order_id = ANY (v_orders)
+      UNION ALL SELECT 'fulfillment_conversations:' || id FROM fulfillment_conversations WHERE order_id = ANY (v_orders)
+      UNION ALL SELECT 'staff_attention:' || id FROM staff_attention WHERE order_id = ANY (v_orders)
+      UNION ALL SELECT 'address_review_queue:' || id FROM address_review_queue
+       WHERE (subject_type = 'customer' AND subject_id = c.id::text) OR (subject_type = 'order' AND subject_id = ANY (v_ot))
+      UNION ALL SELECT 'address_change_log:' || id FROM address_change_log
+       WHERE customer_ref = ANY (v_refs || ARRAY[c.id::text])
+      UNION ALL SELECT 'outbox_event:' || id FROM outbox_events
+       WHERE command_id = ANY (v_cmds) OR payload->>'customer_ref' = ANY (v_refs) OR payload->>'order_id' = ANY (v_ot));
 
-  -- audit_log: actor_ref/before/after chua PSID/ChatID (-> tombstone) hoac ten/SDT/dia chi (-> c_mark).
-  UPDATE audit_log SET actor_ref = dsr_scrub_text(actor_ref, v_refs, p_tomb),
-                       before = dsr_scrub_json(dsr_scrub_json(before, v_refs, p_tomb), v_pii, c_mark),
-                       after = dsr_scrub_json(dsr_scrub_json(after, v_refs, p_tomb), v_pii, c_mark)
-   WHERE actor_ref LIKE ANY (v_like) OR before::text LIKE ANY (v_like) OR after::text LIKE ANY (v_like)
-      OR before::text LIKE ANY (v_like_pii) OR after::text LIKE ANY (v_like_pii);
+  -- (4) Kho bat bien — moi UPDATE: dong LIEN KET subject (+ chi khi thuc su chua dinh danh/PII cua subject).
+  UPDATE audit_log SET actor_ref = CASE WHEN actor_ref = ANY (v_actor) THEN dsr_scrub_text(actor_ref, v_refs, v_tomb)
+                                        ELSE actor_ref END,
+         before = dsr_scrub_json(dsr_scrub_json(before, v_refs, v_tomb), v_pii, c_mark),
+         after = dsr_scrub_json(dsr_scrub_json(after, v_refs, v_tomb), v_pii, c_mark)
+   WHERE (actor_ref = ANY (v_actor) OR (entity_type || ':' || entity_id) = ANY (v_ent))
+     AND (actor_ref = ANY (v_actor) OR dsr_has_any(before::text, v_all) OR dsr_has_any(after::text, v_all));
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('audit_log', n);
 
-  UPDATE order_events SET actor_id = dsr_scrub_text(actor_id, v_refs, p_tomb),
-                          causation_id = dsr_scrub_text(causation_id, v_refs, p_tomb),
-                          idempotency_key = dsr_scrub_text(idempotency_key, v_refs, p_tomb),
-                          metadata_redacted = dsr_scrub_json(metadata_redacted, v_refs, p_tomb)
-   WHERE actor_id LIKE ANY (v_like) OR causation_id LIKE ANY (v_like) OR idempotency_key LIKE ANY (v_like)
-      OR metadata_redacted::text LIKE ANY (v_like);
+  UPDATE order_events SET actor_id = dsr_scrub_text(actor_id, v_refs, v_tomb),
+         causation_id = dsr_scrub_text(causation_id, v_refs, v_tomb),
+         idempotency_key = dsr_scrub_text(idempotency_key, v_refs, v_tomb),
+         metadata_redacted = dsr_scrub_json(dsr_scrub_json(metadata_redacted, v_refs, v_tomb), v_pii, c_mark)
+   WHERE order_id = ANY (v_orders)
+     AND dsr_has_any(concat_ws(' ', actor_id, causation_id, idempotency_key, metadata_redacted::text), v_all);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('order_events', n);
 
-  UPDATE inventory_movements SET actor_id = dsr_scrub_text(actor_id, v_refs, p_tomb),
-                                 idempotency_key = dsr_scrub_text(idempotency_key, v_refs, p_tomb)
-   WHERE actor_id LIKE ANY (v_like) OR idempotency_key LIKE ANY (v_like);
+  UPDATE inventory_movements SET actor_id = dsr_scrub_text(actor_id, v_refs, v_tomb),
+         idempotency_key = dsr_scrub_text(idempotency_key, v_refs, v_tomb)
+   WHERE ((reference_type = 'order' AND reference_id = ANY (v_ot))
+       OR (reference_type = 'order_item' AND reference_id IN (SELECT id::text FROM order_items WHERE order_id = ANY (v_orders)))
+       OR (reference_type = 'reservation'
+           AND reference_id IN (SELECT id::text FROM inventory_reservations WHERE order_id = ANY (v_orders))))
+     AND dsr_has_any(concat_ws(' ', actor_id, idempotency_key), v_refs);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('inventory_movements', n);
 
-  -- Dia chi: resolution cua khach / don cua khach / snapshot gan don -> bo dia chi chi tiet + input tho; GIU ma hanh chinh.
-  SELECT coalesce(array_agg(DISTINCT id), '{}') INTO v_res FROM (
-      SELECT id FROM address_resolution
-       WHERE (subject_type = 'customer' AND subject_id = p_customer_id::text)
-          OR (subject_type = 'order' AND subject_id = ANY (v_orders_txt))
-          OR idempotency_key LIKE ANY (v_like)
-      UNION SELECT resolution_id FROM order_address_snapshot WHERE order_id = ANY (v_orders)
-      UNION SELECT verified_address_id FROM orders WHERE id = ANY (v_orders) AND verified_address_id IS NOT NULL) s;
   UPDATE address_resolution SET raw_province = NULL, raw_district = NULL, raw_ward = NULL, street_text = NULL,
-                                idempotency_key = dsr_scrub_text(idempotency_key, v_refs, p_tomb)
+         idempotency_key = dsr_scrub_text(idempotency_key, v_refs, v_tomb)
    WHERE id = ANY (v_res);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('address_resolution', n);
 
   UPDATE order_address_snapshot SET street_text = NULL WHERE order_id = ANY (v_orders) AND street_text IS NOT NULL;
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('order_address_snapshot', n);
 
-  UPDATE address_change_log SET customer_ref = dsr_scrub_text(customer_ref, v_refs, p_tomb), old_value = NULL,
-                                new_value = NULL
-   WHERE customer_ref = p_customer_id::text OR customer_ref LIKE ANY (v_like);
+  UPDATE address_change_log SET customer_ref = dsr_scrub_text(customer_ref, v_refs, v_tomb), old_value = NULL,
+         new_value = NULL
+   WHERE customer_ref = ANY (v_refs || ARRAY[c.id::text]);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('address_change_log', n);
 
-  UPDATE address_confirmation_request SET bound_ref = dsr_scrub_text(bound_ref, v_refs, p_tomb)
-   WHERE bound_ref LIKE ANY (v_like);
+  UPDATE address_confirmation_request SET bound_ref = dsr_scrub_text(bound_ref, v_refs, v_tomb)
+   WHERE id = ANY (v_req) AND dsr_has_any(bound_ref, v_refs);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('address_confirmation_request', n);
-  UPDATE address_confirmation_outbox SET payload = dsr_scrub_json(payload, v_refs, p_tomb)
-   WHERE payload::text LIKE ANY (v_like);
+  UPDATE address_confirmation_outbox SET payload = dsr_scrub_json(dsr_scrub_json(payload, v_refs, v_tomb), v_pii, c_mark)
+   WHERE request_id = ANY (v_req) AND dsr_has_any(payload::text, v_all);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('address_confirmation_outbox', n);
 
-  -- GHN: nguoi nhan trong snapshot -> NULL/mask SDT 3 so cuoi; giu ma don/ma van don/khoi luong/phi.
+  -- GHN: nguoi nhan -> NULL / SDT '***xyz'; giu ma don/ma van don/khoi luong/phi/ma vung.
   UPDATE ghn_shipment_create_operations
      SET request_snapshot = CASE WHEN request_snapshot ? 'recipient' THEN jsonb_set(request_snapshot, '{recipient}',
            jsonb_build_object('name', NULL, 'address_text', NULL, 'dsr_anonymized', true,
@@ -237,90 +306,88 @@ BEGIN
                            THEN '***' || right(regexp_replace(request_snapshot #>> '{recipient,phone}', '\D', '', 'g'), 3)
                            ELSE NULL END))
            ELSE request_snapshot END,
-         command_key = dsr_scrub_text(command_key, v_refs, p_tomb),
+         command_key = dsr_scrub_text(command_key, v_refs, v_tomb),
          note = CASE WHEN note IS NULL THEN NULL ELSE c_mark END
-   WHERE order_id = ANY (v_orders) OR initiator_customer_id = p_customer_id;
+   WHERE id = ANY (v_ops);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('ghn_shipment_create_operations', n);
-  UPDATE ghn_shipment_create_attempts SET actor = dsr_scrub_text(actor, v_refs, p_tomb) WHERE actor LIKE ANY (v_like);
+  UPDATE ghn_shipment_create_attempts SET actor = dsr_scrub_text(actor, v_refs, v_tomb)
+   WHERE operation_id = ANY (v_ops) AND dsr_has_any(actor, v_refs);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('ghn_shipment_create_attempts', n);
 
-  -- M7 journal: noi dung tin bot (reply_text) xoa nhu messages; command_key/detail thay ref.
+  -- M7 journal: tin bot (reply_text) xoa nhu messages; command_key/detail thay ref/PII.
   UPDATE fulfillment_conversation_events SET reply_text = NULL,
-         command_key = dsr_scrub_text(command_key, v_refs, p_tomb),
-         detail = dsr_scrub_json(dsr_scrub_json(detail, v_refs, p_tomb), v_pii, c_mark)
+         command_key = dsr_scrub_text(command_key, v_refs, v_tomb),
+         detail = dsr_scrub_json(dsr_scrub_json(detail, v_refs, v_tomb), v_pii, c_mark)
    WHERE order_id = ANY (v_orders);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('fulfillment_conversation_events', n);
 
-  UPDATE payment_events SET command_key = dsr_scrub_text(command_key, v_refs, p_tomb),
-                            recorded_by = dsr_scrub_text(recorded_by, v_refs, p_tomb),
-                            note = CASE WHEN note IS NULL THEN NULL ELSE c_mark END
-   WHERE payment_id IN (SELECT id FROM payments WHERE order_id = ANY (v_orders))
-     AND (command_key LIKE ANY (v_like) OR recorded_by LIKE ANY (v_like) OR note IS NOT NULL);
+  UPDATE payment_events SET command_key = dsr_scrub_text(command_key, v_refs, v_tomb),
+         recorded_by = dsr_scrub_text(recorded_by, v_refs, v_tomb),
+         note = CASE WHEN note IS NULL THEN NULL ELSE c_mark END
+   WHERE payment_id = ANY (v_pay) AND (note IS NOT NULL OR dsr_has_any(concat_ws(' ', command_key, recorded_by), v_refs));
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('payment_events', n);
 
-  UPDATE shipment_delivery_attempts SET command_key = dsr_scrub_text(command_key, v_refs, p_tomb),
-                                        recorded_by = dsr_scrub_text(recorded_by, v_refs, p_tomb),
-                                        note = CASE WHEN note IS NULL THEN NULL ELSE c_mark END
-   WHERE shipment_id IN (SELECT id FROM shipments WHERE order_id = ANY (v_orders))
-     AND (command_key LIKE ANY (v_like) OR recorded_by LIKE ANY (v_like) OR note IS NOT NULL);
+  UPDATE shipment_delivery_attempts SET command_key = dsr_scrub_text(command_key, v_refs, v_tomb),
+         recorded_by = dsr_scrub_text(recorded_by, v_refs, v_tomb),
+         note = CASE WHEN note IS NULL THEN NULL ELSE c_mark END
+   WHERE shipment_id = ANY (v_ship) AND (note IS NOT NULL OR dsr_has_any(concat_ws(' ', command_key, recorded_by), v_refs));
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('shipment_delivery_attempts', n);
 
-  -- SePay: noi dung/dien giai chuyen khoan (co the chua ten nguoi tra) -> an; giu so tien/ma tham chieu/thoi gian.
+  -- SePay: noi dung/dien giai chuyen khoan (thuong chua ten nguoi tra) -> an; giu so tien/ma tham chieu/thoi gian.
   UPDATE provider_events SET raw = raw || jsonb_build_object('content', '[dsr]', 'description', '[dsr]')
    WHERE order_id = ANY (v_orders) AND (raw ? 'content' OR raw ? 'description');
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('provider_events', n);
 
-  UPDATE staff_attention SET detail = dsr_scrub_json(dsr_scrub_json(detail, v_refs, p_tomb), v_pii, c_mark),
+  UPDATE staff_attention SET detail = dsr_scrub_json(dsr_scrub_json(detail, v_refs, v_tomb), v_pii, c_mark),
          resolution_note = CASE WHEN resolution_note IS NULL THEN NULL ELSE c_mark END
-   WHERE order_id = ANY (v_orders);
+   WHERE order_id = ANY (v_orders) AND (resolution_note IS NOT NULL OR dsr_has_any(detail::text, v_all));
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('staff_attention', n);
 
-  UPDATE price_overrides SET note = c_mark WHERE customer_id = p_customer_id AND note IS NOT NULL;
+  UPDATE price_overrides SET note = c_mark WHERE customer_id = c.id AND note IS NOT NULL;
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('price_overrides', n);
 
-  DELETE FROM pii_slots WHERE customer_ref = p_customer_id::text OR customer_ref = ANY (v_refs);
+  DELETE FROM pii_slots WHERE customer_ref = ANY (v_refs || ARRAY[c.id::text]);
   GET DIAGNOSTICS n = ROW_COUNT; v_out := v_out || jsonb_build_object('pii_slots', n);
 
+  -- (5) Tombstone customer (psid VA external_chat_id) + gan request (1 lan) + audit (khong dinh danh).
+  UPDATE customers SET psid = v_tomb, external_chat_id = v_tomb, name = NULL, phone = NULL, address = NULL,
+         current_address_resolution_id = NULL
+   WHERE id = c.id;
+  UPDATE data_deletion_requests SET detail = coalesce(detail, '{}'::jsonb) || jsonb_build_object('subject_bound', true)
+   WHERE confirmation_code = p_code;
   INSERT INTO audit_log (actor_type, actor_ref, action, entity_type, entity_id, after, reason)
   VALUES ('system', 'dsr', 'dsr.anonymize', 'data_deletion_request', p_code,
-          v_out || jsonb_build_object('customer', 'customer:' || p_customer_id), 'data subject deletion request');
-  RETURN v_out;
+          v_out || jsonb_build_object('customer', 'customer:' || c.id), 'data subject deletion request');
+  RETURN v_out || jsonb_build_object('customer_id', c.id);
 END;
 $$;
 
-ALTER FUNCTION dsr_anonymize_identity(bigint, text[], text, text, text[]) OWNER TO alpha3s_dsr;
+ALTER FUNCTION dsr_erase_subject(bigint, text) OWNER TO alpha3s_dsr;
 ALTER FUNCTION dsr_scrub_text(text, text[], text) OWNER TO alpha3s_dsr;
 ALTER FUNCTION dsr_scrub_json(jsonb, text[], text) OWNER TO alpha3s_dsr;
-REVOKE ALL ON FUNCTION dsr_anonymize_identity(bigint, text[], text, text, text[]) FROM PUBLIC;
+ALTER FUNCTION dsr_has_any(text, text[]) OWNER TO alpha3s_dsr;
+REVOKE ALL ON FUNCTION dsr_erase_subject(bigint, text) FROM PUBLIC;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'alpha3s_app') THEN
-    GRANT EXECUTE ON FUNCTION dsr_anonymize_identity(bigint, text[], text, text, text[]) TO alpha3s_app;
+    GRANT EXECUTE ON FUNCTION dsr_erase_subject(bigint, text) TO alpha3s_app;
   END IF;
 END $$;
-
--- ---------------------------------------------------------------- yeu cau xoa: trang thai Redis (CA 415 §3.5)
--- subject_hmac: HMAC(app secret, psid) CHI ton tai khi status='redis_pending' (de lan retry/worker tim lai key Redis
--- cua chinh khach do ma KHONG luu PSID tho); ve NULL khi hoan tat.
-ALTER TABLE data_deletion_requests ADD COLUMN IF NOT EXISTS subject_hmac TEXT;
-ALTER TABLE data_deletion_requests ADD COLUMN IF NOT EXISTS detail JSONB;
-CREATE INDEX IF NOT EXISTS idx_ddr_redis_pending ON data_deletion_requests (status) WHERE status = 'redis_pending';
 
 -- Postcondition
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
-                 WHERE p.proname = 'dsr_anonymize_identity' AND p.prosecdef AND r.rolname = 'alpha3s_dsr') THEN
-    RAISE EXCEPTION '077 postcondition: dsr_anonymize_identity phai SECURITY DEFINER owner alpha3s_dsr';
+                 WHERE p.proname = 'dsr_erase_subject' AND p.prosecdef AND r.rolname = 'alpha3s_dsr') THEN
+    RAISE EXCEPTION '077 postcondition: dsr_erase_subject phai SECURITY DEFINER owner alpha3s_dsr';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'dsr_erase_subject' AND pronargs <> 2) THEN
+    RAISE EXCEPTION '077 postcondition: dsr_erase_subject chi duoc nhan (customer_id, code) — khong nhan dinh danh tu caller';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE r.rolname = 'alpha3s_dsr') THEN
     RAISE EXCEPTION '077 postcondition: alpha3s_dsr khong duoc co thanh vien';
   END IF;
 END $$;
 
--- ============================ ROLLBACK (chay tay khi CA/PO quyet; KHONG tu dong) ============================
--- Code cu KHONG goi ham nay. Rollback: (1) DROP FUNCTION dsr_anonymize_identity(bigint,text[],text,text,text[]),
--- dsr_scrub_json(jsonb,text[],text), dsr_scrub_text(text,text[],text); (2) CREATE OR REPLACE 9 ham trigger ve ban 053/055/
--- 057/064/073/022/021 (bo dong 'current_user = alpha3s_dsr'); (3) REVOKE ALL ... FROM alpha3s_dsr tren cac bang tren;
--- DROP ROLE alpha3s_dsr; (4) cot data_deletion_requests.subject_hmac/detail giu nguyen (additive) hoac DROP khi
--- khong con status='redis_pending'. Du lieu da an danh KHONG khoi phuc (dung yeu cau DSR).
+-- ============================ ROLLBACK ============================
+-- scripts/rollback_077_dsr_definer.sql (chay tay khi CA/PO quyet). Du lieu da an danh KHONG khoi phuc.

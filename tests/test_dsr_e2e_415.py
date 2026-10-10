@@ -19,6 +19,15 @@ from app.services import customer_identity as ci
 
 DB = os.environ.get("M6_TEST_DB") == "1"
 dbonly = pytest.mark.skipif(not DB, reason="can DB+Redis (M6_TEST_DB=1)")
+KEY1 = "dsr-test-key-one-" + "a" * 32
+KEY2 = "dsr-test-key-two-" + "b" * 32
+
+
+@pytest.fixture(autouse=True)
+def _dsr_key(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "dsr_hmac_key", KEY1)
+    monkeypatch.setattr(settings, "dsr_hmac_key_previous", "")
 
 
 async def _conn():
@@ -50,7 +59,7 @@ async def _full_scan(conn, needles: list[str]) -> dict:
     hits = {}
     for t in tables:
         for nd in needles:
-            n = await conn.fetchval(f'SELECT count(*) FROM public."{t}" x WHERE x::text LIKE \'%\' || $1 || \'%\'', nd)
+            n = await conn.fetchval(f'SELECT count(*) FROM public."{t}" x WHERE strpos(x::text, $1) > 0', nd)
             if n:
                 hits[f"{t}:{nd[:4]}…"] = n
     return hits
@@ -84,8 +93,9 @@ async def _seed_journey(conn, idn: dict) -> dict:
     tag = uuid.uuid4().hex[:8]
     dsv = await conn.fetchval("SELECT version FROM admin_unit_dataset ORDER BY version LIMIT 1")
     if dsv is None:
-        dsv = f"t415-{tag}"
-        await conn.execute("INSERT INTO admin_unit_dataset(version,status) VALUES($1,'draft')", dsv)
+        dsv = f"VN-ADMIN-2097-10-v{random.randint(10**6, 10**9)}"
+        await conn.execute("INSERT INTO admin_unit_dataset (version, status, source_url, source_kind, sha256, license) "
+                           "VALUES ($1,'draft','test','cross_reference',$2,'test')", dsv, "0" * 64)
     # --- intent + dia chi (resolution + snapshot) ---
     await conn.execute(
         "INSERT INTO order_intents(customer_id,conversation_id,channel,state,draft_customer_name,draft_phone,"
@@ -118,6 +128,10 @@ async def _seed_journey(conn, idn: dict) -> dict:
     await conn.execute("INSERT INTO audit_log(actor_type,actor_ref,action,entity_type,entity_id,after) "
                        "VALUES('customer',$1,'shipment.ghn_create.prepare','order',$2,$3::jsonb)",
                        f"customer:{P}", str(oid), json.dumps({"by": P, "order_id": oid}))
+    # audit cua staff tren don (entity lien ket) co ten/dia chi nguoi nhan trong after (vd sua don tay).
+    await conn.execute("INSERT INTO audit_log(actor_type,actor_ref,action,entity_type,entity_id,after) "
+                       "VALUES('staff','staff:1','order.edit','order',$1,$2::jsonb)", str(oid),
+                       json.dumps({"customer_name": name, "note": f"giao {street}"}))
     # --- M7 / payment / shipment / GHN / SePay ---
     await conn.execute("INSERT INTO fulfillment_conversations(order_id,channel,customer_ref,step,policy_version) "
                        "VALUES($1,'messenger',$2,'completed',1)", oid, P)
@@ -221,36 +235,132 @@ async def test_e2e_full_journey_delete_scans_whole_db_and_redis():
         await conn.close()
 
 
+async def _subject_rows(conn, s: dict, psid: str) -> dict:
+    """Moi dong lien ket voi 1 khach (theo khoa lien ket, KHONG theo gia tri PII) -> {bang: [row::text ...]} de so
+    byte-for-byte truoc/sau khi xoa khach KHAC."""
+    cid, oid = s["cid"], s["oid"]
+    q = {
+        "customers": ("SELECT x::text FROM customers x WHERE id=$1", cid),
+        "orders": ("SELECT x::text FROM orders x WHERE customer_id=$1", cid),
+        "audit_log": ("SELECT x::text FROM audit_log x WHERE (entity_type IN ('order','orders') AND entity_id=$1) "
+                      "OR actor_ref IN ($2, 'customer:' || $2)", str(oid), psid),
+        "order_events": ("SELECT x::text FROM order_events x WHERE order_id=$1", oid),
+        "inventory_movements": ("SELECT x::text FROM inventory_movements x WHERE reference_id=$1", str(oid)),
+        "address_resolution": ("SELECT x::text FROM address_resolution x WHERE id=$1", s["res"]),
+        "order_address_snapshot": ("SELECT x::text FROM order_address_snapshot x WHERE order_id=$1", oid),
+        "address_change_log": ("SELECT x::text FROM address_change_log x WHERE customer_ref=$1", psid),
+        "ghn_ops": ("SELECT x::text FROM ghn_shipment_create_operations x WHERE id=$1", s["op"]),
+        "ghn_attempts": ("SELECT x::text FROM ghn_shipment_create_attempts x WHERE operation_id=$1", s["op"]),
+        "fce": ("SELECT x::text FROM fulfillment_conversation_events x WHERE order_id=$1", oid),
+        "fc": ("SELECT x::text FROM fulfillment_conversations x WHERE order_id=$1", oid),
+        "payments": ("SELECT x::text FROM payments x WHERE order_id=$1", oid),
+        "payment_events": ("SELECT x::text FROM payment_events x WHERE payment_id=$1", s["pay"]),
+        "provider_events": ("SELECT x::text FROM provider_events x WHERE order_id=$1", oid),
+        "shipments": ("SELECT x::text FROM shipments x WHERE order_id=$1", oid),
+        "sda": ("SELECT x::text FROM shipment_delivery_attempts x WHERE shipment_id=$1", s["sh"]),
+        "staff_attention": ("SELECT x::text FROM staff_attention x WHERE order_id=$1", oid),
+        "price_overrides": ("SELECT x::text FROM price_overrides x WHERE customer_id=$1", cid),
+        "order_intents": ("SELECT x::text FROM order_intents x WHERE customer_id=$1", cid),
+        "command_executions": ("SELECT x::text FROM command_executions x WHERE customer_id=$1", cid),
+        "outbox_events": ("SELECT x::text FROM outbox_events x WHERE payload->>'order_id'=$1 OR command_id IN "
+                          "(SELECT id FROM command_executions WHERE customer_id=$2)", str(oid), cid),
+        "messages": ("SELECT x::text FROM messages x WHERE conversation_id IN "
+                     "(SELECT id FROM conversations WHERE customer_id=$1)", cid),
+    }
+    out = {}
+    for name, (sql, *args) in q.items():
+        out[name] = sorted(r[0] for r in await conn.fetch(sql, *args))
+    return out
+
+
 @dbonly
 @pytest.mark.asyncio
-async def test_definer_refuses_live_customer_and_triggers_still_block():
-    import asyncpg
+async def test_two_customers_shared_pii_and_wildcards_other_customer_untouched():
+    """CA 416 finding 1: A va B TRUNG dia chi; ten A chua '%'/'_' ma neu dung LIKE se khop ten B. Xoa A -> MOI dong
+    lien ket B giu nguyen byte-for-byte; audit khong lien ket ai co chua dia chi chung cung giu nguyen."""
+    from app.services import data_deletion as dd
+    tag = "".join(random.choice("0123456789") for _ in range(6))
+    street = f"{tag} Đường Trùng Nhau DSR"
+    a = {**_ident(), "name": f"Lê_Văn%{tag}", "street": street}
+    b = {**_ident(), "name": f"Lê Văn Bình {tag}", "street": street}     # LIKE '%Lê_Văn%<tag>%' se khop ten B
     conn = await _conn()
     try:
-        cid = await conn.fetchval("INSERT INTO customers(psid,channel,external_chat_id) VALUES($1,'messenger',$1) "
-                                  "RETURNING id", _ident()["psid"])
-        with pytest.raises(asyncpg.RaiseError):
-            await conn.fetchval("SELECT dsr_anonymize_identity($1, $2::text[], 'deleted:abc', 'abc')", cid,
-                                ["123456789"])
-        oid = await conn.fetchval("INSERT INTO orders(customer_id,status,total_vnd,origin_channel) "
-                                  "VALUES($1,'new',1,'messenger') RETURNING id", cid)
-        await conn.execute("INSERT INTO order_events(id,order_id,event_type,event_version,to_status,actor_type,actor_id,"
-                           "correlation_id,idempotency_key) VALUES($1,$2,'x',1,'new','bot','a',$3,$4)",
-                           uuid.uuid4(), oid, uuid.uuid4(), uuid.uuid4().hex)
-        with pytest.raises(asyncpg.RaiseError):                 # trigger append-only van chan UPDATE thuong
-            await conn.execute("UPDATE order_events SET actor_id='x' WHERE order_id=$1", oid)
-        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='alpha3s_app')"):
-            async with conn.transaction():
-                await conn.execute("SET LOCAL ROLE alpha3s_app")
-                with pytest.raises(asyncpg.InsufficientPrivilegeError):
-                    async with conn.transaction():
-                        await conn.execute("UPDATE audit_log SET actor_ref='x' WHERE id=-1")
-                assert await conn.fetchval("SELECT has_function_privilege('alpha3s_app', "
-                                           "'dsr_anonymize_identity(bigint,text[],text,text,text[])', 'EXECUTE')")
-        assert not await conn.fetchval("SELECT pg_has_role('alpha3s_app', 'alpha3s_dsr', 'MEMBER')") \
-            if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='alpha3s_app')") else True
+        sa = await _seed_journey(conn, a)
+        sb = await _seed_journey(conn, b)
+        unrelated = await conn.fetchval(
+            "INSERT INTO audit_log(actor_type,actor_ref,action,entity_type,entity_id,after) VALUES('staff','staff:9',"
+            "'note','product','999999',$1::jsonb) RETURNING id", json.dumps({"txt": f"{street} / {b['name']}"}))
+        before_b = await _subject_rows(conn, sb, b["psid"])
+        before_unrel = await conn.fetchval("SELECT x::text FROM audit_log x WHERE id=$1", unrelated)
+        assert sum(len(v) for v in before_b.values()) >= 25
+        res = await dd.process_deletion(a["psid"])
+        assert res["summary"]["customer_found"] and not res["summary"]["redis_pending"]
+        assert await _subject_rows(conn, sb, b["psid"]) == before_b                    # B byte-for-byte
+        assert await conn.fetchval("SELECT x::text FROM audit_log x WHERE id=$1", unrelated) == before_unrel
+        # A: khong con PSID/SDT o bat ky bang nao; ten/dia chi chi con o dong cua B + dong khong lien ket.
+        assert await _full_scan(conn, [a["psid"], a["phone"]]) == {}
+        assert street in json.dumps(before_b, ensure_ascii=False)
+        assert a["name"] not in json.dumps(await _subject_rows(conn, sa, "x"), ensure_ascii=False)
     finally:
         await conn.close()
+
+
+@dbonly
+@pytest.mark.asyncio
+async def test_definer_takes_no_identifiers_and_rejects_misuse():
+    """CA 416 finding 2: ham nhan (customer_id, code) — khong co tham so dinh danh/PII. Tu choi: code khong co yeu cau
+    received / da dung cho subject khac / customer da tombstone. App role khong UPDATE truc tiep kho bat bien."""
+    import asyncpg
+
+    from app.services import data_deletion as dd
+    a, b = _ident(), _ident()
+    conn = await _conn()
+    try:
+        args = await conn.fetchval("SELECT pg_get_function_identity_arguments('dsr_erase_subject'::regproc)")
+        assert args == "p_customer_id bigint, p_code text"
+        sa = await _seed_journey(conn, a)
+        sb = await _seed_journey(conn, b)
+        before_b = await _subject_rows(conn, sb, b["psid"])
+        # code ngau nhien khong co yeu cau xoa -> tu choi
+        with pytest.raises(asyncpg.RaiseError):
+            await conn.fetchval("SELECT dsr_erase_subject($1, $2)", sb["cid"], "0123456789abcdef")
+        # xoa A that -> code A da gan subject; dung lai code A cho B -> tu choi
+        res = await dd.process_deletion(a["psid"])
+        with pytest.raises(asyncpg.RaiseError):
+            await conn.fetchval("SELECT dsr_erase_subject($1, $2)", sb["cid"], res["confirmation_code"])
+        # A da tombstone + yeu cau moi hop le -> van tu choi (khong lam lai tren khach da xoa)
+        code2 = uuid.uuid4().hex[:16]
+        await conn.execute("INSERT INTO data_deletion_requests(confirmation_code,status) VALUES($1,'received')", code2)
+        with pytest.raises(asyncpg.RaiseError):
+            await conn.fetchval("SELECT dsr_erase_subject($1, $2)", sa["cid"], code2)
+        assert await _subject_rows(conn, sb, b["psid"]) == before_b
+        # trigger bat bien van chan UPDATE thuong (ke ca superuser)
+        with pytest.raises(asyncpg.RaiseError):
+            await conn.execute("UPDATE order_events SET actor_id='x' WHERE order_id=$1", sb["oid"])
+        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='alpha3s_app')"):
+            for sql in ("UPDATE audit_log SET actor_ref='x' WHERE id=-1",
+                        "UPDATE order_events SET actor_id='x' WHERE order_id=-1",
+                        "UPDATE inventory_movements SET actor_id='x' WHERE reference_id='-1'"):
+                async with conn.transaction():
+                    await conn.execute("SET LOCAL ROLE alpha3s_app")
+                    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                        async with conn.transaction():
+                            await conn.execute(sql)
+            assert await conn.fetchval("SELECT has_function_privilege('alpha3s_app', "
+                                       "'dsr_erase_subject(bigint,text)', 'EXECUTE')")
+            assert not await conn.fetchval("SELECT pg_has_role('alpha3s_app', 'alpha3s_dsr', 'MEMBER')")
+        acl = await conn.fetchval("SELECT proacl::text FROM pg_proc WHERE proname='dsr_erase_subject'")
+        assert acl and "{=X/" not in acl and ",=X/" not in acl                     # khong cap EXECUTE cho PUBLIC
+    finally:
+        await conn.close()
+
+
+async def _noop_sleep(*a, **k):
+    return None
+
+
+async def _boom(psid, summary):
+    raise ConnectionError("redis down")
 
 
 @dbonly
@@ -263,17 +373,16 @@ async def test_redis_failure_after_db_commit_then_worker_completes(monkeypatch):
     try:
         await _seed_journey(conn, idn)
         real = dd._clear_redis
-
-        async def _boom(psid, summary):
-            raise ConnectionError("redis down")
         monkeypatch.setattr(dd, "_clear_redis", _boom)
         monkeypatch.setattr(dd.asyncio, "sleep", _noop_sleep)
         res = await dd.process_deletion(P)
         code = res["confirmation_code"]
         assert res["summary"]["customer_found"] and res["summary"]["redis_pending"]
-        row = await conn.fetchrow("SELECT status, subject_hmac FROM data_deletion_requests WHERE confirmation_code=$1",
-                                  code)
-        assert row["status"] == "redis_pending" and row["subject_hmac"] == dd.subject_hmac(P) and P not in row[1]
+        row = await conn.fetchrow("SELECT status, subject_hmac, detail FROM data_deletion_requests "
+                                  "WHERE confirmation_code=$1", code)
+        kid, key = dd.hmac_keys()[0]
+        assert row["status"] == "redis_pending" and row["subject_hmac"] == dd.subject_hmac(P, key)
+        assert json.loads(row["detail"])["hmac_key_id"] == kid and P not in row["detail"] + row["subject_hmac"]
         assert await conn.fetchval("SELECT count(*) FROM customers WHERE psid=$1", P) == 0     # DB da xoa
         r = await _redis()
         try:
@@ -286,19 +395,15 @@ async def test_redis_failure_after_db_commit_then_worker_completes(monkeypatch):
         row = await conn.fetchrow("SELECT status, subject_hmac, detail FROM data_deletion_requests "
                                   "WHERE confirmation_code=$1", code)
         assert row["status"] == "completed" and row["subject_hmac"] is None
-        assert json.loads(row["detail"])["redis_completed_by"] == "worker"
+        d = json.loads(row["detail"])
+        assert d["redis_completed_by"] == "worker" and d["subject_bound"] is True
         r = await _redis()
         try:
             assert [k async for k in r.scan_iter(match=f"*{P}*")] == []
         finally:
             await r.aclose()
-        assert await dd.retry_redis_pending() == {"pending": 0}
     finally:
         await conn.close()
-
-
-async def _noop_sleep(*a, **k):
-    return None
 
 
 @dbonly
@@ -311,9 +416,6 @@ async def test_redis_failure_then_repeat_request_completes_pending(monkeypatch):
     try:
         await _seed_journey(conn, idn)
         real = dd._clear_redis
-
-        async def _boom(psid, summary):
-            raise ConnectionError("redis down")
         monkeypatch.setattr(dd, "_clear_redis", _boom)
         monkeypatch.setattr(dd.asyncio, "sleep", _noop_sleep)
         first = await dd.process_deletion(P)
@@ -324,5 +426,50 @@ async def test_redis_failure_then_repeat_request_completes_pending(monkeypatch):
                                  "WHERE confirmation_code=$1", first["confirmation_code"])
         assert st["status"] == "completed" and st["subject_hmac"] is None
         assert json.loads(st["detail"])["redis_completed_by"] == "repeat_request"
+    finally:
+        await conn.close()
+
+
+@dbonly
+@pytest.mark.asyncio
+async def test_hmac_key_rotation_and_missing_key(monkeypatch):
+    """CA 416 ghi chu: khoa DSR rieng. Pending tao bang khoa cu -> sau rotation (cu -> PREVIOUS) worker van ghep duoc.
+    Thieu khoa -> khong tao hmac du doan duoc; request giu redis_pending (khong gia 'xong') + bao unmatchable."""
+    from app.config import settings
+    from app.services import data_deletion as dd
+    monkeypatch.setattr(dd.asyncio, "sleep", _noop_sleep)
+    conn = await _conn()
+    try:
+        # khoa 1 tao pending -> rotation -> worker dung khoa PREVIOUS
+        idn = _ident()
+        await _seed_journey(conn, idn)
+        real = dd._clear_redis
+        monkeypatch.setattr(dd, "_clear_redis", _boom)
+        r1 = await dd.process_deletion(idn["psid"])
+        monkeypatch.setattr(settings, "dsr_hmac_key", KEY2)
+        monkeypatch.setattr(settings, "dsr_hmac_key_previous", KEY1)
+        monkeypatch.setattr(dd, "_clear_redis", real)
+        await dd.retry_redis_pending()
+        assert await conn.fetchval("SELECT status FROM data_deletion_requests WHERE confirmation_code=$1",
+                                   r1["confirmation_code"]) == "completed"
+        # thieu khoa hoan toan
+        monkeypatch.setattr(settings, "dsr_hmac_key", "")
+        monkeypatch.setattr(settings, "dsr_hmac_key_previous", "")
+        idn2 = _ident()
+        await _seed_journey(conn, idn2)
+        monkeypatch.setattr(dd, "_clear_redis", _boom)
+        r2 = await dd.process_deletion(idn2["psid"])
+        row = await conn.fetchrow("SELECT status, subject_hmac, detail FROM data_deletion_requests "
+                                  "WHERE confirmation_code=$1", r2["confirmation_code"])
+        assert row["status"] == "redis_pending" and row["subject_hmac"] is None
+        assert json.loads(row["detail"])["hmac_unavailable"] is True
+        monkeypatch.setattr(dd, "_clear_redis", real)
+        st = await dd.retry_redis_pending()
+        assert st["unmatchable"] >= 1
+        assert await conn.fetchval("SELECT status FROM data_deletion_requests WHERE confirmation_code=$1",
+                                   r2["confirmation_code"]) == "redis_pending"
+        # don sach de khong de lai pending cho cac test khac
+        await conn.execute("UPDATE data_deletion_requests SET status='completed' WHERE confirmation_code=$1",
+                           r2["confirmation_code"])
     finally:
         await conn.close()

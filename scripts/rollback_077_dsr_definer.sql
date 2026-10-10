@@ -1,10 +1,11 @@
 -- Rollback migration 077 (CA Review 415 — duong DSR quyen hep). CHAY TAY khi CA/PO quyet; KHONG tu dong.
--- Hieu ung: code DSR moi (goi dsr_anonymize_identity) se FAIL-CLOSED (rollback ca DSR, request 'failed') -> chi chay
+-- Hieu ung: code DSR moi (goi dsr_erase_subject) se FAIL-CLOSED (rollback ca DSR, request 'failed') -> chi chay
 -- rollback nay CUNG luc revert code ve ban khong goi ham. Du lieu da an danh KHONG khoi phuc (dung yeu cau DSR).
 -- Precheck: SELECT count(*) FROM data_deletion_requests WHERE status='redis_pending'; > 0 -> cho worker xu ly xong.
 BEGIN;
 
-DROP FUNCTION IF EXISTS dsr_anonymize_identity(bigint, text[], text, text, text[]);
+DROP FUNCTION IF EXISTS dsr_erase_subject(bigint, text);
+DROP FUNCTION IF EXISTS dsr_has_any(text, text[]);
 DROP FUNCTION IF EXISTS dsr_scrub_json(jsonb, text[], text);
 DROP FUNCTION IF EXISTS dsr_scrub_text(text, text[], text);
 
