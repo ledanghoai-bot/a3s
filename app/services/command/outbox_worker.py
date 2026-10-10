@@ -353,6 +353,37 @@ async def _refresh_dynamic_text(conn, payload: dict, sc: dict) -> None:
         return  # giu text cu neu refresh loi (khong chan gui)
 
 
+def _order_ref(payload: dict) -> int | None:
+    for src in (payload, payload.get("stale_check") or {}, payload.get("params") or {}):
+        v = src.get("order_id") if isinstance(src, dict) else None
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+    return None
+
+
+async def _close_outside_window(conn, ev, payload: dict, ws: dict) -> str:
+    """Ket thuc event Messenger ngoai khung 24h + mo staff attention trong CUNG transaction (crash giua chung -> lease
+    het han -> reclaim -> danh gia lai, khong mat attention). CAS theo lease: event da bi xu ly noi khac -> no-op."""
+    from app.services.fulfillment import attention as _att
+    order_id = _order_ref(payload)
+    async with conn.transaction():
+        r = await conn.execute(
+            "UPDATE outbox_events SET status='cancelled', cancelled_at=now(), last_error_code='messaging_window_closed', "
+            "lease_owner=NULL, lease_expires_at=NULL WHERE id=$1 AND status='delivering' AND lease_owner=$2",
+            ev["id"], WORKER_ID)
+        if _rowcount(r) == 1:
+            if order_id is not None and not await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM orders WHERE id=$1)", order_id):
+                order_id = None
+            await _att.open_attention(
+                conn, order_id, reason="messaging_window_closed", created_by="outbox_worker",
+                detail={"event_type": ev.get("event_type"), "outbox_event_id": str(ev["id"]),
+                        "window": ws.get("reason"), "age_minutes": ws.get("age_minutes")})
+    return "window_blocked"
+
+
 async def _send_and_record(conn, ev, send_fn) -> str:
     payload = ev["payload"]
     if isinstance(payload, str):
@@ -372,6 +403,13 @@ async def _send_and_record(conn, ev, send_fn) -> str:
             "lease_owner=NULL, lease_expires_at=NULL WHERE id=$1 AND status='delivering' AND lease_owner=$2",
             ev["id"], WORKER_ID)
         return "cancelled"
+    # CA Review 414 §2: Messenger CHI gui khi khach nhan Page trong khung 24h (moc tu messages — durable). Ngoai khung
+    # -> KHONG goi Send API; ket thuc event 'cancelled'/messaging_window_closed (khong bao gio 'delivered') + attention.
+    if ev["destination"] == OUTBOX_DEST_MESSENGER and isinstance(payload, dict):
+        from app.services import messenger_window as _mw
+        ws = await _mw.window_state(conn, payload.get("customer_ref"))
+        if not ws["open"]:
+            return await _close_outside_window(conn, ev, payload, ws)
     # CA 268-01: re-render carrier/tracking/eta cua handover tu state hien tai (khong gui snapshot cu).
     if sc:
         await _refresh_dynamic_text(conn, payload, sc)
@@ -444,7 +482,8 @@ async def run_once(send_fn=None) -> dict:
     """Mot vong drain: reclaim stale -> claim batch -> send+record tung event. Tra stats."""
     send_fn = send_fn or deliver
     conn = await acquire()
-    stats = {"reclaimed": 0, "delivered": 0, "retried": 0, "dead": 0, "claimed": 0, "cancelled": 0}
+    stats = {"reclaimed": 0, "delivered": 0, "retried": 0, "dead": 0, "claimed": 0, "cancelled": 0,
+             "window_blocked": 0}
     try:
         stats["reclaimed"] = await reclaim_stale(conn)
         events = await conn.fetch(_CLAIM_SQL, BATCH, WORKER_ID, LEASE_SECONDS)

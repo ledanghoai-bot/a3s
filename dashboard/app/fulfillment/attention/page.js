@@ -22,6 +22,7 @@ const REASON_LABEL = {
   order_cancel_exception: "Đơn huỷ — hàng đã bàn giao",
   shipment_create: "Tạo vận đơn GHN cần kiểm tra",
   eta_question: "Khách hỏi thời gian giao — chưa có ETA",
+  messaging_window_closed: "Messenger quá 24h — tin chưa gửi được, cần liên hệ khách",
 };
 
 function tone(reason) {

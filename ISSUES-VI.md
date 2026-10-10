@@ -459,6 +459,21 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
         - **Chưa test trên máy anh Hoài / production:** E2E DSR trên tài khoản test Berry Hill sau deploy (D405 §4.1);
           tồn dư kho bất biến (audit_log, order_events, address_resolution, GHN snapshot…) **chờ CA quyết định**;
           callback Meta nhận `user_id` app-scoped (không phải PSID) nếu Meta thực sự gọi → hiện no-op an toàn.
+      - **CA Review 414 §2 — outbox Messenger theo khung 24h (cùng candidate D405, commit riêng):**
+        - **Bug:** `outbox_worker._messenger_send` luôn gửi `messaging_type=RESPONSE` → tin phát sinh muộn (biên nhận,
+          nhắc/xác nhận thanh toán, M7) ngoài 24h từ tin khách gần nhất sẽ bị Meta từ chối.
+        - **Đã làm:** `app/services/messenger_window.py` — mốc = tin `role='customer'` mới nhất trong `messages`
+          (durable, đồng hồ DB), trong khung khi < 24h − 10 phút; chưa từng nhắn = ngoài khung. Outbox worker (cả
+          đường dispatcher): ngoài khung → KHÔNG gọi Send API, event `cancelled`/`messaging_window_closed` (không
+          bao giờ `delivered`), mở `staff_attention` lý do mới `messaging_window_closed` + báo admin (1 lần/đơn) trong
+          cùng transaction, CAS theo lease. Migration **076** (thêm reason, rollback có precheck). Nhãn Dashboard.
+          Không dùng message tag (CA 414: chưa có bằng chứng Meta chính thức).
+        - **Đã verify:** 9 test `tests/test_messenger_window_414.py` (trong khung gửi; biên 24h−10′ ±1 phút; ngoài
+          khung/chưa nhắn → chặn + attention 1 lần; dispatcher; Telegram không ảnh hưởng; retry + replay
+          dead-letter qua `recovery.retry_outbox` vẫn chặn; restart/reclaim lease đánh giá lại đúng 1 lần, lease
+          worker khác → no-op; khách nhắn lại → tin mới gửi được, tin đã chặn không sống lại). Bỏ chốt → 6 test
+          fail. Full suite 1200 pass, 15 fail trùng baseline `main`.
+        - **Chưa test production:** cần event Messenger thật (Meta chưa giao event sau duyệt 10/10).
 - [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).

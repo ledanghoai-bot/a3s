@@ -487,6 +487,22 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
           (D405 §4.1); residual immutable stores (audit_log, order_events, address_resolution, GHN snapshot…)
           **await a CA decision**; the Meta callback carries an app-scoped `user_id` (not a PSID) if Meta ever calls
           it → currently a safe no-op.
+      - **CA Review 414 §2 — Messenger outbox 24-hour window (same D405 candidate, separate commit):**
+        - **Bug:** `outbox_worker._messenger_send` always sends `messaging_type=RESPONSE` → late messages (receipts,
+          payment reminders/confirmations, M7) sent more than 24h after the customer's last message are rejected by
+          Meta.
+        - **Done:** `app/services/messenger_window.py` — anchor = latest `role='customer'` row in `messages` (durable,
+          DB clock), inside the window when < 24h − 10 min; never messaged = outside. Outbox worker (dispatcher path
+          too): outside → NO Send API call, event `cancelled`/`messaging_window_closed` (never `delivered`), opens
+          `staff_attention` with new reason `messaging_window_closed` + admin notice (once per order) in the same
+          transaction, CAS on the lease. Migration **076** (adds the reason; rollback with precheck). Dashboard
+          label. No message tags (CA 414: no official Meta evidence yet).
+        - **Verified:** 9 tests `tests/test_messenger_window_414.py` (inside sends; 24h−10′ boundary ±1 min; outside/
+          never messaged → blocked + one attention; dispatcher; Telegram unaffected; retry + dead-letter replay via
+          `recovery.retry_outbox` still blocked; restart/lease reclaim re-evaluated exactly once, foreign lease →
+          no-op; customer messages again → new message sent, blocked one stays cancelled). Without the guard 6
+          tests fail. Full suite 1200 pass, 15 fail identical to `main` baseline.
+        - **Not yet tested in production:** needs real Messenger events (Meta not delivering since approval 10/10).
 - [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).
