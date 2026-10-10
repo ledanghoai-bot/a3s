@@ -41,7 +41,7 @@ from app.services.handoff import (
     resolve_psid,
     resume_bot,
 )
-from app.services.safe_log import safe_exc
+from app.services.safe_log import mask_ref, safe_exc
 
 API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 30  # giay cho long-polling moi request getUpdates
@@ -264,7 +264,7 @@ async def _poll_loop() -> None:
                             ((callback_query.get("message") or {}).get("chat") or {}).get("id", "")
                         )
                         if chat_id != admin_chat_id:
-                            print(f"[telegram_listener] Bo qua callback tu chat la (chat_id={chat_id})")
+                            print(f"[telegram_listener] Bo qua callback tu chat la (chat_id={mask_ref(chat_id)})")
                             continue
                         await _handle_callback(client, callback_query)
                         continue
@@ -280,7 +280,7 @@ async def _poll_loop() -> None:
                     # BAO MAT: chi xu ly lenh tu DUNG chat admin da cau hinh -
                     # moi chat khac bo qua im lang, khong phan hoi gi ca.
                     if chat_id != admin_chat_id:
-                        print(f"[telegram_listener] Bo qua tin nhan tu chat la (chat_id={chat_id})")
+                        print(f"[telegram_listener] Bo qua tin nhan tu chat la (chat_id={mask_ref(chat_id)})")
                         continue
 
                     await _handle_command(client, text)

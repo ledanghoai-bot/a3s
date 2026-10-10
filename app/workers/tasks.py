@@ -15,7 +15,7 @@ from app.services.command import outbox_worker
 from app.services.handoff import is_bot_paused
 from app.services.messenger import send_text, try_take_thread_control
 from app.services.orchestrator import handle_message
-from app.services.safe_log import safe_exc
+from app.services.safe_log import mask_ref, safe_exc
 
 DEDUP_TTL_SECONDS = 24 * 60 * 60  # 24h - du lon hon cua so retry cua Meta
 DEAD_LETTER_KEY = "dead_letter:messages"
@@ -87,7 +87,7 @@ async def _process_message_inner(event: dict) -> None:
         # khong can them cot timestamp rieng.
         conversation_id = await conversation_log.ensure_conversation(psid, channel="messenger")
         await conversation_log.log_message(conversation_id, "agent", text)
-        print(f"[worker] Da ghi tin nhan that cua nhan vien cho {psid} (luc dang paused).")
+        print(f"[worker] Da ghi tin nhan that cua nhan vien cho {mask_ref(psid)} (luc dang paused).")
         return
 
     # Tin nhan thuong tu khach
@@ -102,7 +102,7 @@ async def _process_message_inner(event: dict) -> None:
     if await is_bot_paused(sender_id):
         conversation_id = await conversation_log.ensure_conversation(sender_id, channel="messenger")
         await conversation_log.log_message(conversation_id, "customer", text)
-        print(f"[worker] Bot dang paused cho {sender_id}, chi log, khong tra loi (nhan vien dang xu ly).")
+        print(f"[worker] Bot dang paused cho {mask_ref(sender_id)}, chi log, khong tra loi (nhan vien dang xu ly).")
         return
 
     # Handover Protocol: giu quyen so huu thread truoc Page Inbox mac dinh cua Meta, de bot nhan
@@ -130,6 +130,18 @@ async def deliver_outbox_job(ctx) -> None:
             print(f"[outbox] drain {stats}")
     except Exception as e:  # noqa: BLE001 - drain loi khong duoc lam sap worker
         print(f"[outbox] drain loi (bo qua vong nay): {safe_exc(e)}")
+
+
+async def dsr_redis_retry_job(ctx) -> None:
+    """CA Review 415 §3.5: hoan tat Redis cleanup cho yeu cau xoa du lieu 'redis_pending' (DB da xoa). Khong co request
+    cho -> no-op (1 SELECT). Loi duoc bao ve, KHONG lam sap worker; luot sau thu lai."""
+    from app.services import data_deletion
+    try:
+        stats = await data_deletion.retry_redis_pending()
+        if stats.get("pending"):
+            print(f"[dsr] redis retry {stats}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[dsr] redis retry loi (bo qua vong nay): {safe_exc(e)}")
 
 
 async def expire_reservations_job(ctx) -> None:
@@ -292,6 +304,8 @@ class WorkerSettings:
         cron(m7_provider_events_job, second={3, 13, 23, 33, 43, 53}, run_at_startup=False),
         # Directive 393: tao van don GHN 20s. Gate OFF -> khong HTTP (chi ghi gate_blocked_reason).
         cron(ghn_shipment_create_job, second={8, 28, 48}, run_at_startup=False),
+        # CA Review 415 §3.5: DSR Redis cleanup con treo (redis_pending) — 5 phut/lan.
+        cron(dsr_redis_retry_job, minute=set(range(0, 60, 5)), second={40}, run_at_startup=False),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 20

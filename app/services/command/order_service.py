@@ -45,14 +45,17 @@ def _fmt_ts(dt) -> str | None:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt is not None else None
 
 
-def _audit_actor(env: CommandEnvelope) -> tuple[str, str, int | None]:
-    """Map envelope actor -> (audit actor_type, actor_ref, actor_staff_id)."""
+def _audit_actor(env: CommandEnvelope, customer_id: int | None = None) -> tuple[str, str, int | None]:
+    """Map envelope actor -> (audit actor_type, actor_ref, actor_staff_id).
+    CA Review 415 §3.3: khach (bot thuc thi) -> actor_ref = 'customer:<customers.id>' (ID noi bo), KHONG PSID/ChatID
+    tho — audit_log/order_events/inventory_movements la so append-only, khong duoc giu dinh danh kenh."""
     if env.actor.type == "staff":
         sid = int(env.actor.id) if env.actor.id.isdigit() else None
         return "staff", env.actor.id, sid
     if env.actor.type == "system":
         return "system", env.actor.id, None
-    return "bot", env.actor.id, None  # customer-initiated, bot-executed
+    cid = customer_id if customer_id is not None else getattr(env, "customer_id", None)
+    return "bot", (f"customer:{cid}" if cid is not None else "customer:unresolved"), None
 
 
 def _loads(v):
@@ -346,7 +349,7 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     # Ledger ON: reserve trên balance rồi materialize stock := available (KHÔNG delta trên giá trị stale
     #   -> Phase C an toàn, không stock âm). Ledger OFF: legacy stock -= qty (hành vi M1).
     if settings.m2_inventory_ledger:
-        atype2, aref2, _ = _audit_actor(env)
+        atype2, aref2, _ = _audit_actor(env, customer_id)
         try:
             loc_reserve = await order_txn.reserve_on_create(
                 conn, order_id=order_id, order_item_id=order_item_id, product_id=product["id"],
@@ -419,7 +422,7 @@ async def _run_winner(conn, env: CommandEnvelope) -> receipt_mod.CommandReceipt:
     # --- Audit fail-closed BẮT BUỘC (CR-05) ---
     # M1 schema (>=015) luôn có audit_log; KHÔNG guard audit_exists nữa -> nếu thiếu/hỏng audit thì
     # record() raise -> transaction rollback (không commit business mutation mà không có audit).
-    atype, aref, asid = _audit_actor(env)
+    atype, aref, asid = _audit_actor(env, customer_id)
     await audit_service.record(
         conn, atype, "order.create", actor_ref=aref, actor_staff_id=asid,
         entity_type="order", entity_id=str(order_id),
@@ -471,7 +474,7 @@ async def _maybe_bind_gate_e(conn, env: CommandEnvelope, order_id: int, customer
         # KHONG bind pointer cu (§5.4 + F2). Enrollment = yeu cau dia chi cua request nay verified.
         raise order_binding.BindingError(
             "gate-e: request chua co verified resolution scope — tu choi (fail-closed, khong bind pointer cu)")
-    atype, aref, _ = _audit_actor(env)
+    atype, aref, _ = _audit_actor(env, customer_id)
     # bind_in_order_tx -> _validate_for_bind kiem tra status verified + owner == order.customer_id
     # (order_binding._assert_owns_order) -> resolution khong thuoc khach nay hoac chua verified se bi tu choi.
     await order_binding.bind_in_order_tx(
