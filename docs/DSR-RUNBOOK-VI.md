@@ -3,10 +3,10 @@
 ```yaml
 document: DSR-RUNBOOK
 owner: PO (điều phối) / Dev (thực thi kỹ thuật)
-version: 1.3.0
+version: 1.4.0
 status: living-document
 created: 2026-07-28 (I-B M3-S0)
-updated: 2026-10-11 (CA 405 + 415 + 416 — tombstone, kho vận hành M1-M7, hàm DSR quyền hẹp 077 tự lấy định danh + giới hạn theo liên kết, khoá HMAC riêng, ma trận §2b)
+updated: 2026-10-11 (CA 405 + 415 + 416 + 417 — gắn subject lúc mở yêu cầu, tombstone, kho vận hành M1-M7, hàm DSR quyền hẹp 077 tự lấy định danh + giới hạn theo liên kết, khoá HMAC riêng, ma trận §2b)
 source_of_truth: Scalffold V2.0 §13.12–13.13; code thực data_deletion.py tại base 9b49628; luật 91/2025/QH15
 scope_note: Gateway sẽ là DSR orchestrator dài hạn; giai đoạn này Alpha3S vận hành thủ công theo runbook
 ```
@@ -16,7 +16,7 @@ scope_note: Gateway sẽ là DSR orchestrator dài hạn; giai đoạn này Alph
 | Quyền | Kênh tiếp nhận | Cách xử lý hiện hành |
 |---|---|---|
 | **Xóa dữ liệu** | Tự phục vụ qua chat: khách nhắn `XOA DU LIEU` → bot hỏi xác nhận → `XAC NHAN XOA` | **TỰ ĐỘNG** (`app/services/data_deletion.py`): xóa + ẩn danh trong 1 transaction, trả confirmation code + status URL. Deterministic, chạy TRƯỚC LLM, keyword match bỏ dấu cả 2 phía, mọi kênh |
-| Xóa dữ liệu (Meta callback) | Meta Data Deletion Callback (signed_request) | Tự động, cùng `_delete_customer_data` |
+| Xóa dữ liệu (Meta callback) | Meta Data Deletion Callback (signed_request) | Cùng `process_deletion`. **Giới hạn:** `user_id` của Meta là ID theo app (ASID, chỉ có với người dùng Facebook Login); app không có Login, và API ánh xạ ASID↔PSID bị Meta từ chối vì Page và app không cùng Business (kiểm 11/10). Callback thật hiện là no-op an toàn. Đường hiệu lực cho khách Messenger/Telegram là tự xoá qua chat hoặc yêu cầu qua email |
 | Biết/truy cập | Khách hỏi qua chat/PO nhận trực tiếp | THỦ CÔNG: PO/admin xuất từ dashboard/DB theo psid — checklist §3 |
 | Chỉnh sửa | qua chat (khách cung cấp thông tin mới khi đặt đơn) hoặc thủ công | update customers/orders qua dashboard (audited) |
 | Rút consent / phản đối / hạn chế | hiện = yêu cầu xóa hoặc yêu cầu thủ công | S3 consent ledger sẽ chuẩn hóa (withdraw per-purpose) |
@@ -57,14 +57,21 @@ public (`row::text`) + Redis (key, arq job, dead-letter); `--legacy` đếm cust
 
 ### 2b. Ma trận DSR đầy đủ (CA Review 415 §3.1) — kho bất biến/append-only + bản sao ngoài DB active
 
-**Đường xử lý kho bất biến:** hàm `dsr_erase_subject(customer_id, code)` (migration 077, sửa theo CA Review 416).
+**Đường xử lý kho bất biến:** hai hàm của migration 077, sửa theo CA Review 416 và 417.
+- `dsr_open_request(psid)` tạo yêu cầu xoá và **gắn subject ngay lúc tạo** (`subject_customer_id` = ID nội bộ, không lưu
+  PSID). Nếu không tìm thấy customer thì yêu cầu không có subject, và bước xoá là no-op.
+- `dsr_erase_subject(code)` **chỉ nhận mã**. Subject được lấy từ yêu cầu dưới khoá, nên caller không ghép được mã của A với
+  customer B.
+- Trigger `ddr_subject_guard`: chỉ `alpha3s_dsr` được ghi `subject_customer_id`/`erased_at`. Role app (kể cả superuser hiện
+  tại) không chèn được yêu cầu có subject, và không tráo hay xoá subject/`erased_at`/mã đã gắn.
+
 Đặc điểm:
 - `SECURITY DEFINER`, owner là role NOLOGIN `alpha3s_dsr`, chỉ có quyền UPDATE trên đúng các cột định danh.
 - Trigger bất biến chỉ cho qua khi `current_user = alpha3s_dsr`. DELETE vẫn bị cấm, cột nghiệp vụ không có quyền sửa.
 - **Caller không truyền định danh hay PII nào.** Hàm tự đọc PSID/ChatID/tên/SĐT/địa chỉ từ chính dòng customer (khoá
   `FOR UPDATE`), người nhận các đơn và draft của customer đó, rồi tự tombstone customer.
-- Bắt buộc có yêu cầu xoá `received` chưa gắn subject. Mỗi mã xác nhận chỉ dùng **một lần** (`detail.subject_bound`).
-  Từ chối khi customer đã tombstone, mã không tồn tại, hoặc mã đã dùng.
+- Bắt buộc có yêu cầu `received`, **đã gắn subject**, chưa dùng. Mỗi mã chỉ dùng **một lần** (`erased_at`). Từ chối khi
+  customer đã tombstone, mã không tồn tại, yêu cầu không có subject, hoặc mã đã dùng.
 - **Mọi UPDATE giới hạn bằng liên kết chắc chắn** với subject:
   - `customer_id`, `order_id`, `payment_id`, `shipment_id`, `operation_id`, `resolution_id`;
   - `entity_type:entity_id` của audit;

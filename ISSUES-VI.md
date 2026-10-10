@@ -511,6 +511,19 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
           khoá + thiếu khoá. DB mới 001..077: 29/29 test DSR/disclosure/24h; full suite 1206 pass, 15 fail trùng baseline;
           GHN 393 27/27 (DB mới, packing 10%); quét toàn DB hành trình 1 khách 41 → 0; rollback 077 rehearsal OK.
         - **Trước deploy (PO):** đặt `DSR_HMAC_KEY` trên VPS `.env`.
+      - **CA Review 417 (REQUEST CHANGES) — mã yêu cầu phải gắn với chính subject:**
+        - **Finding:** yêu cầu `received` tạo không gắn khách; `dsr_erase_subject(customer_id, code)` nhận hai giá trị
+          rời → mã chưa dùng của A xoá được B. **Tái hiện** trên head `aa7e5af` dưới `SET ROLE alpha3s_app`.
+        - **Đã làm:** `dsr_open_request(psid)` (SECURITY DEFINER) tạo yêu cầu + gắn `subject_customer_id` (ID nội bộ)
+          trên dòng khoá; `dsr_erase_subject(code)` CHỈ nhận mã, subject lấy từ yêu cầu dưới khoá, 1 lần (`erased_at`);
+          trigger `ddr_subject_guard` chỉ cho `alpha3s_dsr` ghi subject/erased_at (app không chèn yêu cầu có subject, không
+          tráo). App kiểm thêm customer khoá = subject trả về. Runbook v1.4.0.
+        - **Callback Meta:** `user_id` là ASID (chỉ có với Facebook Login — app không có Login); API ánh xạ ASID↔PSID
+          trả lỗi #100 vì Page và app **không cùng Business** (kiểm chỉ đọc 11/10) → callback thật hiện no-op an toàn;
+          đường hiệu lực là tự xoá qua chat + email. Chờ PO/CA quyết hướng.
+        - **Đã verify:** test mới dưới `SET ROLE alpha3s_app` (mã chưa dùng của A không xoá được B, tráo subject bị chặn,
+          request không subject/ mã ngẫu nhiên bị từ chối, mã A xoá đúng A một lần, B byte-for-byte); DB mới 29/29;
+          full suite 1206 pass/15 baseline; GHN 393 27/27; quét toàn DB 41 → 0; rollback 077 rehearsal OK.
 - [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).

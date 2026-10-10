@@ -4,7 +4,11 @@
 -- Precheck: SELECT count(*) FROM data_deletion_requests WHERE status='redis_pending'; > 0 -> cho worker xu ly xong.
 BEGIN;
 
+DROP FUNCTION IF EXISTS dsr_erase_subject(text);
 DROP FUNCTION IF EXISTS dsr_erase_subject(bigint, text);
+DROP FUNCTION IF EXISTS dsr_open_request(text);
+DROP TRIGGER IF EXISTS ddr_subject_guard ON data_deletion_requests;
+DROP FUNCTION IF EXISTS ddr_subject_guard();
 DROP FUNCTION IF EXISTS dsr_has_any(text, text[]);
 DROP FUNCTION IF EXISTS dsr_scrub_json(jsonb, text[], text);
 DROP FUNCTION IF EXISTS dsr_scrub_text(text, text[], text);
@@ -92,7 +96,7 @@ BEGIN
 END $$;
 
 DELETE FROM schema_migrations WHERE version = '077_dsr_anonymize_definer';
--- Cot data_deletion_requests.subject_hmac/detail + index: additive, code cu bo qua -> giu nguyen.
+-- Cot data_deletion_requests.subject_hmac/detail/subject_customer_id/erased_at + index: additive, code cu bo qua -> giu nguyen.
 
 -- Hau kiem
 DO $$

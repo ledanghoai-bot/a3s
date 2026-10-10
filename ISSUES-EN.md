@@ -544,6 +544,21 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
           15 fail identical to baseline; GHN 393 27/27 (fresh DB, packing 10%); whole-DB scan of one journey 41 → 0;
           077 rollback rehearsal OK.
         - **Before deploy (PO):** set `DSR_HMAC_KEY` in the VPS `.env`.
+      - **CA Review 417 (REQUEST CHANGES) — the request code must be bound to its own subject:**
+        - **Finding:** `received` requests were created unbound; `dsr_erase_subject(customer_id, code)` took two loose
+          values → an unused code of A could erase B. **Reproduced** on head `aa7e5af` under `SET ROLE alpha3s_app`.
+        - **Done:** `dsr_open_request(psid)` (SECURITY DEFINER) creates the request and binds `subject_customer_id`
+          (internal id) on the locked row; `dsr_erase_subject(code)` takes ONLY the code, the subject comes from the
+          request under lock, single use (`erased_at`); trigger `ddr_subject_guard` lets only `alpha3s_dsr` write
+          subject/erased_at (the app cannot insert a bound request nor swap it). The app also checks the locked customer
+          equals the returned subject. Runbook v1.4.0.
+        - **Meta callback:** `user_id` is an ASID (Facebook Login users only — the app has no Login); the ASID↔PSID
+          matching API returns error #100 because the Page and the app are **not in the same Business** (read-only check
+          2026-10-11) → a real callback is currently a safe no-op; effective paths are in-chat self-service + email.
+          Awaiting PO/CA direction.
+        - **Verified:** new test under `SET ROLE alpha3s_app` (A's unused code cannot erase B, subject swap blocked,
+          unbound request / random code refused, A's code erases A exactly once, B byte-for-byte); fresh DB 29/29; full
+          suite 1206 pass/15 baseline; GHN 393 27/27; whole-DB scan 41 → 0; 077 rollback rehearsal OK.
 - [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).

@@ -307,50 +307,72 @@ async def test_two_customers_shared_pii_and_wildcards_other_customer_untouched()
 
 @dbonly
 @pytest.mark.asyncio
-async def test_definer_takes_no_identifiers_and_rejects_misuse():
-    """CA 416 finding 2: ham nhan (customer_id, code) — khong co tham so dinh danh/PII. Tu choi: code khong co yeu cau
-    received / da dung cho subject khac / customer da tombstone. App role khong UPDATE truc tiep kho bat bien."""
+async def test_definer_binds_subject_at_open_and_rejects_misuse():
+    """CA 416/417: ham xoa CHI nhan ma; subject gan luc mo yeu cau (dsr_open_request). Duoi SET ROLE alpha3s_app:
+    ma CHUA dung cua A khong the dung cho B (khong co tham so customer; khong tráo duoc subject tren request), B khong doi
+    byte-for-byte; ma hop le cua A xoa dung A dung 1 lan. Ma ngau nhien / request khong subject -> tu choi."""
     import asyncpg
-
-    from app.services import data_deletion as dd
     a, b = _ident(), _ident()
     conn = await _conn()
     try:
-        args = await conn.fetchval("SELECT pg_get_function_identity_arguments('dsr_erase_subject'::regproc)")
-        assert args == "p_customer_id bigint, p_code text"
+        assert await conn.fetchval("SELECT pg_get_function_identity_arguments('dsr_erase_subject'::regproc)") == \
+            "p_code text"
         sa = await _seed_journey(conn, a)
         sb = await _seed_journey(conn, b)
         before_b = await _subject_rows(conn, sb, b["psid"])
-        # code ngau nhien khong co yeu cau xoa -> tu choi
+        app_role = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='alpha3s_app')")
+        assert app_role, "can role alpha3s_app de kiem ranh gioi quyen"
+
+        async def as_app(sql, *args, fetch=False):
+            async with conn.transaction():
+                await conn.execute("SET LOCAL ROLE alpha3s_app")
+                return await (conn.fetchval(sql, *args) if fetch else conn.execute(sql, *args))
+
+        code_a = await as_app("SELECT dsr_open_request($1)", a["psid"], fetch=True)       # ma CHUA dung cua A
+        assert await conn.fetchval("SELECT subject_customer_id FROM data_deletion_requests WHERE confirmation_code=$1",
+                                   code_a) == sa["cid"]
+        # (1) tráo subject cua ma A sang B / tu tao request co subject B / xoa danh dau da dung -> trigger chan
+        for sql, args in (("UPDATE data_deletion_requests SET subject_customer_id=$2 WHERE confirmation_code=$1",
+                           (code_a, sb["cid"])),
+                          ("INSERT INTO data_deletion_requests(confirmation_code,status,subject_customer_id) "
+                           "VALUES($1,'received',$2)", (uuid.uuid4().hex[:16], sb["cid"])),
+                          ("UPDATE data_deletion_requests SET erased_at=now() WHERE confirmation_code=$1", (code_a,))):
+            with pytest.raises(asyncpg.RaiseError):
+                await as_app(sql, *args)
+        # (2) request KHONG subject (app tu chen) / ma ngau nhien -> ham tu choi
+        free = uuid.uuid4().hex[:16]
+        await as_app("INSERT INTO data_deletion_requests(confirmation_code,status) VALUES($1,'received')", free)
+        for code in (free, uuid.uuid4().hex[:16]):
+            with pytest.raises(asyncpg.RaiseError):
+                await as_app("SELECT dsr_erase_subject($1)", code, fetch=True)
+        assert await _subject_rows(conn, sb, b["psid"]) == before_b                         # B khong doi
+        # (3) app role khong UPDATE truc tiep kho bat bien
+        for sql in ("UPDATE audit_log SET actor_ref='x' WHERE id=-1",
+                    "UPDATE order_events SET actor_id='x' WHERE order_id=-1",
+                    "UPDATE inventory_movements SET actor_id='x' WHERE reference_id='-1'"):
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await as_app(sql)
+        # (4) ma hop le cua A -> xoa DUNG A, dung 1 lan; B van khong doi
+        res = json.loads(await as_app("SELECT dsr_erase_subject($1)", code_a, fetch=True))
+        assert res["customer_id"] == sa["cid"]
+        assert await conn.fetchval("SELECT psid FROM customers WHERE id=$1", sa["cid"]) == ci.tombstone(code_a)
         with pytest.raises(asyncpg.RaiseError):
-            await conn.fetchval("SELECT dsr_erase_subject($1, $2)", sb["cid"], "0123456789abcdef")
-        # xoa A that -> code A da gan subject; dung lai code A cho B -> tu choi
-        res = await dd.process_deletion(a["psid"])
-        with pytest.raises(asyncpg.RaiseError):
-            await conn.fetchval("SELECT dsr_erase_subject($1, $2)", sb["cid"], res["confirmation_code"])
-        # A da tombstone + yeu cau moi hop le -> van tu choi (khong lam lai tren khach da xoa)
-        code2 = uuid.uuid4().hex[:16]
-        await conn.execute("INSERT INTO data_deletion_requests(confirmation_code,status) VALUES($1,'received')", code2)
-        with pytest.raises(asyncpg.RaiseError):
-            await conn.fetchval("SELECT dsr_erase_subject($1, $2)", sa["cid"], code2)
+            await as_app("SELECT dsr_erase_subject($1)", code_a, fetch=True)
         assert await _subject_rows(conn, sb, b["psid"]) == before_b
-        # trigger bat bien van chan UPDATE thuong (ke ca superuser)
+        # (5) ma moi mo cho A (da xoa) -> khong subject -> tu choi; trigger van chan UPDATE thuong ca superuser
+        code_a2 = await as_app("SELECT dsr_open_request($1)", a["psid"], fetch=True)
+        assert await conn.fetchval("SELECT subject_customer_id FROM data_deletion_requests WHERE confirmation_code=$1",
+                                   code_a2) is None
+        with pytest.raises(asyncpg.RaiseError):
+            await as_app("SELECT dsr_erase_subject($1)", code_a2, fetch=True)
         with pytest.raises(asyncpg.RaiseError):
             await conn.execute("UPDATE order_events SET actor_id='x' WHERE order_id=$1", sb["oid"])
-        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='alpha3s_app')"):
-            for sql in ("UPDATE audit_log SET actor_ref='x' WHERE id=-1",
-                        "UPDATE order_events SET actor_id='x' WHERE order_id=-1",
-                        "UPDATE inventory_movements SET actor_id='x' WHERE reference_id='-1'"):
-                async with conn.transaction():
-                    await conn.execute("SET LOCAL ROLE alpha3s_app")
-                    with pytest.raises(asyncpg.InsufficientPrivilegeError):
-                        async with conn.transaction():
-                            await conn.execute(sql)
-            assert await conn.fetchval("SELECT has_function_privilege('alpha3s_app', "
-                                       "'dsr_erase_subject(bigint,text)', 'EXECUTE')")
-            assert not await conn.fetchval("SELECT pg_has_role('alpha3s_app', 'alpha3s_dsr', 'MEMBER')")
-        acl = await conn.fetchval("SELECT proacl::text FROM pg_proc WHERE proname='dsr_erase_subject'")
-        assert acl and "{=X/" not in acl and ",=X/" not in acl                     # khong cap EXECUTE cho PUBLIC
+        assert not await conn.fetchval("SELECT pg_has_role('alpha3s_app', 'alpha3s_dsr', 'MEMBER')")
+        for fn in ("dsr_erase_subject", "dsr_open_request"):
+            acl = await conn.fetchval("SELECT proacl::text FROM pg_proc WHERE proname=$1", fn)
+            assert acl and "{=X/" not in acl and ",=X/" not in acl                 # khong cap EXECUTE cho PUBLIC
+        await conn.execute("UPDATE data_deletion_requests SET status='failed' WHERE confirmation_code = ANY($1)",
+                           [code_a, code_a2, free])
     finally:
         await conn.close()
 
@@ -396,7 +418,9 @@ async def test_redis_failure_after_db_commit_then_worker_completes(monkeypatch):
                                   "WHERE confirmation_code=$1", code)
         assert row["status"] == "completed" and row["subject_hmac"] is None
         d = json.loads(row["detail"])
-        assert d["redis_completed_by"] == "worker" and d["subject_bound"] is True
+        assert d["redis_completed_by"] == "worker"
+        assert await conn.fetchval("SELECT erased_at IS NOT NULL FROM data_deletion_requests WHERE confirmation_code=$1",
+                                   code)
         r = await _redis()
         try:
             assert [k async for k in r.scan_iter(match=f"*{P}*")] == []

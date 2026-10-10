@@ -4,10 +4,15 @@
 -- lieu van con PSID/ChatID/dia chi/ten nguoi nhan trong DB active.
 -- Giai phap (KHONG mo quyen UPDATE chung):
 --   1. Role NOLOGIN `alpha3s_dsr` — khong ai dang nhap/khong role ung dung nao la thanh vien.
---   2. Ham SECURITY DEFINER `dsr_erase_subject(p_customer_id, p_code)` (OWNER alpha3s_dsr) la duong DUY NHAT.
---      CA 416: caller KHONG truyen dinh danh/PII — ham TU doc PSID/ChatID/ten/SDT/dia chi tu chinh dong customer (khoa
---      FOR UPDATE), don va draft cua customer do; bat buoc co yeu cau xoa `received` chua gan subject (1 code = 1 lan);
---      tu tombstone customer. Moi UPDATE gioi han bang LIEN KET chac chan (customer_id/order_id/payment_id/shipment_id/
+--   2. Hai ham SECURITY DEFINER (OWNER alpha3s_dsr) la duong DUY NHAT:
+--      - `dsr_open_request(p_ref)`: tao yeu cau xoa + GAN subject (customers.id — ID noi bo, KHONG luu PSID) ngay luc
+--        tao, tren dong customer khoa FOR UPDATE. CA 417: subject gan TRUOC khi cho phep xoa, qua duong DB kiem soat.
+--      - `dsr_erase_subject(p_code)`: CHI nhan ma; subject lay TU yeu cau (khoa FOR UPDATE) -> caller khong the ghep ma
+--        cua A voi customer B. CA 416: caller KHONG truyen dinh danh/PII — ham TU doc PSID/ChatID/ten/SDT/dia chi tu
+--        chinh dong customer (khoa), don va draft cua customer do; 1 ma = 1 lan (erased_at); tu tombstone customer.
+--      - Trigger ddr_subject_guard: subject_customer_id/erased_at CHI do alpha3s_dsr ghi; role khac (ke ca app) khong
+--        INSERT yeu cau co subject va khong doi/xoa subject/erased_at da gan.
+-- Moi UPDATE gioi han bang LIEN KET chac chan (customer_id/order_id/payment_id/shipment_id/
 --      operation_id/resolution_id/entity_id cua chinh subject, hoac so khop BANG nguyen truong voi dinh danh duy nhat).
 --      KHONG dung gia tri PII lam khoa so huu, KHONG LIKE/wildcard. Gia tri PII chi duoc THAY BEN TRONG dong da lien ket.
 --   3. Quyen cua alpha3s_dsr: SELECT + UPDATE THEO COT (chi cot dinh danh), DELETE pii_slots, INSERT audit_log.
@@ -29,14 +34,38 @@ GRANT USAGE ON SCHEMA public TO alpha3s_dsr;
 -- subject_hmac: HMAC(DSR_HMAC_KEY, psid) CHI ton tai khi status='redis_pending'; detail.hmac_key_id = id khoa (rotation).
 ALTER TABLE data_deletion_requests ADD COLUMN IF NOT EXISTS subject_hmac TEXT;
 ALTER TABLE data_deletion_requests ADD COLUMN IF NOT EXISTS detail JSONB;
+-- CA 417: yeu cau gan subject (ID noi bo) TU LUC TAO; erased_at = thoi diem ham xoa da dung ma (1 lan).
+ALTER TABLE data_deletion_requests ADD COLUMN IF NOT EXISTS subject_customer_id BIGINT;
+ALTER TABLE data_deletion_requests ADD COLUMN IF NOT EXISTS erased_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_ddr_redis_pending ON data_deletion_requests (status) WHERE status = 'redis_pending';
+
+CREATE OR REPLACE FUNCTION ddr_subject_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_user = 'alpha3s_dsr' THEN RETURN NEW; END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.subject_customer_id IS NOT NULL OR NEW.erased_at IS NOT NULL THEN
+      RAISE EXCEPTION 'data_deletion_requests: subject/erased_at chi duoc gan qua dsr_open_request/dsr_erase_subject';
+    END IF;
+  ELSIF NEW.subject_customer_id IS DISTINCT FROM OLD.subject_customer_id
+     OR NEW.erased_at IS DISTINCT FROM OLD.erased_at
+     OR NEW.confirmation_code IS DISTINCT FROM OLD.confirmation_code THEN
+    RAISE EXCEPTION 'data_deletion_requests: subject/erased_at/confirmation_code bat bien voi role ung dung';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS ddr_subject_guard ON data_deletion_requests;
+CREATE TRIGGER ddr_subject_guard BEFORE INSERT OR UPDATE ON data_deletion_requests
+  FOR EACH ROW EXECUTE FUNCTION ddr_subject_guard();
 
 -- ---------------------------------------------------------------- quyen theo cot
 GRANT SELECT ON orders, order_items, payments, payment_instructions, shipments, command_executions, outbox_events,
   fulfillment_conversations, inventory_reservations, address_review_queue, order_intents TO alpha3s_dsr;
 GRANT SELECT, UPDATE (psid, external_chat_id, name, phone, address, current_address_resolution_id) ON customers
   TO alpha3s_dsr;
-GRANT SELECT, UPDATE (detail) ON data_deletion_requests TO alpha3s_dsr;
+GRANT SELECT, INSERT, UPDATE (erased_at) ON data_deletion_requests TO alpha3s_dsr;
+DO $$ BEGIN EXECUTE format('GRANT USAGE ON SEQUENCE %s TO alpha3s_dsr',
+                           pg_get_serial_sequence('data_deletion_requests', 'id')); END $$;
 GRANT SELECT, INSERT ON audit_log TO alpha3s_dsr;
 DO $$ BEGIN EXECUTE format('GRANT USAGE ON SEQUENCE %s TO alpha3s_dsr', pg_get_serial_sequence('audit_log', 'id')); END $$;
 GRANT SELECT, UPDATE (actor_ref, before, after) ON audit_log TO alpha3s_dsr;
@@ -171,11 +200,31 @@ LANGUAGE sql IMMUTABLE AS $$
      AND EXISTS (SELECT 1 FROM unnest(vals) v WHERE v IS NOT NULL AND length(v) >= 5 AND position(v IN t) > 0)
 $$;
 
--- ---------------------------------------------------------------- ham DSR (duong duy nhat, CA 416)
-CREATE OR REPLACE FUNCTION dsr_erase_subject(p_customer_id bigint, p_code text)
+-- ---------------------------------------------------------------- mo yeu cau + gan subject (CA 417)
+-- p_ref = dinh danh kenh dang luu (customers.psid) cua NGUOI YEU CAU (Messenger PSID / 'tg:<chat_id>'). Chi luu
+-- customers.id; khong tim thay (hoac da xoa) -> yeu cau KHONG subject (xoa la no-op). Ma: 16 hex ngau nhien.
+CREATE OR REPLACE FUNCTION dsr_open_request(p_ref text)
+RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_code text; v_cid bigint;
+BEGIN
+  IF p_ref IS NULL OR length(p_ref) < 5 OR left(p_ref, 8) = 'deleted:' THEN
+    RAISE EXCEPTION 'dsr_open_request: dinh danh khong hop le';
+  END IF;
+  SELECT id INTO v_cid FROM customers WHERE psid = p_ref AND left(external_chat_id, 8) <> 'deleted:' FOR UPDATE;
+  v_code := left(replace(gen_random_uuid()::text, '-', ''), 16);
+  INSERT INTO data_deletion_requests (confirmation_code, status, subject_customer_id)
+  VALUES (v_code, 'received', v_cid);
+  RETURN v_code;
+END;
+$$;
+
+-- ---------------------------------------------------------------- ham DSR (duong duy nhat, CA 416 + 417)
+CREATE OR REPLACE FUNCTION dsr_erase_subject(p_code text)
 RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
+  v_rq record;
   c record;
   v_tomb text; v_refs text[]; v_actor text[]; v_pii text[]; v_all text[];
   v_orders bigint[]; v_ot text[]; v_pay bigint[]; v_ship bigint[]; v_ops bigint[]; v_cmds uuid[]; v_res uuid[];
@@ -183,21 +232,21 @@ DECLARE
   n int; v_out jsonb := '{}'::jsonb;
   c_mark CONSTANT text := '[đã ẩn theo yêu cầu xóa dữ liệu]';
 BEGIN
-  -- (1) Bat buoc co yeu cau xoa that: code dung dinh dang, status 'received', CHUA gan subject (1 code = 1 lan).
+  -- (1) Yeu cau that, DA GAN subject luc tao (dsr_open_request), status 'received', CHUA dung (1 ma = 1 lan).
+  --     Subject lay TU yeu cau duoi khoa — caller khong chon customer.
   IF p_code IS NULL OR p_code !~ '^[0-9a-f]{16}$' THEN
     RAISE EXCEPTION 'dsr_erase_subject: confirmation code khong hop le';
   END IF;
-  PERFORM 1 FROM data_deletion_requests
-   WHERE confirmation_code = p_code AND status = 'received' AND NOT coalesce(detail ? 'subject_bound', false)
-   FOR UPDATE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'dsr_erase_subject: khong co yeu cau xoa hop le (received, chua dung) cho code nay';
+  SELECT subject_customer_id INTO v_rq FROM data_deletion_requests
+   WHERE confirmation_code = p_code AND status = 'received' AND erased_at IS NULL FOR UPDATE;
+  IF NOT FOUND OR v_rq.subject_customer_id IS NULL THEN
+    RAISE EXCEPTION 'dsr_erase_subject: khong co yeu cau xoa hop le (received, da gan subject, chua dung) cho ma nay';
   END IF;
-  -- (2) Dinh danh/PII GOC doc TU CHINH dong customer (khoa) — caller khong cap gia tri nao.
+  -- (2) Dinh danh/PII GOC doc TU CHINH dong customer cua yeu cau (khoa) — caller khong cap gia tri nao.
   SELECT id, psid, external_chat_id, name, phone, address, current_address_resolution_id INTO c
-    FROM customers WHERE id = p_customer_id FOR UPDATE;
+    FROM customers WHERE id = v_rq.subject_customer_id FOR UPDATE;
   IF NOT FOUND OR left(c.psid, 8) = 'deleted:' OR left(c.external_chat_id, 8) = 'deleted:' THEN
-    RAISE EXCEPTION 'dsr_erase_subject: customer % khong ton tai hoac da xoa', p_customer_id;
+    RAISE EXCEPTION 'dsr_erase_subject: customer cua yeu cau khong ton tai hoac da xoa';
   END IF;
   v_tomb := 'deleted:' || p_code;
   v_refs := ARRAY(SELECT DISTINCT x FROM unnest(ARRAY[c.psid, c.external_chat_id]) x WHERE x IS NOT NULL AND length(x) >= 5);
@@ -353,8 +402,7 @@ BEGIN
   UPDATE customers SET psid = v_tomb, external_chat_id = v_tomb, name = NULL, phone = NULL, address = NULL,
          current_address_resolution_id = NULL
    WHERE id = c.id;
-  UPDATE data_deletion_requests SET detail = coalesce(detail, '{}'::jsonb) || jsonb_build_object('subject_bound', true)
-   WHERE confirmation_code = p_code;
+  UPDATE data_deletion_requests SET erased_at = now() WHERE confirmation_code = p_code;
   INSERT INTO audit_log (actor_type, actor_ref, action, entity_type, entity_id, after, reason)
   VALUES ('system', 'dsr', 'dsr.anonymize', 'data_deletion_request', p_code,
           v_out || jsonb_build_object('customer', 'customer:' || c.id), 'data subject deletion request');
@@ -362,27 +410,33 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION dsr_erase_subject(bigint, text) OWNER TO alpha3s_dsr;
+ALTER FUNCTION dsr_open_request(text) OWNER TO alpha3s_dsr;
+ALTER FUNCTION dsr_erase_subject(text) OWNER TO alpha3s_dsr;
 ALTER FUNCTION dsr_scrub_text(text, text[], text) OWNER TO alpha3s_dsr;
 ALTER FUNCTION dsr_scrub_json(jsonb, text[], text) OWNER TO alpha3s_dsr;
 ALTER FUNCTION dsr_has_any(text, text[]) OWNER TO alpha3s_dsr;
-REVOKE ALL ON FUNCTION dsr_erase_subject(bigint, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION dsr_open_request(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION dsr_erase_subject(text) FROM PUBLIC;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'alpha3s_app') THEN
-    GRANT EXECUTE ON FUNCTION dsr_erase_subject(bigint, text) TO alpha3s_app;
+    GRANT EXECUTE ON FUNCTION dsr_open_request(text) TO alpha3s_app;
+    GRANT EXECUTE ON FUNCTION dsr_erase_subject(text) TO alpha3s_app;
   END IF;
 END $$;
 
 -- Postcondition
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
-                 WHERE p.proname = 'dsr_erase_subject' AND p.prosecdef AND r.rolname = 'alpha3s_dsr') THEN
-    RAISE EXCEPTION '077 postcondition: dsr_erase_subject phai SECURITY DEFINER owner alpha3s_dsr';
+  IF (SELECT count(*) FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+      WHERE p.proname IN ('dsr_erase_subject', 'dsr_open_request') AND p.prosecdef AND r.rolname = 'alpha3s_dsr') <> 2 THEN
+    RAISE EXCEPTION '077 postcondition: dsr_erase_subject/dsr_open_request phai SECURITY DEFINER owner alpha3s_dsr';
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'dsr_erase_subject' AND pronargs <> 2) THEN
-    RAISE EXCEPTION '077 postcondition: dsr_erase_subject chi duoc nhan (customer_id, code) — khong nhan dinh danh tu caller';
+  IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'dsr_erase_subject' AND pronargs <> 1) THEN
+    RAISE EXCEPTION '077 postcondition: dsr_erase_subject chi duoc nhan (code) — subject lay tu yeu cau da gan';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'ddr_subject_guard') THEN
+    RAISE EXCEPTION '077 postcondition: thieu trigger ddr_subject_guard';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE r.rolname = 'alpha3s_dsr') THEN
     RAISE EXCEPTION '077 postcondition: alpha3s_dsr khong duoc co thanh vien';

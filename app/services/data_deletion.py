@@ -351,12 +351,16 @@ async def _delete_customer_data(psid: str, confirmation_code: str) -> dict:
                     "SELECT id FROM conversations WHERE customer_id = $1", cid)]
                 order_ids = [r["id"] for r in await conn.fetch(
                     "SELECT id FROM orders WHERE customer_id = $1", cid)]
-                # CA 415 §3.2 + CA 416: kho bat bien/append-only -> DUONG QUYEN HEP duy nhat (migration 077). Ham TU doc
-                # dinh danh/PII tu chinh dong customer + don/draft (CHAY TRUOC khi app null cac truong do), chi sua dong
-                # LIEN KET subject, TU tombstone customer (psid VA external_chat_id), gan request (1 code = 1 lan), tu
-                # audit 'dsr.anonymize'. App KHONG truyen dinh danh/PII nao. Loi -> rollback ca DSR.
-                imm = await conn.fetchval("SELECT dsr_erase_subject($1, $2)", cid, confirmation_code)
-                summary["immutable_anonymized"] = json.loads(imm) if isinstance(imm, str) else imm
+                # CA 415 §3.2 + 416 + 417: kho bat bien/append-only -> DUONG QUYEN HEP duy nhat (migration 077). Ham CHI
+                # nhan ma; subject = customer da gan vao yeu cau luc mo (dsr_open_request) — app khong chon customer.
+                # Ham TU doc dinh danh/PII tu chinh dong customer + don/draft (CHAY TRUOC khi app null cac truong do),
+                # chi sua dong LIEN KET subject, TU tombstone customer (psid VA external_chat_id), dung ma 1 lan, tu
+                # audit 'dsr.anonymize'. Loi -> rollback ca DSR.
+                imm = await conn.fetchval("SELECT dsr_erase_subject($1)", confirmation_code)
+                imm = json.loads(imm) if isinstance(imm, str) else imm
+                if imm.get("customer_id") != cid:   # phong thu: dong app khoa phai la subject cua yeu cau
+                    raise RuntimeError("subject cua yeu cau xoa khong khop customer dang khoa")
+                summary["immutable_anonymized"] = imm
                 await _scrub_operational_stores(conn, cid=cid, psid=psid, tomb=tomb, conv_ids=conv_ids,
                                                 order_ids=order_ids, summary=summary)
                 # Con truoc: messages + escalations -> conversations
@@ -408,8 +412,20 @@ async def process_deletion(psid: str) -> dict:
     Loi khi xoa DB -> danh dau 'failed' (transaction rollback, khong xoa gi) nhung VAN tra code.
     CA 415 §3.5 + 416: DB da commit nhung Redis loi (sau retry) -> 'redis_pending' + (hmac_key_id, subject_hmac) theo
     DSR_HMAC_KEY rieng; lan goi lai cung psid (callback lap / khach nhan lai) hoac worker retry_redis_pending hoan tat."""
-    confirmation_code = secrets.token_hex(8)
-    await _record_request(confirmation_code, "received")
+    # CA 417: mo yeu cau + GAN subject (customers.id) qua ham DB kiem soat, TRUOC khi xoa. Khong tim thay customer ->
+    # yeu cau khong subject (xoa la no-op). Ham loi (vd DB) -> van tra ma cho Meta/khach, request 'failed'.
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            confirmation_code = await conn.fetchval("SELECT dsr_open_request($1)", psid)
+    except Exception as e:  # noqa: BLE001
+        print(f"[data_deletion] Khong mo duoc yeu cau xoa psid={mask_ref(psid)}: {safe_exc(e)}")
+        confirmation_code = secrets.token_hex(8)
+        try:
+            await _record_request(confirmation_code, "failed")
+        except Exception:  # noqa: BLE001
+            pass
+        return {"confirmation_code": confirmation_code, "summary": None}
     summary = None
     try:
         summary = await _delete_customer_data(psid, confirmation_code)
