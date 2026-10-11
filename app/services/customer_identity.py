@@ -14,6 +14,17 @@ import uuid
 CHANNELS = ("telegram_customer", "messenger", "dashboard")
 MESSAGING_CHANNELS = ("telegram_customer", "messenger")
 _TG_PREFIX = "tg:"
+# CA Directive 405 §2.1: khach da xoa du lieu -> psid VA external_chat_id = 'deleted:<confirmation_code>' (code ngau
+# nhien theo tung yeu cau, KHONG suy ra duoc PSID/ChatID goc). Ref dang nay KHONG BAO GIO la nguoi nhan hop le.
+TOMBSTONE_PREFIX = "deleted:"
+
+
+def tombstone(confirmation_code: str) -> str:
+    return f"{TOMBSTONE_PREFIX}{confirmation_code}"
+
+
+def is_tombstone(ref) -> bool:
+    return isinstance(ref, str) and ref.startswith(TOMBSTONE_PREFIX)
 
 
 class IdentityError(ValueError):

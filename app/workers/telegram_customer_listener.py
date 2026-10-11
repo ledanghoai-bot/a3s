@@ -26,7 +26,7 @@ from app.config import settings
 from app.services import conversation_log
 from app.services.handoff import is_bot_paused
 from app.services.orchestrator import handle_message
-from app.services.safe_log import safe_exc
+from app.services.safe_log import mask_ref, safe_exc
 
 API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 30
@@ -93,7 +93,7 @@ async def _handle_customer_message(client: httpx.AsyncClient, chat_id: int, text
     if await is_bot_paused(sender_id):
         conversation_id = await conversation_log.ensure_conversation(sender_id, channel="telegram_customer")
         await conversation_log.log_message(conversation_id, "customer", text)
-        print(f"[telegram_customer_listener] Bot dang paused cho {sender_id}, chi log.")
+        print(f"[telegram_customer_listener] Bot dang paused cho {mask_ref(sender_id)}, chi log.")
         return
 
     # channel='telegram_customer' (khớp CHANNELS của command envelope) + provider message id thật

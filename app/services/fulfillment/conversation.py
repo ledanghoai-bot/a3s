@@ -614,7 +614,7 @@ async def _handle_ship_confirm(conn, fc, text: str, *, command_key: str, actor: 
     try:
         async with conn.transaction():   # savepoint: loi prepare khong lam hong tx cua luot khach
             rc = await _gsc.prepare(conn, order_id, source="bot", command_key=f"bot:{order_id}:{command_key}",
-                                    actor=f"customer:{fc['customer_ref']}", customer_id=cust_id,
+                                    actor=f"customer:{cust_id}", customer_id=cust_id,
                                     confirm_fingerprint=offer_fp)
     except _gsc.ShipmentCreateError as e:
         reply = staff_text(order_id, "shipment_create")
