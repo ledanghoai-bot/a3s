@@ -457,8 +457,19 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
         (Hoài clicked Submit) — status "In review", Meta says most submissions are reviewed
         within ~10 days, nothing to do for now; result arrives via email + the Developer Console
         notification inbox.**
+      - **✅ STATUS 2026-10-11 — D405 + CA 414 §2 + CA 415–418: DEPLOYED DORMANT (acknowledged in CA Review 419).**
+        PR #93 squash → main `a383649` (tree `00197894` = the CA 418 reviewed candidate); CI push-main `38109625179`
+        lint-test/migration-pipeline/deploy ✓; prod schema **077**; `DSR_HMAC_KEY` set on the VPS (`.env` backed up).
+        Preflight/postflight: 16 digests + workflow + flags **unchanged** (only `schema_migrations` 75→77); legacy
+        tombstones with a real ChatID = 0. **System smoke (SYNTHETIC Telegram customer) PASS:** delete → 0 refs in
+        DB/Redis → same ChatID creates a new customer → cleaned up. **NOT YET:** DSR E2E via **real chat** (a second
+        Telegram tester outside the allowlists; do NOT delete customer 1) — pending; the Meta callback has no ASID→PSID
+        E2E (Page now in the same Business, `ids_for_apps` empty because there is no Facebook Login) → effective DSR path
+        = chat/email, PO to decide how to publish it. **Messenger public: NO-GO** — Meta delivered only 1/12 real text
+        messages since approval (receipts/postbacks/test events do arrive); bug report sent to Meta 2026-10-11. No
+        gate/flag changes. Evidence: `Dev/evidence/d405-apply/v01`, `Dev/evidence/messenger-post-approval-1010`.
       - **CA Directive 405 — data deletion (DSR) + automated-assistant disclosure (candidate 2026-10-10, branch
-        `feat/d405-dsr-disclosure` off main `c15ac60`, NOT deployed — awaiting CA review):**
+        `feat/d405-dsr-disclosure` off main `c15ac60`; review-round history below):**
         - **Bugs found:** (1) deletion left `customers.external_chat_id` (migration 072) → the real PSID/ChatID
           survived and the same person messaging again hit `UniqueViolation uq_customers_channel_chat`, bot silent;
           (2) **new, more severe:** `command_executions.conversation_id` and `order_intents.conversation_id` are FKs

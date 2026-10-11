@@ -433,8 +433,18 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
         nút Tiếp im lặng không chuyển). Tổng quan 4/4 phần tick xanh. **ĐÃ GỬI 03/9/2026 (anh
         Hoài bấm Gửi) — trạng thái "Đang xem xét", Meta báo xem xét trong ~10 ngày, hiện không
         cần làm gì thêm; kết quả về qua email + Hộp thư thông báo Developer Console.**
+      - **✅ TRẠNG THÁI 11/10/2026 — D405 + CA 414 §2 + CA 415–418: DEPLOYED DORMANT (CA Review 419 ghi nhận).**
+        PR #93 squash → main `a383649` (tree `00197894` = bản CA 418 review); CI push-main `38109625179`
+        lint-test/migration-pipeline/deploy ✓; prod schema **077**; `DSR_HMAC_KEY` đặt trên VPS (backup `.env`).
+        Preflight/postflight: 16 digest + workflow + flag **không đổi** (chỉ `schema_migrations` 75→77); legacy tombstone
+        còn ChatID thật = 0. **Smoke hệ thống (khách Telegram TỔNG HỢP) PASS:** xoá → DB/Redis 0 ref → cùng ChatID tạo
+        customer mới → dọn. **CHƯA:** E2E DSR qua **chat thật** (tester Telegram thứ hai ngoài allowlist; KHÔNG xoá
+        customer 1) — pending; callback Meta chưa có E2E ASID→PSID (Page đã cùng Business, `ids_for_apps` rỗng vì không
+        có Facebook Login) → đường DSR thực tế = chat/email, PO chốt cách công bố. **Messenger public: NO-GO** — Meta chỉ
+        giao 1/12 tin chữ từ khi duyệt (receipt/postback/test event vẫn về); đã gửi bug report Meta 11/10. Không đổi
+        gate/flag. Evidence: `Dev/evidence/d405-apply/v01`, `Dev/evidence/messenger-post-approval-1010`.
       - **CA Directive 405 — xóa dữ liệu (DSR) + khai báo trợ lý tự động (candidate 10/10/2026, branch
-        `feat/d405-dsr-disclosure` off main `c15ac60`, CHƯA deploy — chờ CA review):**
+        `feat/d405-dsr-disclosure` off main `c15ac60`; lịch sử các vòng review dưới đây):**
         - **Bug phát hiện:** (1) xóa dữ liệu bỏ sót `customers.external_chat_id` (migration 072) → PSID/ChatID thật
           còn lại + cùng người nhắn lại bị `UniqueViolation uq_customers_channel_chat`, bot im; (2) **mới, nặng hơn:**
           `command_executions.conversation_id` và `order_intents.conversation_id` là FK tới `conversations` không
