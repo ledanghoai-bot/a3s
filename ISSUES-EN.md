@@ -230,6 +230,51 @@ Addendum 411 → Review 412 → Closure 413, LIVE 2026-09-27, PR #91, main `c15a
 - **Lessons / backlog:** Dashboard orders on the legacy path decrement `products.stock` directly and cancelling
   **does not restore stock** while the M2 ledger is OFF (test order #257 had to be restored by hand, audit #5025, an
   exception for test data only). Must be fixed before opening to real customers if the legacy path stays in use.
+  → **Fixed in D421 (PR #95)**, see below.
+
+**M7 gap closure before M8 — M7 CLOSED for the tester/dormant scope (Phase I-B, CA Directive 421 → Reviews 422–427 →
+Closure 428, 2026-10-17; PR #95 main `1da87742`, PR #96 main `21f9423b`, schema 077):**
+- **Bugs fixed:**
+  - Cancelling an order while the M2 ledger is OFF **did not restore stock**: all 3 creation paths (bot/command bus,
+    `order_service`, legacy Dashboard) decrement `products.stock` directly, but the cancel lifecycle only released
+    reservations. PR #95: cancellation (`EFFECT_RELEASE`, 0 reservations, `unreserved`) restores `products.stock`
+    **exactly once per order**, keyed by event `inventory.legacy_stock_restore` / `legacy_stock_restore:<order_id>`.
+    Verified on prod: new test order #258 914→913→914, replay adds nothing.
+  - Historical data: a one-off script (hard-coded allowlist #253/#254/#255, actor `system`, exit 0/2/10) restored
+    914→**917** (CA 425 approved, PO decision 2026-10-17); #257 had been restored by hand, not added again; rerun
+    `ALREADY_APPLIED_NOOP`.
+  - The GHN shipment-create adapter (D393) did not match the real contract — found by a read-only/preview **staging**
+    probe: lookup must be GET + query; "not found" = HTTP 400, `code_message` null, message
+    `… - Đơn hàng không tồn tại` (only the exact accented string, NFC); missing `items` is rejected; exactly 20,000 g
+    must use service 5 (60,500đ vs 155,100đ). The **code-based** address payload is accepted; the name-based one gets
+    `TO_ADDRESS_CONFLICT` → kept code-based.
+- **Done (PR #96, deployed dormant):**
+  - GET lookup; strict `not_found`; `code_message` in `error_class`; blockers `items_missing`, `cod_over_provider_max`
+    (>50M), `parcel_over_provider_max` (side >200 cm); fee mismatch at create → attention `provider_fee_mismatch`;
+    exactly 20,000 g → service 5 for both quote and create (heavy guard still `>20 kg`).
+  - Create errors 408/5xx → `unknown` (staff reconciliation), no auto-retry; only 425/429/not-sent retry.
+  - **From GHN staging (1 real create, PO approved):** re-sending the same `client_order_code` returns **the same
+    order**; but **a cancelled order also looks up as "not found"**. So after any send that may have reached GHN,
+    `not_found` **never auto-recreates** (staff or worker) — stays `unknown` (`not_found_unsettled` <60s /
+    `not_found_unverified`); staff checks the GHN portal → "Dừng yêu cầu" (note, closes that op's attention) → new
+    request.
+  - Runbook `docs/GHN-CREATE-UNKNOWN-RECONCILIATION-RUNBOOK-VI.md`; Dashboard shows the actual reconcile result.
+- **DSR over real Telegram (A4):** PASS — the PO's second Telegram account erased customer #1549, messaging again
+  created #1550 without the `external_chat_id` error; footprint shows only new data (no pre-delete baseline — limitation
+  recorded). Production `DSR_HMAC_KEY` **rotated** (old value was accidentally printed in a Dev transcript); `.env` and
+  16 backups → mode 600, the backup holding the leaked key shredded.
+- **GHN production pickup:** the GHN shop had no address → PO registered one; PO changed the A3S config to
+  **1552/400101 (Phường Ea Tam)** to match (audit #5036). Connection test pass (revision 6); tester quote 600 g =
+  16,500đ; 20,001 g guard → staff, 0 HTTP.
+- **Verified:** m5lab DB 386 GHN/shipment/fulfillment/quote tests; CI mode 1113 pass; #96 deploy postflight: 0 data
+  change, `ghn_ops=0`, create gates OFF/OFF.
+- **Not done / boundaries (CA 428):**
+  - Production shipment-create canary (1 Dashboard + 1 Bot, plan qualified in CA 427) — **deferred by the PO**;
+    required before announcing real shipment creation as working. `GHN_SHIPMENT_CREATE_BOT/DASHBOARD_ENABLED` stay OFF.
+  - A3S has no GHN cancel API yet — staff cancel on the GHN portal.
+  - SePay live OFF (S0 tester passed); bank transfer outside tester = staff confirmation. M7 Telegram stays `tester`;
+    going public is a separate activation. Messenger/Meta App Review out of scope.
+  - M8 uses only recorded delivery/payment events, never predicted shipment status.
 ---
 
 ## #7 · Human handoff: bot_paused + staff notification
