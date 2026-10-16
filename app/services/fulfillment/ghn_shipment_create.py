@@ -29,8 +29,9 @@ from datetime import datetime, timedelta, timezone
 from app.config import settings
 from app.services import audit_service
 from app.services.command import repository as cmd_repo
+from app.services.providers.ghn_create import COD_MAX_VND
 
-POLICY_VERSION = "ghn_create_policy_v1"
+POLICY_VERSION = "ghn_create_policy_v2"   # v2 (D421 B1): items_missing + cod_over_provider_max la blocker
 SNAPSHOT_SCHEMA = "ghn_create_snapshot_v1"
 # Policy v1 (PO co the doi qua version moi): shop tra phi GHN (payment_type_id=1), khach tra tong (hang + phi giao)
 # qua COD; khong cho xem hang. BANK_TRANSFER chi du dieu kien khi tien DA xac nhan. Quote hieu luc 24h.
@@ -243,10 +244,16 @@ async def evaluate(conn, order_id: int, *, source: str, exclude_op_id: int | Non
         "items": items,
         "policy": {"payment_type_id": POLICY["payment_type_id"], "required_note": POLICY["required_note"]},
     }
+    # D421 B1: GHN tu choi don thieu hang ("Tên hàng hoá bắt buộc", probe staging) va COD vuot tran -> blocker,
+    # chan TRUOC khi goi provider (khong de thanh rejected terminal sau khi khach da xac nhan).
+    if not items or any(not (it["name"] or "").strip() or it["quantity"] < 1 for it in items):
+        blockers.append("items_missing")
+    if cod > COD_MAX_VND:
+        blockers.append("cod_over_provider_max")
+    if blockers:
+        return out
     if cod >= 3_000_000:
         warnings.append("cod_amount_high")
-    if not items:
-        warnings.append("no_items")
     out.update(eligible=True, snapshot=snapshot, fingerprint=fingerprint(snapshot))
     return out
 

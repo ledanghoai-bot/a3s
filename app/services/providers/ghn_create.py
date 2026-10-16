@@ -16,10 +16,16 @@ Hop dong an toan:
 Provider-contract GAP (CHUA verify voi GHN that — nop CA): endpoint `/v2/shipping-order/create`, bo field bat buoc,
 co/khong idempotency theo client_order_code, `/v2/shipping-order/detail-by-client-code` cho doi soat, API huy/label/
 tracking/webhook — xem ho so submission Directive 393 §gap.
+D421 B1 (probe STAGING read-only/preview 16/10/2026, KHONG goi create): payload theo MA duoc chap nhan (ban theo ten
++ is_new_to_address -> TO_ADDRESS_CONFLICT) -> giu theo ma; thieu items+content -> 'Tên hàng hoá bắt buộc';
+lookup = GET + query; 'khong ton tai' = HTTP 400/code 400/code_message null/message '... - Đơn hàng không tồn tại'.
+Idempotency create theo client_order_code VAN CHUA verify (can create that tren staging — cam theo CA 422).
 """
 from __future__ import annotations
 
+import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +39,10 @@ _RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 # Chi cac key nay duoc luu tu response (khong PII: ten/SDT/dia chi nguoi nhan, khong token).
 _RESULT_KEYS = ("order_code", "sort_code", "trans_type", "total_fee", "expected_delivery_time", "status",
                 "client_order_code")
+
+_NOT_FOUND_MSG = unicodedata.normalize("NFC", "Đơn hàng không tồn tại")
+# Tran COD cua GHN (docs Tao don, D421 B1) — vuot -> blocker truoc khi goi provider.
+COD_MAX_VND = 50_000_000
 
 CREATED, REJECTED, RETRYABLE, UNKNOWN = "created", "rejected", "retryable", "unknown"
 FOUND, NOT_FOUND = "found", "not_found"
@@ -75,6 +85,30 @@ def build_create_payload(snapshot: dict, client_order_code: str) -> dict:
     }
 
 
+def _code_message_suffix(js: dict | None) -> str:
+    """`code_message` GHN (vd TO_ADDRESS_CONFLICT, USER_ERR_COMMON) -> hau to error_class de staff biet sua gi.
+    Chi giu [A-Z0-9_] (<=48 ky tu) — khong dua message tu do (co the chua PII/du lieu dau vao) vao error_class."""
+    cm = (js or {}).get("code_message")
+    if not isinstance(cm, str):
+        return ""
+    s = re.sub(r"[^A-Z0-9_]", "", cm.strip().upper())[:48]
+    return f"_{s}" if s else ""
+
+
+def is_lookup_not_found(http_status: int | None, js: dict | None) -> bool:
+    """'Khong ton tai' CHAC CHAN cho detail-by-client-code (not_found -> state machine DUOC tao lai => phai chat).
+    Hop dong quan sat tren staging (D421 B1, 16/10/2026): HTTP 400, code 400, data null, code_message null,
+    message 'Lỗi gọi API: corev2_tenant_order_detail_by_client_order_code - Đơn hàng không tồn tại'.
+    Chap nhan: code_message == ORDER_NOT_FOUND (theo docs) HOAC doan cuoi message (sau ' - ') == 'Đơn hàng không tồn
+    tại' (NFC, GIU DAU — khong bo dau/khong substring). Moi truong hop khac -> unknown (staff doi soat)."""
+    if http_status != 400 or not isinstance(js, dict) or js.get("code") != 400 or js.get("data"):
+        return False
+    if js.get("code_message") == "ORDER_NOT_FOUND":
+        return True
+    msg = unicodedata.normalize("NFC", str(js.get("message") or ""))
+    return msg.rsplit(" - ", 1)[-1].strip() == _NOT_FOUND_MSG
+
+
 def _retry_after(resp) -> int | None:
     v = resp.headers.get("Retry-After") if resp is not None else None
     if v is None:
@@ -86,16 +120,18 @@ def _retry_after(resp) -> int | None:
     return max(0, min(n, RETRY_AFTER_MAX_S))
 
 
-async def _send_once(cfg: dict, path: str, body: dict) -> tuple[Any, dict | None, str, int]:
-    """1 POST, KHONG retry. Tra (resp|None, json|None, error_class, duration_ms). error_class:
-    '' | 'connect' (chua gui) | 'timeout_read' | 'protocol' (co the da gui)."""
+async def _send_once(cfg: dict, path: str, body: dict | None, *, method: str = "POST",
+                     params: dict | None = None) -> tuple[Any, dict | None, str, int]:
+    """1 request (POST create | GET lookup), KHONG retry. Tra (resp|None, json|None, error_class, duration_ms).
+    error_class: '' | 'connect' (chua gui) | 'timeout_read' | 'protocol' (co the da gui)."""
     headers = {"Content-Type": "application/json", "Token": cfg["token"]}
     if cfg.get("shop_id"):
         headers["ShopId"] = str(cfg["shop_id"])
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(cfg["timeout"], connect=3.0)) as client:
-            resp = await client.post(f"{cfg['base']}{path}", headers=headers, json=body)
+            resp = await client.request(method, f"{cfg['base']}{path}", headers=headers, params=params,
+                                        json=body if method == "POST" else None)
     except (httpx.ConnectError, httpx.ConnectTimeout):
         return None, None, "connect", int((time.perf_counter() - t0) * 1000)
     except httpx.TimeoutException:
@@ -137,14 +173,16 @@ class GhnCreateProvider:
                                    retry_after_s=_retry_after(resp) if st == 429 else None)
         if st == 200 or 400 <= st < 500:
             gcode = js.get("code") if js else None
-            return ProviderOutcome(REJECTED, http_status=st, error_class=f"rejected_http_{st}_code_{gcode}",
+            return ProviderOutcome(REJECTED, http_status=st,
+                                   error_class=f"rejected_http_{st}_code_{gcode}{_code_message_suffix(js)}",
                                    duration_ms=dur)
         return ProviderOutcome(UNKNOWN, http_status=st, error_class=f"http_{st}", duration_ms=dur)
 
     async def lookup(self, client_order_code: str) -> ProviderOutcome:
         """Doi soat theo client_order_code (read-only). found | not_found | unknown (khong chac chan -> staff)."""
-        resp, js, err, dur = await self._send(self.cfg, DETAIL_BY_CLIENT_CODE_PATH,
-                                              {"client_order_code": client_order_code})
+        # D421 B1 (probe staging): docs + thuc te = GET + query string (POST body KHONG phai hop dong).
+        resp, js, err, dur = await self._send(self.cfg, DETAIL_BY_CLIENT_CODE_PATH, None, method="GET",
+                                              params={"client_order_code": client_order_code})
         if err:
             return ProviderOutcome(UNKNOWN, error_class=f"lookup_{err}", duration_ms=dur)
         st = resp.status_code
@@ -155,10 +193,7 @@ class GhnCreateProvider:
                 return ProviderOutcome(FOUND, http_status=st, duration_ms=dur, order_code=code.strip(),
                                        result=redact_result(data))
             return ProviderOutcome(UNKNOWN, http_status=st, error_class="lookup_ok_mismatch", duration_ms=dur)
-        # GAP: ma/HTTP GHN tra khi KHONG tim thay chua duoc xac nhan -> chi coi 'not_found' khi body noi ro.
-        if js is not None and st in (200, 400, 404) and js.get("code") in (400, 404) and not data:
-            msg = str(js.get("message") or "").lower()
-            if "not found" in msg or "không tìm thấy" in msg or "khong tim thay" in msg:
-                return ProviderOutcome(NOT_FOUND, http_status=st, duration_ms=dur)
-        return ProviderOutcome(UNKNOWN, http_status=st, error_class=f"lookup_http_{st}", duration_ms=dur,
-                               retry_after_s=_retry_after(resp) if st == 429 else None)
+        if is_lookup_not_found(st, js):
+            return ProviderOutcome(NOT_FOUND, http_status=st, duration_ms=dur)
+        return ProviderOutcome(UNKNOWN, http_status=st, error_class=f"lookup_http_{st}{_code_message_suffix(js)}",
+                               duration_ms=dur, retry_after_s=_retry_after(resp) if st == 429 else None)

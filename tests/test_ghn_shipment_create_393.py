@@ -40,8 +40,8 @@ class _Resp:
 def _send(status=None, js=None, err="", headers=None):
     calls = []
 
-    async def send(cfg, path, body):
-        calls.append((path, body))
+    async def send(cfg, path, body, **kw):
+        calls.append((path, body, kw))
         return (_Resp(status, headers) if status is not None else None), js, err, 5
     send.calls = calls
     return send
@@ -86,7 +86,7 @@ def test_retry_after_capped_and_lookup():
     assert _run(prov.create(SNAP, "c")).retry_after_s == P.RETRY_AFTER_MAX_S
     f = P.GhnCreateProvider({}, send=_send(200, {"code": 200, "data": {"order_code": "G1", "client_order_code": "c"}}))
     assert _run(f.lookup("c")).outcome == "found"
-    nf = P.GhnCreateProvider({}, send=_send(400, {"code": 400, "message": "Order not found"}))
+    nf = P.GhnCreateProvider({}, send=_send(400, {"code": 400, "message": "Lỗi gọi API: x - Đơn hàng không tồn tại"}))
     assert _run(nf.lookup("c")).outcome == "not_found"
     uk = P.GhnCreateProvider({}, send=_send(None, None, "timeout_read"))
     assert _run(uk.lookup("c")).outcome == "unknown"
