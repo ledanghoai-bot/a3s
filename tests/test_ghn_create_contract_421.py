@@ -201,9 +201,109 @@ async def test_reconcile_not_found_within_settle_window_stays_unknown(gate_on, m
         assert await conn.fetchval("SELECT error_class FROM ghn_shipment_create_attempts WHERE operation_id=$1 "
                                    "AND kind='reconcile'", op_id) == "not_found_unsettled"
         monkeypatch.setattr(G, "LOOKUP_SETTLE_S", 0)          # het cua so (attempts append-only: khong sua thoi gian)
-        out = await G.reconcile(conn, op_id, staff_id=st, actor="t", provider_factory=T._fac(T.FakeProv(lookups=[nf])))
-        assert out["lookup"] == "not_found" and out["changed"] is True
-        assert (await T._op(conn, op_id))["state"] == "failed_retryable"
+        # CA 425 §2: SAU 60s van KHONG mo lai create — GHN tra not_found ca cho don DA HUY (probe staging L8RD3U)
+        prov = T.FakeProv(lookups=[nf])
+        out = await G.reconcile(conn, op_id, staff_id=st, actor="t", provider_factory=T._fac(prov))
+        assert out["lookup"] == "not_found_unverified" and out["changed"] is False and prov.calls == ["lookup"]
+        assert (await T._op(conn, op_id))["state"] == "unknown_reconciliation_required"
+        assert await conn.fetchval("SELECT count(*) FROM staff_attention WHERE order_id=$1 AND status='open' "
+                                   "AND reason='shipment_create'", s["oid"]) == 1
+        w = T.FakeProv()
+        again = await G.run_dispatch_once(provider_factory=T._fac(w), op_ids=[op_id])
+        assert again["picked"] == 0 and again["http_calls"] == 0 and w.calls == []     # zero create HTTP moi
+        assert await conn.fetchval("SELECT count(*) FROM ghn_shipment_create_attempts WHERE operation_id=$1 "
+                                   "AND kind='create'", op_id) == 1
+    finally:
+        await T._cleanup_env(conn, iid)
+        await conn.close()
+
+
+@T.dbonly
+@pytest.mark.asyncio
+async def test_worker_never_recreates_after_maybe_reached_create_even_if_lookup_not_found(gate_on):
+    """Phong thu chieu sau: op bi dua ve failed_retryable (vd sua tay) sau 1 create unknown -> worker lookup not_found
+    (mo phong don GHN da huy) -> KHONG create, ve unknown + attention not_found_unverified."""
+    conn = await T._conn()
+    iid, mapv = await T._env(conn)
+    try:
+        st = await T._staff(conn)
+        s = await T._seed(conn, mapv)
+        op_id = (await T._prepare(conn, s["oid"], st))["operation"]["id"]
+        await G.run_dispatch_once(provider_factory=T._fac(T.FakeProv(
+            creates=[P.ProviderOutcome("unknown", http_status=503, error_class="http_503_maybe_created")])),
+            op_ids=[op_id])
+        await conn.execute("UPDATE ghn_shipment_create_operations SET state='failed_retryable', next_attempt_at=now() "
+                           "WHERE id=$1", op_id)
+        # sua tay ca attention (neu con mo, revalidation da chan som hon — staff_attention_open, 0 HTTP)
+        await conn.execute("UPDATE staff_attention SET status='resolved', resolved_at=now(), resolved_by='t', "
+                           "resolution_note='t' WHERE order_id=$1 AND status='open'", s["oid"])
+        prov = T.FakeProv(lookups=[P.ProviderOutcome("not_found", http_status=400)])
+        stats = await G.run_dispatch_once(provider_factory=T._fac(prov), op_ids=[op_id])
+        assert prov.calls == ["lookup"] and stats["unknown"] == 1
+        op = await T._op(conn, op_id)
+        assert op["state"] == "unknown_reconciliation_required" and op["last_error_class"] == "not_found_unverified"
+        assert await conn.fetchval("SELECT count(*) FROM staff_attention WHERE order_id=$1 AND status='open' AND "
+                                   "detail->>'why'='not_found_unverified'", s["oid"]) == 1
+    finally:
+        await T._cleanup_env(conn, iid)
+        await conn.close()
+
+
+@T.dbonly
+@pytest.mark.asyncio
+async def test_found_succeeds_once_and_safe_retry_path_kept(gate_on):
+    conn = await T._conn()
+    iid, mapv = await T._env(conn)
+    try:
+        st = await T._staff(conn)
+        # unknown -> found: ghi thanh cong DUNG mot lan; doi soat lai -> state_invalid, khong ghi them
+        s = await T._seed(conn, mapv)
+        op_id = (await T._prepare(conn, s["oid"], st))["operation"]["id"]
+        await G.run_dispatch_once(provider_factory=T._fac(T.FakeProv(
+            creates=[P.ProviderOutcome("unknown", error_class="timeout_read")])), op_ids=[op_id])
+        fd = P.ProviderOutcome("found", http_status=200, order_code="GFOUND1", result={"order_code": "GFOUND1"})
+        out = await G.reconcile(conn, op_id, staff_id=st, actor="t", provider_factory=T._fac(T.FakeProv(lookups=[fd])))
+        assert out["lookup"] == "found" and (await T._op(conn, op_id))["state"] == "succeeded"
+        with pytest.raises(G.ShipmentCreateError):
+            await G.reconcile(conn, op_id, staff_id=st, actor="t", provider_factory=T._fac(T.FakeProv(lookups=[fd])))
+        assert await conn.fetchval("SELECT count(*) FROM audit_log WHERE action='shipment.ghn_create.succeeded' "
+                                   "AND entity_id=$1", str(op_id)) == 1
+        # duong an toan: 429 (chac chan chua xu ly) -> staff doi soat not_found -> failed_retryable -> worker tao
+        s2 = await T._seed(conn, mapv)
+        op2 = (await T._prepare(conn, s2["oid"], st))["operation"]["id"]
+        await G.run_dispatch_once(provider_factory=T._fac(T.FakeProv(
+            creates=[P.ProviderOutcome("retryable", http_status=429, error_class="http_429")])), op_ids=[op2])
+        out = await G.reconcile(conn, op2, staff_id=st, actor="t", provider_factory=T._fac(T.FakeProv(
+            lookups=[P.ProviderOutcome("not_found", http_status=400)])))
+        assert out["lookup"] == "not_found" and (await T._op(conn, op2))["state"] == "failed_retryable"
+        p = T.FakeProv(lookups=[P.ProviderOutcome("not_found", http_status=400)],
+                       creates=[P.ProviderOutcome("created", http_status=200, order_code="GSAFE", result={})])
+        await G.run_dispatch_once(provider_factory=T._fac(p), op_ids=[op2])
+        assert p.calls == ["lookup", "create"] and (await T._op(conn, op2))["state"] == "succeeded"
+    finally:
+        await T._cleanup_env(conn, iid)
+        await conn.close()
+
+
+@T.dbonly
+@pytest.mark.asyncio
+async def test_abandon_unknown_resolves_its_attention_then_new_operation(gate_on):
+    conn = await T._conn()
+    iid, mapv = await T._env(conn)
+    try:
+        st = await T._staff(conn)
+        s = await T._seed(conn, mapv)
+        op_id = (await T._prepare(conn, s["oid"], st))["operation"]["id"]
+        await G.run_dispatch_once(provider_factory=T._fac(T.FakeProv(
+            creates=[P.ProviderOutcome("unknown", error_class="timeout_read")])), op_ids=[op_id])
+        assert "staff_attention_open" in (await G.evaluate(conn, s["oid"], source="dashboard"))["blockers"]
+        async with conn.transaction():
+            await G.abandon(conn, op_id, staff_id=st, actor="t", note="Da kiem tra cong GHN: khong co van don hieu luc")
+        assert (await T._op(conn, op_id))["state"] == "failed_terminal"
+        assert await conn.fetchval("SELECT count(*) FROM staff_attention WHERE order_id=$1 AND status='open'",
+                                   s["oid"]) == 0
+        new = await T._prepare(conn, s["oid"], st)          # operation MOI, client_order_code moi
+        assert new["operation"]["id"] != op_id
     finally:
         await T._cleanup_env(conn, iid)
         await conn.close()
