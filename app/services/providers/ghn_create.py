@@ -8,9 +8,12 @@ Hop dong an toan:
 - Phan loai ket qua create:
     created    : HTTP 200 + code 200 + data.order_code (provider evidence)
     rejected   : 4xx validation (tru 408/425/429) hoac 200 + code != 200 (GHN tu choi) -> terminal
-    retryable  : request CHUA toi provider (connect error/connect timeout) HOAC 429/5xx co response ro rang
-    unknown    : request CO THE da toi provider nhung khong co ket qua chac chan (read timeout, mat ket noi giua
-                 chung, 200 thieu order_code, body khong doc duoc) -> KHONG blind retry, bat buoc doi soat
+    retryable  : request CHUA duoc GHN xu ly: connect error/connect timeout, 425/429
+    unknown    : request CO THE da duoc GHN xu ly nhung khong co ket qua chac chan (read timeout, mat ket noi giua
+                 chung, 200 thieu order_code, body khong doc duoc, 408/5xx) -> KHONG tu retry, staff doi soat.
+                 D421 B1 (CA 424 §2): 5xx/408 truoc day la retryable -> worker lookup not_found roi create lai; neu
+                 GHN da tao don ma index chua kip thi co the tao TRUNG. Idempotency client_order_code chua chung minh
+                 tren staging -> 5xx/408 = unknown (staff-only) cho toi khi CA cho phep doi.
 - 429: ton trong Retry-After (giay, gioi han). Khong log token/Authorization/PII/raw payload.
 
 Provider-contract GAP (CHUA verify voi GHN that — nop CA): endpoint `/v2/shipping-order/create`, bo field bat buoc,
@@ -35,7 +38,8 @@ PROVIDER = "ghn"
 CREATE_PATH = "/v2/shipping-order/create"
 DETAIL_BY_CLIENT_CODE_PATH = "/v2/shipping-order/detail-by-client-code"
 RETRY_AFTER_MAX_S = 3600
-_RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+_RETRYABLE_HTTP = {425, 429}                       # GHN tu choi TRUOC khi xu ly -> retry (sau doi soat)
+_MAYBE_PROCESSED_HTTP = {408, 500, 502, 503, 504}  # co the da tao don -> unknown, staff doi soat (CA 424 §2)
 # Chi cac key nay duoc luu tu response (khong PII: ten/SDT/dia chi nguoi nhan, khong token).
 _RESULT_KEYS = ("order_code", "sort_code", "trans_type", "total_fee", "expected_delivery_time", "status",
                 "client_order_code")
@@ -168,6 +172,8 @@ class GhnCreateProvider:
                 return ProviderOutcome(CREATED, http_status=st, duration_ms=dur, order_code=code.strip(),
                                        result=redact_result(data))
             return ProviderOutcome(UNKNOWN, http_status=st, error_class="ok_without_order_code", duration_ms=dur)
+        if st in _MAYBE_PROCESSED_HTTP:
+            return ProviderOutcome(UNKNOWN, http_status=st, error_class=f"http_{st}_maybe_created", duration_ms=dur)
         if st in _RETRYABLE_HTTP:
             return ProviderOutcome(RETRYABLE, http_status=st, error_class=f"http_{st}", duration_ms=dur,
                                    retry_after_s=_retry_after(resp) if st == 429 else None)

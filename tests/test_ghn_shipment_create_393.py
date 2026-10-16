@@ -66,7 +66,9 @@ def test_payload_from_frozen_snapshot_only():
     (200, {"code": 400, "message": "sai ward"}, "", None, "rejected", None),
     (400, {"code": 400, "message": "invalid"}, "", None, "rejected", None),
     (429, {"code": 429}, "", {"Retry-After": "120"}, "retryable", 120),
-    (503, None, "", None, "retryable", None),
+    (503, None, "", None, "unknown", None),                 # D421 B1 / CA 424: 5xx co the da tao -> doi soat
+    (500, {"code": 500}, "", None, "unknown", None),
+    (408, None, "", None, "unknown", None),
     (None, None, "connect", None, "retryable", None),
     (None, None, "timeout_read", None, "unknown", None),
     (None, None, "protocol", None, "unknown", None),

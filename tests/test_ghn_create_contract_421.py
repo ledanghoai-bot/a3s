@@ -207,3 +207,16 @@ async def test_reconcile_not_found_within_settle_window_stays_unknown(gate_on, m
     finally:
         await T._cleanup_env(conn, iid)
         await conn.close()
+
+
+@pytest.mark.parametrize("status", [408, 500, 502, 503, 504])
+def test_create_5xx_408_is_unknown_staff_only_not_auto_retry(status):
+    """CA 424 §2: 5xx/408 co the da tao don -> unknown (staff doi soat), KHONG retryable (worker se lookup+create lai)."""
+    r = _run(P.GhnCreateProvider({}, send=T._send(status, None)).create(T.SNAP, "c"))
+    assert r.outcome == "unknown" and r.error_class == f"http_{status}_maybe_created"
+
+
+@pytest.mark.parametrize("status", [425, 429])
+def test_create_429_425_still_retryable(status):
+    r = _run(P.GhnCreateProvider({}, send=T._send(status, {"code": status})).create(T.SNAP, "c"))
+    assert r.outcome == "retryable"
