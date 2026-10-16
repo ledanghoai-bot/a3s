@@ -91,7 +91,7 @@ def test_provider_20001_no_http_no_log_20000_calls():
     assert res.status == "quote_required" and res.reason == "heavy_goods_manual" and res.fee_vnd is None
     assert calls == [] and conn.execs == [] and conn.reads == []      # 0 HTTP, 0 provider_quote_log, 0 map lookup
     res2 = asyncio.run(ghn.GhnQuoteProvider(CFG, post=_post(calls)).quote(conn, _req(20000)))
-    assert res2.status == "ok" and res2.service_type_id == 2 and calls[0].endswith("/fee")
+    assert res2.status == "ok" and res2.service_type_id == 5 and calls[0].endswith("/fee")   # CA 422 §B1.3
 
 
 def test_guard_independent_of_light_max_g():

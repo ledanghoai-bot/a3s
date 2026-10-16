@@ -116,3 +116,94 @@ async def test_items_missing_and_cod_cap_are_blockers():
     finally:
         await T._cleanup_env(conn, iid)
         await conn.close()
+
+
+# ============================================================ CA 422 §B1.2/§B1.3 bo sung
+from tests.test_ghn_shipment_create_393 import gate_on  # noqa: E402,F401 — fixture
+
+
+def test_20kg_boundary_service5_guard_unchanged():
+    from app.services.fulfillment import shipping_policy as sp
+    from app.services.providers import ghn
+    assert ghn.service_type_for_weight(19999, 20000) == 2 and ghn.service_type_for_weight(20000, 20000) == 5
+    assert sp.is_heavy(20000) is False and sp.is_heavy(20001) is True      # guard PO: CHI tren 20 kg -> staff
+
+
+def test_settle_window_invariant():
+    assert G.POLICY["backoff_s"][0] >= G.LOOKUP_SETTLE_S > 0 and G.PARCEL_MAX_SIDE_CM == 200
+
+
+@T.dbonly
+@pytest.mark.asyncio
+async def test_20000g_eligible_with_service5_and_dims_guard():
+    conn = await T._conn()
+    iid, mapv = await T._env(conn)
+    try:
+        s = await T._seed(conn, mapv, weight=20000)
+        ev = await G.evaluate(conn, s["oid"], source="dashboard")
+        assert ev["eligible"], ev["blockers"]
+        assert ev["snapshot"]["parcel"]["service_type_id"] == 5 and ev["snapshot"]["parcel"]["weight_g"] == 20000
+        s = await T._seed(conn, mapv)
+        await conn.execute("UPDATE products SET length_cm=201 WHERE id=(SELECT product_id FROM order_items "
+                           "WHERE order_id=$1)", s["oid"])
+        ev = await G.evaluate(conn, s["oid"], source="dashboard")
+        assert not ev["eligible"] and "parcel_over_provider_max" in ev["blockers"], ev["blockers"]
+    finally:
+        await T._cleanup_env(conn, iid)
+        await conn.close()
+
+
+async def _attn(conn, oid, why):
+    return await conn.fetchval("SELECT count(*) FROM staff_attention WHERE order_id=$1 AND reason='shipment_create' "
+                               "AND status='open' AND detail->>'why'=$2", oid, why)
+
+
+@T.dbonly
+@pytest.mark.asyncio
+async def test_fee_mismatch_opens_attention_shipment_kept(gate_on):
+    conn = await T._conn()
+    iid, mapv = await T._env(conn)
+    try:
+        st = await T._staff(conn)
+        for billed, expect in ((45000, 1), (30000, 0)):
+            s = await T._seed(conn, mapv)
+            op_id = (await T._prepare(conn, s["oid"], st))["operation"]["id"]
+            prov = T.FakeProv(creates=[P.ProviderOutcome("created", http_status=200, order_code=f"GF{billed}",
+                                                         result={"order_code": f"GF{billed}", "total_fee": billed})])
+            await G.run_dispatch_once(provider_factory=T._fac(prov), op_ids=[op_id])
+            assert (await T._op(conn, op_id))["state"] == "succeeded"
+            assert await _attn(conn, s["oid"], "provider_fee_mismatch") == expect
+            assert await conn.fetchval("SELECT count(*) FROM audit_log WHERE action='shipment.ghn_create.fee_mismatch' "
+                                       "AND entity_id=$1", str(op_id)) == expect
+    finally:
+        await T._cleanup_env(conn, iid)
+        await conn.close()
+
+
+@T.dbonly
+@pytest.mark.asyncio
+async def test_reconcile_not_found_within_settle_window_stays_unknown(gate_on, monkeypatch):
+    conn = await T._conn()
+    iid, mapv = await T._env(conn)
+    try:
+        st = await T._staff(conn)
+        s = await T._seed(conn, mapv)
+        op_id = (await T._prepare(conn, s["oid"], st))["operation"]["id"]
+        await G.run_dispatch_once(provider_factory=T._fac(T.FakeProv(
+            creates=[P.ProviderOutcome("unknown", error_class="timeout_read")])), op_ids=[op_id])
+        assert (await T._op(conn, op_id))["state"] == "unknown_reconciliation_required"
+        nf = P.ProviderOutcome("not_found", http_status=400)
+        out = await G.reconcile(conn, op_id, staff_id=st, actor="t", provider_factory=T._fac(T.FakeProv(lookups=[nf])))
+        assert out["lookup"] == "not_found_unsettled" and out["changed"] is False
+        assert (await T._op(conn, op_id))["state"] == "unknown_reconciliation_required"     # KHONG mo lai create
+        assert await conn.fetchval("SELECT count(*) FROM staff_attention WHERE order_id=$1 AND status='open' "
+                                   "AND reason='shipment_create'", s["oid"]) == 1
+        assert await conn.fetchval("SELECT error_class FROM ghn_shipment_create_attempts WHERE operation_id=$1 "
+                                   "AND kind='reconcile'", op_id) == "not_found_unsettled"
+        monkeypatch.setattr(G, "LOOKUP_SETTLE_S", 0)          # het cua so (attempts append-only: khong sua thoi gian)
+        out = await G.reconcile(conn, op_id, staff_id=st, actor="t", provider_factory=T._fac(T.FakeProv(lookups=[nf])))
+        assert out["lookup"] == "not_found" and out["changed"] is True
+        assert (await T._op(conn, op_id))["state"] == "failed_retryable"
+    finally:
+        await T._cleanup_env(conn, iid)
+        await conn.close()

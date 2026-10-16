@@ -31,7 +31,12 @@ from app.services import audit_service
 from app.services.command import repository as cmd_repo
 from app.services.providers.ghn_create import COD_MAX_VND
 
-POLICY_VERSION = "ghn_create_policy_v2"   # v2 (D421 B1): items_missing + cod_over_provider_max la blocker
+POLICY_VERSION = "ghn_create_policy_v2"   # v2 (D421 B1): blocker items/COD/kich thuoc, service 5 tu 20.000 g
+# Canh goi toi da GHN (docs Tao don: dai/rong/cao <= 200 cm) — vuot -> blocker, staff xu ly tay.
+PARCEL_MAX_SIDE_CM = 200
+# GHN co the chua index don vua tao: 'khong ton tai' trong cua so nay sau lan create gan nhat KHONG duoc tin (staff
+# doi soat giu nguyen unknown). Worker tu nhien thoa vi backoff_s[0] >= cua so nay (test khoa bat bien).
+LOOKUP_SETTLE_S = 60
 SNAPSHOT_SCHEMA = "ghn_create_snapshot_v1"
 # Policy v1 (PO co the doi qua version moi): shop tra phi GHN (payment_type_id=1), khach tra tong (hang + phi giao)
 # qua COD; khong cho xem hang. BANK_TRANSFER chi du dieu kien khi tien DA xac nhan. Quote hieu luc 24h.
@@ -156,6 +161,8 @@ async def evaluate(conn, order_id: int, *, source: str, exclude_op_id: int | Non
         req, req_reason, _d = await _fb.build_ghn_request(conn, order_id, route, weight)
         if req is None:
             blockers.append(f"packing_{req_reason}")
+        elif max(req.length_cm, req.width_cm, req.height_cm) > PARCEL_MAX_SIDE_CM:
+            blockers.append("parcel_over_provider_max")     # D421 B1 (CA 422 §B1.2): chan truoc khi goi GHN
 
     sh = await conn.fetchrow("SELECT * FROM shipments WHERE order_id=$1", order_id)
     qsnap = {}
@@ -381,6 +388,15 @@ async def _succeed(conn, op, res, *, actor: str) -> dict:
                        "WHERE order_id=$1 AND status IN ('pending_prep','ready_to_ship')", op["order_id"], res.order_code)
     await _audit(conn, op2, "shipment.ghn_create.succeeded",
                  {"provider_order_code": res.order_code, "http_status": res.http_status}, actor=actor)
+    # D421 B1 (CA 422 §B1.2): phi GHN tra ve khi tao != phi da bao khach (quote snapshot) -> staff (van don VAN giu).
+    snap = op["request_snapshot"]
+    snap = json.loads(snap) if isinstance(snap, str) else (snap or {})
+    quoted, billed = (snap.get("quote") or {}).get("fee_vnd"), (res.result or {}).get("total_fee")
+    if isinstance(quoted, int) and isinstance(billed, (int, float)) and int(billed) != quoted:
+        await _open_attention(conn, op2, "provider_fee_mismatch", {"quote_fee_vnd": quoted,
+                                                                   "provider_total_fee_vnd": int(billed)})
+        await _audit(conn, op2, "shipment.ghn_create.fee_mismatch",
+                     {"quote_fee_vnd": quoted, "provider_total_fee_vnd": int(billed)}, actor=actor)
     cust = await conn.fetchrow("SELECT c.psid, c.channel FROM orders o JOIN customers c ON c.id=o.customer_id "
                                "WHERE o.id=$1", op["order_id"])
     if cust and cust["channel"] in ("telegram_customer", "messenger") and cust["psid"]:
@@ -621,6 +637,16 @@ async def reconcile(conn, op_id: int, *, staff_id: int, actor: str, provider_fac
             return {"operation": _op_view(op), "lookup": lk.outcome, "changed": False}
         n = await conn.fetchval("SELECT count(*) FROM ghn_shipment_create_attempts WHERE operation_id=$1 "
                                 "AND kind='reconcile'", op_id)
+        if lk.outcome == "not_found":
+            unsettled = await conn.fetchval(
+                "SELECT max(created_at) > now() - make_interval(secs => $2) FROM ghn_shipment_create_attempts "
+                "WHERE operation_id=$1 AND kind='create'", op_id, LOOKUP_SETTLE_S)
+            if unsettled:
+                import dataclasses
+                await _attempt(conn, op_id, int(n) + 1, "reconcile",
+                               dataclasses.replace(lk, error_class="not_found_unsettled"), actor=actor)
+                return {"operation": _op_view(op), "lookup": "not_found_unsettled", "changed": False,
+                        "retry_after_s": LOOKUP_SETTLE_S}
         await _attempt(conn, op_id, int(n) + 1, "reconcile", lk, actor=actor)
         if lk.outcome == "found":
             op2 = await _succeed(conn, op, lk, actor=actor)
