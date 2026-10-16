@@ -61,6 +61,7 @@ async def apply_transition(
 
     # --- inventory effect (§7.2) trên active reservations, lock ordering §10.4 ---
     affected = 0
+    reservations: list = []
     if spec.inventory_effect in (transitions.EFFECT_RELEASE, transitions.EFFECT_CONSUME):
         reservations = await inv_repo.lock_reservations_for_order(conn, order_id)
         for r in reservations:
@@ -80,6 +81,15 @@ async def apply_transition(
                     correlation_id=correlation_id, command_id=command_id)
                 # Mirror contract: materialize (available không đổi -> no-op nhưng giữ nhất quán mọi path).
                 await inv_repo.materialize_stock_mirror(conn, r["location_id"], r["product_id"])
+
+    # CA Directive 421 §2.2: ledger OFF -> moi duong tao don (bot tools / Dashboard legacy / command bus) da tru THANG
+    # products.stock, KHONG co reservation (inventory_status='unreserved'). Huy (EFFECT_RELEASE) phai hoan DUNG so luong
+    # cua don, DUNG 1 lan / don (khoa idempotent theo order). Don co reservation -> nhanh ledger o tren (khong hoan 2 lan).
+    # Huy sau giao that bai (EFFECT_NONE) / da giao / da ship KHONG vao day -> khong hoan sai.
+    if spec.inventory_effect == transitions.EFFECT_RELEASE and not reservations and inv_before == "unreserved":
+        affected += await _legacy_restore_stock(
+            conn, order_id=order_id, from_status=from_status, to_status=spec.to_status, actor_type=actor_type,
+            actor_id=actor_id, correlation_id=correlation_id, command_id=command_id, reason=reason)
 
     # confirm: giữ reservation nhưng bỏ expiry (§11.3) — new -> confirmed set expires_at=NULL
     if action == "confirm":
@@ -109,6 +119,32 @@ async def apply_transition(
     # --- customer notification deterministic (AC-M2-15, CA M2-S1-F06) ---
     await _notify_customer(conn, order, spec.to_status, command_id)
     return TransitionResult(order_id, from_status, spec.to_status, spec.inventory_effect, affected)
+
+
+async def _legacy_restore_stock(conn, *, order_id: int, from_status: str, to_status: str, actor_type: str,
+                                actor_id: str, correlation_id, command_id, reason: str | None) -> int:
+    """Hoan products.stock cho don legacy (khong reservation). Khoa 1 lan/don bang order_event idempotency_key
+    `legacy_stock_restore:<order_id>` (ghi TRUOC khi cong) -> replay/huy lai/dong thoi KHONG hoan 2 lan. Khoa dong
+    products theo product_id tang dan (thu tu khoa on dinh). Tra tong so luong da hoan."""
+    items = [dict(r) for r in await conn.fetch(
+        "SELECT product_id, sum(quantity)::int AS qty FROM order_items WHERE order_id=$1 GROUP BY product_id "
+        "ORDER BY product_id", order_id)]
+    if not items:
+        return 0
+    first = await append_order_event(
+        conn, order_id=order_id, event_type="inventory.legacy_stock_restore", event_version=1,
+        from_status=from_status, to_status=to_status, actor_type=actor_type, actor_id=actor_id,
+        correlation_id=correlation_id, command_id=command_id, reason=reason,
+        idempotency_key=f"legacy_stock_restore:{order_id}",
+        metadata={"items": items, "source": "products.stock", "ledger": "off"})
+    if not first:
+        return 0
+    total = 0
+    for it in items:
+        await conn.execute("SELECT 1 FROM products WHERE id=$1 FOR UPDATE", it["product_id"])
+        await conn.execute("UPDATE products SET stock = stock + $2 WHERE id=$1", it["product_id"], it["qty"])
+        total += it["qty"]
+    return total
 
 
 # Version template dispatcher chọn theo key (mặc định 1). fulfilled -> v2 (migration 036, PO M3 #4).
