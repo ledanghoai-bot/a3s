@@ -183,10 +183,84 @@ thông tin → bot dừng đúng chỗ, không tạo order rác.
   - Hỏi ETA thật qua Telegram với đơn tester.
   - Tạo đơn Dashboard bằng form Tỉnh/Phường mới, và nút "Xác minh địa chỉ" (không tạo đơn test khi deploy).
 - **Còn mở:**
-  - Race khởi tạo pool `app/db_pool.get_pool` (1 lỗi drain outbox lúc worker khởi động sau deploy #88) — CA yêu cầu
-    sửa trước khi mở rộng vận hành.
+  - ~~Race khởi tạo pool `app/db_pool.get_pool` (1 lỗi drain outbox lúc worker khởi động sau deploy #88)~~ — **đã
+    sửa ở D404** (xem mục dưới).
   - Bật Dashboard quote gọi GHN thật cần activation riêng.
   - Hỏi ETA ngay sau chốt đơn (trước khi định tuyến) sẽ mở attention.
+
+
+**Tạo vận đơn GHN từ Bot + Dashboard — DORMANT (Phase I-B, CA Directive 393 → Review 394 → Closure 397, deploy
+25/09/2026, PR #87, main `64b93688`):**
+- **Đã làm:**
+  - Một lifecycle chung `app/services/fulfillment/ghn_shipment_create.py` cho 2 entry point. Bot chỉ tạo yêu cầu sau
+    khi khách nhắn tường minh "XÁC NHẬN GIAO" và fingerprint tóm tắt khớp dữ liệu hiện tại. Dashboard: quyền
+    `shipment.ghn.create`, xem trước rồi nhập lại mã đơn để xác nhận.
+  - Chỉ worker gọi provider (adapter `app/services/providers/ghn_create.py`), sau gate **tách** theo nguồn
+    `GHN_SHIPMENT_CREATE_BOT_ENABLED` / `GHN_SHIPMENT_CREATE_DASHBOARD_ENABLED` — **cả hai OFF**.
+  - Timeout/mất response → `unknown_reconciliation_required` + staff, **không retry mù**. Mọi retry đều đối soát
+    `client_order_code` trước. Huỷ đơn: chưa gửi → `cancelled_before_dispatch`; đã gửi → chặn huỷ thường.
+  - Migration 073: operation có snapshot bất biến + attempt append-only.
+- **Đã verify:** 27 test mới, full suite lab 1108; postflight prod: 0 operation, gate OFF, không gọi GHN.
+- **Chưa làm / điều kiện activation:** hợp đồng GHN create/lookup, idempotency, lỗi 429/4xx/5xx, pickup/ca lấy
+  hàng production, policy create v1, runbook đối soát — cần CA/PO chốt (gap G1–G10). Dashboard còn phụ thuộc F2.
+
+**Độ tin cậy báo phí M7 (Phase I-B, CA Directive 404 → Review 406 → Requalification 407 → Directive 408 → Review 410
+→ Addendum 411 → Review 412 → Closure 413, LIVE 27/09/2026, PR #91, main `c15ac60d`):**
+- **Bug:** log sau deploy D399 có `InterfaceError: Pool.release() ... is not a member of this pool`. Nguyên nhân:
+  `app/db_pool.get_pool()` không khoá, nên sau restart nhiều cron cùng tạo pool và connection bị trả nhầm pool.
+- **Đã làm:**
+  - Pool khởi tạo đúng 1 lần (lock); `release()` trả về **đúng pool đã cấp**, không fallback (báo lỗi rõ).
+  - `close_pool()` giữ owner tới khi release, `get_pool()` chờ đóng xong; quá 10s → terminate (Review 406).
+  - Nhãn zone nghiệp vụ "GHN ngoài khu vực tự giao" thay cho `unknown — quoted` (chỉ hiển thị).
+  - Migration 075: `provider_quote_log.trace_key/route_operation_id/endpoint/response_class/http_attempts`; tra vết
+    theo `command_key` qua `GET /dashboard/fulfillment/quote-trace` và `scripts/m7_quote_trace.py`.
+- **Đã verify:** regression tái hiện đúng lỗi prod trên code cũ; full suite lab 1192. Soak 6/6 trên prod (PO cho
+  Dev tự chạy trên dữ liệu test): 3 lần báo phí = 6 HTTP, replay/tự giao/phường chưa map đều 0 HTTP, báo phí sau
+  restart OK, outbox gửi đúng 1 lần, 0 lỗi pool.
+- **Bài học / backlog:** đơn Dashboard đường legacy trừ thẳng `products.stock`, huỷ đơn **không hoàn kho** khi M2
+  ledger OFF (đơn test #257 phải hoàn tay, audit #5025, ngoại lệ chỉ cho dữ liệu test). Cần xử lý trước khi mở khách
+  thật nếu còn dùng đường legacy. → **Đã sửa ở D421 (PR #95)**, xem mục dưới.
+
+**Đóng gap M7 trước M8 — M7 CLOSED phạm vi tester/dormant (Phase I-B, CA Directive 421 → Review 422–427 → Closure
+428, 17/10/2026; PR #95 main `1da87742`, PR #96 main `21f9423b`, schema 077):**
+- **Bug đã sửa:**
+  - Huỷ đơn khi M2 ledger OFF **không hoàn kho**: cả 3 đường tạo đơn (bot/command bus, `order_service`, Dashboard
+    legacy) đều trừ thẳng `products.stock`, nhưng lifecycle huỷ chỉ nhả reservation. PR #95: huỷ (`EFFECT_RELEASE`,
+    0 reservation, `unreserved`) hoàn `products.stock` **đúng 1 lần/đơn**, khoá bằng event
+    `inventory.legacy_stock_restore` key `legacy_stock_restore:<order_id>`. Verify prod: đơn test mới #258 914→913→914,
+    replay không cộng thêm.
+  - Dữ liệu lịch sử: script 1 lần (allowlist cứng #253/#254/#255, actor `system`, exit 0/2/10) hoàn 914→**917**
+    (CA 425 duyệt, PO quyết định 17/10); #257 đã hoàn tay trước đó, không cộng lại; rerun `ALREADY_APPLIED_NOOP`.
+  - Adapter GHN tạo vận đơn (D393) lệch hợp đồng thật — phát hiện bằng probe GHN **staging** chỉ đọc/preview: lookup
+    phải là GET + query; "không tồn tại" = HTTP 400, `code_message` null, message `… - Đơn hàng không tồn tại`
+    (chỉ nhận đúng chuỗi có dấu, NFC); thiếu `items` bị từ chối; 20.000 g phải dùng service 5 (60.500đ so với
+    155.100đ). Payload địa chỉ **theo mã** được GHN nhận; bản theo tên bị `TO_ADDRESS_CONFLICT` → giữ theo mã.
+- **Đã làm (PR #96, deploy dormant):**
+  - Lookup GET; `not_found` chặt; `code_message` vào `error_class`; blocker `items_missing`,
+    `cod_over_provider_max` (>50 triệu), `parcel_over_provider_max` (cạnh >200 cm); lệch phí khi tạo → attention
+    `provider_fee_mismatch`; đúng 20.000 g → service 5 ở cả báo giá và tạo (guard hàng nặng vẫn `>20 kg`).
+  - Tạo vận đơn lỗi 408/5xx → `unknown` (staff đối soát), không tự retry; chỉ 425/429/chưa gửi mới retry.
+  - **Từ GHN staging (1 create thật, PO đồng ý):** gửi lặp cùng `client_order_code` trả lại **đúng đơn cũ**; nhưng
+    **đơn đã huỷ tra cứu cũng ra "không tồn tại"**. Vì vậy sau một lần gửi có thể đã tới GHN, `not_found` **không bao
+    giờ tự tạo lại** (staff lẫn worker) — giữ `unknown` (`not_found_unsettled` <60s / `not_found_unverified`); staff
+    xác minh cổng GHN → "Dừng yêu cầu" (ghi chú, đóng attention của op) → tạo yêu cầu mới.
+  - Runbook `docs/GHN-CREATE-UNKNOWN-RECONCILIATION-RUNBOOK-VI.md`; Dashboard hiện đúng kết quả đối soát.
+- **DSR qua Telegram thật (A4):** PASS — tài khoản Telegram thứ hai của PO xoá khách #1549, nhắn lại tạo #1550, không
+  lỗi `external_chat_id`; footprint chỉ còn dữ liệu mới (thiếu baseline trước xoá — đã ghi giới hạn). Khoá
+  `DSR_HMAC_KEY` production **đã xoay** (giá trị cũ lỡ in ra transcript Dev); `.env` và 16 backup → quyền 600, backup
+  chứa khoá lộ đã shred.
+- **Pickup GHN production:** shop trên GHN chưa khai báo địa chỉ → PO khai báo; PO đổi cấu hình A3S sang
+  **1552/400101 (Phường Ea Tam)** cho khớp (audit #5036). Test kết nối pass (revision 6); báo giá tester 600 g =
+  16.500đ; guard 20.001 g về staff, 0 HTTP.
+- **Đã verify:** m5lab DB 386 test GHN/shipment/fulfillment/quote; CI mode 1113 pass; postflight deploy #96: 0 thay
+  đổi dữ liệu, `ghn_ops=0`, gate tạo vận đơn OFF/OFF.
+- **Chưa làm / ranh giới (CA 428):**
+  - Canary tạo vận đơn production (1 Dashboard + 1 Bot, kế hoạch CA 427 qualified) — **hoãn theo PO**; bắt buộc trước
+    khi công bố tạo vận đơn thật hoạt động. Gate `GHN_SHIPMENT_CREATE_BOT/DASHBOARD_ENABLED` vẫn OFF.
+  - A3S chưa có API huỷ vận đơn GHN — staff huỷ trên cổng GHN.
+  - SePay live OFF (S0 tester đã pass); CK ngoài tester = staff xác nhận. M7 Telegram vẫn `tester`; mở public là
+    activation riêng. Messenger/Meta App Review ngoài phạm vi.
+  - M8 chỉ dùng sự kiện giao/thu tiền đã ghi thật, không dùng trạng thái vận đơn dự đoán.
 
 ---
 
