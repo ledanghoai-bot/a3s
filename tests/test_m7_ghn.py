@@ -45,7 +45,8 @@ def _post_factory(seq):
 
 
 def test_service_type_and_dims_contract():
-    assert ghn.service_type_for_weight(20000, 20000) == 2 and ghn.service_type_for_weight(20001, 20000) == 5
+    assert ghn.service_type_for_weight(19999, 20000) == 2 and ghn.service_type_for_weight(20000, 20000) == 5
+    assert ghn.service_type_for_weight(20001, 20000) == 5
     assert ghn.default_dims_cm(600) == (20, 15, 10) and ghn.default_dims_cm(4000) == (30, 25, 20)
     assert ghn.default_dims_cm(9000) == (40, 30, 30)
 

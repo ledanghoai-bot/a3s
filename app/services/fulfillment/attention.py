@@ -14,7 +14,8 @@ REASONS = ("address", "quote", "account", "method", "payment_mismatch", "unmatch
            "provider_error", "other",
            "refund_required", "order_cancel_exception",                       # CA Directive 387 (huy don)
            "shipment_create",                                                  # CA Directive 393 (van don GHN)
-           "eta_question")                                                     # CA Directive 396 (khach hoi ETA)
+           "eta_question",                                                     # CA Directive 396 (khach hoi ETA)
+           "messaging_window_closed")                                          # CA Review 414 (Messenger ngoai 24h)
 CANCEL_REASONS = ("refund_required", "order_cancel_exception")
 ADMIN_EVENT = "fulfillment.staff.notify"
 

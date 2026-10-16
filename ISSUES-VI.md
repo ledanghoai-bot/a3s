@@ -466,6 +466,107 @@ phí. User quyết định chuyển sang GitHub (repo mới `github.com/ledangho
         nút Tiếp im lặng không chuyển). Tổng quan 4/4 phần tick xanh. **ĐÃ GỬI 03/9/2026 (anh
         Hoài bấm Gửi) — trạng thái "Đang xem xét", Meta báo xem xét trong ~10 ngày, hiện không
         cần làm gì thêm; kết quả về qua email + Hộp thư thông báo Developer Console.**
+      - **✅ TRẠNG THÁI 11/10/2026 — D405 + CA 414 §2 + CA 415–418: DEPLOYED DORMANT (CA Review 419 ghi nhận).**
+        PR #93 squash → main `a383649` (tree `00197894` = bản CA 418 review); CI push-main `38109625179`
+        lint-test/migration-pipeline/deploy ✓; prod schema **077**; `DSR_HMAC_KEY` đặt trên VPS (backup `.env`).
+        Preflight/postflight: 16 digest + workflow + flag **không đổi** (chỉ `schema_migrations` 75→77); legacy tombstone
+        còn ChatID thật = 0. **Smoke hệ thống (khách Telegram TỔNG HỢP) PASS:** xoá → DB/Redis 0 ref → cùng ChatID tạo
+        customer mới → dọn. **CHƯA:** E2E DSR qua **chat thật** (tester Telegram thứ hai ngoài allowlist; KHÔNG xoá
+        customer 1) — pending; callback Meta chưa có E2E ASID→PSID (Page đã cùng Business, `ids_for_apps` rỗng vì không
+        có Facebook Login) → đường DSR thực tế = chat/email, PO chốt cách công bố. **Messenger public: NO-GO** — Meta chỉ
+        giao 1/12 tin chữ từ khi duyệt (receipt/postback/test event vẫn về); đã gửi bug report Meta 11/10. Không đổi
+        gate/flag. Evidence: `Dev/evidence/d405-apply/v01`, `Dev/evidence/messenger-post-approval-1010`.
+      - **CA Directive 405 — xóa dữ liệu (DSR) + khai báo trợ lý tự động (candidate 10/10/2026, branch
+        `feat/d405-dsr-disclosure` off main `c15ac60`; lịch sử các vòng review dưới đây):**
+        - **Bug phát hiện:** (1) xóa dữ liệu bỏ sót `customers.external_chat_id` (migration 072) → PSID/ChatID thật
+          còn lại + cùng người nhắn lại bị `UniqueViolation uq_customers_channel_chat`, bot im; (2) **mới, nặng hơn:**
+          `command_executions.conversation_id` và `order_intents.conversation_id` là FK tới `conversations` không
+          ON DELETE → khách từng đặt đơn qua chat thì lệnh xóa **rollback toàn bộ** (`ForeignKeyViolation`), không
+          xóa gì, request `failed`; (3) khai báo "trợ lý tự động" ở tin đầu Messenger chỉ là chỉ dẫn cho LLM.
+        - **Đã làm:** `data_deletion.py` — `SELECT … FOR UPDATE`; psid **và** external_chat_id → `deleted:<code>`;
+          trong cùng transaction gỡ FK + tombstone/bỏ PII ở `command_executions`, `order_intents` (intent mở →
+          CANCELLED), `outbox_events` (tin tới khách chưa gửi → cancelled; bỏ tên/địa chỉ/tin ở thông báo staff),
+          `fulfillment_conversations.customer_ref`; Redis thêm `nlu_state`/`del_pending`/`addr_clarify:*` + lọc
+          `dead_letter:messages`. Outbox worker: ref tombstone → hủy, không gọi provider. Orchestrator:
+          `handle_message` thành lớp bọc điểm xuất cuối — tin đầu phiên (chưa có `chat:<id>`) trên kênh trong
+          `DISCLOSURE_REQUIRED_CHANNELS` → chèn câu cố định "Dạ em là trợ lý tự động của 3S Coffee. Khi cần, em sẽ
+          chuyển anh/chị cho nhân viên ạ." (không lặp nếu đã có "trợ lý tự động"), đồng bộ lại Redis + dòng DB.
+          Log paused-path mask PSID/ChatID. Script chỉ đọc `scripts/d405_dsr_footprint.py` (quét mọi bảng + Redis,
+          `--legacy`). `docs/DSR-RUNBOOK-VI.md` v1.1.0 (+§2b tồn dư kho bất biến).
+        - **Đã verify:** 14 test mới `tests/test_dsr_disclosure_405.py` (DB+Redis thật: Messenger đủ footprint →
+          cùng PSID tạo customer mới, Telegram, callback Meta + lặp + chữ ký sai, 2 yêu cầu xóa đồng thời, xóa đồng
+          thời tin mới, outbox tombstone; khai báo ở **tin gửi ra qua worker**: chào, hỏi giá, nhánh trả lời sớm,
+          lỗi LLM, phiên mới sau hết hạn, lượt sau, Telegram không chèn). Chạy trên code cũ: 5 test DSR fail đúng
+          lỗi FK. Full suite DB scratch 1191 pass, 15 fail trùng khít baseline `main` (GHN 393 + COD — thiếu seed
+          môi trường). Ruff sạch. Legacy §2.5: 0 hàng (prod 27/09).
+        - **Chưa test trên máy anh Hoài / production:** E2E DSR trên tài khoản test Berry Hill sau deploy (D405 §4.1);
+          tồn dư kho bất biến (audit_log, order_events, address_resolution, GHN snapshot…) **chờ CA quyết định**;
+          callback Meta nhận `user_id` app-scoped (không phải PSID) nếu Meta thực sự gọi → hiện no-op an toàn.
+      - **CA Review 414 §2 — outbox Messenger theo khung 24h (cùng candidate D405, commit riêng):**
+        - **Bug:** `outbox_worker._messenger_send` luôn gửi `messaging_type=RESPONSE` → tin phát sinh muộn (biên nhận,
+          nhắc/xác nhận thanh toán, M7) ngoài 24h từ tin khách gần nhất sẽ bị Meta từ chối.
+        - **Đã làm:** `app/services/messenger_window.py` — mốc = tin `role='customer'` mới nhất trong `messages`
+          (durable, đồng hồ DB), trong khung khi < 24h − 10 phút; chưa từng nhắn = ngoài khung. Outbox worker (cả
+          đường dispatcher): ngoài khung → KHÔNG gọi Send API, event `cancelled`/`messaging_window_closed` (không
+          bao giờ `delivered`), mở `staff_attention` lý do mới `messaging_window_closed` + báo admin (1 lần/đơn) trong
+          cùng transaction, CAS theo lease. Migration **076** (thêm reason, rollback có precheck). Nhãn Dashboard.
+          Không dùng message tag (CA 414: chưa có bằng chứng Meta chính thức).
+        - **Đã verify:** 9 test `tests/test_messenger_window_414.py` (trong khung gửi; biên 24h−10′ ±1 phút; ngoài
+          khung/chưa nhắn → chặn + attention 1 lần; dispatcher; Telegram không ảnh hưởng; retry + replay
+          dead-letter qua `recovery.retry_outbox` vẫn chặn; restart/reclaim lease đánh giá lại đúng 1 lần, lease
+          worker khác → no-op; khách nhắn lại → tin mới gửi được, tin đã chặn không sống lại). Bỏ chốt → 6 test
+          fail. Full suite 1200 pass, 15 fail trùng baseline `main`.
+        - **Chưa test production:** cần event Messenger thật (Meta chưa giao event sau duyệt 10/10).
+      - **CA Review 415 (REQUEST CHANGES) — DSR phủ kho bất biến (cùng PR #93, commit riêng):**
+        - **Finding:** sau DSR vẫn còn PSID/địa chỉ/tên ở audit_log, order_events/inventory_movements, address_*,
+          GHN snapshot, journal M7, payment/SePay events, ghi chú staff — các kho bị trigger/REVOKE chặn sửa. Quét toàn
+          DB trên một hành trình khách đầy đủ: bản trước còn **21 dấu vết / 15 bảng** sau khi xoá.
+        - **Đã làm:** migration **077**: role NOLOGIN `alpha3s_dsr` + hàm `SECURITY DEFINER dsr_anonymize_identity`
+          (quyền UPDATE theo **cột**, trigger chỉ cho qua khi `current_user = alpha3s_dsr`, chỉ chạy khi customer đã
+          tombstone trong cùng transaction, tự audit `dsr.anonymize`); ID → tombstone, tên/SĐT/địa chỉ → NULL hoặc nhãn,
+          GHN recipient → `***xyz`; giữ mã hành chính, số tiền, mã đơn/vận đơn, số dòng sổ. **Sửa nguồn:** audit/ledger
+          đơn bot ghi `customer:<id nội bộ>`; actor GHN `customer:<id>`; key live-verify `lv:c<id>:…`; command_key M7
+          không fallback PSID; causation_id không fallback PSID; log listener admin mask. **Redis lỗi sau commit DB:**
+          thử lại 3 lần → `redis_pending` + `subject_hmac` (HMAC khoá server, NULL khi xong); yêu cầu lặp hoặc worker
+          5 phút hoàn tất. Trang trạng thái thêm nhãn mới + escape mã (vá XSS phản chiếu). Ma trận kho đầy đủ
+          `docs/DSR-RUNBOOK-VI.md` v1.2.0 §2b; rollback `scripts/rollback_077_dsr_definer.sql`.
+        - **Đã verify:** `tests/test_dsr_e2e_415.py` 4 test — đơn qua command bus thật, địa chỉ, M7/payment/SePay, GHN,
+          ledger, dữ liệu cũ có PSID thô → xoá → quét MỌI bảng: **0 dấu vết**, sổ nghiệp vụ giữ nguyên; hàm từ chối
+          khách chưa tombstone, trigger vẫn chặn UPDATE thường, `alpha3s_app` không UPDATE được ledger; Redis lỗi →
+          worker/yêu cầu lặp hoàn tất. 27 test DSR/disclosure/24h pass; full suite 1204 pass, 15 fail trùng baseline;
+          GHN 393 pass 14/14 trên DB mới khi đặt `packing_overhead_percent`; rollback 077 rehearsal OK.
+        - **Chờ PO/legal:** thời hạn lưu chứng từ kế toán; giữ SĐT `***xyz` trong snapshot GHN; xoay vòng log container
+          (prod chưa có `max-size`).
+      - **CA Review 416 (REQUEST CHANGES) — hàm DSR không được chạm khách khác:**
+        - **Finding:** (1) hàm 077 cũ sửa `audit_log` toàn bảng theo **giá trị** tên/địa chỉ (+ `LIKE` coi `%`/`_` là
+          wildcard) → xoá khách A sửa audit khách B trùng địa chỉ — **tái hiện được** trên head `6ec04ef`; (2) hàm quyền
+          cao nhận PSID/PII tuỳ ý từ caller; (3) HMAC dùng `META_APP_SECRET`/chuỗi rỗng, chưa có rotation.
+        - **Đã làm:** hàm mới `dsr_erase_subject(customer_id, code)` — **không nhận định danh/PII**; tự đọc từ dòng customer
+          khoá `FOR UPDATE` + đơn/draft của chính customer; bắt buộc yêu cầu `received` chưa gắn subject (1 code = 1 lần);
+          từ chối khách đã tombstone; tự tombstone. Mọi UPDATE giới hạn theo **liên kết** (customer/order/payment/shipment/
+          operation/resolution/`entity_type:entity_id` audit, `actor_ref` bằng nguyên trường); không `LIKE`; PII chỉ thay
+          bên trong dòng đã liên kết. App gọi hàm TRƯỚC khi tự null các trường. Khoá `DSR_HMAC_KEY` riêng (≥32) +
+          `DSR_HMAC_KEY_PREVIOUS` cho rotation, request lưu `hmac_key_id`; thiếu khoá → `redis_pending` + `hmac_unavailable`
+          (không hmac đoán được), worker cảnh báo. `.env.example` + runbook v1.3.0.
+        - **Đã verify:** test hai khách trùng địa chỉ, tên chứa `%`/`_` → toàn bộ dòng khách B + audit không liên kết giữ
+          nguyên byte-for-byte (trên 077 cũ: FAIL đúng finding); hàm từ chối code ngẫu nhiên / code đã dùng / khách đã
+          tombstone; `alpha3s_app` không UPDATE được audit/order_events/inventory, không có EXECUTE cho PUBLIC; rotation
+          khoá + thiếu khoá. DB mới 001..077: 29/29 test DSR/disclosure/24h; full suite 1206 pass, 15 fail trùng baseline;
+          GHN 393 27/27 (DB mới, packing 10%); quét toàn DB hành trình 1 khách 41 → 0; rollback 077 rehearsal OK.
+        - **Trước deploy (PO):** đặt `DSR_HMAC_KEY` trên VPS `.env`.
+      - **CA Review 417 (REQUEST CHANGES) — mã yêu cầu phải gắn với chính subject:**
+        - **Finding:** yêu cầu `received` tạo không gắn khách; `dsr_erase_subject(customer_id, code)` nhận hai giá trị
+          rời → mã chưa dùng của A xoá được B. **Tái hiện** trên head `aa7e5af` dưới `SET ROLE alpha3s_app`.
+        - **Đã làm:** `dsr_open_request(psid)` (SECURITY DEFINER) tạo yêu cầu + gắn `subject_customer_id` (ID nội bộ)
+          trên dòng khoá; `dsr_erase_subject(code)` CHỈ nhận mã, subject lấy từ yêu cầu dưới khoá, 1 lần (`erased_at`);
+          trigger `ddr_subject_guard` chỉ cho `alpha3s_dsr` ghi subject/erased_at (app không chèn yêu cầu có subject, không
+          tráo). App kiểm thêm customer khoá = subject trả về. Runbook v1.4.0.
+        - **Callback Meta:** `user_id` là ASID (chỉ có với Facebook Login — app không có Login); API ánh xạ ASID↔PSID
+          trả lỗi #100 vì Page và app **không cùng Business** (kiểm chỉ đọc 11/10) → callback thật hiện no-op an toàn;
+          đường hiệu lực là tự xoá qua chat + email. Chờ PO/CA quyết hướng.
+        - **Đã verify:** test mới dưới `SET ROLE alpha3s_app` (mã chưa dùng của A không xoá được B, tráo subject bị chặn,
+          request không subject/ mã ngẫu nhiên bị từ chối, mã A xoá đúng A một lần, B byte-for-byte); DB mới 29/29;
+          full suite 1206 pass/15 baseline; GHN 393 27/27; quét toàn DB 41 → 0; rollback 077 rehearsal OK.
 - [ ] (Tùy chọn) theo dõi uptime webhook >99% sau khi mở khách thật.
 
 **Tiêu chí hoàn thành:** Push lên `main` → tự động deploy ✅ (ĐẠT); uptime webhook > 99% (đo sau cutover).

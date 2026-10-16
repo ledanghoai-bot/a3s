@@ -5,7 +5,8 @@
   validation/mapping error. Moi loi -> QuoteResult(quote_required) (fail-closed), KHONG raise ra luong bot.
 - Address adapter co version: (province_code, ward_code) chinh phu -> carrier_address_map (status matched) ->
   to_district_id/to_ward_code GHN. Thieu/ambiguous -> quote_required.
-- Service type theo hop dong: weight <= GHN_LIGHT_MAX_G -> service_type_id 2 (hang nhe), nguoc lai 5 (hang nang).
+- Service type theo hop dong: weight < GHN_LIGHT_MAX_G -> service_type_id 2 (hang nhe), tu GHN_LIGHT_MAX_G tro len -> 5
+  (hang nang; CA 422 §B1.3: dung 20.000 g van eligible nhung service 5 — staging D421 B1: 60.500 vs 155.100).
 - Snapshot: request fingerprint, fee total + breakdown, leadtime, timestamp -> provider_quote_log (append-only) +
   shipments.quote_snapshot (o shipment_service).
 """
@@ -117,7 +118,7 @@ async def resolve_quote_cfg(conn) -> dict[str, Any]:
 
 
 def service_type_for_weight(weight_g: int, light_max_g: int) -> int:
-    return SERVICE_TYPE_LIGHT if weight_g <= light_max_g else SERVICE_TYPE_HEAVY
+    return SERVICE_TYPE_LIGHT if weight_g < light_max_g else SERVICE_TYPE_HEAVY
 
 
 def default_dims_cm(weight_g: int) -> tuple[int, int, int]:

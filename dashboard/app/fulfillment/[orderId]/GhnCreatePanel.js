@@ -69,9 +69,18 @@ export default function GhnCreatePanel({ orderId, cancelled, onChange }) {
   async function act(opId, action, body) {
     setBusy(true); setErr(null); setMsg(null);
     try {
-      await apiFetch(`/dashboard/fulfillment/ghn-create/operations/${opId}/${action}`, {
+      const r = await apiFetch(`/dashboard/fulfillment/ghn-create/operations/${opId}/${action}`, {
         method: "POST", body: JSON.stringify(body || {}) });
-      setMsg(action === "reconcile" ? "Đã đối soát" : "Đã dừng yêu cầu");
+      const lk = r && r.lookup;
+      // D421 B1 / CA 424: hien dung ket qua doi soat — not_found_unsettled = chua du 60 giay, KHONG mo lai create.
+      setMsg(action !== "reconcile" ? "Đã dừng yêu cầu"
+        : lk === "found" ? "Đối soát: GHN ĐÃ có vận đơn — đã ghi nhận"
+        : lk === "not_found"
+          ? "Đối soát: GHN chưa có vận đơn; lần gửi trước chắc chắn chưa tới GHN — hệ thống sẽ đối soát lại rồi mới tạo"
+        : lk === "not_found_unsettled" || lk === "not_found_unverified"
+          ? "Đối soát: GHN báo 'không tồn tại' — có thể CHƯA tạo hoặc ĐÃ BỊ HUỶ. Hệ thống KHÔNG tự tạo lại. "
+            + "Kiểm tra cổng GHN; nếu chắc chắn không có vận đơn hiệu lực, bấm 'Dừng yêu cầu' (ghi chú) rồi tạo yêu cầu mới"
+        : "Đối soát: chưa có kết quả chắc chắn — xem lỗi rồi thử lại sau");
       await loadPreview(); if (onChange) onChange();
     } catch (e) { setErr(e.message); }
     finally { setBusy(false); }

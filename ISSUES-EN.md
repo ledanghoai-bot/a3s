@@ -489,6 +489,119 @@ account is also paid. User chose to move to GitHub (new repo `github.com/ledangh
         (Hoài clicked Submit) — status "In review", Meta says most submissions are reviewed
         within ~10 days, nothing to do for now; result arrives via email + the Developer Console
         notification inbox.**
+      - **✅ STATUS 2026-10-11 — D405 + CA 414 §2 + CA 415–418: DEPLOYED DORMANT (acknowledged in CA Review 419).**
+        PR #93 squash → main `a383649` (tree `00197894` = the CA 418 reviewed candidate); CI push-main `38109625179`
+        lint-test/migration-pipeline/deploy ✓; prod schema **077**; `DSR_HMAC_KEY` set on the VPS (`.env` backed up).
+        Preflight/postflight: 16 digests + workflow + flags **unchanged** (only `schema_migrations` 75→77); legacy
+        tombstones with a real ChatID = 0. **System smoke (SYNTHETIC Telegram customer) PASS:** delete → 0 refs in
+        DB/Redis → same ChatID creates a new customer → cleaned up. **NOT YET:** DSR E2E via **real chat** (a second
+        Telegram tester outside the allowlists; do NOT delete customer 1) — pending; the Meta callback has no ASID→PSID
+        E2E (Page now in the same Business, `ids_for_apps` empty because there is no Facebook Login) → effective DSR path
+        = chat/email, PO to decide how to publish it. **Messenger public: NO-GO** — Meta delivered only 1/12 real text
+        messages since approval (receipts/postbacks/test events do arrive); bug report sent to Meta 2026-10-11. No
+        gate/flag changes. Evidence: `Dev/evidence/d405-apply/v01`, `Dev/evidence/messenger-post-approval-1010`.
+      - **CA Directive 405 — data deletion (DSR) + automated-assistant disclosure (candidate 2026-10-10, branch
+        `feat/d405-dsr-disclosure` off main `c15ac60`; review-round history below):**
+        - **Bugs found:** (1) deletion left `customers.external_chat_id` (migration 072) → the real PSID/ChatID
+          survived and the same person messaging again hit `UniqueViolation uq_customers_channel_chat`, bot silent;
+          (2) **new, more severe:** `command_executions.conversation_id` and `order_intents.conversation_id` are FKs
+          to `conversations` without ON DELETE → for any customer who ordered via chat the deletion **rolled back
+          entirely** (`ForeignKeyViolation`), nothing deleted, request `failed`; (3) the first-message Messenger
+          disclosure was only an LLM instruction.
+        - **Done:** `data_deletion.py` — `SELECT … FOR UPDATE`; psid **and** external_chat_id → `deleted:<code>`;
+          in the same transaction detach FKs + tombstone/strip PII in `command_executions`, `order_intents` (open
+          intents → CANCELLED), `outbox_events` (unsent customer messages → cancelled; staff notices lose name/
+          address/last message), `fulfillment_conversations.customer_ref`; Redis also `nlu_state`/`del_pending`/
+          `addr_clarify:*` + filter `dead_letter:messages`. Outbox worker: tombstoned ref → cancel, no provider call.
+          Orchestrator: `handle_message` is now a wrapper at the final output point — first message of a session
+          (no `chat:<id>`) on a `DISCLOSURE_REQUIRED_CHANNELS` channel gets the fixed sentence "Dạ em là trợ lý tự
+          động của 3S Coffee. Khi cần, em sẽ chuyển anh/chị cho nhân viên ạ." (not repeated if the reply already says
+          "trợ lý tự động"), then Redis + DB row are re-synced. Paused-path logs mask PSID/ChatID. Read-only script
+          `scripts/d405_dsr_footprint.py` (scans every table + Redis, `--legacy`). `docs/DSR-RUNBOOK-VI.md` v1.1.0
+          (+§2b residual immutable stores).
+        - **Verified:** 14 new tests `tests/test_dsr_disclosure_405.py` (real DB+Redis: full Messenger footprint →
+          same PSID creates a new customer, Telegram, Meta callback + repeat + bad signature, concurrent deletions,
+          deletion concurrent with a new message, tombstoned outbox; disclosure checked on the **message sent by the
+          worker**: greeting, price question, early deterministic branch, LLM error, new session after expiry, later
+          turn, Telegram unchanged). Against the old code the 5 DSR tests fail with the FK error. Full suite on
+          scratch DB 1191 pass, 15 fail identical to `main` baseline (GHN 393 + COD — missing env seed). Ruff clean.
+          Legacy §2.5: 0 rows (prod 2026-09-27).
+        - **Not yet tested on Hoài's machine / production:** DSR E2E on the Berry Hill test account after deploy
+          (D405 §4.1); residual immutable stores (audit_log, order_events, address_resolution, GHN snapshot…)
+          **await a CA decision**; the Meta callback carries an app-scoped `user_id` (not a PSID) if Meta ever calls
+          it → currently a safe no-op.
+      - **CA Review 414 §2 — Messenger outbox 24-hour window (same D405 candidate, separate commit):**
+        - **Bug:** `outbox_worker._messenger_send` always sends `messaging_type=RESPONSE` → late messages (receipts,
+          payment reminders/confirmations, M7) sent more than 24h after the customer's last message are rejected by
+          Meta.
+        - **Done:** `app/services/messenger_window.py` — anchor = latest `role='customer'` row in `messages` (durable,
+          DB clock), inside the window when < 24h − 10 min; never messaged = outside. Outbox worker (dispatcher path
+          too): outside → NO Send API call, event `cancelled`/`messaging_window_closed` (never `delivered`), opens
+          `staff_attention` with new reason `messaging_window_closed` + admin notice (once per order) in the same
+          transaction, CAS on the lease. Migration **076** (adds the reason; rollback with precheck). Dashboard
+          label. No message tags (CA 414: no official Meta evidence yet).
+        - **Verified:** 9 tests `tests/test_messenger_window_414.py` (inside sends; 24h−10′ boundary ±1 min; outside/
+          never messaged → blocked + one attention; dispatcher; Telegram unaffected; retry + dead-letter replay via
+          `recovery.retry_outbox` still blocked; restart/lease reclaim re-evaluated exactly once, foreign lease →
+          no-op; customer messages again → new message sent, blocked one stays cancelled). Without the guard 6
+          tests fail. Full suite 1200 pass, 15 fail identical to `main` baseline.
+        - **Not yet tested in production:** needs real Messenger events (Meta not delivering since approval 10/10).
+      - **CA Review 415 (REQUEST CHANGES) — DSR covers immutable stores (same PR #93, separate commit):**
+        - **Finding:** after DSR, PSID/address/name remained in audit_log, order_events/inventory_movements, address_*,
+          GHN snapshot, M7 journal, payment/SePay events, staff notes — stores blocked by triggers/REVOKE. Whole-DB scan of
+          one full customer journey: the previous candidate left **21 traces / 15 tables** after deletion.
+        - **Done:** migration **077**: NOLOGIN role `alpha3s_dsr` + `SECURITY DEFINER dsr_anonymize_identity`
+          (**column-level** UPDATE grants, triggers allow only `current_user = alpha3s_dsr`, runs only when the customer
+          is already tombstoned in the same transaction, self-audits `dsr.anonymize`); IDs → tombstone, name/phone/
+          address → NULL or a marker, GHN recipient → `***xyz`; keeps admin-unit codes, amounts, order/waybill codes,
+          ledger row counts. **Source fixes:** bot-order audit/ledger write `customer:<internal id>`; GHN actor
+          `customer:<id>`; live-verify key `lv:c<id>:…`; M7 command_key and causation_id no longer fall back to the PSID;
+          admin listener log masked. **Redis failure after DB commit:** 3 retries → `redis_pending` + `subject_hmac`
+          (server-keyed HMAC, NULL once done); a repeat request or the 5-minute worker completes it. Status page gets the
+          new label + escapes the code (reflected XSS fix). Full store matrix `docs/DSR-RUNBOOK-VI.md` v1.2.0 §2b;
+          rollback `scripts/rollback_077_dsr_definer.sql`.
+        - **Verified:** `tests/test_dsr_e2e_415.py` 4 tests — real command-bus order, address, M7/payment/SePay, GHN,
+          ledger, legacy rows with raw PSID → delete → scan EVERY table: **0 traces**, business ledgers unchanged; the
+          function refuses a non-tombstoned customer, triggers still block normal UPDATE, `alpha3s_app` cannot UPDATE
+          ledgers; Redis failure → worker/repeat request completes. 27 DSR/disclosure/24h tests pass; full suite 1204
+          pass, 15 fail identical to baseline; GHN 393 14/14 pass on a fresh DB once `packing_overhead_percent` is set;
+          077 rollback rehearsal OK.
+        - **Awaiting PO/legal:** accounting retention period; keeping `***xyz` phone in the GHN snapshot; container log
+          rotation (prod has no `max-size`).
+      - **CA Review 416 (REQUEST CHANGES) — the DSR function must not touch other customers:**
+        - **Finding:** (1) the previous 077 function updated `audit_log` table-wide by name/address **values** (and `LIKE`
+          treats `%`/`_` as wildcards) → deleting customer A rewrote audit rows of customer B sharing the address —
+          **reproduced** on head `6ec04ef`; (2) the privileged function accepted arbitrary PSID/PII from the caller;
+          (3) the HMAC used `META_APP_SECRET`/empty string, no rotation story.
+        - **Done:** new `dsr_erase_subject(customer_id, code)` — **takes no identifiers/PII**; reads them from the
+          customer row locked `FOR UPDATE` + that customer's orders/drafts; requires a `received` request not yet bound
+          (one code = one use); refuses tombstoned customers; tombstones itself. Every UPDATE is bounded by **linkage**
+          (customer/order/payment/shipment/operation/resolution/audit `entity_type:entity_id`, whole-field `actor_ref`);
+          no `LIKE`; PII is only replaced inside linked rows. The app calls it BEFORE nulling fields itself. Dedicated
+          `DSR_HMAC_KEY` (≥32) + `DSR_HMAC_KEY_PREVIOUS` for rotation, requests store `hmac_key_id`; missing key →
+          `redis_pending` + `hmac_unavailable` (no guessable HMAC), worker warns. `.env.example` + runbook v1.3.0.
+        - **Verified:** two customers sharing an address, name with `%`/`_` → every row of customer B + an unrelated
+          audit row unchanged byte-for-byte (on the old 077: FAILS exactly as found); the function refuses a random code /
+          a used code / a tombstoned customer; `alpha3s_app` cannot UPDATE audit/order_events/inventory, no PUBLIC
+          EXECUTE; key rotation + missing key. Fresh DB 001..077: 29/29 DSR/disclosure/24h tests; full suite 1206 pass,
+          15 fail identical to baseline; GHN 393 27/27 (fresh DB, packing 10%); whole-DB scan of one journey 41 → 0;
+          077 rollback rehearsal OK.
+        - **Before deploy (PO):** set `DSR_HMAC_KEY` in the VPS `.env`.
+      - **CA Review 417 (REQUEST CHANGES) — the request code must be bound to its own subject:**
+        - **Finding:** `received` requests were created unbound; `dsr_erase_subject(customer_id, code)` took two loose
+          values → an unused code of A could erase B. **Reproduced** on head `aa7e5af` under `SET ROLE alpha3s_app`.
+        - **Done:** `dsr_open_request(psid)` (SECURITY DEFINER) creates the request and binds `subject_customer_id`
+          (internal id) on the locked row; `dsr_erase_subject(code)` takes ONLY the code, the subject comes from the
+          request under lock, single use (`erased_at`); trigger `ddr_subject_guard` lets only `alpha3s_dsr` write
+          subject/erased_at (the app cannot insert a bound request nor swap it). The app also checks the locked customer
+          equals the returned subject. Runbook v1.4.0.
+        - **Meta callback:** `user_id` is an ASID (Facebook Login users only — the app has no Login); the ASID↔PSID
+          matching API returns error #100 because the Page and the app are **not in the same Business** (read-only check
+          2026-10-11) → a real callback is currently a safe no-op; effective paths are in-chat self-service + email.
+          Awaiting PO/CA direction.
+        - **Verified:** new test under `SET ROLE alpha3s_app` (A's unused code cannot erase B, subject swap blocked,
+          unbound request / random code refused, A's code erases A exactly once, B byte-for-byte); fresh DB 29/29; full
+          suite 1206 pass/15 baseline; GHN 393 27/27; whole-DB scan 41 → 0; 077 rollback rehearsal OK.
 - [ ] (Optional) watch webhook uptime >99% after opening to real customers.
 
 **Definition of done:** Push to `main` → auto-deploys ✅ (MET); webhook uptime > 99% (measured after cutover).

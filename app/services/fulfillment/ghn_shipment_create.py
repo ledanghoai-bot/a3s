@@ -29,8 +29,25 @@ from datetime import datetime, timedelta, timezone
 from app.config import settings
 from app.services import audit_service
 from app.services.command import repository as cmd_repo
+from app.services.providers.ghn_create import COD_MAX_VND
 
-POLICY_VERSION = "ghn_create_policy_v1"
+POLICY_VERSION = "ghn_create_policy_v2"   # v2 (D421 B1): blocker items/COD/kich thuoc, service 5 tu 20.000 g
+# Canh goi toi da GHN (docs Tao don: dai/rong/cao <= 200 cm) — vuot -> blocker, staff xu ly tay.
+PARCEL_MAX_SIDE_CM = 200
+# GHN co the chua index don vua tao: 'khong ton tai' trong cua so nay sau lan create gan nhat KHONG duoc tin (staff
+# doi soat giu nguyen unknown). Worker tu nhien thoa vi backoff_s[0] >= cua so nay (test khoa bat bien).
+LOOKUP_SETTLE_S = 60
+# CA 425 §2: GHN tra 'Đơn hàng không tồn tại' cho ca don DA HUY (probe staging D421 B1) -> not_found sau mot create
+# co the da toi GHN KHONG bao gio tu mo tao lai; giu unknown, staff xac minh cong GHN.
+NOT_FOUND_UNVERIFIED = "not_found_unverified"
+
+
+async def _create_may_have_reached(conn, op_id: int) -> bool:
+    """Co lan create nao CO THE da duoc GHN xu ly? Chi 'retryable' (chua gui/429/425) va 'rejected' la chac chan
+    khong tao don; moi outcome khac (unknown, lease_expired, ...) -> True."""
+    return bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM ghn_shipment_create_attempts WHERE operation_id=$1 AND kind='create' "
+        "AND outcome NOT IN ('retryable', 'rejected'))", op_id))
 SNAPSHOT_SCHEMA = "ghn_create_snapshot_v1"
 # Policy v1 (PO co the doi qua version moi): shop tra phi GHN (payment_type_id=1), khach tra tong (hang + phi giao)
 # qua COD; khong cho xem hang. BANK_TRANSFER chi du dieu kien khi tien DA xac nhan. Quote hieu luc 24h.
@@ -155,6 +172,8 @@ async def evaluate(conn, order_id: int, *, source: str, exclude_op_id: int | Non
         req, req_reason, _d = await _fb.build_ghn_request(conn, order_id, route, weight)
         if req is None:
             blockers.append(f"packing_{req_reason}")
+        elif max(req.length_cm, req.width_cm, req.height_cm) > PARCEL_MAX_SIDE_CM:
+            blockers.append("parcel_over_provider_max")     # D421 B1 (CA 422 §B1.2): chan truoc khi goi GHN
 
     sh = await conn.fetchrow("SELECT * FROM shipments WHERE order_id=$1", order_id)
     qsnap = {}
@@ -243,10 +262,16 @@ async def evaluate(conn, order_id: int, *, source: str, exclude_op_id: int | Non
         "items": items,
         "policy": {"payment_type_id": POLICY["payment_type_id"], "required_note": POLICY["required_note"]},
     }
+    # D421 B1: GHN tu choi don thieu hang ("Tên hàng hoá bắt buộc", probe staging) va COD vuot tran -> blocker,
+    # chan TRUOC khi goi provider (khong de thanh rejected terminal sau khi khach da xac nhan).
+    if not items or any(not (it["name"] or "").strip() or it["quantity"] < 1 for it in items):
+        blockers.append("items_missing")
+    if cod > COD_MAX_VND:
+        blockers.append("cod_over_provider_max")
+    if blockers:
+        return out
     if cod >= 3_000_000:
         warnings.append("cod_amount_high")
-    if not items:
-        warnings.append("no_items")
     out.update(eligible=True, snapshot=snapshot, fingerprint=fingerprint(snapshot))
     return out
 
@@ -374,6 +399,15 @@ async def _succeed(conn, op, res, *, actor: str) -> dict:
                        "WHERE order_id=$1 AND status IN ('pending_prep','ready_to_ship')", op["order_id"], res.order_code)
     await _audit(conn, op2, "shipment.ghn_create.succeeded",
                  {"provider_order_code": res.order_code, "http_status": res.http_status}, actor=actor)
+    # D421 B1 (CA 422 §B1.2): phi GHN tra ve khi tao != phi da bao khach (quote snapshot) -> staff (van don VAN giu).
+    snap = op["request_snapshot"]
+    snap = json.loads(snap) if isinstance(snap, str) else (snap or {})
+    quoted, billed = (snap.get("quote") or {}).get("fee_vnd"), (res.result or {}).get("total_fee")
+    if isinstance(quoted, int) and isinstance(billed, (int, float)) and int(billed) != quoted:
+        await _open_attention(conn, op2, "provider_fee_mismatch", {"quote_fee_vnd": quoted,
+                                                                   "provider_total_fee_vnd": int(billed)})
+        await _audit(conn, op2, "shipment.ghn_create.fee_mismatch",
+                     {"quote_fee_vnd": quoted, "provider_total_fee_vnd": int(billed)}, actor=actor)
     cust = await conn.fetchrow("SELECT c.psid, c.channel FROM orders o JOIN customers c ON c.id=o.customer_id "
                                "WHERE o.id=$1", op["order_id"])
     if cust and cust["channel"] in ("telegram_customer", "messenger") and cust["psid"]:
@@ -495,6 +529,8 @@ async def _dispatch_one(conn, op_id: int, *, provider_factory, stats: dict) -> N
             stats["terminal"] += 1
             return
         needs_reconcile = op["state"] == FAILED_RETRYABLE
+        # CA 425 §2: neu da co create CO THE toi GHN, lookup not_found KHONG du de tao lai (don da huy cung not_found).
+        may_reached = needs_reconcile and await _create_may_have_reached(conn, op_id)
         attempt_no = op["attempt_count"] + 1
         op = await _set_state(conn, op, DISPATCHING, lease_owner=owner, attempt_count=attempt_no,
                               lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=POLICY["lease_s"]),
@@ -514,7 +550,7 @@ async def _dispatch_one(conn, op_id: int, *, provider_factory, stats: dict) -> N
             from app.services.providers.ghn_create import ProviderOutcome
             lookup = ProviderOutcome(_U, error_class="lookup_exception")
     res = None
-    if lookup is None or lookup.outcome == "not_found":
+    if lookup is None or (lookup.outcome == "not_found" and not may_reached):
         stats["http_calls"] += 1
         try:
             res = await provider.create(snapshot, op["client_order_code"])
@@ -546,6 +582,13 @@ async def _record_outcome(conn, op_id: int, owner: str, attempt_no: int, lookup,
                                        last_http_status=lookup.http_status)
                 await _open_attention(conn, op2, "reconcile_unknown")
                 await _audit(conn, op2, "shipment.ghn_create.unknown", {"why": "reconcile_unknown"})
+                stats["unknown"] += 1
+                return
+            if res is None:   # not_found nhung truoc do da co create co the toi GHN -> KHONG tao lai, staff xac minh
+                op2 = await _set_state(conn, op, UNKNOWN, lease_owner=None, lease_expires_at=None,
+                                       last_error_class=NOT_FOUND_UNVERIFIED, last_http_status=lookup.http_status)
+                await _open_attention(conn, op2, NOT_FOUND_UNVERIFIED)
+                await _audit(conn, op2, "shipment.ghn_create.unknown", {"why": NOT_FOUND_UNVERIFIED})
                 stats["unknown"] += 1
                 return
         await _attempt(conn, op_id, attempt_no, "create", res, actor=actor)
@@ -614,11 +657,25 @@ async def reconcile(conn, op_id: int, *, staff_id: int, actor: str, provider_fac
             return {"operation": _op_view(op), "lookup": lk.outcome, "changed": False}
         n = await conn.fetchval("SELECT count(*) FROM ghn_shipment_create_attempts WHERE operation_id=$1 "
                                 "AND kind='reconcile'", op_id)
+        if lk.outcome == "not_found" and (op["state"] == UNKNOWN or await _create_may_have_reached(conn, op_id)):
+            # CA 425 §2: GHN tra 'khong ton tai' CA cho don chua tung tao LAN don da tao roi bi huy -> lookup am tinh
+            # KHONG phai bang chung duoc tao lai. Giu nguyen unknown + attention; staff xac minh cong GHN roi
+            # 'Dung yeu cau' (abandon, co ghi chu) va tao yeu cau MOI theo lifecycle. 60s dau chi de bao ro thoi diem.
+            import dataclasses
+            unsettled = await conn.fetchval(
+                "SELECT max(created_at) > now() - make_interval(secs => $2) FROM ghn_shipment_create_attempts "
+                "WHERE operation_id=$1 AND kind='create'", op_id, LOOKUP_SETTLE_S)
+            tag = "not_found_unsettled" if unsettled else NOT_FOUND_UNVERIFIED
+            await _attempt(conn, op_id, int(n) + 1, "reconcile", dataclasses.replace(lk, error_class=tag), actor=actor)
+            await _audit(conn, op, "shipment.ghn_create.reconciled_not_found_unverified",
+                         {"staff_id": staff_id, "lookup": tag}, actor=actor)
+            return {"operation": _op_view(op), "lookup": tag, "changed": False,
+                    **({"retry_after_s": LOOKUP_SETTLE_S} if unsettled else {})}
         await _attempt(conn, op_id, int(n) + 1, "reconcile", lk, actor=actor)
         if lk.outcome == "found":
             op2 = await _succeed(conn, op, lk, actor=actor)
         elif lk.outcome == "not_found":
-            # GHN noi ro KHONG co van don -> cho phep dispatch lai (worker se doi soat lan nua truoc create)
+            # CHI khi moi lan create truoc do chac chan CHUA toi GHN (429/425/chua gui): cho worker doi soat+tao lai
             op2 = await _set_state(conn, op, FAILED_RETRYABLE, next_attempt_at=datetime.now(timezone.utc),
                                    last_error_class="reconciled_not_found")
             await _audit(conn, op2, "shipment.ghn_create.reconciled_not_found", {"staff_id": staff_id}, actor=actor)
@@ -651,6 +708,12 @@ async def abandon(conn, op_id: int, *, staff_id: int, actor: str, note: str) -> 
         raise ShipmentCreateError("state_invalid", f"khong dung duoc o trang thai {op['state']}", 409)
     op2 = await _set_state(conn, op, to, terminal_reason=f"staff_abandon: {note.strip()[:200]}", lease_owner=None,
                            lease_expires_at=None)
+    # CA 425 §2: dong attention CUA operation nay (staff da xac minh + ghi chu) -> don con du dieu kien thi tao yeu
+    # cau MOI theo lifecycle (client_order_code moi). Attention cua operation khac giu nguyen.
+    from app.services.fulfillment import attention as _att
+    for a in await conn.fetch("SELECT id FROM staff_attention WHERE order_id=$1 AND status='open' AND reason=$2 "
+                              "AND detail->>'operation_id' = $3", op["order_id"], ATTENTION_REASON, str(op_id)):
+        await _att.resolve(conn, a["id"], resolved_by=actor, note=f"abandon: {note.strip()[:200]}")
     await audit_service.record(conn, "staff", "shipment.ghn_create.abandon", actor_ref=actor, actor_staff_id=staff_id,
                                entity_type="ghn_shipment_create_operations", entity_id=str(op_id),
                                after={"order_id": op["order_id"], "from": op["state"], "to": to}, reason=note.strip())

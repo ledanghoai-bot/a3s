@@ -14,6 +14,8 @@ truc tiep). Caddy da proxy {$DOMAIN} -> api:8000 nen tu phuc vu tai:
 het cho can dien. Ngay hieu luc mac dinh 24/07/2026 - doi neu can.
 """
 
+from html import escape
+
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -341,7 +343,7 @@ async def data_deletion_status(code: str = Query(default="")) -> HTMLResponse:
     if rec is None:
         inner = (
             f'<h1>Trạng thái xóa dữ liệu</h1>'
-            f'<p class="updated">Mã xác nhận: {code or "(trống)"}</p>'
+            f'<p class="updated">Mã xác nhận: {escape(code[:64]) if code else "(trống)"}</p>'
             f'<div class="note">Không tìm thấy yêu cầu xóa dữ liệu với mã này. '
             f'Nếu bạn vừa gửi yêu cầu, vui lòng thử lại sau ít phút, hoặc liên hệ '
             f'{CONTACT_EMAIL}.</div>'
@@ -352,11 +354,12 @@ async def data_deletion_status(code: str = Query(default="")) -> HTMLResponse:
         "received": "Đã tiếp nhận, đang xử lý",
         "completed": "Đã hoàn tất — dữ liệu của bạn đã được xóa",
         "failed": "Xử lý gặp lỗi — vui lòng liên hệ chúng tôi",
-    }.get(rec["status"], rec["status"])
+        "redis_pending": "Đã xóa dữ liệu chính — đang dọn bộ nhớ tạm, sẽ tự hoàn tất",
+    }.get(rec["status"], escape(str(rec["status"])))
     done = rec.get("completed_at")
     inner = f"""
 <h1>Trạng thái xóa dữ liệu</h1>
-<p class="updated">Mã xác nhận: {rec['confirmation_code']}</p>
+<p class="updated">Mã xác nhận: {escape(rec['confirmation_code'])}</p>
 <p><strong>Trạng thái:</strong> {label}</p>
 <p>Thời điểm yêu cầu: {rec['requested_at']}</p>
 {f'<p>Thời điểm hoàn tất: {done}</p>' if done else ''}

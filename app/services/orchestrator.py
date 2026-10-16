@@ -15,6 +15,8 @@ Luong:
 
 import hashlib
 import json
+import unicodedata
+import uuid
 from pathlib import Path
 from time import perf_counter
 
@@ -55,6 +57,10 @@ MAX_OUTPUT_TOKENS = 4096
 # vao system prompt ben duoi + docs/META-APP-REVIEW-VI.md §7. Truyen channel
 # TUONG MINH tu tung caller (khong suy tu prefix sender_id) - bai hoc CLAUDE.md.
 DISCLOSURE_REQUIRED_CHANNELS = {"messenger"}
+# CA Directive 405 §3.4: cau khai bao CO DINH (du 2 y: tro ly tu dong cua 3S Coffee + chuyen nhan vien khi can).
+# Chen boi code tai diem xuat cuoi (handle_message) — prompt chi la lop phu, khong con la co che bao dam.
+DISCLOSURE_TEXT = "Dạ em là trợ lý tự động của 3S Coffee. Khi cần, em sẽ chuyển anh/chị cho nhân viên ạ."
+_DISCLOSURE_MARKER = "tro ly tu dong"  # so khop sau _fold_vi (bo dau ca hai phia)
 
 # Dau hieu reply DANG BAO da tao don (dung de chan bia don - xem guard trong
 # handle_message). Model chi duoc noi cac cum nay khi create_order that su tra
@@ -742,8 +748,85 @@ async def _execute_tool(name: str, args: dict, sender_id: str, last_message: str
         return {"error": f"Loi he thong khi chay tool '{name}', vui long thu lai."}
 
 
+def _fold_vi(s: str) -> str:
+    """Bo dau + lower de so khop cum khai bao (bo dau CA HAI phia — bai hoc tieng Viet CLAUDE.md)."""
+    s = unicodedata.normalize("NFD", s.lower().replace("đ", "d").replace("Đ", "d"))
+    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
+def apply_disclosure(reply, *, channel: str, first_turn: bool):
+    """CA Directive 405 §3: tin dau phien tren kenh BAT BUOC -> chen cau khai bao CO DINH vao dau reply (tat dinh,
+    khong phu thuoc LLM). Bo qua: kenh khong yeu cau, khong phai tin dau, reply rong/None (M7 SILENT), hoac reply DA
+    co noi dung tuong duong ('tro ly tu dong') -> khong lap."""
+    if not first_turn or channel not in DISCLOSURE_REQUIRED_CHANNELS:
+        return reply
+    if not isinstance(reply, str) or not reply.strip():
+        return reply
+    if _DISCLOSURE_MARKER in _fold_vi(reply):
+        return reply
+    return f"{DISCLOSURE_TEXT}\n\n{reply}"
+
+
+async def _is_session_start(sender_id: str) -> bool:
+    """Tin dau phien = chua co lich su Redis chat:<sender_id> (TTL 24h; cung tieu chi is_first_turn cua prompt).
+    Redis loi -> True (fail TOWARD khai bao: thua 1 cau khai bao an toan hon thieu)."""
+    try:
+        r = await aioredis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            return not await r.exists(_redis_key(sender_id))
+        finally:
+            await r.aclose()
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] disclosure session check failed -> disclose: {safe_exc(e)}")
+        return True
+
+
+async def _persist_disclosed_reply(sender_id: str, original: str, final: str) -> None:
+    """Dong bo ban DA khai bao vao lich su Redis + dong bot cuoi trong DB (core da luu ban goc). Best-effort, KHONG
+    tao customer/conversation/lich su moi (vd nhanh xoa du lieu da xoa sach -> khong co gi de sua)."""
+    try:
+        r = await aioredis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            history = await _get_history(r, sender_id)
+            if history and history[-1].get("role") == "assistant" and history[-1].get("content") == original:
+                history[-1]["content"] = final
+                await _save_history(r, sender_id, history)
+        finally:
+            await r.aclose()
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] disclosure history sync skipped: {safe_exc(e)}")
+    try:
+        from app.db_pool import acquire as _acq
+        from app.db_pool import release as _rel
+        _c = await _acq()
+        try:
+            await _c.execute(
+                "UPDATE messages SET content = $3 WHERE id = ("
+                " SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id"
+                " JOIN customers cu ON cu.id = c.customer_id"
+                " WHERE cu.psid = $1 AND m.role = 'bot' AND m.content = $2 ORDER BY m.id DESC LIMIT 1)",
+                sender_id, original, final)
+        finally:
+            await _rel(_c)
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] disclosure log sync skipped: {safe_exc(e)}")
+
+
 async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                          provider_message_id: str | None = None) -> str:
+    """Diem xuat thong diep CUOI cua bot cho khach (worker Messenger/Telegram gui nguyen gia tri tra ve).
+    CA Directive 405 §3.2: khai bao tro ly tu dong ap TAI DAY de bao phu moi nhanh tra loi som + LLM + fallback
+    loi. Trang thai 'tin dau phien' doc TRUOC khi core chay (core se ghi lich su)."""
+    first_turn = channel in DISCLOSURE_REQUIRED_CHANNELS and await _is_session_start(sender_id)
+    reply = await _handle_message_core(sender_id, text, channel=channel, provider_message_id=provider_message_id)
+    final = apply_disclosure(reply, channel=channel, first_turn=first_turn)
+    if final != reply:
+        await _persist_disclosed_reply(sender_id, reply, final)
+    return final
+
+
+async def _handle_message_core(sender_id: str, text: str, channel: str = "messenger",
+                               provider_message_id: str | None = None) -> str:
     # provider_message_id (CR-04): mid Messenger / message_id Telegram — neo causation + idempotency
     # key cho command (order.create). None -> fallback sender_id.
     # channel: kenh goi toi (tuong minh, do caller truyen) - quyet dinh muc do
@@ -876,8 +959,11 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                     # _m7=None -> roi xuong luong M5/M6/LLM binh thuong (KHONG M7 effect, KHONG SILENT).
                     if await _m7s.enabled_for_psid(_c, sender_id):
                         async with _c.transaction():
+                            # CA 415 §3.3: command_key luu o journal/payment_events BAT BIEN -> KHONG dung
+                            # PSID/ChatID lam fallback; thieu provider id -> key mot-lan (khong dedupe gia).
                             _m7 = await _fc.handle_customer_text(
-                                _c, sender_id, text, command_key=f"msg:{provider_message_id or sender_id}")
+                                _c, sender_id, text,
+                                command_key=f"msg:{provider_message_id or 'noid:' + uuid.uuid4().hex}")
                 finally:
                     await _rel(_c)
                 _m7_silent = _m7 is _fc.SILENT
@@ -1269,7 +1355,7 @@ async def handle_message(sender_id: str, text: str, channel: str = "messenger",
                         "actor_type": "customer",
                         "actor_id": sender_id,
                         "conversation_id": conversation_id,
-                        "causation_id": pmid,
+                        "causation_id": provider_message_id,  # CA 415: khong fallback PSID vao so bat bien
                         "provider_message_id": pmid,
                     }
                 _t_tool = perf_counter()
